@@ -16,8 +16,36 @@ ACTIONS = {
     "cancel_price_all",
     "cancel_trail_all",
     "hold",
+    "watch",
+    "skip",
     "grid",
     "trail",
+    "stop_entry_long",
+    "stop_entry_short",
+    "buy_stop",
+    "sell_stop",
+    "stop_long",
+    "stop_short",
+    "add_long",
+    "add_short",
+    "reduce_long",
+    "reduce_short",
+    "reduce",
+    "flatten",
+}
+
+# alias → canonical action; logs keep requested_action for clarity
+ALIAS_MAP = {
+    "buy_stop": "stop_entry_long",
+    "stop_long": "stop_entry_long",
+    "sell_stop": "stop_entry_short",
+    "stop_short": "stop_entry_short",
+    "add_long": "open_long",
+    "add_short": "open_short",
+    "reduce_long": "close",
+    "reduce_short": "close",
+    "reduce": "close",
+    "flatten": "close_all",
 }
 
 ORDER_TYPES = {"market", "limit", "post_only", "ioc", "fok"}
@@ -54,6 +82,7 @@ class Intent:
     close_size: Optional[int] = None
     price_offset: Optional[str] = None
     activation_price: Optional[str] = None
+    trigger_price_tp: Optional[float] = None
     label: str = "signal"
     meta: dict = field(default_factory=dict)
 
@@ -96,18 +125,66 @@ def infer_trigger_rules(action: str, is_tp: bool) -> int:
     return 1 if is_tp else 2
 
 
+def _parse_stop_entry(data: dict, action: str, default_label: str) -> Intent:
+    """Breakout ENTRY (buy_stop / sell_stop). This is NOT stop-loss."""
+    symbol = data.get("symbol")
+    if not symbol:
+        raise SchemaError(f"{action} requires symbol")
+    trigger_price = _f(data.get("trigger_price"), "trigger_price")
+    if trigger_price is None:
+        raise SchemaError(f"{action} requires trigger_price (breakout level)")
+    order_type = str(data.get("type") or "market").lower()
+    if order_type not in ORDER_TYPES:
+        raise SchemaError(f"unsupported type: {order_type!r}")
+    price = _f(data.get("price"), "price")
+    if order_type != "market" and price is None:
+        raise SchemaError(f"type={order_type} requires price")
+    size_usd = _f(data.get("size_usd"), "size_usd")
+    size = _i(data.get("size"), "size")
+    size_pct = _f(data.get("size_pct"), "size_pct")
+    margin_pct = _f(data.get("margin_pct"), "margin_pct")
+    if size_usd is None and size is None and size_pct is None and margin_pct is None:
+        raise SchemaError(f"{action} requires size_usd, size_pct, margin_pct, or size")
+    default_rule = 1 if action == "stop_entry_long" else 2
+    rule = _i(data.get("trigger_rule"), "trigger_rule") or default_rule
+    trigger_price_type = str(data.get("trigger_price_type") or "latest").lower()
+    if trigger_price_type not in PRICE_TYPES:
+        raise SchemaError(f"trigger_price_type invalid: {trigger_price_type!r}")
+    return Intent(
+        action=action,
+        symbol=resolve_symbol(symbol),
+        size_usd=size_usd,
+        size_pct=size_pct,
+        margin_pct=margin_pct,
+        size=size,
+        order_type=order_type,
+        price=price,
+        leverage=_i(data.get("leverage"), "leverage"),
+        trigger_price_tp=trigger_price,
+        trigger_rule_tp=rule,
+        trigger_price_type=trigger_price_type,
+        trigger_expiration=_i(data.get("trigger_expiration"), "trigger_expiration"),
+        margin_mode=str(data["margin_mode"]).lower() if data.get("margin_mode") else None,
+        side="long" if action == "stop_entry_long" else "short",
+        label=str(data.get("label") or default_label),
+        meta=data.get("meta") or {},
+    )
+
+
 def parse_intent(data: dict, default_label: str = "signal") -> Intent:
     if not isinstance(data, dict):
         raise SchemaError("intent must be an object")
     action = str(data.get("action") or "").strip().lower()
-    # empty / missing action is a legal no-op (hold)
-    if not action:
+    if action in ("", "hold", "watch", "skip"):
         return Intent(action="hold", meta=data.get("meta") or {}, label=default_label)
+    requested_action = action
+    action = ALIAS_MAP.get(action, action)
     if action not in ACTIONS:
-        raise SchemaError(f"unsupported action: {action!r}")
-
-    if action in ("hold",):
-        return Intent(action="hold", meta=data.get("meta") or {}, label=default_label)
+        raise SchemaError(f"unsupported action: {requested_action!r}")
+    if action in ("stop_entry_long", "stop_entry_short"):
+        intent = _parse_stop_entry(data, action, default_label)
+        intent.meta.setdefault("requested_action", requested_action)
+        return intent
 
     if action in ("close_all", "cancel_all", "cancel_price_all", "cancel_trail_all"):
         symbol = data.get("symbol") or ""
@@ -148,6 +225,10 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
         if not symbol:
             raise SchemaError("close requires symbol")
         side = data.get("side")
+        if requested_action == "reduce_long":
+            side = "long"
+        elif requested_action == "reduce_short":
+            side = "short"
         if side is not None:
             side = str(side).lower()
             if side not in ("long", "short"):
@@ -159,7 +240,7 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
             side=side,
             close_size=size,
             label=str(data.get("label") or default_label),
-            meta=data.get("meta") or {},
+            meta={**(data.get("meta") or {}), "requested_action": requested_action},
         )
 
     # open_long / open_short
@@ -251,7 +332,7 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
         margin_mode=margin_mode,
         side="long" if action == "open_long" else "short",
         label=str(data.get("label") or default_label),
-        meta=data.get("meta") or {},
+        meta={**(data.get("meta") or {}), "requested_action": requested_action},
     )
 
 

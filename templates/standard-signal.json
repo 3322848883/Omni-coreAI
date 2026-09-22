@@ -1,0 +1,33 @@
+{
+  "action": "open_long",
+  "symbol": "BTC_USDT",
+  "size": null,
+  "size_usd": 100,
+  "size_pct": null,
+  "margin_pct": null,
+  "type": "limit",
+  "price": 70000,
+  "leverage": 5,
+  "margin_mode": "cross",
+  "tp": 73000,
+  "sl": 69000,
+  "tp_type": "limit",
+  "sl_type": "limit",
+  "tp_limit_price": 72950,
+  "sl_limit_price": 68950,
+  "trigger_price_type": "mark",
+  "trigger_rule_tp": 1,
+  "trigger_rule_sl": 2,
+  "trigger_expiration": null,
+  "label": "drive",
+  "meta": {
+    "strategy": "deepseek-v1",
+    "confidence": 85,
+    "timeframe": "15m",
+    "reasoning": "趋势多头，回踩确认",
+    "signal_id": "20260302-153000-btc-long",
+    "ts": "2026-03-02T15:30:00+08:00",
+    "note_breakout_vs_stoploss": "突破进场用 action=stop_entry_long/short，不要用 sl。sl/tp 是持仓后平仓保护。详见 templates/README.md",
+    "note_trail": "trail 需 API 资金密码（X-Gate-Password），当前搁置"
+  }
+}

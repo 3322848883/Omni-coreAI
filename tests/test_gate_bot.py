@@ -49,6 +49,45 @@ class TestSchema(unittest.TestCase):
         self.assertEqual(infer_trigger_rules("open_short", True), 2)
         self.assertEqual(infer_trigger_rules("open_short", False), 1)
 
+    def test_watch_alias_is_hold_no_exec(self):
+        for a in ("hold", "watch", "skip", ""):
+            sig = parse_signal({"action": a, "meta": {"reasoning": "x"}})
+            self.assertEqual(sig.intents[0].action, "hold")
+        client = FakeClient()
+        report = Executor(client).execute_signal(parse_signal({"action": "watch"}))
+        self.assertTrue(report.ok)
+        self.assertEqual(len(client.orders), 0)
+        self.assertTrue(report.results[0].detail.get("skipped"))
+
+    def test_stop_entry_is_breakout_not_stoploss(self):
+        sig = parse_signal({"action": "buy_stop", "symbol": "BTC_USDT", "size": 1, "trigger_price": 90000})
+        self.assertEqual(sig.intents[0].action, "stop_entry_long")
+        self.assertEqual(parse_signal(
+            {"action": "sell_stop", "symbol": "BTC_USDT", "size": 1, "trigger_price": 80000}
+        ).intents[0].action, "stop_entry_short")
+        client = FakeClient()
+        self.assertTrue(Executor(client).execute_signal(sig).ok)
+        body = client.price_orders[0]
+        self.assertEqual(body["initial"]["size"], 1)
+        self.assertEqual(body["trigger"]["rule"], 1)
+        self.assertNotIn("reduce_only", body["initial"])
+
+    def test_add_reduce_logs_requested_action(self):
+        client = FakeClient()
+        ex = Executor(client, max_notional_usd=5000)
+        rep = ex.execute_signal(parse_signal({
+            "action": "add_long", "symbol": "BTC_USDT", "size": 1,
+        }))
+        self.assertTrue(rep.ok)
+        self.assertEqual(rep.results[0].action, "add_long")
+        self.assertEqual(rep.results[0].detail["executed_as"], "open_long")
+        rep2 = ex.execute_signal(parse_signal({
+            "action": "reduce_long", "symbol": "BTC_USDT", "size": 1,
+        }))
+        self.assertTrue(rep2.ok)
+        self.assertEqual(rep2.results[0].action, "reduce_long")
+        self.assertEqual(rep2.results[0].detail["executed_as"], "close")
+
     def test_empty_action_is_hold(self):
         self.assertEqual(parse_signal({"symbol": "BTC_USDT"}).intents[0].action, "hold")
         self.assertEqual(parse_signal({"action": ""}).intents[0].action, "hold")
@@ -375,6 +414,297 @@ class TestGateClient(unittest.TestCase):
         self.assertEqual(client.get_contract("BTC_USDT").quanto_multiplier, 0.0001)
         with self.assertRaises(GateApiError):
             client.get_contract("NOPE_USDT")
+
+    def test_official_paths_and_close_and_trail(self):
+        client = GateClient("k", "s", env="testnet")
+        calls = []
+
+        def fake(method, path, qs="", body=None):
+            calls.append((method, path, qs, body))
+            if path.endswith("/accounts"):
+                return {"position_mode": "dual", "in_dual_mode": True, "available": "10", "total": "10"}
+            if path.endswith("/leverage"):
+                return [{"leverage": "5"}]
+            return {"id": 1}
+
+        client.rest_signed_request = fake
+        client._position_mode_cache = (None, 0.0)
+        self.assertEqual(client.get_position_mode(), "dual")
+        self.assertTrue(any(c[1].endswith("/accounts") for c in calls))
+        client.set_leverage("BTC_USDT", 5)
+        lev = [c for c in calls if c[1].endswith("/leverage")][-1]
+        self.assertIn("dual_comp", lev[1])
+        self.assertEqual(lev[2], "leverage=5")
+
+        single = GateClient("k", "s", env="live")
+        single.is_dual_position_mode = lambda: False
+        placed = {}
+        single.place_order = lambda body: placed.update(body) or {"id": 1, **body}
+        single.close_position("BTC_USDT", size=0)
+        self.assertTrue(placed.get("close") and placed.get("reduce_only"))
+        self.assertEqual(placed.get("size"), 0)
+
+        client.rest_signed_request = lambda *a, **k: {"code": -1, "message": "InvalidRequest"}
+        with self.assertRaises(GateApiError):
+            client.place_trailing_order({"contract": "BTC_USDT"})
+
+    def test_market_slippage_fallback(self):
+        client = GateClient("k", "s", env="testnet")
+
+        def fake(method, path, qs="", body=None):
+            if body and body.get("price") == "0":
+                raise GateApiError("slip", status=400, label="MARKET_PRICE_TOO_DEVIATED")
+            return {"id": 9, "price": body.get("price")}
+
+        client.rest_signed_request = fake
+        client.public_get = lambda path, qs="": {"bids": [{"p": "100", "s": 1}], "asks": [{"p": "101", "s": 1}]}
+        result = client.place_order({"contract": "BTC_USDT", "size": 1, "price": "0", "tif": "ioc"})
+        self.assertEqual(result["price"], "100")
+
+    def test_official_paths_and_close(self):
+        client = GateClient("k", "s", env="testnet")
+        calls = []
+
+        def fake(method, path, qs="", body=None):
+            calls.append((method, path, qs, body))
+            if path.endswith("/accounts"):
+                return {"position_mode": "dual", "in_dual_mode": True, "available": "10", "total": "10"}
+            return {"id": 1, "is_close": True}
+
+        client.rest_signed_request = fake
+        client._position_mode_cache = (None, 0.0)
+        self.assertEqual(client.get_position_mode(), "dual")
+        self.assertTrue(any(c[1].endswith("/accounts") for c in calls))
+
+        client.set_leverage("BTC_USDT", 5)
+        lev = [c for c in calls if "leverage" in c[1]][-1]
+        self.assertIn("dual_comp", lev[1])
+        self.assertEqual(lev[2], "leverage=5")
+        self.assertIsNone(lev[3])
+
+        single = GateClient("k", "s", env="live")
+        single.is_dual_position_mode = lambda: False
+        placed = {}
+        single.place_order = lambda body: placed.update(body) or {"id": 1, **body}
+        single.close_position("BTC_USDT", size=0)
+        self.assertEqual(placed.get("size"), 0)
+        self.assertTrue(placed.get("close"))
+        self.assertTrue(placed.get("reduce_only"))
+
+    def test_trail_business_code_fails(self):
+        client = GateClient("k", "s", env="testnet")
+        client.rest_signed_request = lambda *a, **k: {"code": -1, "message": "InvalidRequest"}
+        with self.assertRaises(GateApiError):
+            client.place_trailing_order({"contract": "BTC_USDT"})
+
+    def test_market_slippage_fallback_limit(self):
+        client = GateClient("k", "s", env="testnet")
+        attempts = []
+
+        def fake(method, path, qs="", body=None):
+            attempts.append(body)
+            if body.get("price") == "0":
+                raise GateApiError("slip", status=400, label="MARKET_PRICE_TOO_DEVIATED")
+            return {"id": 9, "price": body.get("price")}
+
+        client.rest_signed_request = fake
+        client.public_get = lambda path, qs="": {"bids": [{"p": "100", "s": 1}], "asks": [{"p": "101", "s": 1}]}
+        r = client.place_order({"contract": "BTC_USDT", "size": 1, "price": "0", "tif": "ioc"})
+        self.assertEqual(r["price"], "100")
+
+    def test_official_paths_and_close(self):
+        client = GateClient("k", "s", env="testnet")
+        calls = []
+
+        def fake(method, path, qs="", body=None):
+            calls.append((method, path, qs, body))
+            if path.endswith("/accounts"):
+                return {"position_mode": "dual", "in_dual_mode": True, "available": "10", "total": "10"}
+            return {"id": 1}
+
+        client.rest_signed_request = fake
+        client._position_mode_cache = (None, 0.0)
+        self.assertEqual(client.get_position_mode(), "dual")
+        self.assertTrue(any(p.endswith("/accounts") for _, p, _, _ in calls))
+        client.set_leverage("BTC_USDT", 5)
+        lev = [c for c in calls if c[1].endswith("/leverage")][-1]
+        self.assertIn("dual_comp", lev[1])
+        self.assertEqual(lev[2], "leverage=5")
+        self.assertIsNone(lev[3])
+
+        single = GateClient("k", "s", env="live")
+        single.is_dual_position_mode = lambda: False
+        placed = {}
+        single.place_order = lambda body: placed.update(body) or {"id": 1, **body}
+        single.close_position("BTC_USDT", size=0)
+        self.assertEqual(placed.get("size"), 0)
+        self.assertTrue(placed.get("close"))
+        self.assertTrue(placed.get("reduce_only"))
+
+    def test_trail_rejects_business_code(self):
+        client = GateClient("k", "s", env="testnet")
+        client.rest_signed_request = lambda *a, **k: {"code": -1, "message": "InvalidRequest"}
+        with self.assertRaises(GateApiError):
+            client.place_trailing_order({"contract": "BTC_USDT"})
+
+    def test_market_slippage_fallback(self):
+        client = GateClient("k", "s", env="testnet")
+
+        def fake(method, path, qs="", body=None):
+            if body and str(body.get("price")) == "0":
+                raise GateApiError("slip", status=400, label="MARKET_PRICE_TOO_DEVIATED")
+            return {"id": 9, "price": (body or {}).get("price")}
+
+        client.rest_signed_request = fake
+        client.public_get = lambda path, qs="": {"bids": [{"p": "100", "s": 1}], "asks": [{"p": "101", "s": 1}]}
+        r = client.place_order({"contract": "BTC_USDT", "size": 1, "price": "0", "tif": "ioc"})
+        self.assertEqual(r["price"], "100")
+
+    def test_official_accounts_and_leverage(self):
+        client = GateClient("k", "s", env="testnet")
+        calls = []
+
+        def fake(method, path, qs="", body=None):
+            calls.append((method, path, qs, body))
+            if path.endswith("/accounts"):
+                return {"position_mode": "dual", "in_dual_mode": True, "available": "10", "total": "10"}
+            return {"id": 1}
+
+        client.rest_signed_request = fake
+        client._position_mode_cache = (None, 0.0)
+        self.assertEqual(client.get_position_mode(), "dual")
+        self.assertTrue(any(p.endswith("/accounts") for _, p, _, _ in calls))
+        client.set_leverage("BTC_USDT", 5)
+        lev = [c for c in calls if c[1].endswith("/leverage")][-1]
+        self.assertIn("dual_comp", lev[1])
+        self.assertEqual(lev[2], "leverage=5")
+        self.assertIsNone(lev[3])
+
+    def test_official_single_close(self):
+        client = GateClient("k", "s", env="live")
+        client.is_dual_position_mode = lambda: False
+        placed = {}
+        client.place_order = lambda body: placed.update(body) or {"id": 1, **body}
+        client.close_position("BTC_USDT", size=0)
+        self.assertEqual(placed.get("size"), 0)
+        self.assertTrue(placed.get("close"))
+        self.assertTrue(placed.get("reduce_only"))
+
+    def test_trail_business_code(self):
+        client = GateClient("k", "s", env="testnet")
+        client.rest_signed_request = lambda *a, **k: {"code": -1, "message": "InvalidRequest"}
+        with self.assertRaises(GateApiError):
+            client.place_trailing_order({"contract": "BTC_USDT"})
+
+    def test_market_slippage_fallback(self):
+        client = GateClient("k", "s", env="testnet")
+
+        def fake(method, path, qs="", body=None):
+            if body and str(body.get("price")) == "0":
+                raise GateApiError("slip", status=400, label="MARKET_PRICE_TOO_DEVIATED")
+            return {"id": 9, "price": (body or {}).get("price")}
+
+        client.rest_signed_request = fake
+        client.public_get = lambda path, qs="": {"bids": [{"p": "100", "s": 1}], "asks": [{"p": "101", "s": 1}]}
+        r = client.place_order({"contract": "BTC_USDT", "size": 1, "price": "0", "tif": "ioc"})
+        self.assertEqual(r["price"], "100")
+
+    def test_official_paths_and_close(self):
+        client = GateClient("k", "s", env="testnet")
+        calls = []
+
+        def fake(method, path, qs="", body=None):
+            calls.append((method, path, qs, body))
+            if path.endswith("/accounts"):
+                return {"position_mode": "dual", "in_dual_mode": True, "available": "10", "total": "10"}
+            return {"id": 1, "is_close": True}
+
+        client.rest_signed_request = fake
+        client._position_mode_cache = (None, 0.0)
+        self.assertEqual(client.get_position_mode(), "dual")
+        self.assertTrue(any(c[1].endswith("/accounts") for c in calls))
+        client.set_leverage("BTC_USDT", 5)
+        lev = [c for c in calls if c[1].endswith("/leverage")][-1]
+        self.assertIn("dual_comp", lev[1])
+        self.assertEqual(lev[2], "leverage=5")
+        self.assertIsNone(lev[3])
+
+        single = GateClient("k", "s", env="live")
+        single.is_dual_position_mode = lambda: False
+        placed = {}
+        single.place_order = lambda body: placed.update(body) or {"id": 1, **body}
+        single.close_position("BTC_USDT", size=0)
+        self.assertEqual(placed.get("size"), 0)
+        self.assertTrue(placed.get("close"))
+        self.assertTrue(placed.get("reduce_only"))
+
+    def test_trail_business_code_fails(self):
+        client = GateClient("k", "s", env="testnet")
+        client.rest_signed_request = lambda *a, **k: {"code": -1, "message": "InvalidRequest"}
+        with self.assertRaises(GateApiError):
+            client.place_trailing_order({"contract": "BTC_USDT"})
+
+    def test_market_slippage_fallback_limit(self):
+        client = GateClient("k", "s", env="testnet")
+        attempts = []
+
+        def fake(method, path, qs="", body=None):
+            attempts.append(body)
+            if str(body.get("price")) == "0":
+                raise GateApiError("slip", status=400, label="MARKET_PRICE_TOO_DEVIATED")
+            return {"id": 9, "price": body.get("price")}
+
+        client.rest_signed_request = fake
+        client.public_get = lambda path, qs="": {"bids": [{"p": "100", "s": 1}], "asks": [{"p": "101", "s": 1}]}
+        r = client.place_order({"contract": "BTC_USDT", "size": 1, "price": "0", "tif": "ioc"})
+        self.assertEqual(r["price"], "100")
+
+    def test_official_paths_and_close_and_trail(self):
+        client = GateClient("k", "s", env="testnet")
+        calls = []
+
+        def fake(method, path, qs="", body=None):
+            calls.append((method, path, qs, body))
+            if path.endswith("/accounts"):
+                return {"position_mode": "dual", "in_dual_mode": True, "available": "10", "total": "10"}
+            return {"id": 1}
+
+        client.rest_signed_request = fake
+        client._position_mode_cache = (None, 0.0)
+        self.assertEqual(client.get_position_mode(), "dual")
+        self.assertTrue(any(p.endswith("/accounts") for _, p, _, _ in calls))
+        client.set_leverage("BTC_USDT", 5)
+        lev = [c for c in calls if c[1].endswith("/leverage")][-1]
+        self.assertIn("dual_comp", lev[1])
+        self.assertEqual(lev[2], "leverage=5")
+        self.assertIsNone(lev[3])
+
+        single = GateClient("k", "s", env="live")
+        single.is_dual_position_mode = lambda: False
+        placed = {}
+        single.place_order = lambda body: placed.update(body) or {"id": 1, **body}
+        single.close_position("BTC_USDT", size=0)
+        self.assertEqual(placed.get("size"), 0)
+        self.assertTrue(placed.get("close"))
+        self.assertTrue(placed.get("reduce_only"))
+
+        client.rest_signed_request = lambda *a, **k: {"code": -1, "message": "InvalidRequest"}
+        with self.assertRaises(GateApiError):
+            client.place_trailing_order({"contract": "BTC_USDT"})
+
+        client2 = GateClient("k", "s", env="testnet")
+        attempts = []
+
+        def fake2(method, path, qs="", body=None):
+            attempts.append(body)
+            if str(body.get("price")) == "0":
+                raise GateApiError("slip", status=400, label="MARKET_PRICE_TOO_DEVIATED")
+            return {"id": 9, "price": body.get("price")}
+
+        client2.rest_signed_request = fake2
+        client2.public_get = lambda path, qs="": {"bids": [{"p": "100", "s": 1}], "asks": [{"p": "101", "s": 1}]}
+        r = client2.place_order({"contract": "BTC_USDT", "size": 1, "price": "0", "tif": "ioc"})
+        self.assertEqual(r["price"], "100")
 
     def test_load_credentials(self):
         keys = ("GATE_API_KEY", "GATE_API_SECRET", "GATE_TESTNET_API_KEY", "GATE_TESTNET_API_SECRET")

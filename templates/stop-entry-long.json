@@ -1,0 +1,20 @@
+{
+  "action": "stop_entry_long",
+  "symbol": "BTC_USDT",
+  "trigger_price": 88750,
+  "size_usd": 100,
+  "type": "market",
+  "trigger_price_type": "latest",
+  "trigger_rule": 1,
+  "label": "breakout-long",
+  "meta": {
+    "kind": "stop_entry",
+    "meaning": "BREAKOUT ENTRY — price>=trigger then OPEN LONG. This is NOT stop-loss.",
+    "do_not_use": "sl (sl closes a position)",
+    "aliases": ["buy_stop", "stop_long"],
+    "strategy": "deepseek-v1",
+    "confidence": 85,
+    "reasoning": "breakout above resistance",
+    "signal_id": "20260302-stop-entry-long"
+  }
+}

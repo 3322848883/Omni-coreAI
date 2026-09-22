@@ -127,7 +127,8 @@ class GateClient:
 
     # ── account / market ─────────────────────────────────
     def get_account(self) -> dict:
-        return self.rest_signed_request("GET", f"{FUTURES_API}/account")
+        # Official: GET /futures/usdt/accounts (plural). /account is 404.
+        return self.rest_signed_request("GET", f"{FUTURES_API}/accounts") or {}
 
     def get_position_mode(self) -> str:
         cached, ts = self._position_mode_cache
@@ -135,6 +136,8 @@ class GateClient:
             return cached
         account = self.get_account() or {}
         mode = str(account.get("position_mode") or "single")
+        if account.get("in_dual_mode") or mode == "dual":
+            mode = "dual"
         self._position_mode_cache = (mode, time.time())
         return mode
 
@@ -182,24 +185,43 @@ class GateClient:
         return float(last)
 
     def set_leverage(self, symbol: str, leverage: int) -> Any:
-        return self.rest_signed_request(
-            "POST",
-            f"{FUTURES_API}/positions/{symbol}/leverage",
-            "",
-            {"leverage": str(leverage)},
-        )
+        # Official: leverage is a QUERY param; dual uses dual_comp path.
+        qs = f"leverage={int(leverage)}"
+        if self.is_dual_position_mode():
+            path = f"{FUTURES_API}/dual_comp/positions/{symbol}/leverage"
+        else:
+            path = f"{FUTURES_API}/positions/{symbol}/leverage"
+        return self.rest_signed_request("POST", path, qs, None)
 
     def set_margin_mode(self, symbol: str, margin_mode: str) -> Any:
-        return self.rest_signed_request(
-            "POST",
-            f"{FUTURES_API}/positions/{symbol}/margin_mode",
-            "",
-            {"mode": margin_mode},
-        )
+        # Official FuturesPositionCrossMode: mode = ISOLATED | CROSS (uppercase)
+        mode = "ISOLATED" if str(margin_mode).lower() == "isolated" else "CROSS"
+        body = {"contract": symbol, "mode": mode}
+        path = f"{FUTURES_API}/positions/cross_mode"
+        if self.is_dual_position_mode():
+            path = f"{FUTURES_API}/dual_comp/positions/cross_mode"
+        return self.rest_signed_request("POST", path, "", body)
 
     # ── orders ───────────────────────────────────────────
     def place_order(self, body: dict) -> dict:
-        result = self.rest_signed_request("POST", f"{FUTURES_API}/orders", "", body)
+        try:
+            result = self.rest_signed_request("POST", f"{FUTURES_API}/orders", "", body)
+        except GateApiError as e:
+            # market slippage: fall back once to near-touch limit
+            if e.label == "MARKET_PRICE_TOO_DEVIATED" and str(body.get("price", "0")) == "0":
+                retry = dict(body)
+                contract = str(body.get("contract") or "")
+                side_buy = int(body.get("size") or 0) > 0
+                ob = self.public_get(f"{FUTURES_API}/order_book", f"contract={contract}&limit=1")
+                levels = (ob.get("bids") if side_buy else ob.get("asks")) or []
+                px = str((levels[0] if levels else {}).get("p") or "")
+                if not px:
+                    raise
+                retry["price"] = px
+                retry["tif"] = "gtc"
+                result = self.rest_signed_request("POST", f"{FUTURES_API}/orders", "", retry)
+            else:
+                raise
         if not isinstance(result, dict):
             raise GateApiError(f"unexpected place_order response: {result!r}")
         return result
@@ -246,30 +268,48 @@ class GateClient:
         return self.rest_signed_request("DELETE", f"{FUTURES_API}/autoorder/v1/trail", qs)
 
     def place_trailing_order(self, body: dict) -> dict:
-        """POST /futures/usdt/autoorder/v1/trail/create — Gate trailing stop."""
+        """POST /autoorder/v1/trail/create — Gate trailing stop."""
         result = self.rest_signed_request(
             "POST", f"{FUTURES_API}/autoorder/v1/trail/create", "", body
         )
         if not isinstance(result, dict):
             raise GateApiError(f"unexpected place_trailing_order response: {result!r}")
+        # HTTP 200 but business failure: {code:-1, message:...}
+        if result.get("code") not in (None, 0, "0"):
+            raise GateApiError(
+                f"trail rejected: {result.get('message') or result}",
+                label=str(result.get("code")),
+            )
         return result
 
     def close_position(self, contract: str, side: Optional[str] = None, size: int = 0) -> dict:
-        """Market reduce-close. size=0 means full close of that side."""
+        """Official close (verified on testnet).
+
+        single full close: size=0, close=true, reduce_only=true
+        dual reduce:       reduce_only=true, size>0 reduces short, size<0 reduces long
+        """
         if size < 0:
             raise GateApiError("close size must be >= 0")
         dual = self.is_dual_position_mode()
         if dual and side not in ("long", "short"):
             raise GateApiError("dual position mode requires side=long|short for close")
+
+        if not dual and size == 0:
+            return self.place_order({
+                "contract": contract,
+                "size": 0,
+                "close": True,
+                "price": "0",
+                "tif": "ioc",
+                "reduce_only": True,
+            })
+
         positions = self.get_positions()
         target = [
-            p
-            for p in positions
+            p for p in positions
             if p.get("contract") == contract and int(p.get("size") or 0) != 0
         ]
-        if dual:
-            target = [p for p in target if _pos_is_side(p, side)]
-        elif side:
+        if side:
             target = [p for p in target if _pos_is_side(p, side)]
         if not target:
             raise GateApiError(f"no position to close on {contract} side={side}")
@@ -277,16 +317,15 @@ class GateClient:
             side = _infer_side(target[0])
         total = sum(abs(int(p.get("size") or 0)) for p in target)
         close_size = total if size == 0 else min(size, total)
-        # sell to close long (negative size), buy to close short (positive size)
+        # sell to close long (negative), buy to close short (positive)
         order_size = -abs(close_size) if side == "long" else abs(close_size)
-        body = {
+        return self.place_order({
             "contract": contract,
             "size": order_size,
             "price": "0",
             "tif": "ioc",
             "reduce_only": True,
-        }
-        return self.place_order(body)
+        })
 
 
 def _pos_is_side(pos: dict, side: str) -> bool:

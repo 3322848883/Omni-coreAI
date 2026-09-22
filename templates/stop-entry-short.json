@@ -1,0 +1,20 @@
+{
+  "action": "stop_entry_short",
+  "symbol": "BTC_USDT",
+  "trigger_price": 82000,
+  "size_usd": 100,
+  "type": "market",
+  "trigger_price_type": "latest",
+  "trigger_rule": 2,
+  "label": "breakout-short",
+  "meta": {
+    "kind": "stop_entry",
+    "meaning": "BREAKDOWN ENTRY — price<=trigger then OPEN SHORT. This is NOT stop-loss.",
+    "do_not_use": "sl (sl closes a position)",
+    "aliases": ["sell_stop", "stop_short"],
+    "strategy": "deepseek-v1",
+    "confidence": 85,
+    "reasoning": "breakdown below support",
+    "signal_id": "20260302-stop-entry-short"
+  }
+}

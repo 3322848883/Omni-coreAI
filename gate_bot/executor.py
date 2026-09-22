@@ -76,6 +76,15 @@ class Executor:
                 step = StepResult(intent.action, intent.symbol, False, error=str(e))
             except Exception as e:  # noqa: BLE001 — boundary
                 step = StepResult(intent.action, intent.symbol, False, error=repr(e))
+            requested = (intent.meta or {}).get("requested_action")
+            if requested and requested != step.action:
+                step = StepResult(
+                    action=requested,
+                    symbol=step.symbol,
+                    ok=step.ok,
+                    detail={**step.detail, "executed_as": step.action},
+                    error=step.error,
+                )
             report.results.append(step)
             if not step.ok:
                 break
@@ -92,6 +101,8 @@ class Executor:
             return self._cancel_all(intent.symbol)
         if action == "cancel_price_all":
             return self._cancel_price_all(intent.symbol)
+        if action in ("stop_entry_long", "stop_entry_short"):
+            return self._stop_entry(intent)
         if action == "close":
             return self._close(intent)
         if action == "trail":
@@ -188,22 +199,81 @@ class Executor:
         result = self.client.stop_trailing_orders(symbol or None)
         return StepResult("cancel_trail_all", symbol, True, detail={"result": result})
 
+    def _stop_entry(self, intent: Intent) -> StepResult:
+        """Breakout ENTRY: trigger then OPEN. Not stop-loss."""
+        self._check_symbol(intent.symbol)
+        meta = self.client.get_contract(intent.symbol)
+        self._check_notional(intent.size_usd)
+        if intent.size is not None:
+            contracts = int(intent.size)
+        else:
+            size_usd = intent.size_usd
+            if size_usd is None and intent.size_pct is not None:
+                size_usd = pct_to_size_usd(intent.size_pct, self.client.get_available_usdt())
+            elif size_usd is None and intent.margin_pct is not None:
+                size_usd = pct_to_size_usd(intent.margin_pct, self.client.get_available_usdt()) * int(intent.leverage or 1)
+            entry = intent.price if intent.price is not None else self.client.get_last_price(intent.symbol)
+            contracts = usd_to_contracts(float(size_usd), float(entry), meta)
+        signed = contracts if intent.action == "stop_entry_long" else -contracts
+        if intent.order_type == "market":
+            initial = {"contract": intent.symbol, "size": signed, "price": "0", "tif": "ioc"}
+        else:
+            initial = {
+                "contract": intent.symbol,
+                "size": signed,
+                "price": str(round_price(float(intent.price), meta)),
+                "tif": {"limit": "gtc", "post_only": "poc", "ioc": "ioc", "fok": "fok"}[intent.order_type],
+            }
+        if intent.label:
+            initial["text"] = f"t-{intent.label}"
+        body = {
+            "initial": initial,
+            "trigger": {
+                "strategy_type": 0,
+                "price_type": PRICE_TYPE_MAP.get(intent.trigger_price_type, 0),
+                "price": str(intent.trigger_price_tp),
+                "rule": int(intent.trigger_rule_tp or (1 if intent.action == "stop_entry_long" else 2)),
+            },
+        }
+        if intent.trigger_expiration and self.client.env == "live":
+            body["trigger"]["expiration"] = int(intent.trigger_expiration)
+        order = self.client.place_price_order(body)
+        return StepResult(intent.action, intent.symbol, True, detail={"order": order, "body": body})
+
     def _close(self, intent: Intent) -> StepResult:
         self._check_symbol(intent.symbol)
         dual = self.client.is_dual_position_mode()
+        requested = (intent.meta or {}).get("requested_action") or intent.action
         side = intent.side
+        if requested == "reduce_long":
+            side = "long"
+        elif requested == "reduce_short":
+            side = "short"
         if dual and side not in ("long", "short"):
-            raise GateApiError("dual position mode requires side=long|short for close")
+            raise GateApiError(
+                "dual position mode requires side (use reduce_long / reduce_short or side=long|short)"
+            )
+        size = intent.close_size
+        if size is not None and size <= 0:
+            raise GateApiError("reduce size must be positive")
         order = self.client.close_position(
             intent.symbol,
-            side=side,
-            size=intent.close_size or 0,
+            side=side if dual else side,
+            size=size or 0,
         )
         return StepResult(
-            "close",
+            requested,
             intent.symbol,
             True,
-            detail={"order": order, "side": side, "position_mode": self.client.get_position_mode()},
+            detail={
+                "order": order,
+                "side": side,
+                "position_mode": self.client.get_position_mode(),
+                "executed_as": "close",
+                "mode_note": (
+                    "dual: close this side only" if dual else "single: one book, side is advisory"
+                ),
+            },
         )
 
     def _close_all(self, symbol: str) -> StepResult:

@@ -8,6 +8,15 @@ Gate.io 策略 JSON 信号下单机器人：AI/策略把交易意图 JSON 写入
 - **持仓模式**：按 API Key 自动识别 `single / dual / dual_long_short`
 - **无 dry-run**：合法信号直接下单；失败文件归档到 `archive/failed/`
 
+## 上线准备（Checklist）
+
+1. **密钥**：环境变量 `GATE_API_KEY` / `GATE_API_SECRET`（或 `GATE_TESTNET_*`），**不要写进 yaml**
+2. **配置**：复制 `config/bots/_example.yaml` → `config/bots/<bot_id>.yaml`，设 `env`、`symbols`、`max_notional_usd`
+3. **自检**：`python -m gate_bot status`；先 `once --bot <id>` 小文件试跑
+4. **信号源**：AI 只写 `inbox/<bot_id>/`，模板见 **`templates/README.md`**
+5. **建议**：`max_notional_usd` 从小开始；确认持仓模式 single/dual 与策略一致
+6. **已知限制**：`trail` 追踪单需资金密码，当前搁置（见 templates/README.md）
+
 ## 目录
 
 ```text
@@ -97,6 +106,31 @@ python -m gate_bot process path\to\sig.json --bot alpha
 }
 ```
 
+### 突破单 vs 止损（禁止用错）
+
+| 意图 | 用这个 | 禁止 |
+|------|--------|------|
+| **涨破 → 买进开多**（突破进场） | **`stop_entry_long`**（别名 `buy_stop` / `stop_long`） | 禁止用 `sl` |
+| **跌破 → 卖出开空**（突破进场） | **`stop_entry_short`**（别名 `sell_stop` / `stop_short`） | 禁止用 `sl` |
+| 已有多头，跌到价 → 平仓止损 | `open_long` 的 **`sl`** | 禁止用 `stop_entry_*` |
+| 已有空头，涨到价 → 平仓止损 | `open_short` 的 **`sl`** | 禁止用 `stop_entry_*` |
+
+口诀：**突破进场 = `stop_entry_*`（开仓）｜止损保护 = `sl`（平仓）**。  
+完整模板见 **`templates/README.md`**（含字段字典与加减仓×持仓模式）。
+
+**已知限制**：`trail` 追踪单需 API 资金密码（`X-Gate-Password`）或追踪委托权限，当前搁置。官方 CLI 语义见 `templates/README.md`。
+
+```json
+{
+  "action": "stop_entry_long",
+  "symbol": "BTC_USDT",
+  "trigger_price": 88750,
+  "size_usd": 100,
+  "type": "market",
+  "meta": {"kind": "stop_entry", "reasoning": "breakout entry"}
+}
+```
+
 ### action 一览
 
 | action | 说明 |
@@ -105,7 +139,7 @@ python -m gate_bot process path\to\sig.json --bot alpha
 | `close` | 平仓；dual 模式需 `side` |
 | `close_all` | 市价全平（可省 symbol） |
 | `cancel_all` / `cancel_price_all` / `cancel_trail_all` | 撤普通挂单 / 计划委托 / 追踪止损 |
-| `hold` | 无操作，直接归档 |
+| `hold` / `watch` / `skip` | **不执行下单**，直接归档 done（可写 meta.reasoning） |
 | `grid` | 网格多档限价开仓 |
 | `trail` | 追踪止损（Gate `autoorder/v1/trail/create`） |
 
