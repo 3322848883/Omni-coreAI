@@ -1,0 +1,70 @@
+"""Convert strategy size_usd into Gate futures contract counts."""
+
+from __future__ import annotations
+
+import math
+from typing import Optional
+
+from .gate_client import ContractMeta, GateApiError
+
+
+def usd_to_contracts(
+    size_usd: float,
+    entry_price: float,
+    meta: ContractMeta,
+) -> int:
+    """contracts = size_usd / (price * quanto_multiplier), rounded down to lot size."""
+    if size_usd is None or size_usd <= 0:
+        raise GateApiError("size_usd must be positive")
+    if entry_price is None or entry_price <= 0:
+        raise GateApiError("entry_price must be positive")
+    multiplier = meta.quanto_multiplier or 1.0
+    if multiplier <= 0:
+        multiplier = 1.0
+    raw = size_usd / (entry_price * multiplier)
+    lot = meta.order_size_round or 1.0
+    if lot <= 0:
+        lot = 1.0
+    # floor to lot
+    lots = math.floor(raw / lot + 1e-12)
+    contracts = int(lots * lot) if lot >= 1 else int(lots)
+    # order_size_round may be fractional (e.g. 0.0001) but Gate futures size is int
+    # for USDT contracts it is typically 1. Force integer contracts >= 1.
+    contracts = int(math.floor(raw + 1e-12))
+    if contracts < 1:
+        raise GateApiError(
+            f"size_usd={size_usd} too small at price={entry_price} "
+            f"(need >= {entry_price * multiplier:.6f} USDT per 1 contract)"
+        )
+    # apply lot size if lot > 1
+    if lot > 1:
+        contracts = int(contracts // lot) * int(lot)
+        if contracts < 1:
+            raise GateApiError(f"rounded size to 0 with lot={lot}")
+    return contracts
+
+
+def default_trigger_limit_price(
+    trigger_price: float,
+    side: str,
+    is_tp: bool,
+    slip_ratio: float = 0.001,
+) -> float:
+    """Mirror quick_order guidance: sell a bit below trigger, buy a bit above."""
+    if trigger_price <= 0:
+        raise GateApiError("trigger_price must be positive")
+    slip = trigger_price * slip_ratio
+    if is_tp:
+        # take profit close: sell (long) near trigger → slightly below
+        return trigger_price - slip if side == "long" else trigger_price + slip
+    # stop loss close: aggressive exit
+    return trigger_price - slip if side == "long" else trigger_price + slip
+
+
+def round_price(price: float, meta: ContractMeta) -> float:
+    step = meta.order_price_round or 0
+    if step <= 0:
+        return price
+    precision = max(0, int(round(-math.log10(step))) if step < 1 else 0)
+    rounded = round(price / step) * step
+    return float(f"{rounded:.{precision}f}")
