@@ -25,22 +25,15 @@ def usd_to_contracts(
     lot = meta.order_size_round or 1.0
     if lot <= 0:
         lot = 1.0
-    # floor to lot
-    lots = math.floor(raw / lot + 1e-12)
-    contracts = int(lots * lot) if lot >= 1 else int(lots)
-    # order_size_round may be fractional (e.g. 0.0001) but Gate futures size is int
-    # for USDT contracts it is typically 1. Force integer contracts >= 1.
+    # Gate futures size is an integer contract count; floor to lot when lot >= 1
     contracts = int(math.floor(raw + 1e-12))
+    if lot > 1:
+        contracts = (contracts // int(lot)) * int(lot)
     if contracts < 1:
         raise GateApiError(
             f"size_usd={size_usd} too small at price={entry_price} "
             f"(need >= {entry_price * multiplier:.6f} USDT per 1 contract)"
         )
-    # apply lot size if lot > 1
-    if lot > 1:
-        contracts = int(contracts // lot) * int(lot)
-        if contracts < 1:
-            raise GateApiError(f"rounded size to 0 with lot={lot}")
     return contracts
 
 

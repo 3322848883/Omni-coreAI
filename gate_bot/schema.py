@@ -94,6 +94,9 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
     if not isinstance(data, dict):
         raise SchemaError("intent must be an object")
     action = str(data.get("action") or "").strip().lower()
+    # empty / missing action is a legal no-op (hold)
+    if not action:
+        return Intent(action="hold", meta=data.get("meta") or {}, label=default_label)
     if action not in ACTIONS:
         raise SchemaError(f"unsupported action: {action!r}")
 
@@ -290,8 +293,11 @@ def parse_signal(data: Any, default_label: str = "signal") -> SignalFile:
         raise SchemaError("use either top-level action or orders[], not both")
     if "orders" in data:
         orders = data.get("orders")
-        if not isinstance(orders, list) or not orders:
-            raise SchemaError("orders must be a non-empty array")
+        if not isinstance(orders, list):
+            raise SchemaError("orders must be an array")
+        # empty orders[] is a legal no-op (hold → done)
+        if not orders:
+            return SignalFile(intents=[Intent(action="hold", meta=data.get("meta") or {})], meta=data.get("meta") or {}, raw=data)
         if len(orders) > 50:
             raise SchemaError("orders too large (max 50)")
         intents = [parse_intent(item, default_label=default_label) for item in orders]
@@ -299,7 +305,12 @@ def parse_signal(data: Any, default_label: str = "signal") -> SignalFile:
     if "action" in data:
         intent = parse_intent(data, default_label=default_label)
         return SignalFile(intents=[intent], meta=data.get("meta") or {}, raw=data)
-    raise SchemaError("signal requires action or orders")
+    # bare object without action/orders is a legal hold no-op
+    return SignalFile(
+        intents=[Intent(action="hold", meta=data.get("meta") or {})],
+        meta=data.get("meta") or {},
+        raw=data,
+    )
 
 
 def expand_signal(signal: SignalFile) -> list[Intent]:

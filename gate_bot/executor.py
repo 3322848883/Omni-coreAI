@@ -208,9 +208,14 @@ class Executor:
             self._check_symbol(symbol)
             result = self.client.cancel_all_orders(symbol)
         else:
-            result = []
-            for sym in self._open_symbols():
-                result.append(self.client.cancel_all_orders(sym))
+            # cancel open orders on every contract with open orders (not only open positions)
+            orders = self.client.list_orders() or []
+            symbols = []
+            for o in orders:
+                sym = o.get("contract")
+                if sym and sym not in symbols:
+                    symbols.append(sym)
+            result = {sym: self.client.cancel_all_orders(sym) for sym in symbols}
         return StepResult("cancel_all", symbol, True, detail={"result": result})
 
     def _cancel_price_all(self, symbol: str) -> StepResult:

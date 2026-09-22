@@ -88,9 +88,15 @@ def _take_file(path: Path) -> Optional[Path]:
 def process_file(path: Path, bot: BotConfig, paths: ProjectPaths, executor: Optional[Executor] = None) -> bool:
     """Process one JSON signal file. Returns True on success archive."""
     tmp = path
-    original_name = path.name.lstrip(".")
+    original_name = path.name
+    while original_name.startswith("."):
+        original_name = original_name[1:]
     if original_name.endswith(".taking"):
         original_name = original_name[: -len(".taking")]
+    if original_name.endswith(".staged.json"):
+        original_name = original_name[: -len(".staged.json")]
+        if not original_name.endswith(".json"):
+            original_name += ".json"
     try:
         raw = tmp.read_text(encoding="utf-8")
         data = json.loads(raw)
@@ -158,9 +164,17 @@ def _archive_failed(
             dest.write_text(tmp.read_text(encoding="utf-8") if tmp.exists() else "", encoding="utf-8")
     except OSError as e:
         log.error("archive failed for %s: %s", original_name, e)
-    payload = {"error": error, "file": original_name, "bot_id": bot_id}
+    payload = {
+        "error": error,
+        "code": "EXEC_OR_SCHEMA",
+        "message": error,
+        "file": original_name,
+        "bot_id": bot_id,
+    }
     if extra:
+        steps = extra.get("steps") or []
         payload["report"] = extra
+        payload["partials"] = [s for s in steps if s.get("ok")]
     (dest.parent / f"{original_name}.error.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )

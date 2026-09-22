@@ -157,7 +157,7 @@ class GateClient:
                 continue
             cache[name] = ContractMeta(
                 name=name,
-                quanto_multiplier=float(item.get("quanto_multiplier") or item.get("order_price_round") or 1),
+                quanto_multiplier=float(item.get("quanto_multiplier") or 1),
                 order_size_round=float(item.get("order_size_round") or 1),
                 order_price_round=float(item.get("order_price_round") or 0.1),
                 leverage_max=int(item.get("leverage_max") or 100),

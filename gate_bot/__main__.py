@@ -74,8 +74,12 @@ def cmd_process(args) -> int:
     if not src.exists():
         print(f"missing file: {src}", file=sys.stderr)
         return 1
-    # copy into a temp take name under bot inbox semantics but process directly
-    ok = process_file(src, bot, paths, executor=None)
+    # stage a copy so the caller's source file is not moved away
+    inbox = paths.bot_inbox(bot_id)
+    staged = inbox / f".{src.name}.staged.json"
+    staged.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    ok = process_file(staged, bot, paths, executor=None)
+    # process_file renames using original_name derived from staged name; map result names
     return 0 if ok else 2
 
 

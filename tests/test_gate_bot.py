@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -7,7 +8,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.gate_client import ContractMeta, GateApiError, resolve_symbol  # noqa: E402
+from gate_bot.gate_client import (
+    ContractMeta,
+    GateApiError,
+    GateClient,
+    load_credentials,
+    resolve_symbol,
+)  # noqa: E402
 from gate_bot.schema import (  # noqa: E402
     SchemaError,
     expand_signal,
@@ -42,6 +49,13 @@ class TestSchema(unittest.TestCase):
         self.assertEqual(infer_trigger_rules("open_short", True), 2)
         self.assertEqual(infer_trigger_rules("open_short", False), 1)
 
+    def test_empty_action_is_hold(self):
+        self.assertEqual(parse_signal({"symbol": "BTC_USDT"}).intents[0].action, "hold")
+        self.assertEqual(parse_signal({"action": ""}).intents[0].action, "hold")
+
+    def test_empty_orders_is_hold(self):
+        self.assertEqual(parse_signal({"orders": []}).intents[0].action, "hold")
+
     def test_orders_array(self):
         sig = parse_signal(
             {
@@ -71,7 +85,7 @@ class TestSchema(unittest.TestCase):
         self.assertEqual(len(intents), 2)
         self.assertEqual(intents[0].action, "open_long")
         self.assertEqual(intents[0].price, 70000)
-        self.assertIsNone(intents[0].tp)  # tp/sl only on last level
+        self.assertIsNone(intents[0].tp)
         self.assertEqual(intents[1].tp, 72000)
 
     def test_reject_action_plus_orders(self):
@@ -112,7 +126,6 @@ class TestSizing(unittest.TestCase):
         )
 
     def test_usd_to_contracts(self):
-        # 100 USD / (50000 * 0.0001) = 100/5 = 20
         self.assertEqual(usd_to_contracts(100, 50000, self.meta()), 20)
 
     def test_too_small(self):
@@ -132,6 +145,7 @@ class FakeClient:
         self.price_orders = []
         self.dual = False
         self.meta = ContractMeta("BTC_USDT", 0.0001, 1, 0.1, 100)
+        self.cancelled = []
 
     def banner(self):
         return "[TEST]"
@@ -167,7 +181,11 @@ class FakeClient:
         self.orders.append(body)
         return {"id": len(self.orders), **body}
 
+    def list_orders(self, contract=None):
+        return []
+
     def cancel_all_orders(self, contract):
+        self.cancelled.append(contract)
         return {"cancelled": contract}
 
     def cancel_all_price_orders(self, contract=None):
@@ -193,21 +211,19 @@ class TestExecutor(unittest.TestCase):
         report = ex.execute_signal(sig)
         self.assertTrue(report.ok)
         self.assertEqual(len(client.orders), 1)
-        self.assertEqual(client.orders[0]["size"], 20)  # 100/(50000*0.0001)
+        self.assertEqual(client.orders[0]["size"], 20)
         self.assertEqual(len(client.price_orders), 2)
-        # nested {initial, trigger}; long close-trigger side is short (negative size)
         tp = client.price_orders[0]
         sl = client.price_orders[1]
         self.assertEqual(tp["initial"]["size"], -20)
         self.assertTrue(tp["initial"]["reduce_only"])
-        self.assertEqual(tp["trigger"]["rule"], 1)  # tp
-        self.assertEqual(sl["trigger"]["rule"], 2)  # sl
+        self.assertEqual(tp["trigger"]["rule"], 1)
+        self.assertEqual(sl["trigger"]["rule"], 2)
 
     def test_notional_guard(self):
         client = FakeClient()
         ex = Executor(client, max_notional_usd=50)
-        sig = parse_signal({"action": "open_long", "symbol": "BTC_USDT", "size_usd": 100})
-        report = ex.execute_signal(sig)
+        report = ex.execute_signal(parse_signal({"action": "open_long", "symbol": "BTC_USDT", "size_usd": 100}))
         self.assertFalse(report.ok)
         self.assertEqual(len(client.orders), 0)
 
@@ -215,9 +231,100 @@ class TestExecutor(unittest.TestCase):
         client = FakeClient()
         client.dual = True
         ex = Executor(client)
-        sig = parse_signal({"action": "close", "symbol": "BTC_USDT"})
-        report = ex.execute_signal(sig)
+        report = ex.execute_signal(parse_signal({"action": "close", "symbol": "BTC_USDT"}))
         self.assertFalse(report.ok)
+
+    def test_dual_close_long_sells_negative_size(self):
+        client = GateClient("k", "s", env="live")
+        client.is_dual_position_mode = lambda: True
+        client.get_positions = lambda: [
+            {"contract": "BTC_USDT", "size": 5, "mode": "dual_long"},
+            {"contract": "BTC_USDT", "size": -2, "mode": "dual_short"},
+        ]
+        placed = {}
+        client.place_order = lambda body: placed.update(body) or {"id": 1, **body}
+        client.close_position("BTC_USDT", side="long", size=0)
+        self.assertEqual(placed["size"], -5)
+        self.assertTrue(placed["reduce_only"])
+
+    def test_cancel_all_without_symbol_uses_open_orders(self):
+        client = FakeClient()
+        client.list_orders = lambda contract=None: [
+            {"contract": "BTC_USDT"},
+            {"contract": "ETH_USDT"},
+            {"contract": "BTC_USDT"},
+        ]
+        ex = Executor(client)
+        self.assertTrue(ex.execute_signal(parse_signal({"action": "cancel_all"})).ok)
+        self.assertEqual(client.cancelled, ["BTC_USDT", "ETH_USDT"])
+
+
+class TestGateClient(unittest.TestCase):
+    def test_sign_headers_and_position_mode(self):
+        client = GateClient("KEY123", "SECRET456", env="live")
+        self.assertEqual(client.base, "https://api.gateio.ws")
+        self.assertIn("LIVE", client.banner())
+        captured = {}
+
+        class FakeResp:
+            def read(self):
+                return b'{"ok":true}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake_urlopen(req, timeout=15):
+            captured["headers"] = {k.title(): v for k, v in req.header_items()}
+            captured["method"] = req.get_method()
+            return FakeResp()
+
+        import urllib.request as ur
+
+        old = ur.urlopen
+        ur.urlopen = fake_urlopen
+        try:
+            self.assertEqual(client.rest_signed_request("GET", "/x"), {"ok": True})
+        finally:
+            ur.urlopen = old
+        self.assertEqual(captured["headers"].get("Key"), "KEY123")
+        self.assertTrue(captured["headers"].get("Sign"))
+        self.assertEqual(captured["method"], "GET")
+
+        client.get_account = lambda: {"position_mode": "dual_long_short"}
+        self.assertTrue(client.is_dual_position_mode())
+        client.public_get = lambda path, qs="": [
+            {
+                "name": "BTC_USDT",
+                "quanto_multiplier": 0.0001,
+                "order_size_round": 1,
+                "order_price_round": 0.1,
+                "leverage_max": 100,
+            }
+        ]
+        self.assertEqual(client.get_contract("BTC_USDT").quanto_multiplier, 0.0001)
+        with self.assertRaises(GateApiError):
+            client.get_contract("NOPE_USDT")
+
+    def test_load_credentials(self):
+        keys = ("GATE_API_KEY", "GATE_API_SECRET", "GATE_TESTNET_API_KEY", "GATE_TESTNET_API_SECRET")
+        old = {k: os.environ.get(k) for k in keys}
+        for k in keys:
+            os.environ.pop(k, None)
+        os.environ["GATE_API_KEY"] = "k"
+        os.environ["GATE_API_SECRET"] = "s"
+        try:
+            self.assertEqual(load_credentials("live"), ("k", "s"))
+            with self.assertRaises(GateApiError):
+                load_credentials("testnet")
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
 
 class TestWatcher(unittest.TestCase):
@@ -241,16 +348,23 @@ class TestWatcher(unittest.TestCase):
             paths = ProjectPaths(root)
             paths.ensure()
             bot = BotConfig(bot_id="alpha", env="testnet")
-
-            class HoldClient(FakeClient):
-                pass
-
             f = paths.bot_inbox("alpha") / "hold.json"
             f.write_text(json.dumps({"action": "hold"}), encoding="utf-8")
-            ex = Executor(HoldClient())
-            ok = process_file(f, bot, paths, executor=ex)
+            ok = process_file(f, bot, paths, executor=Executor(FakeClient()))
             self.assertTrue(ok)
             self.assertTrue((paths.bot_done("alpha") / "hold.json").exists())
+
+    def test_staged_name_normalized(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            paths = ProjectPaths(root)
+            paths.ensure()
+            bot = BotConfig(bot_id="alpha", env="testnet")
+            f = paths.bot_inbox("alpha") / ".sig.json.staged.json"
+            f.write_text(json.dumps({"action": "hold"}), encoding="utf-8")
+            ok = process_file(f, bot, paths, executor=Executor(FakeClient()))
+            self.assertTrue(ok)
+            self.assertTrue((paths.bot_done("alpha") / "sig.json").exists())
 
 
 if __name__ == "__main__":

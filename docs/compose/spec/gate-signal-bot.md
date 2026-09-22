@@ -1,14 +1,25 @@
 ---
 feature: gate-signal-bot
-status: in-progress
+status: delivered
 updated: 2026-03-02
 branch: main
-commits: pending
+commits: 6e3a77e..HEAD
 ---
 
 # Gate Signal Bot — 策略 JSON 信号下单机器人
 
 ## Report
+
+**What was built** — 独立项目 `gate-signal-bot`：单进程多机器人守护，扫描 `inbox/<bot_id>/*.json` 策略意图（open_long/short、close/close_all、cancel_all/cancel_price_all、hold、grid，以及 `orders[]` 多腿），按 `size_usd` 与合约 `quanto_multiplier` 换算张数，自动识别持仓模式（single/dual）并适配开平仓 body，开仓后自动挂限价止盈/止损触发单（nested `{initial,trigger}`）。支持 market/limit/post_only/ioc/fok，live/testnet 双环境独立密钥，无 dry-run。成功归档 `archive/done/`（+result.json），失败归档 `archive/failed/`（+error.json 含 partials）。CLI：`run|once|process|status`。
+
+**Verification** — `python -m unittest discover -s tests`：**23 tests PASS**（schema/empty-action/empty-orders/grid、sizing、executor TP/SL + dual close + cancel_all、GateClient 签名头/持仓模式/合约元数据/凭据、watcher 归档与 staged 文件名）。`python -m gate_bot status`：PASS。独立复审确认 5 项 critical 全部修复、无新增 critical。
+
+**Journey log** —
+1. 触发单 body 先写成 flat 字段，对齐 `quick_order.cmd_trigger_order` 后改为 nested `{initial,trigger}`，并补 `is_stop_order`。
+2. 复审指出空 `action`/空 `orders[]` 必须是合法 hold→done；`cancel_all` 无 symbol 不能只扫持仓。
+3. 测试要覆盖「实现存在」之外的验收点（签名头、dual close size 符号），否则 spec 的 acceptance 无法关闭。
+4. 环境无系统 Python，用 `uv venv` + `.venv/Scripts/python` 跑 unittest。
+5. 并行工具调用易触发 flood 取消，修复应小步单改。
 
 ## [S1] Problem
 
@@ -263,11 +274,11 @@ python -m gate_bot status           # bot 配置/inbox 余量/最近执行摘要
 
 ## Tasks
 
-- [ ] T1: 核心库 gate_bot/gate_client.py — 签名 REST、环境选择、合约元数据、持仓模式识别 — acceptance: 单元测试可 mock 调用 get position_mode/contracts，签名请求构造正确 (covers: S2)
-- [ ] T2: 信号解析 gate_bot/schema.py — 单意图/多意图/grid 展开、字段校验、触发规则推导 — acceptance: 合法 A/B/C 解析通过；非法 action/互斥字段抛 SchemaError (covers: S2)
-- [ ] T3: 张数换算 gate_bot/sizing.py — size_usd→contracts，精度/最小 1 张/不足面值失败 — acceptance: 给定 mock multiplier 与 price 得到期望张数；过小失败 (covers: S2)
-- [ ] T4: 执行器 gate_bot/executor.py — 开/平/撤 + 自动 TP/SL 价格触发单 + 持仓模式适配 — acceptance: mock API 下 open_long+tp+sl 产生 1×orders + 2×price_orders，dual close 带正确 side (covers: S2)
-- [ ] T5: 多 bot 配置与文件守护 gate_bot/config.py + gate_bot/watcher.py — 扫描 inbox、归档 done/failed、result/error 旁路 — acceptance: 合法文件归档 done 并写 result.json；失败归档 failed 并写 error.json (covers: S2)
-- [ ] T6: CLI 入口 gate_bot/__main__.py — run/once/process/status — acceptance: `python -m gate_bot status` 列出 bots 与 inbox 积压 (covers: S2)
-- [ ] T7: 配置样例与 README — config/bots/_example.yaml、目录约定、JSON 样例 — acceptance: 新用户按 README 能写入 inbox 并跑 once (covers: S2)
-- [ ] T8: 测试套件 tests/ — schema/sizing/executor/watcher 关键路径 — acceptance: `python -m unittest` 全绿 (covers: S2)
+- [x] T1: 核心库 gate_bot/gate_client.py — 签名 REST、环境选择、合约元数据、持仓模式识别 — acceptance: 单元测试可 mock 调用 get position_mode/contracts，签名请求构造正确 (covers: S2)
+- [x] T2: 信号解析 gate_bot/schema.py — 单意图/多意图/grid 展开、字段校验、触发规则推导 — acceptance: 合法 A/B/C 解析通过；非法 action/互斥字段抛 SchemaError (covers: S2)
+- [x] T3: 张数换算 gate_bot/sizing.py — size_usd→contracts，精度/最小 1 张/不足面值失败 — acceptance: 给定 mock multiplier 与 price 得到期望张数；过小失败 (covers: S2)
+- [x] T4: 执行器 gate_bot/executor.py — 开/平/撤 + 自动 TP/SL 价格触发单 + 持仓模式适配 — acceptance: mock API 下 open_long+tp+sl 产生 1×orders + 2×price_orders，dual close 带正确 side (covers: S2)
+- [x] T5: 多 bot 配置与文件守护 gate_bot/config.py + gate_bot/watcher.py — 扫描 inbox、归档 done/failed、result/error 旁路 — acceptance: 合法文件归档 done 并写 result.json；失败归档 failed 并写 error.json (covers: S2)
+- [x] T6: CLI 入口 gate_bot/__main__.py — run/once/process/status — acceptance: `python -m gate_bot status` 列出 bots 与 inbox 积压 (covers: S2)
+- [x] T7: 配置样例与 README — config/bots/_example.yaml、目录约定、JSON 样例 — acceptance: 新用户按 README 能写入 inbox 并跑 once (covers: S2)
+- [x] T8: 测试套件 tests/ — schema/sizing/executor/watcher 关键路径 — acceptance: `python -m unittest` 全绿 (covers: S2)
