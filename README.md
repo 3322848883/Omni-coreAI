@@ -101,12 +101,38 @@ python -m gate_bot process path\to\sig.json --bot alpha
 
 | action | 说明 |
 |--------|------|
-| `open_long` / `open_short` | 开仓；`size_usd` 或 `size`（张数） |
+| `open_long` / `open_short` | 开仓；`size`（张）/ `size_usd`（名义 U）/ `size_pct`（可用余额比例）/ `margin_pct`（保证金比例×杠杆） |
 | `close` | 平仓；dual 模式需 `side` |
 | `close_all` | 市价全平（可省 symbol） |
-| `cancel_all` / `cancel_price_all` | 撤普通挂单 / 计划委托 |
+| `cancel_all` / `cancel_price_all` / `cancel_trail_all` | 撤普通挂单 / 计划委托 / 追踪止损 |
 | `hold` | 无操作，直接归档 |
 | `grid` | 网格多档限价开仓 |
+| `trail` | 追踪止损（Gate `autoorder/v1/trail/create`） |
+
+### 资产比例仓位
+
+```json
+{"action": "open_long", "symbol": "BTC_USDT", "size_pct": 0.1, "type": "market"}
+```
+
+- `size_pct`：名义价值 = 可用余额 × 比例（0.1 = 10%）
+- `margin_pct`：保证金 = 可用余额 × 比例，名义 = 保证金 × `leverage`
+
+### 追踪止损 trail
+
+```json
+{
+  "action": "trail",
+  "symbol": "BTC_USDT",
+  "amount": -1,
+  "price_offset": "0.5%",
+  "activation_price": "0"
+}
+```
+
+- `amount`：张数，正=买入（平空/做多腿），负=卖出
+- `price_offset`：回撤比例或价距（`0.5` 或 `0.5%`）
+- `activation_price`：激活价，`0` 表示立即生效
 
 ### 订单类型 `type`
 

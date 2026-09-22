@@ -21,7 +21,7 @@ from gate_bot.schema import (  # noqa: E402
     infer_trigger_rules,
     parse_signal,
 )
-from gate_bot.sizing import default_trigger_limit_price, usd_to_contracts  # noqa: E402
+from gate_bot.sizing import default_trigger_limit_price, pct_to_size_usd, usd_to_contracts  # noqa: E402
 from gate_bot.executor import Executor  # noqa: E402
 from gate_bot.watcher import ProjectPaths, process_file  # noqa: E402
 from gate_bot.config import BotConfig  # noqa: E402
@@ -110,6 +110,37 @@ class TestSchema(unittest.TestCase):
                 {"action": "open_long", "symbol": "BTC_USDT", "size_usd": 10, "type": "limit"}
             )
 
+    def test_size_pct_and_margin_pct(self):
+        sig = parse_signal(
+            {"action": "open_long", "symbol": "BTC_USDT", "size_pct": 0.1}
+        )
+        self.assertEqual(sig.intents[0].size_pct, 0.1)
+        with self.assertRaises(SchemaError):
+            parse_signal({"action": "open_long", "symbol": "BTC_USDT", "size_pct": 1.5})
+        with self.assertRaises(SchemaError):
+            parse_signal({"action": "open_long", "symbol": "BTC_USDT"})
+
+    def test_trail_action(self):
+        sig = parse_signal(
+            {
+                "action": "trail",
+                "symbol": "BTC_USDT",
+                "amount": -2,
+                "price_offset": "0.5%",
+                "activation_price": "0",
+            }
+        )
+        intent = sig.intents[0]
+        self.assertEqual(intent.action, "trail")
+        self.assertEqual(intent.size, 2)
+        self.assertEqual(intent.side, "short")
+        self.assertEqual(intent.price_offset, "0.5%")
+
+    def test_pct_to_size_usd(self):
+        self.assertAlmostEqual(pct_to_size_usd(0.1, 1000), 100)
+        with self.assertRaises(GateApiError):
+            pct_to_size_usd(0, 1000)
+
     def test_resolve_symbol(self):
         self.assertEqual(resolve_symbol("btc"), "BTC_USDT")
         self.assertEqual(resolve_symbol("XAU"), "XAU_USDT")
@@ -194,6 +225,17 @@ class FakeClient:
     def get_positions(self):
         return []
 
+    def get_available_usdt(self):
+        return 1000.0
+
+    def place_trailing_order(self, body):
+        self.price_orders.append(body)
+        return {"id": 200 + len(self.price_orders), **body}
+
+    def stop_trailing_orders(self, contract=None):
+        self.cancelled.append(("trail", contract))
+        return {"cancelled": contract or "ALL"}
+
 
 class TestExecutor(unittest.TestCase):
     def test_open_long_with_tp_sl(self):
@@ -257,6 +299,32 @@ class TestExecutor(unittest.TestCase):
         ex = Executor(client)
         self.assertTrue(ex.execute_signal(parse_signal({"action": "cancel_all"})).ok)
         self.assertEqual(client.cancelled, ["BTC_USDT", "ETH_USDT"])
+
+
+    def test_open_size_pct(self):
+        client = FakeClient()
+        ex = Executor(client, max_notional_usd=5000)
+        sig = parse_signal({"action": "open_long", "symbol": "BTC_USDT", "size_pct": 0.1})
+        # 10% of 1000 available = 100 USD → 20 contracts at 50000
+        report = ex.execute_signal(sig)
+        self.assertTrue(report.ok, report.to_dict())
+        self.assertEqual(client.orders[0]["size"], 20)
+
+    def test_trail_places_trailing_order(self):
+        client = FakeClient()
+        ex = Executor(client)
+        sig = parse_signal(
+            {
+                "action": "trail",
+                "symbol": "BTC_USDT",
+                "amount": -3,
+                "price_offset": "0.5",
+            }
+        )
+        report = ex.execute_signal(sig)
+        self.assertTrue(report.ok, report.to_dict())
+        self.assertEqual(client.price_orders[0]["amount"], "-3")
+        self.assertEqual(client.price_orders[0]["price_offset"], "0.5")
 
 
 class TestGateClient(unittest.TestCase):

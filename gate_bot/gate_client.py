@@ -237,6 +237,23 @@ class GateClient:
         qs = f"contract={contract}" if contract else ""
         return self.rest_signed_request("DELETE", f"{FUTURES_API}/price_orders", qs)
 
+    def get_available_usdt(self) -> float:
+        account = self.get_account() or {}
+        return float(account.get("available") or 0)
+
+    def stop_trailing_orders(self, contract: Optional[str] = None) -> Any:
+        qs = f"contract={contract}" if contract else ""
+        return self.rest_signed_request("DELETE", f"{FUTURES_API}/autoorder/v1/trail", qs)
+
+    def place_trailing_order(self, body: dict) -> dict:
+        """POST /futures/usdt/autoorder/v1/trail/create — Gate trailing stop."""
+        result = self.rest_signed_request(
+            "POST", f"{FUTURES_API}/autoorder/v1/trail/create", "", body
+        )
+        if not isinstance(result, dict):
+            raise GateApiError(f"unexpected place_trailing_order response: {result!r}")
+        return result
+
     def close_position(self, contract: str, side: Optional[str] = None, size: int = 0) -> dict:
         """Market reduce-close. size=0 means full close of that side."""
         if size < 0:

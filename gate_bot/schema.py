@@ -14,8 +14,10 @@ ACTIONS = {
     "close_all",
     "cancel_all",
     "cancel_price_all",
+    "cancel_trail_all",
     "hold",
     "grid",
+    "trail",
 }
 
 ORDER_TYPES = {"market", "limit", "post_only", "ioc", "fok"}
@@ -31,6 +33,8 @@ class Intent:
     action: str
     symbol: str = ""
     size_usd: Optional[float] = None
+    size_pct: Optional[float] = None
+    margin_pct: Optional[float] = None
     size: Optional[int] = None
     order_type: str = "market"
     price: Optional[float] = None
@@ -48,6 +52,8 @@ class Intent:
     margin_mode: Optional[str] = None
     side: Optional[str] = None  # for close / grid
     close_size: Optional[int] = None
+    price_offset: Optional[str] = None
+    activation_price: Optional[str] = None
     label: str = "signal"
     meta: dict = field(default_factory=dict)
 
@@ -103,12 +109,33 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
     if action in ("hold",):
         return Intent(action="hold", meta=data.get("meta") or {}, label=default_label)
 
-    if action in ("close_all", "cancel_all", "cancel_price_all"):
+    if action in ("close_all", "cancel_all", "cancel_price_all", "cancel_trail_all"):
         symbol = data.get("symbol") or ""
         return Intent(
             action=action,
             symbol=resolve_symbol(symbol) if symbol else "",
             side=data.get("side"),
+            label=str(data.get("label") or default_label),
+            meta=data.get("meta") or {},
+        )
+
+    if action == "trail":
+        symbol = data.get("symbol")
+        if not symbol:
+            raise SchemaError("trail requires symbol")
+        amount = _i(data.get("amount") or data.get("size"), "amount")
+        if amount is None or amount == 0:
+            raise SchemaError("trail requires non-zero amount (positive=buy, negative=sell)")
+        offset = data.get("price_offset")
+        if offset is None or offset == "":
+            raise SchemaError("trail requires price_offset (e.g. 0.5 or 0.5%)")
+        return Intent(
+            action="trail",
+            symbol=resolve_symbol(symbol),
+            size=abs(int(amount)),
+            side="long" if amount > 0 else "short",
+            price_offset=str(offset),
+            activation_price=str(data.get("activation_price") or "0"),
             label=str(data.get("label") or default_label),
             meta=data.get("meta") or {},
         )
@@ -141,8 +168,13 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
         raise SchemaError(f"{action} requires symbol")
     size_usd = _f(data.get("size_usd"), "size_usd")
     size = _i(data.get("size"), "size")
-    if size_usd is None and size is None:
-        raise SchemaError(f"{action} requires size_usd or size")
+    size_pct = _f(data.get("size_pct"), "size_pct")
+    margin_pct = _f(data.get("margin_pct"), "margin_pct")
+    for name, val in (("size_pct", size_pct), ("margin_pct", margin_pct)):
+        if val is not None and not (0 < val <= 1):
+            raise SchemaError(f"{name} must be in (0, 1], got {val}")
+    if size_usd is None and size is None and size_pct is None and margin_pct is None:
+        raise SchemaError(f"{action} requires size_usd, size_pct, margin_pct, or size")
 
     order_type = str(data.get("type") or "market").lower()
     if order_type not in ORDER_TYPES:
@@ -200,6 +232,8 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
         action=action,
         symbol=resolve_symbol(symbol),
         size_usd=size_usd,
+        size_pct=size_pct,
+        margin_pct=margin_pct,
         size=size,
         order_type=order_type,
         price=price,

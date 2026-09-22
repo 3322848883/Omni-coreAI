@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 from .gate_client import GateApiError, GateClient, resolve_symbol
 from .schema import Intent, SignalFile, expand_signal
-from .sizing import default_trigger_limit_price, round_price, usd_to_contracts
+from .sizing import default_trigger_limit_price, pct_to_size_usd, round_price, usd_to_contracts
 
 log = logging.getLogger("gate_bot.executor")
 
@@ -94,6 +94,10 @@ class Executor:
             return self._cancel_price_all(intent.symbol)
         if action == "close":
             return self._close(intent)
+        if action == "trail":
+            return self._trail(intent)
+        if action == "cancel_trail_all":
+            return self._cancel_trail_all(intent.symbol)
         if action in ("open_long", "open_short"):
             return self._open(intent)
         return StepResult(action, intent.symbol, False, error=f"unhandled action {action}")
@@ -126,8 +130,13 @@ class Executor:
         if intent.size is not None:
             contracts = int(intent.size)
         else:
+            size_usd = intent.size_usd
+            if size_usd is None and intent.size_pct is not None:
+                size_usd = pct_to_size_usd(intent.size_pct, self.client.get_available_usdt())
+            elif size_usd is None and intent.margin_pct is not None:
+                size_usd = pct_to_size_usd(intent.margin_pct, self.client.get_available_usdt()) * int(intent.leverage or 1)
             entry = intent.price if intent.price is not None else self.client.get_last_price(intent.symbol)
-            contracts = usd_to_contracts(float(intent.size_usd), float(entry), meta)
+            contracts = usd_to_contracts(float(size_usd), float(entry), meta)
 
         # Gate: positive size = buy/long, negative = sell/short
         order_size = contracts if intent.action == "open_long" else -contracts
@@ -158,6 +167,26 @@ class Executor:
         detail["tp_orders"] = tp_orders
         detail["sl_orders"] = sl_orders
         return StepResult(intent.action, intent.symbol, True, detail=detail)
+
+    def _trail(self, intent: Intent) -> StepResult:
+        self._check_symbol(intent.symbol)
+        amount = abs(int(intent.size or 0))
+        if intent.side != "long":
+            amount = -amount
+        body = {
+            "contract": intent.symbol,
+            "amount": str(amount),
+            "activation_price": str(intent.activation_price or "0"),
+            "price_offset": str(intent.price_offset),
+        }
+        order = self.client.place_trailing_order(body)
+        return StepResult("trail", intent.symbol, True, detail={"order": order, "body": body})
+
+    def _cancel_trail_all(self, symbol: str) -> StepResult:
+        if symbol:
+            self._check_symbol(symbol)
+        result = self.client.stop_trailing_orders(symbol or None)
+        return StepResult("cancel_trail_all", symbol, True, detail={"result": result})
 
     def _close(self, intent: Intent) -> StepResult:
         self._check_symbol(intent.symbol)

@@ -8,6 +8,15 @@ from typing import Optional
 from .gate_client import ContractMeta, GateApiError
 
 
+def pct_to_size_usd(pct: float, base_usdt: float) -> float:
+    """Convert asset ratio to notional size_usd. pct is 0..1 (0.1 = 10%)."""
+    if pct is None or pct <= 0 or pct > 1:
+        raise GateApiError(f"pct must be in (0, 1], got {pct!r}")
+    if base_usdt is None or base_usdt <= 0:
+        raise GateApiError(f"base_usdt must be positive, got {base_usdt!r}")
+    return float(base_usdt) * float(pct)
+
+
 def usd_to_contracts(
     size_usd: float,
     entry_price: float,
