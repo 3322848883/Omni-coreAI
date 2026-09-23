@@ -1,0 +1,14 @@
+{
+  "ok": true,
+  "steps": [
+    {
+      "action": "hold",
+      "symbol": "",
+      "ok": true,
+      "detail": {
+        "skipped": true
+      },
+      "error": ""
+    }
+  ]
+}
