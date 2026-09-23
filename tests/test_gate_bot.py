@@ -88,6 +88,65 @@ class TestSchema(unittest.TestCase):
         self.assertEqual(rep2.results[0].action, "reduce_long")
         self.assertEqual(rep2.results[0].detail["executed_as"], "close")
 
+    def test_replace_cancels_symbol_before_open(self):
+        client = FakeClient()
+        ex = Executor(client, symbols_whitelist=["BTC_USDT", "ETH_USDT"])
+        rep = ex.execute_signal(parse_signal({
+            "replace": True,
+            "action": "open_long",
+            "symbol": "BTC_USDT",
+            "size": 1,
+        }))
+        self.assertTrue(rep.ok)
+        kinds = [r.action for r in rep.results]
+        self.assertIn("replace_cancel", kinds)
+        self.assertEqual(client.cancelled.count("BTC_USDT"), 1)  # orders
+        # price_orders cancel uses ("trail", ...) only for trail; cancel_all_price_orders
+        self.assertEqual(kinds[0], "replace_cancel")
+        self.assertEqual(kinds[1], "open_long")
+
+    def test_replace_all_cancels_whitelist(self):
+        client = FakeClient()
+        ex = Executor(client, symbols_whitelist=["BTC_USDT", "ETH_USDT"])
+        rep = ex.execute_signal(parse_signal({
+            "replace": "all",
+            "orders": [
+                {"action": "hold"},
+            ],
+        }))
+        # hold still runs after replace
+        self.assertTrue(rep.ok)
+        self.assertIn("BTC_USDT", client.cancelled)
+        self.assertIn("ETH_USDT", client.cancelled)
+
+    def test_replace_none_no_cancel(self):
+        client = FakeClient()
+        ex = Executor(client)
+        rep = ex.execute_signal(parse_signal({"action": "add_long", "symbol": "BTC_USDT", "size": 1}))
+        self.assertTrue(rep.ok)
+        self.assertEqual(client.cancelled, [])
+
+    def test_position_policy_strict_blocks_entry(self):
+        client = FakeClient()
+        client.get_positions = lambda: [{"contract": "BTC_USDT", "size": 2, "mode": "single"}]
+        ex = Executor(client, position_policy="strict")
+        rep = ex.execute_signal(parse_signal({"action": "open_long", "symbol": "BTC_USDT", "size": 1}))
+        self.assertFalse(rep.ok)
+        self.assertIn("POSITION_EXISTS", rep.results[0].error)
+        # same-side add allowed
+        rep2 = ex.execute_signal(parse_signal({"action": "add_long", "symbol": "BTC_USDT", "size": 1}))
+        self.assertTrue(rep2.ok)
+        # reduce allowed
+        rep3 = ex.execute_signal(parse_signal({"action": "reduce_long", "symbol": "BTC_USDT", "size": 1}))
+        self.assertTrue(rep3.ok)
+
+    def test_position_policy_free_allows_entry(self):
+        client = FakeClient()
+        client.get_positions = lambda: [{"contract": "BTC_USDT", "size": 2, "mode": "single"}]
+        ex = Executor(client, position_policy="free")
+        rep = ex.execute_signal(parse_signal({"action": "open_long", "symbol": "BTC_USDT", "size": 1}))
+        self.assertTrue(rep.ok)
+
     def test_empty_action_is_hold(self):
         self.assertEqual(parse_signal({"symbol": "BTC_USDT"}).intents[0].action, "hold")
         self.assertEqual(parse_signal({"action": ""}).intents[0].action, "hold")

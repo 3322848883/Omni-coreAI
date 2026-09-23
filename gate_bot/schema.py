@@ -84,6 +84,7 @@ class Intent:
     activation_price: Optional[str] = None
     trigger_price_tp: Optional[float] = None
     label: str = "signal"
+    replace: str = "none"  # none | symbol | all — cancel old orders before this intent
     meta: dict = field(default_factory=dict)
 
     @property
@@ -96,6 +97,12 @@ class SignalFile:
     intents: list[Intent]
     meta: dict = field(default_factory=dict)
     raw: dict = field(default_factory=dict)
+    # none | symbol | all — cancel old resting orders before exec (anti-pile-up)
+    replace: str = "none"
+    # replace mode: none | symbol | all
+    # symbol = cancel open orders/price orders of touched symbols first
+    # all    = cancel whole bot whitelist symbols first
+    replace: str = "none"
 
 
 def _f(value: Any, name: str) -> Optional[float]:
@@ -171,7 +178,25 @@ def _parse_stop_entry(data: dict, action: str, default_label: str) -> Intent:
     )
 
 
+def _norm_replace(value) -> str:
+    """true/1/symbol -> symbol; all -> all; else none."""
+    if value is None or value is False or value == "":
+        return "none"
+    if value is True or value == 1:
+        return "symbol"
+    s = str(value).strip().lower()
+    if s in ("1", "true", "yes", "symbol", "replace", "auto"):
+        return "symbol"
+    if s in ("all", "bot", "everything"):
+        return "all"
+    if s in ("0", "false", "no", "none", "off"):
+        return "none"
+    raise SchemaError(f"replace must be none|symbol|all, got {value!r}")
+
+
 def parse_intent(data: dict, default_label: str = "signal") -> Intent:
+    """Parse one intent. `replace`: none|symbol|all (true=symbol) — cancel old first."""
+    replace = _norm_replace(data.get("replace"))
     if not isinstance(data, dict):
         raise SchemaError("intent must be an object")
     action = str(data.get("action") or "").strip().lower()
@@ -332,6 +357,7 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
         margin_mode=margin_mode,
         side="long" if action == "open_long" else "short",
         label=str(data.get("label") or default_label),
+        replace=replace,
         meta={**(data.get("meta") or {}), "requested_action": requested_action},
     )
 
@@ -404,6 +430,7 @@ def _parse_grid(data: dict, default_label: str) -> Intent:
 def parse_signal(data: Any, default_label: str = "signal") -> SignalFile:
     if not isinstance(data, dict):
         raise SchemaError("signal root must be a JSON object")
+    file_replace = _norm_replace(data.get("replace"))
     if "orders" in data and "action" in data:
         raise SchemaError("use either top-level action or orders[], not both")
     if "orders" in data:
@@ -412,11 +439,20 @@ def parse_signal(data: Any, default_label: str = "signal") -> SignalFile:
             raise SchemaError("orders must be an array")
         # empty orders[] is a legal no-op (hold → done)
         if not orders:
-            return SignalFile(intents=[Intent(action="hold", meta=data.get("meta") or {})], meta=data.get("meta") or {}, raw=data)
+            return SignalFile(
+                intents=[Intent(action="hold", meta=data.get("meta") or {})],
+                meta=data.get("meta") or {},
+                raw=data,
+                replace=file_replace,
+            )
         if len(orders) > 50:
             raise SchemaError("orders too large (max 50)")
         intents = [parse_intent(item, default_label=default_label) for item in orders]
-        return SignalFile(intents=intents, meta=data.get("meta") or {}, raw=data)
+        if file_replace != "none":
+            for it in intents:
+                if it.replace == "none":
+                    it.replace = file_replace
+        return SignalFile(intents=intents, meta=data.get("meta") or {}, raw=data, replace=file_replace)
     if "action" in data:
         intent = parse_intent(data, default_label=default_label)
         return SignalFile(intents=[intent], meta=data.get("meta") or {}, raw=data)

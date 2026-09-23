@@ -20,3 +20,11 @@ max_orders_per_file: 20
 max_files_per_run: 50
 poll_interval_sec: 2
 label_prefix: alpha       # 写入订单 text: t-<label>
+
+# 有仓时的进场管控（bot 级，不影响其它 bot）
+#   strict     = 一账户一策略：有仓只收加/减/平/调TP-SL，拒新方案（默认）
+#   manage_only = 同 strict，规则略宽（预留）
+#   free       = 多策略共账户：不拦进场，只靠 replace 防堆积
+position_policy: strict
+# 新方案默认替换：none | symbol | all（JSON 里 replace 可覆盖）
+default_replace: none

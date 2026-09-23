@@ -1,5 +1,6 @@
 {
   "action": "open_long",
+  "replace": "symbol",
   "symbol": "BTC_USDT",
   "size": null,
   "size_usd": 100,
@@ -27,7 +28,9 @@
     "reasoning": "趋势多头，回踩确认",
     "signal_id": "20260302-153000-btc-long",
     "ts": "2026-03-02T15:30:00+08:00",
-    "note_breakout_vs_stoploss": "突破进场用 action=stop_entry_long/short，不要用 sl。sl/tp 是持仓后平仓保护。详见 templates/README.md",
-    "note_trail": "trail 需 API 资金密码（X-Gate-Password），当前搁置"
+    "kind": "open_with_exit",
+    "note_replace": "replace: true|symbol|all — 执行前撤旧挂单/计划委托，防堆积",
+    "note_position_policy": "有仓只收管理单由 bot 的 position_policy 控制（strict 会拒新方案）",
+    "note_breakout_vs_stoploss": "突破进场用 stop_entry_long/short，不要用 sl。详见 templates/README.md"
   }
 }

@@ -25,6 +25,12 @@ class BotConfig:
     max_files_per_run: int = 50
     poll_interval_sec: float = 2.0
     label_prefix: str = ""
+    # free      = no entry gating (multi-strategy / same account)
+    # manage_only = with position: only add/reduce/close/tp-sl replace (no new entry)
+    # strict    = same as manage_only; opposite add_* also rejected as new plan
+    position_policy: str = "strict"
+    # none | symbol | all — default replace before new plan (anti pile-up)
+    default_replace: str = "none"
 
     def create_client(self) -> GateClient:
         key, secret = load_credentials(self.env, self.api_key_env, self.api_secret_env)
@@ -51,6 +57,8 @@ def load_bot_config(path: Path) -> BotConfig:
         max_files_per_run=int(data.get("max_files_per_run") or 50),
         poll_interval_sec=float(data.get("poll_interval_sec") or 2.0),
         label_prefix=str(data.get("label_prefix") or ""),
+        position_policy=str(data.get("position_policy") or "strict").strip().lower(),
+        default_replace=str(data.get("default_replace") or "none").strip().lower(),
     )
 
 

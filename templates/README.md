@@ -178,6 +178,70 @@ AI/策略把信号写成 **一个 JSON 文件**，放入 `inbox/<bot_id>/`。
 CLI 对照：`gate-cli cex futures trail create --contract BTC_USDT --amount -1 --price-offset 2% --activation-price 70000`  
 配套：`cancel_trail_all` ↔ `trail stop-all`。
 
+## 新方案替换旧方案（`replace`，防堆积）
+
+执行新信号前**先撤掉旧挂单/计划委托**，避免无限堆积。
+
+| `replace` | 行为 |
+|-----------|------|
+| 省略 / `none` | 不撤，直接执行 |
+| **`true` / `symbol`** | 先撤**本信号涉及合约**的普通挂单 + 计划委托，再执行 |
+| **`all`** | 先撤 bot 白名单内**全部**挂单 + 计划委托，再执行 |
+
+```json
+{
+  "replace": true,
+  "action": "open_long",
+  "symbol": "BTC_USDT",
+  "size_usd": 100,
+  "type": "limit",
+  "price": 70000,
+  "meta": {"signal_id": "plan-2", "note": "取代 plan-1"}
+}
+```
+
+- 顶层 `replace` 覆盖子单；单腿也可写 `"replace": "symbol"`
+- 日志有 `replace_cancel` 步骤（先撤后下）
+- **改单 = 撤旧 + 下新**；连续网格请一次 `orders[]` 下完
+
+## 有仓管控（`position_policy`，bot 级配置）
+
+规则在 **`config/bots/<id>.yaml`**，不在 JSON 里；**每个 bot 独立**，多策略互不影响。
+
+| policy | 适用 | 有仓时（同币种） |
+|--------|------|------------------|
+| **`strict`**（默认） | 一账户一策略 | 只收管理单；拒新进场 |
+| `manage_only` | 同 strict | 预留 |
+| **`free`** | 多策略共账户 | 不拦进场，只靠 `replace` 防堆积 |
+
+**strict / manage_only 有仓时：**
+
+| 动作 | 放行？ |
+|------|--------|
+| `add_long` / `add_short`（同向） | ✅ 加仓 |
+| `reduce_*` / `close` / `flatten` | ✅ 减仓/清仓 |
+| `cancel_*` / `hold` / `watch` / `skip` / `trail` | ✅ |
+| 调 TP/SL（计划委托，建议带 `replace: "symbol"`） | ✅ 只换触发单 |
+| `open_*` / `stop_entry_*` / `grid` | ❌ 新方案 |
+| 反向 `add_*` | ❌（strict） |
+
+拒单写入 `failed/`，`error.json` 含：
+
+- `POSITION_EXISTS: <symbol> already has position; use add_long/reduce...`
+- `POSITION_POLICY_STRICT: opposite add not allowed...`
+
+```yaml
+# config/bots/trend.yaml — 独占账户
+position_policy: strict
+default_replace: none
+
+# config/bots/grid.yaml — 与其它策略共账户
+position_policy: free
+default_replace: symbol
+```
+
+**口诀：无仓收新方案；有仓只收管理单（加/减/平/调TP-SL）；多策略共账户用 `free` + `replace`。**
+
 ## 投递约定
 
 - 路径：`inbox/<bot_id>/*.json`，UTF-8

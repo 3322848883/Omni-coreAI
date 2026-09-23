@@ -54,12 +54,16 @@ class Executor:
         client: GateClient,
         symbols_whitelist: Optional[list[str]] = None,
         max_notional_usd: Optional[float] = None,
+        position_policy: str = "free",
+        default_replace: str = "none",
     ):
         self.client = client
         self.symbols_whitelist = (
             {resolve_symbol(s) for s in symbols_whitelist} if symbols_whitelist else None
         )
         self.max_notional_usd = max_notional_usd
+        self.position_policy = (position_policy or "free").lower()
+        self.default_replace = (default_replace or "none").lower()
 
     def execute_signal(self, signal: SignalFile) -> ExecReport:
         report = ExecReport()
@@ -69,7 +73,15 @@ class Executor:
                 StepResult("hold", "", True, detail={"skipped": True})
             )
             return report
+        # anti-pile-up: cancel old resting orders before new plan
+        self._apply_replace(signal, intents, report)
         for intent in intents:
+            gate = self._entry_gate(intent)
+            if gate:
+                report.results.append(
+                    StepResult(intent.action, intent.symbol, False, error=gate)
+                )
+                break
             try:
                 step = self._execute_intent(intent)
             except GateApiError as e:
@@ -89,6 +101,105 @@ class Executor:
             if not step.ok:
                 break
         return report
+
+    def _entry_gate(self, intent: Intent) -> str:
+        """Return error string to reject intent, or '' to allow.
+
+        position_policy:
+          free        — always allow
+          manage_only — with position on symbol: allow manage (add/reduce/close/cancel/hold/trail),
+                        reject new entry (open_*/stop_entry_*)
+          strict      — like manage_only; opposite-side add_* also rejected
+        """
+        policy = self.position_policy
+        if policy not in ("strict", "manage_only"):
+            return ""
+        action = intent.action
+        manage = {
+            "hold", "close", "close_all", "flatten",
+            "cancel_all", "cancel_price_all", "cancel_trail_all",
+            "reduce", "reduce_long", "reduce_short", "trail",
+        }
+        # normalized after alias map: open_*, stop_entry_*, add_* via requested
+        requested = (intent.meta or {}).get("requested_action") or action
+        if action in manage or requested in manage:
+            return ""
+        if action == "hold":
+            return ""
+        # entry-like: open_long/open_short/stop_entry_*
+        pos = self._symbol_positions(intent.symbol)
+        if not pos:
+            return ""
+        # allow same-side add_* only
+        if requested in ("add_long", "open_long") and all(p["side"] == "long" for p in pos):
+            if requested == "add_long":
+                return ""
+            # open_long with existing long = new plan pile-up → reject under both
+            return f"POSITION_EXISTS: {intent.symbol} already has position; use add_long/reduce or replace plan first"
+        if requested in ("add_short", "open_short") and all(p["side"] == "short" for p in pos):
+            if requested == "add_short":
+                return ""
+            return f"POSITION_EXISTS: {intent.symbol} already has position; use add_short/reduce or replace plan first"
+        if policy == "strict" and requested in ("add_long", "add_short"):
+            return f"POSITION_POLICY_STRICT: opposite add not allowed while position open on {intent.symbol}"
+        return (
+            f"POSITION_EXISTS: {intent.symbol} has open position "
+            f"({'/'.join(sorted({p['side'] for p in pos}))}); "
+            f"policy={policy} only allows add/reduce/close/tp-sl"
+        )
+
+    def _symbol_positions(self, symbol: str) -> list[dict]:
+        try:
+            positions = self.client.get_positions() or []
+        except Exception:  # noqa: BLE001
+            return []
+        out = []
+        for p in positions:
+            if p.get("contract") != symbol:
+                continue
+            size = int(p.get("size") or 0)
+            if size == 0:
+                continue
+            mode = str(p.get("mode") or "")
+            if size > 0 or mode.endswith("long"):
+                side = "long"
+            else:
+                side = "short"
+            out.append({"side": side, "size": size, "mode": mode})
+        return out
+
+    def _apply_replace(self, signal: SignalFile, intents: list, report: ExecReport) -> None:
+        """Cancel old open/price orders before executing a new plan.
+
+        replace=all    → every whitelist symbol (or all open contracts)
+        replace=symbol → each symbol in this payload (once)
+        """
+        modes = {getattr(i, "replace", "none") for i in intents}
+        if signal.replace and signal.replace != "none":
+            modes.add(signal.replace)
+        mode = "all" if "all" in modes else ("symbol" if "symbol" in modes else "none")
+        if mode == "none":
+            return
+        if mode == "all":
+            symbols = sorted(self.symbols_whitelist) if self.symbols_whitelist else self._open_symbols()
+        else:
+            symbols = sorted({i.symbol for i in intents if i.symbol})
+        for sym in symbols:
+            try:
+                self.client.cancel_all_orders(sym)
+                self.client.cancel_all_price_orders(sym)
+                report.results.append(
+                    StepResult(
+                        "replace_cancel",
+                        sym,
+                        True,
+                        detail={"replace": mode, "cancelled": ["orders", "price_orders"]},
+                    )
+                )
+            except GateApiError as e:
+                report.results.append(
+                    StepResult("replace_cancel", sym, False, error=str(e))
+                )
 
     def _execute_intent(self, intent: Intent) -> StepResult:
         print(self.client.banner())
