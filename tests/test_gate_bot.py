@@ -351,6 +351,12 @@ class FakeClient:
         self.price_orders.append(body)
         return {"id": 100 + len(self.price_orders), **body}
 
+    def get_order(self, order_id):
+        return {"id": int(order_id) if str(order_id).isdigit() else order_id, "status": "open", "left": 1}
+
+    def get_price_order(self, price_order_id):
+        return {"id": price_order_id, "status": "open"}
+
     def close_position(self, contract, side=None, size=0):
         body = {"contract": contract, "side": side, "size": size, "reduce_only": True}
         self.orders.append(body)

@@ -248,6 +248,13 @@ class GateClient:
             raise GateApiError(f"unexpected place_price_order response: {result!r}")
         return result
 
+    def get_order(self, order_id: str) -> dict:
+        """GET one order (any status) — used to confirm it actually landed."""
+        return self.rest_signed_request("GET", f"{FUTURES_API}/orders/{order_id}", "") or {}
+
+    def get_price_order(self, price_order_id: str) -> dict:
+        return self.rest_signed_request("GET", f"{FUTURES_API}/price_orders/{price_order_id}", "") or {}
+
     def list_orders(self, contract: Optional[str] = None) -> list:
         qs = "status=open"
         if contract:

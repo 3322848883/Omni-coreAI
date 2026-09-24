@@ -272,34 +272,148 @@ class Executor:
         if intent.label:
             body["text"] = f"t-{intent.label}"
 
-        order = self.client.place_order(body)
+        entry_rec, entry_err = self._place_entry_leg(lambda: self.client.place_order(body), body)
         detail: dict[str, Any] = {
-            "order": order,
+            "order": (entry_rec or {}).get("order") or {},
+            "order_check": (entry_rec or {}).get("check") or {},
             "contracts": contracts,
             "size_usd": intent.size_usd,
             "order_type": intent.order_type,
             "price": intent.price,
             "quanto_multiplier": meta.quanto_multiplier,
+            "leg_entry_ok": entry_rec is not None,
         }
+        if entry_rec is None:
+            return StepResult(
+                intent.action, intent.symbol, False, detail=detail,
+                error="entry_not_confirmed: " + str(entry_err),
+            )
 
         # auto TP/SL: trigger (price_order) or resting reduce_only limit
         pos_side = "long" if intent.action == "open_long" else "short"
         trigger_side = "short" if pos_side == "long" else "long"
         tp_orders = []
         sl_orders = []
+        exit_errors = []
         if intent.tp is not None:
-            if intent.tp_mode == "limit_order":
-                tp_orders.append(self._place_limit_exit(intent, pos_side, intent.tp, is_tp=True, meta=meta, size=contracts))
-            else:
-                tp_orders.append(self._place_trigger(intent, trigger_side, intent.tp, is_tp=True, meta=meta, size=contracts))
+            rec_, err_ = self._place_exit_leg(
+                lambda: self._place_limit_exit(intent, pos_side, intent.tp, is_tp=True, meta=meta, size=contracts)
+                if intent.tp_mode == "limit_order"
+                else self._place_trigger(intent, trigger_side, intent.tp, is_tp=True, meta=meta, size=contracts),
+                kind="tp", price_order=(intent.tp_mode != "limit_order"),
+            )
+            (tp_orders if rec_ else exit_errors).append(rec_ or err_)
         if intent.sl is not None:
-            if intent.sl_mode == "limit_order":
-                sl_orders.append(self._place_limit_exit(intent, pos_side, intent.sl, is_tp=False, meta=meta, size=contracts))
-            else:
-                sl_orders.append(self._place_trigger(intent, trigger_side, intent.sl, is_tp=False, meta=meta, size=contracts))
+            rec_, err_ = self._place_exit_leg(
+                lambda: self._place_limit_exit(intent, pos_side, intent.sl, is_tp=False, meta=meta, size=contracts)
+                if intent.sl_mode == "limit_order"
+                else self._place_trigger(intent, trigger_side, intent.sl, is_tp=False, meta=meta, size=contracts),
+                kind="sl", price_order=(intent.sl_mode != "limit_order"),
+            )
+            (sl_orders if rec_ else exit_errors).append(rec_ or err_)
         detail["tp_orders"] = tp_orders
         detail["sl_orders"] = sl_orders
+        detail["exit_errors"] = exit_errors
+        detail["leg_tp_ok"] = intent.tp is None or bool(tp_orders)
+        detail["leg_sl_ok"] = intent.sl is None or bool(sl_orders)
+        detail["exits_ok"] = detail["leg_tp_ok"] and detail["leg_sl_ok"] and not exit_errors
+        detail["all_legs_ok"] = detail["leg_entry_ok"] and detail["exits_ok"]
+        if exit_errors or not detail["exits_ok"]:
+            # entry landed but exits missing — do NOT pretend full success
+            return StepResult(
+                intent.action,
+                intent.symbol,
+                False,
+                detail=detail,
+                error="exit_not_placed: " + "; ".join(str(x) for x in exit_errors or ["tp/sl missing"]),
+            )
         return StepResult(intent.action, intent.symbol, True, detail=detail)
+
+    def _place_entry_leg(self, placer, body: dict) -> tuple[Optional[dict], Optional[str]]:
+        """Place entry with confirmation; one retry if not confirmed on exchange."""
+        last_err = None
+        for attempt in (1, 2):
+            try:
+                order = placer()
+            except GateApiError as e:
+                last_err = f"entry#{attempt} {e}"
+                continue
+            check = self._confirm_order_landed(order, kind="entry")
+            if check.get("ok") and check.get("confirmed"):
+                return {"order": order, "check": check}, None
+            last_err = f"entry#{attempt} not_confirmed id={(order or {}).get('id')}"
+        return None, last_err
+
+    def _confirm_order_landed(self, order: dict, kind: str = "entry") -> dict:
+        """Re-read the order on exchange; reject empty/failed placements."""
+        oid = (order or {}).get("id")
+        status = str((order or {}).get("status") or "")
+        finish_as = str((order or {}).get("finish_as") or "")
+        check = {
+            "kind": kind,
+            "id": oid,
+            "status": status,
+            "finish_as": finish_as,
+            "left": (order or {}).get("left"),
+            "ok": bool(oid) and status not in ("cancelled", "failed", "reduced"),
+        }
+        if not check["ok"]:
+            return check
+        try:
+            live = self.client.get_order(str(oid))
+            check["live_status"] = live.get("status")
+            check["live_left"] = live.get("left")
+            # still visible as open or already finished/canceled-after-fill
+            check["confirmed"] = live.get("id") is not None
+        except Exception as e:  # noqa: BLE001
+            check["confirm_error"] = str(e)
+            check["confirmed"] = False
+        return check
+
+    def _confirm_price_order_landed(self, order: dict, kind: str = "trigger") -> dict:
+        oid = (order or {}).get("id")
+        check = {"kind": kind, "id": oid, "ok": bool(oid), "confirmed": False}
+        if not oid:
+            return check
+        try:
+            live = self.client.get_price_order(str(oid))
+            check["live_status"] = live.get("status")
+            check["confirmed"] = live.get("id") is not None and str(live.get("status") or "") != "cancelled"
+        except Exception as e:  # noqa: BLE001
+            # fall back to open list
+            try:
+                found = [
+                    p for p in (self.client.list_price_orders(order.get("body", {}).get("initial", {}).get("contract"))
+                                or [])
+                    if str(p.get("id")) == str(oid)
+                ]
+                check["confirmed"] = bool(found)
+            except Exception as e2:  # noqa: BLE001
+                check["confirm_error"] = f"{e} / {e2}"
+        return check
+
+    def _place_exit_leg(self, placer, kind: str, price_order: bool) -> tuple[Optional[dict], Optional[str]]:
+        """Place one exit leg with one retry and exchange confirmation."""
+        last_err = None
+        for attempt in (1, 2):
+            try:
+                rec = placer()
+            except GateApiError as e:
+                last_err = f"{kind}#{attempt} {e}"
+                continue
+            rec = dict(rec or {})
+            order = rec.get("order") if isinstance(rec.get("order"), dict) else rec
+            check = (
+                self._confirm_price_order_landed(order, kind=kind)
+                if price_order
+                else self._confirm_order_landed(order, kind=kind)
+            )
+            rec["order"] = order
+            rec["check"] = check
+            if check.get("ok", True) and (check.get("confirmed") or order.get("finish_as") == "finished"):
+                return rec, None
+            last_err = f"{kind}#{attempt} not_confirmed id={order.get('id')}"
+        return None, last_err or f"{kind} failed"
 
     def _place_limit_exit(self, intent: Intent, pos_side: str, price: float, is_tp: bool, meta, size: int) -> dict:
         """Resting reduce_only LIMIT exit (限价止盈/止损挂单), not a price trigger.
@@ -419,7 +533,13 @@ class Executor:
         if intent.trigger_expiration and self.client.env == "live":
             body["trigger"]["expiration"] = int(intent.trigger_expiration)
         order = self.client.place_price_order(body)
-        return StepResult(intent.action, intent.symbol, True, detail={"order": order, "body": body})
+        check = self._confirm_price_order_landed(order, kind="stop_entry")
+        ok = bool(check.get("ok") and check.get("confirmed"))
+        detail = {"order": order, "body": body, "order_check": check}
+        if not ok:
+            return StepResult(intent.action, intent.symbol, False, detail=detail,
+                              error=f"stop_entry not confirmed id={order.get('id')}")
+        return StepResult(intent.action, intent.symbol, True, detail=detail)
 
     def _close(self, intent: Intent) -> StepResult:
         self._check_symbol(intent.symbol)
