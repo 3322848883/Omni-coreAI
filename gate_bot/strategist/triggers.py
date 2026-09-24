@@ -26,6 +26,18 @@ from .indicators import atr, boll, ema, macd, rsi, sma
 
 log = logging.getLogger("gate_bot.triggers")
 
+LEAF_CONDITIONS = frozenset({
+    "price_vs_ema", "ema_cross", "atr_spike", "price_break", "rsi",
+    "ma_cross", "macd_cross", "boll_break", "volume_spike",
+})
+COMBINATORS = frozenset({"all", "any"})
+KNOWN_CONDITIONS = LEAF_CONDITIONS | COMBINATORS
+MAX_COND_DEPTH = 2
+
+
+class ConditionError(ValueError):
+    pass
+
 
 @dataclass
 class ConditionState:
@@ -33,18 +45,32 @@ class ConditionState:
     last_values: dict = field(default_factory=dict)
 
 
-def parse_conditions(raw: Optional[list]) -> list[dict]:
+def parse_conditions(raw: Optional[list], _depth: int = 0) -> list[dict]:
+    """Parse and validate conditions. Unknown types raise ConditionError."""
     out = []
     for item in raw or []:
         if not isinstance(item, dict):
-            continue
+            raise ConditionError("condition must be an object")
         ctype = str(item.get("type") or "").strip().lower()
         if ctype in ("", "kline_close"):
-            continue  # kline_close is a first-class flag, not a list condition
+            continue
+        if ctype not in KNOWN_CONDITIONS:
+            raise ConditionError(
+                f"unknown condition type {ctype!r}; supported: "
+                f"{','.join(sorted(KNOWN_CONDITIONS))}"
+            )
         item = dict(item)
         item["type"] = ctype
-        item.setdefault("symbol", item.get("symbol") or "")
         item.setdefault("cooldown_sec", 60)
+        if ctype in COMBINATORS:
+            if _depth >= MAX_COND_DEPTH:
+                raise ConditionError(f"condition nesting deeper than {MAX_COND_DEPTH}")
+            children = item.get("children")
+            if not isinstance(children, list) or not children:
+                raise ConditionError(f"{ctype} requires non-empty children[]")
+            item["children"] = parse_conditions(children, _depth=_depth + 1)
+        else:
+            item.setdefault("symbol", item.get("symbol") or "")
         out.append(item)
     return out
 
@@ -76,6 +102,22 @@ def evaluate_condition(client, cond: dict, timeframe: str, now: Optional[float] 
     """Return (fired, human reason)."""
     ts = now if now is not None else time.time()
     ctype = cond.get("type")
+
+    if ctype in COMBINATORS:
+        children = cond.get("children") or []
+        if not children:
+            return False, f"{ctype} empty"
+        parts = []
+        oks = []
+        for ch in children:
+            ok, reason = evaluate_condition(client, ch, timeframe, now=ts)
+            oks.append(ok)
+            parts.append(f"{ch.get('type')}:{'Y' if ok else 'N'}({reason[:40]})")
+        joined = "; ".join(parts)
+        if ctype == "all":
+            return all(oks), f"all[{joined}]"
+        return any(oks), f"any[{joined}]"
+
     symbol = cond.get("symbol") or ""
     if not symbol:
         return False, "no symbol"
@@ -260,7 +302,7 @@ def check_conditions(
             st.last_fire = ts
             fired.append({
                 "type": cond.get("type"),
-                "symbol": cond.get("symbol"),
+                "symbol": cond.get("symbol") or (cond.get("children") or [{}])[0].get("symbol"),
                 "reason": reason,
                 "key": key,
             })

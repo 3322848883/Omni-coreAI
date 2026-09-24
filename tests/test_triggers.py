@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from gate_bot.strategist.triggers import (  # noqa: E402
+    ConditionError,
     check_conditions,
     evaluate_condition,
     parse_conditions,
@@ -30,7 +31,6 @@ class TestParseConditions(unittest.TestCase):
         conds = parse_conditions([
             {"type": "kline_close"},
             {"type": "price_vs_ema", "symbol": "BTC_USDT"},
-            "bad",
         ])
         self.assertEqual(len(conds), 1)
         self.assertEqual(conds[0]["type"], "price_vs_ema")
@@ -161,6 +161,44 @@ class TestEvaluate(unittest.TestCase):
             {"type": "volume_spike", "symbol": "BTC_USDT"},
         ])
         self.assertEqual(len(conds), 4)
+
+    def test_parse_rejects_unknown(self):
+        with self.assertRaises(ConditionError):
+            parse_conditions([{"type": "zzz", "symbol": "BTC_USDT"}])
+
+    def test_all_any_combinators(self):
+        c = FakeMD([float(i) for i in range(1, 40)])
+        # both true
+        all_true = {
+            "type": "all",
+            "children": [
+                {"type": "rsi", "symbol": "BTC_USDT", "period": 5, "op": "gt", "level": 10},
+                {"type": "price_vs_ema", "symbol": "BTC_USDT", "period": 5, "side": "above"},
+            ],
+        }
+        ok, reason = evaluate_condition(c, all_true, "1m")
+        self.assertTrue(ok)
+        self.assertIn("all[", reason)
+        # one false
+        all_mixed = {
+            "type": "all",
+            "children": [
+                {"type": "rsi", "symbol": "BTC_USDT", "period": 5, "op": "gt", "level": 10},
+                {"type": "price_vs_ema", "symbol": "BTC_USDT", "period": 5, "side": "below"},
+            ],
+        }
+        ok, _ = evaluate_condition(c, all_mixed, "1m")
+        self.assertFalse(ok)
+        any_mixed = dict(all_mixed, type="any")
+        ok, _ = evaluate_condition(c, any_mixed, "1m")
+        self.assertTrue(ok)
+
+    def test_combo_depth_limit(self):
+        nested = {"type": "all", "children": [{"type": "all", "children": [{"type": "all", "children": [
+            {"type": "rsi", "symbol": "BTC_USDT"}
+        ]}]}]}
+        with self.assertRaises(ConditionError):
+            parse_conditions([nested])
 
     def test_cooldown(self):
         c = FakeMD()

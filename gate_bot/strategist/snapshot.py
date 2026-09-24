@@ -152,6 +152,9 @@ def collect_snapshot(
     except Exception as e:  # noqa: BLE001
         account = {"error": f"account: {e}"}
         meta["degraded"].append("account")
+    if "error" not in account and account.get("available") in (None, ""):
+        account["error"] = "account: missing available"
+        meta["degraded"].append("account")
     if "error" not in account:
         try:
             account["positions"] = [

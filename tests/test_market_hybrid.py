@@ -198,6 +198,26 @@ class TestIndicators(unittest.TestCase):
         with self.assertRaises(ValueError):
             MarketConfig(mode="rest_only", indicators=["ema20", "foo"])
 
+    def test_rsi_gap_uses_prev_close(self):
+        rows = []
+        for i in range(30):
+            rows.append({"t": i, "o": 1, "h": 2, "l": 0, "c": 10.0 + i, "v": 1})
+        rows[10]["c"] = None  # gap bar
+        out = attach_indicators(rows, ["rsi7"])
+        self.assertIsNone(out[10]["rsi7"])
+        # after gap, series continues (change vs last known close)
+        self.assertIsNotNone(out[12]["rsi7"])
+        self.assertIsNotNone(out[-1]["rsi7"])
+
+    def test_account_missing_available_errors(self):
+        class NoAvail(FakeClient):
+            def get_account(self):
+                return {"position_mode": "single", "total": "1"}
+
+        snap = collect_snapshot(NoAvail(), ["BTC_USDT"], candles=5, interval="15m")
+        self.assertIn("error", snap["account"])
+        self.assertIn("available", snap["account"]["error"])
+
     def test_custom_indicator_periods(self):
         rows = []
         for i in range(40):

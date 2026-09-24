@@ -310,21 +310,55 @@ class Executor:
         use sl_mode=trigger for true stop semantics.
         """
         api_size = -abs(size) if pos_side == "long" else abs(size)
-        body = {
-            "contract": intent.symbol,
-            "size": api_size,
-            "price": str(round_price(float(price), meta)),
-            "tif": "gtc",
-            "reduce_only": True,
-            "text": f"t-{intent.label}-{'lp' if is_tp else 'ls'}",
-        }
-        order = self.client.place_order(body)
+        px = float(price)
+
+        def _body(p: float) -> dict:
+            return {
+                "contract": intent.symbol,
+                "size": api_size,
+                "price": str(round_price(p, meta)),
+                "tif": "gtc",
+                "reduce_only": True,
+                "text": f"t-{intent.label}-{'lp' if is_tp else 'ls'}",
+            }
+
+        body = _body(px)
+        try:
+            order = self.client.place_order(body)
+        except GateApiError as e:
+            if "PRICE_TOO_DEVIATED" not in str(e) and "MARKET_PRICE_TOO_DEVIATED" not in str(e):
+                raise
+            # one clamp toward book mid so resting exit still lands
+            mid = self._book_mid(intent.symbol)
+            if mid is None:
+                raise
+            side = "down" if pos_side == "long" else "up"
+            clamped = self._clamp_toward(px, mid, side=side, max_bps=80)
+            body = _body(clamped)
+            order = self.client.place_order(body)
+            body["price_clamped_from"] = round_price(px, meta)
         return {
             "mode": "limit_order",
             "kind": "tp" if is_tp else "sl",
             "order": order,
             "body": body,
         }
+
+    def _book_mid(self, symbol: str) -> Optional[float]:
+        try:
+            ob = self.client.get_orderbook_top(symbol, limit=1)
+            bids, asks = ob.get("bids") or [], ob.get("asks") or []
+            b = float((bids[0] or {}).get("p")) if bids else None
+            a = float((asks[0] or {}).get("p")) if asks else None
+            if b is not None and a is not None:
+                return (b + a) / 2.0
+            return b or a
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _clamp_toward(self, px: float, mid: float, side: str = "down", max_bps: float = 80) -> float:
+        limit = mid * (1 - max_bps / 10000.0) if side == "down" else mid * (1 + max_bps / 10000.0)
+        return min(px, limit) if side == "down" else max(px, limit)
 
     def _trail(self, intent: Intent) -> StepResult:
         self._check_symbol(intent.symbol)

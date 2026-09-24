@@ -267,25 +267,33 @@ def _fill_rsi_from(rows, key, period) -> None:
     losses: list[float] = []
     avg_gain: Optional[float] = None
     avg_loss: Optional[float] = None
+    prev_c: Optional[float] = None
     for i in range(n):
-        if i == 0 or closes[i] is None or closes[i - 1] is None:
+        c = closes[i]
+        if c is None:
             rows[i][key] = None
             continue
-        ch = (closes[i] or 0.0) - (closes[i - 1] or 0.0)
+        if prev_c is None:
+            rows[i][key] = None
+            prev_c = c
+            continue
+        # use last known close across gaps (align ATR warm-start)
+        ch = c - prev_c
         g, ls = max(ch, 0.0), max(-ch, 0.0)
         gains.append(g)
         losses.append(ls)
         if avg_gain is None:
             if len(gains) < period:
                 rows[i][key] = None
-                continue
-            avg_gain = sum(gains[-period:]) / period
-            avg_loss = sum(losses[-period:]) / period
+            else:
+                avg_gain = sum(gains[-period:]) / period
+                avg_loss = sum(losses[-period:]) / period
+                rows[i][key] = _rsi_value(avg_gain, avg_loss)
+        else:
+            avg_gain = (avg_gain * (period - 1) + g) / period
+            avg_loss = (avg_loss * (period - 1) + ls) / period
             rows[i][key] = _rsi_value(avg_gain, avg_loss)
-            continue
-        avg_gain = (avg_gain * (period - 1) + g) / period
-        avg_loss = (avg_loss * (period - 1) + ls) / period
-        rows[i][key] = _rsi_value(avg_gain, avg_loss)
+        prev_c = c
 
 
 def _fill_macd_from(rows, fast, slow, signal, prefix="") -> None:
