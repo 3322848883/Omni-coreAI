@@ -10,6 +10,7 @@ archive/failed/*
 logs/*
 !logs/.gitkeep
 *.log
+history/
 
 # runtime bot configs may be local-only (examples stay tracked)
 config/bots/llm-test.yaml
