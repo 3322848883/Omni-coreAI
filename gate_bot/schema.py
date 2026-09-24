@@ -297,8 +297,9 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
 
     tp = _f(data.get("tp"), "tp")
     sl = _f(data.get("sl"), "sl")
-    tp_type = str(data.get("tp_type") or "limit").lower()
-    sl_type = str(data.get("sl_type") or "limit").lower()
+    # default market: trigger → market fill (guaranteed exit). explicit limit still allowed
+    tp_type = str(data.get("tp_type") or "market").lower()
+    sl_type = str(data.get("sl_type") or "market").lower()
     tp_mode = str(data.get("tp_mode") or "trigger").lower()
     sl_mode = str(data.get("sl_mode") or "trigger").lower()
     for name, m in (("tp_mode", tp_mode), ("sl_mode", sl_mode)):
@@ -310,11 +311,7 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
         raise SchemaError(f"tp_type invalid: {tp_type!r}")
     if sl is not None and sl_type not in ORDER_TYPES:
         raise SchemaError(f"sl_type invalid: {sl_type!r}")
-    # real close-trigger must be limit (mirror quick_order)
-    if tp is not None and tp_type == "market":
-        raise SchemaError("tp_type=market forbidden for close trigger; use limit")
-    if sl is not None and sl_type == "market":
-        raise SchemaError("sl_type=market forbidden for close trigger; use limit")
+    # close-trigger supports market (Gate price=0) — no longer forbidden
 
     trigger_price_type = str(data.get("trigger_price_type") or "latest").lower()
     if trigger_price_type not in PRICE_TYPES:

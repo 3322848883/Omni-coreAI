@@ -61,6 +61,7 @@ class Executor:
         max_notional_usd: Optional[float] = None,
         position_policy: str = "free",
         default_replace: str = "none",
+        order_scope: str = "own",
     ):
         self.client = client
         self.symbols_whitelist = (
@@ -69,6 +70,8 @@ class Executor:
         self.max_notional_usd = max_notional_usd
         self.position_policy = (position_policy or "free").lower()
         self.default_replace = (default_replace or "none").lower()
+        # own = only cancel this bot's orders (text prefix t-{label}); all = legacy wipe
+        self.order_scope = (order_scope or "own").lower()
 
     def execute_signal(self, signal: SignalFile) -> ExecReport:
         report = ExecReport()
@@ -78,8 +81,11 @@ class Executor:
                 StepResult("hold", "", True, detail={"skipped": True})
             )
             return report
-        # anti-pile-up: cancel old resting orders before new plan
-        self._apply_replace(signal, intents, report)
+        # Snapshot owned resting orders before new placements (place-before-cancel).
+        # Do NOT cancel here — new protection first, then withdraw old owned ones.
+        replace_mode = self._replace_mode(signal, intents)
+        pre_owned = self._snapshot_owned(intents) if replace_mode != "none" else {}
+
         for intent in intents:
             gate = self._entry_gate(intent)
             if gate:
@@ -105,7 +111,123 @@ class Executor:
             report.results.append(step)
             if not step.ok:
                 break
+
+        # After successful steps: withdraw OLD owned orders (keep newly placed ids)
+        if replace_mode != "none" and report.ok:
+            self._cancel_stale_owned(pre_owned, intents, report)
         return report
+
+    def _replace_mode(self, signal: SignalFile, intents: list) -> str:
+        modes = {getattr(i, "replace", "none") for i in intents}
+        if signal.replace and signal.replace != "none":
+            modes.add(signal.replace)
+        if self.default_replace and self.default_replace != "none":
+            modes.add(self.default_replace)
+        return "all" if "all" in modes else ("symbol" if "symbol" in modes else "none")
+
+    def _text_prefix(self, label: str) -> str:
+        return f"t-{label}" if label else ""
+
+    def _owned_price_orders(self, symbol: str, prefix: str) -> list[dict]:
+        if not prefix:
+            return []
+        try:
+            rows = self.client.list_price_orders(symbol) or []
+        except GateApiError:
+            return []
+        out = []
+        for p in rows:
+            text = str((p.get("initial") or {}).get("text") or p.get("text") or "")
+            if text.startswith(prefix):
+                out.append(p)
+        return out
+
+    def _owned_open_orders(self, symbol: str, prefix: str) -> list[dict]:
+        if not prefix:
+            return []
+        try:
+            rows = self.client.list_orders(symbol) or []
+        except GateApiError:
+            return []
+        return [o for o in rows if str(o.get("text") or "").startswith(prefix)]
+
+    def _snapshot_owned(self, intents: list) -> dict:
+        """{symbol: {"prefix": set(price_ids), "orders": set(order_ids)}}"""
+        snap: dict[str, dict] = {}
+        for intent in intents:
+            if not intent.symbol:
+                continue
+            prefix = self._text_prefix(intent.label)
+            if not prefix:
+                continue
+            slot = snap.setdefault(intent.symbol, {"prefix": prefix, "price_ids": set(), "order_ids": set()})
+            for p in self._owned_price_orders(intent.symbol, prefix):
+                pid = str(p.get("id") or "")
+                if pid:
+                    slot["price_ids"].add(pid)
+            for o in self._owned_open_orders(intent.symbol, prefix):
+                oid = str(o.get("id") or "")
+                if oid:
+                    slot["order_ids"].add(oid)
+        return snap
+
+    def _cancel_stale_owned(self, pre_owned: dict, intents: list, report: ExecReport) -> None:
+        """Cancel old owned orders that are not part of the new plan (place-before-cancel)."""
+        if self.order_scope == "all":
+            # legacy wipe after new plan is in place
+            symbols = sorted({i.symbol for i in intents if i.symbol})
+            if not symbols and self.symbols_whitelist:
+                symbols = sorted(self.symbols_whitelist)
+            elif not symbols:
+                symbols = self._open_symbols()
+            for sym in symbols:
+                try:
+                    self.client.cancel_all_orders(sym)
+                    self.client.cancel_all_price_orders(sym)
+                    report.results.append(StepResult("replace_cancel", sym, True,
+                        detail={"replace": "all", "cancelled": ["orders", "price_orders"], "order_scope": "all"}))
+                except GateApiError as e:
+                    report.results.append(StepResult("replace_cancel", sym, False, error=str(e)))
+            return
+
+        # Collect new ids to keep
+        keep_price: dict[str, set] = {}
+        keep_orders: dict[str, set] = {}
+        for intent in intents:
+            if not intent.symbol:
+                continue
+            prefix = self._text_prefix(intent.label)
+            keep_price.setdefault(intent.symbol, set())
+            keep_orders.setdefault(intent.symbol, set())
+            for p in self._owned_price_orders(intent.symbol, prefix):
+                keep_price[intent.symbol].add(str(p.get("id") or ""))
+            for o in self._owned_open_orders(intent.symbol, prefix):
+                keep_orders[intent.symbol].add(str(o.get("id") or ""))
+
+        for sym, slot in pre_owned.items():
+            prefix = slot.get("prefix") or ""
+            # pre_owned was snapshotted BEFORE this run — these are the old ones.
+            # Newly placed orders are not in this set, so cancel the snapshot as-is.
+            old_p = slot.get("price_ids") or set()
+            old_o = slot.get("order_ids") or set()
+            cancelled = []
+            for pid in sorted(old_p):
+                try:
+                    self.client.cancel_price_order(pid)
+                    cancelled.append(("price", pid))
+                except GateApiError:
+                    pass
+            for oid in sorted(old_o):
+                try:
+                    self.client.cancel_order(oid)
+                    cancelled.append(("order", oid))
+                except GateApiError:
+                    pass
+            if cancelled:
+                report.results.append(StepResult(
+                    "replace_cancel", sym, True,
+                    detail={"replace": "owned", "prefix": prefix, "cancelled": cancelled},
+                ))
 
     def _entry_gate(self, intent: Intent) -> str:
         """Return error string to reject intent, or '' to allow.
@@ -670,18 +792,12 @@ class Executor:
         """Place a close price-trigger (TP/SL). trigger_side is the order side to close position."""
         if is_tp:
             rule = intent.trigger_rule_tp
-            order_type = intent.tp_type
+            order_type = intent.tp_type or "market"
             limit = intent.tp_limit_price
         else:
             rule = intent.trigger_rule_sl
-            order_type = intent.sl_type
+            order_type = intent.sl_type or "market"
             limit = intent.sl_limit_price
-
-        if order_type == "market":
-            raise GateApiError("close trigger market forbidden; use limit")
-        if limit is None:
-            limit = default_trigger_limit_price(float(trigger_price), intent.side or "long", is_tp)
-        limit = round_price(float(limit), meta)
 
         # size for close-trigger: opposite side contracts; 0 would mean full close —
         # use explicit integer size of the opened contracts.
@@ -689,12 +805,23 @@ class Executor:
         # API: buy to close short (positive), sell to close long (negative)
         api_size = -close_size if (intent.side or "long") == "long" else close_size
 
+        use_market = order_type == "market"
+        if use_market:
+            # Gate price-trigger: price=0 → market on trigger (guaranteed exit)
+            init_price = "0"
+            init_tif = "ioc"
+        else:
+            if limit is None:
+                limit = default_trigger_limit_price(float(trigger_price), intent.side or "long", is_tp)
+            init_price = str(round_price(float(limit), meta))
+            init_tif = "gtc"
+
         body: dict[str, Any] = {
             "initial": {
                 "contract": intent.symbol,
                 "size": api_size,
-                "price": str(limit),
-                "tif": "gtc",
+                "price": init_price,
+                "tif": init_tif,
                 "reduce_only": True,
                 "text": f"t-{intent.label}-{'tp' if is_tp else 'sl'}",
             },

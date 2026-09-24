@@ -31,6 +31,8 @@ class BotConfig:
     position_policy: str = "strict"
     # none | symbol | all — default replace before new plan (anti pile-up)
     default_replace: str = "none"
+    # own = only manage orders with text prefix t-{label}; all = wipe symbol (legacy)
+    order_scope: str = "own"
     # LLM strategist (per-bot strategy + risk)
     strategist: dict = field(default_factory=dict)
 
@@ -61,6 +63,7 @@ def load_bot_config(path: Path) -> BotConfig:
         label_prefix=str(data.get("label_prefix") or ""),
         position_policy=str(data.get("position_policy") or "strict").strip().lower(),
         default_replace=str(data.get("default_replace") or "none").strip().lower(),
+        order_scope=str(data.get("order_scope") or "own").strip().lower(),
         strategist=dict(data.get("strategist") or {}),
     )
 

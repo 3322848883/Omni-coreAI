@@ -98,33 +98,40 @@ class TestSchema(unittest.TestCase):
         self.assertEqual(rep2.results[0].action, "reduce_long")
         self.assertEqual(rep2.results[0].detail["executed_as"], "close")
 
-    def test_replace_cancels_symbol_before_open(self):
+    def test_replace_place_before_cancel_owned(self):
+        """New protection first; then withdraw old owned orders only."""
         client = FakeClient()
         ex = Executor(client, symbols_whitelist=["BTC_USDT", "ETH_USDT"])
+        # pre-existing owned SL (same strategy prefix)
+        client.place_price_order({
+            "contract": "BTC_USDT",
+            "initial": {"text": "t-demo-legacy-sl"},
+            "trigger": {"price": "1"},
+        })
         rep = ex.execute_signal(parse_signal({
             "replace": True,
             "action": "open_long",
             "symbol": "BTC_USDT",
             "size": 1,
+            "label": "demo",
+            "sl": 90,
         }))
         self.assertTrue(rep.ok)
         kinds = [r.action for r in rep.results]
+        # open (with new sl) before replace_cancel
+        self.assertIn("open_long", kinds)
         self.assertIn("replace_cancel", kinds)
-        self.assertEqual(client.cancelled.count("BTC_USDT"), 1)  # orders
-        # price_orders cancel uses ("trail", ...) only for trail; cancel_all_price_orders
-        self.assertEqual(kinds[0], "replace_cancel")
-        self.assertEqual(kinds[1], "open_long")
+        self.assertLess(kinds.index("open_long"), kinds.index("replace_cancel"))
+        # only owned stale price id cancelled — not wipe-all
+        self.assertTrue(any(isinstance(c, tuple) and c[0] == "price" for c in client.cancelled))
 
-    def test_replace_all_cancels_whitelist(self):
+    def test_replace_all_scope_wipes_whitelist(self):
         client = FakeClient()
-        ex = Executor(client, symbols_whitelist=["BTC_USDT", "ETH_USDT"])
+        ex = Executor(client, symbols_whitelist=["BTC_USDT", "ETH_USDT"], order_scope="all")
         rep = ex.execute_signal(parse_signal({
             "replace": "all",
-            "orders": [
-                {"action": "hold"},
-            ],
+            "orders": [{"action": "hold"}],
         }))
-        # hold still runs after replace
         self.assertTrue(rep.ok)
         self.assertIn("BTC_USDT", client.cancelled)
         self.assertIn("ETH_USDT", client.cancelled)
@@ -236,17 +243,27 @@ class TestSchema(unittest.TestCase):
         with self.assertRaises(SchemaError):
             parse_signal({"action": "hold", "orders": [{"action": "hold"}]})
 
-    def test_reject_market_tp(self):
-        with self.assertRaises(SchemaError):
-            parse_signal(
-                {
-                    "action": "open_long",
-                    "symbol": "BTC_USDT",
-                    "size_usd": 10,
-                    "tp": 1,
-                    "tp_type": "market",
-                }
-            )
+    def test_market_tp_sl_default_and_allowed(self):
+        sig = parse_signal({
+            "action": "open_long",
+            "symbol": "BTC_USDT",
+            "size_usd": 10,
+            "tp": 2,
+            "sl": 1,
+        })
+        self.assertEqual(sig.intents[0].tp_type, "market")
+        self.assertEqual(sig.intents[0].sl_type, "market")
+        sig2 = parse_signal({
+            "action": "open_long",
+            "symbol": "BTC_USDT",
+            "size_usd": 10,
+            "tp": 2,
+            "tp_type": "market",
+            "sl": 1,
+            "sl_type": "limit",
+        })
+        self.assertEqual(sig2.intents[0].tp_type, "market")
+        self.assertEqual(sig2.intents[0].sl_type, "limit")
 
     def test_limit_requires_price(self):
         with self.assertRaises(SchemaError):
@@ -363,7 +380,27 @@ class FakeClient:
         return {"id": len(self.orders), **body}
 
     def list_orders(self, contract=None):
-        return []
+        out = []
+        for i, o in enumerate(self.orders):
+            if isinstance(o, dict) and o.get("text"):
+                out.append({"id": i + 1, "text": o.get("text"), "contract": o.get("contract")})
+        return out
+
+    def list_price_orders(self, contract=None):
+        out = []
+        for i, p in enumerate(self.price_orders):
+            text = (p.get("initial") or {}).get("text") or p.get("text") or ""
+            if text:
+                out.append({"id": 100 + i + 1, "initial": {"text": text}, "text": text})
+        return out
+
+    def cancel_price_order(self, order_id):
+        self.cancelled.append(("price", order_id))
+        return {"cancelled": order_id}
+
+    def cancel_order(self, order_id):
+        self.cancelled.append(("order", order_id))
+        return {"cancelled": order_id}
 
     def cancel_all_orders(self, contract):
         self.cancelled.append(contract)

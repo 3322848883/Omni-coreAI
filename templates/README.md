@@ -74,7 +74,7 @@ AI/策略把信号写成 **一个 JSON 文件**，放入 `inbox/<bot_id>/`。
 | `price` | limit 等必填 | 委托价 |
 | `tp` / `sl` | 可省 | 止盈/止损价 |
 | `tp_mode` / `sl_mode` | 可省 | **`trigger`（默认）**=条件计划委托；**`limit_order`**=盘口 reduce_only **限价挂单** |
-| `tp_type` / `sl_type` | 可省 | 条件单触发后委托方式，默认 `limit`（禁 market 平仓） |
+| `tp_type` / `sl_type` | 可省 | 触发后成交方式，默认 **`market`（触价市价，保证出场）**；`limit` 为触发后限价 |
 
 ### 限价单止盈止损 vs 条件单止盈止损
 
