@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from ..gate_client import GateApiError, GateClient
+from ..gate_client import GateClient
 
 INTERVAL_SECONDS = {
     "1m": 60,
@@ -22,8 +22,6 @@ INTERVAL_SECONDS = {
     "4h": 14400,
     "1d": 86400,
 }
-
-LOCAL_FIELDS = ("t", "o", "h", "l", "c", "v", "sum", "ema20", "atr14")
 
 
 @dataclass
@@ -41,7 +39,10 @@ class MarketConfig:
             raise ValueError(f"market.mode must be hybrid|rest_only|local_only, got {self.mode!r}")
         self.mode = mode
         self.db = str(self.db or "kline.db")
-        self.stale_factor = float(self.stale_factor or 2.0)
+        if self.stale_factor is None:
+            self.stale_factor = 2.0
+        else:
+            self.stale_factor = float(self.stale_factor)
         self.indicators = [str(x) for x in (self.indicators or [])]
 
 
@@ -59,7 +60,7 @@ def interval_seconds(interval: str) -> int:
 
 
 def resolve_pa_data_root(market_cfg: Optional[MarketConfig] = None, bot_root: Optional[Path] = None) -> Optional[Path]:
-    env = os.environ.get("GATE_BOT_PA_DATA") or os.environ.get("PA_DATA_SOURCE_DIR")
+    env = os.environ.get("GATE_BOT_PA_DATA")
     if env:
         return Path(env).expanduser().resolve()
     if market_cfg and market_cfg.pa_data_root:
@@ -185,6 +186,11 @@ def fetch_rest_candles(client: GateClient, symbol: str, interval: str, limit: in
     return rows[-int(limit) :]
 
 
+def _to_epoch_seconds(ts: float) -> float:
+    # pa/Gate candlestick t is seconds; tolerate ms epoch.
+    return ts / 1000.0 if ts > 1e12 else ts
+
+
 def is_stale(
     rows: list[dict[str, Any]],
     interval: str,
@@ -194,7 +200,7 @@ def is_stale(
     if not rows:
         return True
     ts = now if now is not None else time.time()
-    last_t = float(rows[-1].get("t") or 0)
+    last_t = _to_epoch_seconds(float(rows[-1].get("t") or 0))
     return (ts - last_t) > float(stale_factor) * interval_seconds(interval)
 
 

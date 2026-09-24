@@ -33,7 +33,7 @@ def collect_snapshot(
             entry["last"] = client.get_last_price(sym)
         except GateApiError as e:
             entry["last_error"] = str(e)
-            meta["degraded"].append(f"{sym}_last")
+            meta["degraded"].append(f"{sym}:last")
 
         try:
             result = resolve_candles(
@@ -73,23 +73,27 @@ def collect_snapshot(
             "available": acc.get("available"),
             "total": acc.get("total"),
         }
-        account["positions"] = [
-            {
-                "contract": p.get("contract"),
-                "mode": p.get("mode"),
-                "size": p.get("size"),
-                "entry_price": p.get("entry_price"),
-                "leverage": p.get("leverage"),
-            }
-            for p in (client.get_positions() or [])
-            if int(p.get("size") or 0) != 0
-        ]
-    except GateApiError as e:
-        account = {"error": str(e)}
-        meta["degraded"].append("account")
     except Exception as e:  # noqa: BLE001
-        account = {"error": str(e)}
+        account = {"error": f"account: {e}"}
         meta["degraded"].append("account")
+    if "error" not in account:
+        try:
+            account["positions"] = [
+                {
+                    "contract": p.get("contract"),
+                    "mode": p.get("mode"),
+                    "size": p.get("size"),
+                    "entry_price": p.get("entry_price"),
+                    "leverage": p.get("leverage"),
+                }
+                for p in (client.get_positions() or [])
+                if int(p.get("size") or 0) != 0
+            ]
+        except Exception as e:  # noqa: BLE001
+            # Keep available/total if already fetched; still mark error so plan aborts.
+            account["error"] = f"positions: {e}"
+            account.setdefault("positions", [])
+            meta["degraded"].append("positions")
 
     return {
         "interval": interval,

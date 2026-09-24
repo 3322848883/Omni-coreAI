@@ -69,8 +69,8 @@ class PlanRunner:
             bot_root=self.cfg.bot_root,
         )
         account = snapshot.get("account") or {}
-        if account.get("error") and account.get("available") is None:
-            # Never plan or write inbox without a live account view.
+        if account.get("error"):
+            # Never plan or write inbox without a complete live account view.
             return {
                 "ok": False,
                 "cycle_id": cycle_id,

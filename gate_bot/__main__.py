@@ -40,7 +40,7 @@ def _build_plan_runner(bot, paths: ProjectPaths):
             mode=str(mk.get("mode") or "rest_only"),
             pa_data_root=mk.get("pa_data_root"),
             db=str(mk.get("db") or "kline.db"),
-            stale_factor=float(mk.get("stale_factor") or 2.0),
+            stale_factor=2.0 if mk.get("stale_factor") is None else float(mk.get("stale_factor")),
             health_url=mk.get("health_url"),
             indicators=[str(x) for x in (mk.get("indicators") or ["ema20", "ema50", "atr14", "rsi14"])],
         ),

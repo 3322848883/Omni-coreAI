@@ -70,20 +70,69 @@ class TestIndicators(unittest.TestCase):
         self.assertIsNotNone(out[4])
 
     def test_attach_keeps_db_ema20(self):
-        rows = [
-            {"t": 1, "o": 1, "h": 2, "l": 0.5, "c": 1.5, "v": 1, "ema20": 99.0, "atr14": None},
-            {"t": 2, "o": 1, "h": 2, "l": 0.5, "c": 1.5, "v": 1, "ema20": None, "atr14": None},
-        ] * 30
-        for i, r in enumerate(rows):
-            r["t"] = i
-            r["c"] = 1.0 + i * 0.01
-            r["h"] = r["c"] + 0.1
-            r["l"] = r["c"] - 0.1
-        rows[0]["ema20"] = 123.0
+        rows = []
+        for i in range(60):
+            c = 1.0 + i * 0.01
+            rows.append(
+                {
+                    "t": i,
+                    "o": 1,
+                    "h": c + 0.1,
+                    "l": c - 0.1,
+                    "c": c,
+                    "v": 1,
+                    "ema20": 99.0 if i == 0 else None,
+                    "atr14": None,
+                }
+            )
         out = attach_indicators(rows, ["ema20", "ema50", "rsi14"])
-        self.assertEqual(out[0]["ema20"], 123.0)  # DB value kept
+        self.assertEqual(out[0]["ema20"], 99.0)  # DB value kept
         self.assertIsNotNone(out[-1].get("ema50"))
         self.assertIn("rsi14", out[-1])
+
+    def test_attach_warm_starts_from_db_ema(self):
+        """Gap after a DB ema20 must continue from that state, not reseed SMA."""
+        rows = []
+        for i in range(5):
+            c = float(i + 1)
+            rows.append(
+                {
+                    "t": i,
+                    "o": c,
+                    "h": c + 1,
+                    "l": c - 1,
+                    "c": c,
+                    "v": 1,
+                    "ema20": 100.0 if i == 3 else None,
+                    "atr14": None,
+                }
+            )
+        out = attach_indicators(list(rows), ["ema20"])
+        self.assertEqual(out[3]["ema20"], 100.0)
+        k = 2.0 / 21.0
+        self.assertAlmostEqual(out[4]["ema20"], 5.0 * k + 100.0 * (1 - k))
+
+    def test_null_close_does_not_zero_series(self):
+        rows = [
+            {"t": 0, "h": 2, "l": 0, "c": 1.0, "ema20": 1.0},
+            {"t": 1, "h": None, "l": None, "c": None},
+            {"t": 2, "h": 3, "l": 1, "c": 2.0},
+        ]
+        out = attach_indicators(rows, ["ema20", "atr14", "rsi14"])
+        self.assertIsNone(out[1]["ema20"])
+        self.assertIsNone(out[1]["atr14"])
+        # continues from DB state at row0 across the gap when close resumes
+        k = 2.0 / 21.0
+        self.assertAlmostEqual(out[2]["ema20"], 2.0 * k + 1.0 * (1 - k))
+
+    def test_rsi_hand_fixture(self):
+        # First 14 changes are pure losses → RSI=0 at index 14; later gains lift it.
+        closes = [20.0, 19.0, 18.0, 17.0, 16.0, 15.0, 14.0, 13.0, 12.0, 11.0,
+                  10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 6.0, 7.0, 8.0]
+        out = rsi(closes, 14)
+        self.assertAlmostEqual(out[14], 0.0)
+        self.assertGreater(out[-1], 0.0)
+        self.assertLess(out[-1], 100.0)
 
     def test_latest_indicators(self):
         rows = [{"ema20": 1.0, "ema50": 2.0, "atr14": 3.0, "rsi14": 4.0}]
@@ -169,12 +218,15 @@ class TestMarket(unittest.TestCase):
             self.assertAlmostEqual(rows[0]["ema20"], 1.4)
 
     def test_is_stale(self):
-        now = 1_000_000.0
+        now = 1_700_000_000.0
         rows = [{"t": now - 100}]
         self.assertFalse(is_stale(rows, "15m", 2.0, now=now))
         rows_old = [{"t": now - 3600}]
         self.assertTrue(is_stale(rows_old, "15m", 2.0, now=now))
         self.assertTrue(is_stale([], "15m", 2.0, now=now))
+        # milliseconds epoch must not look "fresh forever"
+        ms_old = [{"t": (now - 3600) * 1000}]
+        self.assertTrue(is_stale(ms_old, "15m", 2.0, now=now))
 
     def test_hybrid_uses_local_when_fresh(self):
         with tempfile.TemporaryDirectory() as td:
@@ -334,6 +386,8 @@ class TestSnapshot(unittest.TestCase):
 
 class TestPlanRunnerAccountAbort(unittest.TestCase):
     def test_account_unavailable_aborts(self):
+        import tempfile
+
         from gate_bot.strategist.loop import PlanRunner, StrategistConfig
 
         class BoomClient(FakeClient):
@@ -344,11 +398,24 @@ class TestPlanRunnerAccountAbort(unittest.TestCase):
             def chat(self, system, user):
                 raise AssertionError("LLM must not be called when account unavailable")
 
-        cfg = StrategistConfig(symbols=["BTC_USDT"], candles=5, timeframe="15m", write_hold=True)
-        runner = PlanRunner(BoomClient(), cfg, Path("inbox/x"), Path("hist/x"), llm=NeverLLM())
-        result = runner.run_once()
-        self.assertFalse(result.get("ok"))
-        self.assertEqual(result.get("error"), "account_unavailable")
+        with tempfile.TemporaryDirectory() as td:
+            inbox = Path(td) / "inbox"
+            inbox.mkdir()
+            cfg = StrategistConfig(symbols=["BTC_USDT"], candles=5, timeframe="15m", write_hold=True)
+            runner = PlanRunner(BoomClient(), cfg, inbox, Path(td) / "hist", llm=NeverLLM())
+            result = runner.run_once()
+            self.assertFalse(result.get("ok"))
+            self.assertEqual(result.get("error"), "account_unavailable")
+            self.assertEqual(list(inbox.glob("*.json")), [])
+
+    def test_positions_fail_still_aborts_but_keeps_available(self):
+        class PosFailClient(FakeClient):
+            def get_positions(self):
+                raise GateApiError("positions down")
+
+        snap = collect_snapshot(PosFailClient(), ["BTC_USDT"], candles=5, interval="15m")
+        self.assertIn("error", snap["account"])
+        self.assertEqual(snap["account"].get("available"), "100")
 
 
 if __name__ == "__main__":
