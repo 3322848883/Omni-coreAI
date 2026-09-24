@@ -90,10 +90,10 @@ order_scope: own          # own（默认）| all
 
 ## Tasks
 
-- [ ] T1: `_place_trigger` 默认市价 initial（`price=0`）+ `tp_type/sl_type` 默认 market；允许 market close — acceptance: 单测 body.price=="0"；旧 limit 仍可配 (covers: S2.A)
-- [ ] T2: `default_trigger_limit_price` 仅在显式 limit 时使用；文档说明 gap 风险 — acceptance: market 路径不调用 (covers: S2.A)
-- [ ] T3: 归属过滤 helper（`owned_price_orders` / `cancel_owned_price_orders`）— acceptance: 只撤 `t-{label}` 前缀 (covers: S2.C)
-- [ ] T4: `_apply_replace` 改为先挂后撤 + 只撤 owned；`cancel_*` action 默认 own — acceptance: 顺序与范围单测 (covers: S2.B, S2.C; depends: T3)
-- [ ] T5: `_open` 流程：入场 → 新 TP/SL → 确认 → 撤旧 owned — acceptance: 新 SL 失败不撤旧 (covers: S2.B; depends: T1, T4)
-- [ ] T6: testnet 实测：市价触发 SL、双策略同 symbol 互不撤单、先挂后撤 — acceptance: 脚本 PASS (covers: S2; depends: T1–T5)
-- [ ] T7: README/templates + 全量 unittest — acceptance: 全绿 (covers: S2)
+- [x] T1: `_place_trigger` 默认市价 initial（`price=0`）+ `tp_type/sl_type` 默认 market；允许 market close — acceptance: 单测 body.price=="0"；旧 limit 仍可配 (covers: S2.A)
+- [x] T2: `default_trigger_limit_price` 仅在显式 limit 时使用；文档说明 gap 风险 — acceptance: market 路径不调用 (covers: S2.A)
+- [x] T3: 归属过滤 helper（`owned_price_orders` / `cancel_owned_price_orders`）— acceptance: 只撤 `t-{label}` 前缀 (covers: S2.C)
+- [x] T4: `_apply_replace` 改为先挂后撤 + 只撤 owned；`cancel_*` action 默认 own — acceptance: 顺序与范围单测 (covers: S2.B, S2.C; depends: T3)
+- [x] T5: `_open` 流程：入场 → 新 TP/SL → 确认 → 撤旧 owned — acceptance: 新 SL 失败不撤旧 (covers: S2.B; depends: T1, T4)
+- [x] T6: testnet 实测：市价触发 SL、双策略同 symbol 互不撤单、先挂后撤 — acceptance: 脚本 PASS (covers: S2; depends: T1–T5)
+- [x] T7: README/templates + 全量 unittest — acceptance: 124 全绿；prod_e2e 23/23 (covers: S2)
