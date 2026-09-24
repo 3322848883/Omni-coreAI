@@ -154,13 +154,15 @@ def main() -> int:
         except Exception as e:  # noqa: BLE001
             rec(name, False, str(e))
 
-    run("mkt_long", {"action": "open_long", "symbol": "BTC_USDT", "size": 1, "type": "market", "label": "p-m"})
+    sl_p = round(last * 0.99, 1)
+    run("mkt_long", {"action": "open_long", "symbol": "BTC_USDT", "size": 1, "type": "market",
+                     "sl": sl_p, "label": "p-m"})
     run("limit_long", {"action": "open_long", "symbol": "BTC_USDT", "size": 1, "type": "limit",
-                       "price": round(last * 0.98, 1), "label": "p-l"})
+                       "price": round(last * 0.98, 1), "sl": sl_p, "label": "p-l"})
     run("post_only", {"action": "open_long", "symbol": "BTC_USDT", "size": 1, "type": "post_only",
-                      "price": round(last * 0.97, 1), "label": "p-po"})
+                      "price": round(last * 0.97, 1), "sl": sl_p, "label": "p-po"})
     run("ioc_far", {"action": "open_long", "symbol": "BTC_USDT", "size": 1, "type": "ioc",
-                    "price": round(last * 0.90, 1), "label": "p-ioc"})
+                    "price": round(last * 0.90, 1), "sl": sl_p, "label": "p-ioc"})
     run("fok_far_reject", {"action": "open_long", "symbol": "BTC_USDT", "size": 1, "type": "fok",
                            "price": round(last * 0.90, 1)}, expect_ok=False)
     run("tpsl_trigger", {"action": "open_long", "symbol": "BTC_USDT", "size": 1, "type": "market",
@@ -172,6 +174,7 @@ def main() -> int:
     run("stop_entry", {"action": "stop_entry_long", "symbol": "BTC_USDT", "size": 1,
                        "trigger_price": round(last * 1.03, 1), "label": "p-se"})
     run("grid", {"action": "grid", "symbol": "BTC_USDT", "side": "long", "type": "limit",
+                 "sl": sl_p,
                  "levels": [{"price": round(last * 0.96, 1), "size": 1}], "label": "p-g"})
     run("orders_multi", {"orders": [
         {"action": "add_long", "symbol": "ETH_USDT", "size": 1, "type": "limit",

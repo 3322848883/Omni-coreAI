@@ -101,18 +101,19 @@ def main() -> int:
 
     # ── 3 order types: market / limit / post_only ──────────
     print("\n[3] order types")
-    run("market_long", {"action": "open_long", "symbol": "BTC_USDT", "size": 1, "type": "market", "label": "t-mktL"})
-    run("market_short", {"action": "open_short", "symbol": "BTC_USDT", "size": 1, "type": "market", "label": "t-mktS"})
+    sl_ok = px(-300)
+    run("market_long", {"action": "open_long", "symbol": "BTC_USDT", "size": 1, "type": "market", "sl": sl_ok, "label": "t-mktL"})
+    run("market_short", {"action": "open_short", "symbol": "BTC_USDT", "size": 1, "type": "market", "sl": px(+300), "label": "t-mktS"})
     run("limit_long", {"action": "open_long", "symbol": "BTC_USDT", "size": 1, "type": "limit",
-                       "price": px(-200), "label": "t-limL"})
+                       "price": px(-200), "sl": sl_ok, "label": "t-limL"})
     run("limit_short", {"action": "open_short", "symbol": "BTC_USDT", "size": 1, "type": "limit",
-                        "price": px(+200), "label": "t-limS"})
+                        "price": px(+200), "sl": px(+300), "label": "t-limS"})
     run("post_only_long", {"action": "open_long", "symbol": "BTC_USDT", "size": 1, "type": "post_only",
-                           "price": px(-150), "label": "t-poL"})
+                           "price": px(-150), "sl": sl_ok, "label": "t-poL"})
     run("post_only_short", {"action": "open_short", "symbol": "BTC_USDT", "size": 1, "type": "post_only",
-                            "price": px(+150), "label": "t-poS"})
+                            "price": px(+150), "sl": px(+300), "label": "t-poS"})
     run("ioc_far", {"action": "open_long", "symbol": "BTC_USDT", "size": 1, "type": "ioc",
-                    "price": px(-800), "label": "t-ioc"})
+                    "price": px(-800), "sl": sl_ok, "label": "t-ioc"})
     run("fok_far_reject", {"action": "open_long", "symbol": "BTC_USDT", "size": 1, "type": "fok",
                            "price": px(-800), "label": "t-fok"}, expect_ok=False)
 
@@ -182,6 +183,7 @@ def main() -> int:
     # ── 8 grid / multi-leg ─────────────────────────────────
     print("\n[8] grid / orders[]")
     run("grid_long", {"action": "grid", "symbol": "BTC_USDT", "side": "long", "type": "limit",
+                      "sl": sl_ok,
                       "levels": [{"price": px(-250), "size": 1}, {"price": px(-350), "size": 1}],
                       "label": "t-gL"})
     run("orders_multi", {"orders": [
