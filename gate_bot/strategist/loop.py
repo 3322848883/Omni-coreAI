@@ -7,6 +7,7 @@ Triggers (per-bot, configurable):
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -75,6 +76,27 @@ class PlanRunner:
         self._conditions = parse_conditions(cfg.conditions)
         self._cond_states: dict[str, Any] = {}
         self._last_trigger: str = ""
+        self._cycle_file = history_dir / "last_cycle.json"
+        self._last_cycle_id = self._load_last_cycle()
+
+    def _load_last_cycle(self) -> Optional[str]:
+        try:
+            if self._cycle_file.exists():
+                data = json.loads(self._cycle_file.read_text(encoding="utf-8"))
+                return data.get("cycle_id")
+        except Exception:  # noqa: BLE001
+            return None
+        return None
+
+    def _save_last_cycle(self, cycle_id: str) -> None:
+        try:
+            self._cycle_file.parent.mkdir(parents=True, exist_ok=True)
+            self._cycle_file.write_text(
+                json.dumps({"cycle_id": cycle_id, "ts": datetime.now(timezone.utc).isoformat()}),
+                encoding="utf-8",
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     def run_once(self, trigger: str = "manual") -> dict[str, Any]:
         cycle_id = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -126,6 +148,7 @@ class PlanRunner:
                 "trigger": trigger,
             }
         self._last_cycle_id = plan.cycle_id
+        self._save_last_cycle(plan.cycle_id)
         risk_result = apply_risk(plan, self.cfg.risk)
         payload = chips_to_signal(plan, risk_result, bot_id=self.inbox.name)
         orders = payload.get("orders") or []

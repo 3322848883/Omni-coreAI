@@ -62,6 +62,8 @@ class Executor:
         position_policy: str = "free",
         default_replace: str = "none",
         order_scope: str = "own",
+        require_sl: bool = True,
+        account_risk: Optional[dict] = None,
     ):
         self.client = client
         self.symbols_whitelist = (
@@ -72,6 +74,10 @@ class Executor:
         self.default_replace = (default_replace or "none").lower()
         # own = only cancel this bot's orders (text prefix t-{label}); all = legacy wipe
         self.order_scope = (order_scope or "own").lower()
+        # pre-trade: open_* must carry sl (unless explicitly disabled)
+        self.require_sl = bool(require_sl)
+        # account-level risk: halt / max_total_notional_usd / daily_loss_limit_usd / max_leverage
+        self.account_risk = dict(account_risk or {})
 
     def execute_signal(self, signal: SignalFile) -> ExecReport:
         report = ExecReport()
@@ -358,6 +364,66 @@ class Executor:
         if self.symbols_whitelist is not None and symbol not in self.symbols_whitelist:
             raise GateApiError(f"symbol {symbol} not in whitelist {sorted(self.symbols_whitelist)}")
 
+    def _check_open_sl(self, intent: Intent) -> None:
+        """Reject naked entries: open_* / stop_entry_* must set sl."""
+        if not self.require_sl:
+            return
+        action = (intent.meta or {}).get("requested_action") or intent.action
+        if action not in ("open_long", "open_short", "stop_entry_long", "stop_entry_short"):
+            return
+        if intent.sl is None:
+            raise GateApiError(
+                "SL_REQUIRED: open/stop_entry requires sl (or set require_sl: false)"
+            )
+
+    def _check_account_risk(self, intent: Intent) -> None:
+        """Account-level halt / exposure limits (pre-trade)."""
+        ar = self.account_risk or {}
+        action = (intent.meta or {}).get("requested_action") or intent.action
+        manage = {"hold", "close", "close_all", "flatten", "cancel_all", "cancel_price_all",
+                  "cancel_trail_all", "reduce", "reduce_long", "reduce_short"}
+        if ar.get("halt") and action not in manage:
+            raise GateApiError("HALTED: account_risk.halt=true; only close/cancel allowed")
+        if action not in manage and action.startswith(("open", "add", "stop_entry")):
+            max_lev = ar.get("max_leverage")
+            if max_lev is not None and intent.leverage and int(intent.leverage) > int(max_lev):
+                raise GateApiError(
+                    f"MAX_LEVERAGE: {intent.leverage} > account max_leverage={max_lev}"
+                )
+            # total notional: sum open positions + this order
+            max_total = ar.get("max_total_notional_usd")
+            if max_total is not None:
+                try:
+                    pos_notional = 0.0
+                    for p in self.client.get_positions() or []:
+                        if int(p.get("size") or 0) == 0:
+                            continue
+                        mark = float(p.get("mark_price") or p.get("entry_price") or 0)
+                        qty = abs(float(p.get("size") or 0))
+                        mult = 1.0
+                        try:
+                            mult = float(self.client.get_contract(p.get("contract")).quanto_multiplier or 1)
+                        except Exception:  # noqa: BLE001
+                            mult = 1.0
+                        pos_notional += mark * qty * mult
+                    this_usd = intent.size_usd
+                    if this_usd is None and intent.size is not None:
+                        px = intent.price or self.client.get_last_price(intent.symbol)
+                        try:
+                            mult = float(self.client.get_contract(intent.symbol).quanto_multiplier or 1)
+                        except Exception:  # noqa: BLE001
+                            mult = 1.0
+                        this_usd = abs(intent.size) * float(px) * mult
+                    if this_usd is not None and pos_notional + float(this_usd) > float(max_total):
+                        raise GateApiError(
+                            f"MAX_TOTAL_NOTIONAL: open={pos_notional:.2f} + this={this_usd:.2f} "
+                            f"> {max_total}"
+                        )
+                except GateApiError:
+                    raise
+                except Exception:  # noqa: BLE001 — if cannot measure, do not silently allow huge size
+                    raise GateApiError("MAX_TOTAL_NOTIONAL: cannot measure account exposure")
+
     def _check_notional(self, size_usd: Optional[float]) -> None:
         if self.max_notional_usd is not None and size_usd is not None:
             if size_usd > self.max_notional_usd:
@@ -368,6 +434,8 @@ class Executor:
     # ── actions ──────────────────────────────────────────
     def _open(self, intent: Intent) -> StepResult:
         self._check_symbol(intent.symbol)
+        self._check_open_sl(intent)
+        self._check_account_risk(intent)
         meta = self.client.get_contract(intent.symbol)
         self._check_notional(intent.size_usd)
 
@@ -414,22 +482,30 @@ class Executor:
         # auto TP/SL: trigger (price_order) or resting reduce_only limit
         pos_side = "long" if intent.action == "open_long" else "short"
         trigger_side = "short" if pos_side == "long" else "long"
+        # SL size follows FILLED contracts (not planned) when available
+        entry_order = (entry_rec or {}).get("order") or {}
+        filled = abs(int(entry_order.get("size") or 0)) - abs(int(entry_order.get("left") or 0))
+        if entry_order.get("finish_as") == "filled":
+            filled = abs(int(entry_order.get("size") or 0))
+        exit_size = int(filled) if filled and filled > 0 else int(contracts)
+        detail["exit_size"] = exit_size
+        detail["filled_size"] = filled
         tp_orders = []
         sl_orders = []
         exit_errors = []
         if intent.tp is not None:
             rec_, err_ = self._place_exit_leg(
-                lambda: self._place_limit_exit(intent, pos_side, intent.tp, is_tp=True, meta=meta, size=contracts)
+                lambda: self._place_limit_exit(intent, pos_side, intent.tp, is_tp=True, meta=meta, size=exit_size)
                 if intent.tp_mode == "limit_order"
-                else self._place_trigger(intent, trigger_side, intent.tp, is_tp=True, meta=meta, size=contracts),
+                else self._place_trigger(intent, trigger_side, intent.tp, is_tp=True, meta=meta, size=exit_size),
                 kind="tp", price_order=(intent.tp_mode != "limit_order"),
             )
             (tp_orders if rec_ else exit_errors).append(rec_ or err_)
         if intent.sl is not None:
             rec_, err_ = self._place_exit_leg(
-                lambda: self._place_limit_exit(intent, pos_side, intent.sl, is_tp=False, meta=meta, size=contracts)
+                lambda: self._place_limit_exit(intent, pos_side, intent.sl, is_tp=False, meta=meta, size=exit_size)
                 if intent.sl_mode == "limit_order"
-                else self._place_trigger(intent, trigger_side, intent.sl, is_tp=False, meta=meta, size=contracts),
+                else self._place_trigger(intent, trigger_side, intent.sl, is_tp=False, meta=meta, size=exit_size),
                 kind="sl", price_order=(intent.sl_mode != "limit_order"),
             )
             (sl_orders if rec_ else exit_errors).append(rec_ or err_)
@@ -451,10 +527,29 @@ class Executor:
             )
         return StepResult(intent.action, intent.symbol, True, detail=detail)
 
+    def _find_open_order_by_text(self, symbol: str, text: str) -> Optional[dict]:
+        if not text:
+            return None
+        try:
+            rows = self.client.list_orders(symbol) or []
+        except Exception:  # noqa: BLE001
+            return None
+        for o in rows:
+            if str(o.get("text") or "") == text:
+                return o
+        return None
+
     def _place_entry_leg(self, placer, body: dict) -> tuple[Optional[dict], Optional[str]]:
-        """Place entry with confirmation; one retry if not confirmed on exchange."""
+        """Place entry with confirmation; retry only when order is NOT on exchange."""
+        text = str(body.get("text") or "")
         last_err = None
         for attempt in (1, 2):
+            if attempt == 2:
+                # idempotent: if first place landed but confirm flaked, do NOT double-place
+                existing = self._find_open_order_by_text(body.get("contract"), text)
+                if existing and existing.get("id"):
+                    check = self._confirm_order_landed(existing, kind="entry")
+                    return {"order": existing, "check": check}, None
             try:
                 order = placer()
             except GateApiError as e:
@@ -515,9 +610,12 @@ class Executor:
         return check
 
     def _place_exit_leg(self, placer, kind: str, price_order: bool) -> tuple[Optional[dict], Optional[str]]:
-        """Place one exit leg with one retry and exchange confirmation."""
+        """Place one exit leg with confirmation; retry only if not on exchange."""
         last_err = None
         for attempt in (1, 2):
+            if attempt == 2 and last_err and "not_confirmed" in str(last_err):
+                # do not blindly re-place when first attempt may have landed
+                break
             try:
                 rec = placer()
             except GateApiError as e:

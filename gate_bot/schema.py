@@ -157,7 +157,7 @@ def _parse_stop_entry(data: dict, action: str, default_label: str) -> Intent:
         raise SchemaError(f"{action} requires size_usd, size_pct, margin_pct, or size")
     default_rule = 1 if action == "stop_entry_long" else 2
     rule = _i(data.get("trigger_rule"), "trigger_rule") or default_rule
-    trigger_price_type = str(data.get("trigger_price_type") or "latest").lower()
+    trigger_price_type = str(data.get("trigger_price_type") or "mark").lower()
     if trigger_price_type not in PRICE_TYPES:
         raise SchemaError(f"trigger_price_type invalid: {trigger_price_type!r}")
     return Intent(
@@ -313,7 +313,7 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
         raise SchemaError(f"sl_type invalid: {sl_type!r}")
     # close-trigger supports market (Gate price=0) — no longer forbidden
 
-    trigger_price_type = str(data.get("trigger_price_type") or "latest").lower()
+    trigger_price_type = str(data.get("trigger_price_type") or "mark").lower()
     if trigger_price_type not in PRICE_TYPES:
         raise SchemaError(f"trigger_price_type invalid: {trigger_price_type!r}")
 

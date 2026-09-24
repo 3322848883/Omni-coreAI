@@ -195,6 +195,40 @@ def _archive_failed(
     log.error("failed %s/%s: %s", bot_id, original_name, error)
 
 
+def reconcile_protection(client, symbols: list[str], prefix: str = "") -> list[str]:
+    """Startup check: flag positions that have no owned TP/SL (naked risk).
+
+    Returns warning strings; does not place orders (caller decides).
+    """
+    warnings = []
+    try:
+        positions = client.get_positions() or []
+    except Exception as e:  # noqa: BLE001
+        return [f"reconcile: cannot read positions: {e}"]
+    for p in positions:
+        if int(p.get("size") or 0) == 0:
+            continue
+        sym = p.get("contract") or ""
+        if symbols and sym not in symbols:
+            continue
+        has_protect = False
+        try:
+            for po in client.list_price_orders(sym) or []:
+                text = str((po.get("initial") or {}).get("text") or po.get("text") or "")
+                if prefix and not text.startswith(prefix):
+                    continue
+                if "-sl" in text or "-tp" in text:
+                    has_protect = True
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+        if not has_protect:
+            warnings.append(
+                f"reconcile: {sym} position size={p.get('size')} has no owned TP/SL (prefix={prefix or '*'})"
+            )
+    return warnings
+
+
 def run_bot_once(bot: BotConfig, paths: ProjectPaths) -> dict:
     inbox = paths.bot_inbox(bot.bot_id)
     files = _pick_inbox_files(inbox, bot.max_files_per_run)
@@ -213,6 +247,8 @@ def run_bot_once(bot: BotConfig, paths: ProjectPaths) -> dict:
                     position_policy=bot.position_policy,
                     default_replace=bot.default_replace,
                     order_scope=getattr(bot, "order_scope", "own"),
+                    require_sl=getattr(bot, "require_sl", True),
+                    account_risk=getattr(bot, "account_risk", None),
                 )
             except GateApiError as e:
                 _archive_failed(paths, bot.bot_id, taken, path.name, f"credentials: {e}")

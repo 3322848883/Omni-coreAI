@@ -33,6 +33,10 @@ class BotConfig:
     default_replace: str = "none"
     # own = only manage orders with text prefix t-{label}; all = wipe symbol (legacy)
     order_scope: str = "own"
+    # pre-trade: open/stop_entry must carry sl
+    require_sl: bool = True
+    # account-level risk: {halt, max_total_notional_usd, daily_loss_limit_usd, max_leverage}
+    account_risk: dict = field(default_factory=dict)
     # LLM strategist (per-bot strategy + risk)
     strategist: dict = field(default_factory=dict)
 
@@ -64,6 +68,8 @@ def load_bot_config(path: Path) -> BotConfig:
         position_policy=str(data.get("position_policy") or "strict").strip().lower(),
         default_replace=str(data.get("default_replace") or "none").strip().lower(),
         order_scope=str(data.get("order_scope") or "own").strip().lower(),
+        require_sl=bool(data.get("require_sl", True)),
+        account_risk=dict(data.get("account_risk") or {}),
         strategist=dict(data.get("strategist") or {}),
     )
 

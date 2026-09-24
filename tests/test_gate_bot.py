@@ -161,7 +161,7 @@ class TestSchema(unittest.TestCase):
         client = FakeClient()
         client.get_positions = lambda: [{"contract": "BTC_USDT", "size": 2, "mode": "single"}]
         ex = Executor(client, position_policy="free")
-        rep = ex.execute_signal(parse_signal({"action": "open_long", "symbol": "BTC_USDT", "size": 1}))
+        rep = ex.execute_signal(parse_signal({"action": "open_long", "symbol": "BTC_USDT", "size": 1, "sl": 1}))
         self.assertTrue(rep.ok)
 
     def test_limit_order_tpsl_resting_reduce_only(self):
@@ -488,10 +488,83 @@ class TestExecutor(unittest.TestCase):
         self.assertEqual(client.cancelled, ["BTC_USDT", "ETH_USDT"])
 
 
+    def test_require_sl_blocks_naked_open(self):
+        client = FakeClient()
+        ex = Executor(client, require_sl=True)
+        rep = ex.execute_signal(parse_signal({"action": "open_long", "symbol": "BTC_USDT", "size": 1}))
+        self.assertFalse(rep.ok)
+        self.assertIn("SL_REQUIRED", rep.results[0].error or "")
+
+    def test_account_halt_blocks_open(self):
+        client = FakeClient()
+        ex = Executor(client, require_sl=False, account_risk={"halt": True})
+        rep = ex.execute_signal(parse_signal({"action": "open_long", "symbol": "BTC_USDT", "size": 1, "sl": 1}))
+        self.assertFalse(rep.ok)
+        self.assertIn("HALTED", rep.results[0].error or "")
+
+    def test_max_leverage_reject(self):
+        client = FakeClient()
+        ex = Executor(client, require_sl=False, account_risk={"max_leverage": 5})
+        rep = ex.execute_signal(parse_signal({
+            "action": "open_long", "symbol": "BTC_USDT", "size": 1, "sl": 1, "leverage": 20,
+        }))
+        self.assertFalse(rep.ok)
+        self.assertIn("MAX_LEVERAGE", rep.results[0].error or "")
+
+    def test_idempotent_no_double_on_confirm_flake(self):
+        class Flaky(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.n = 0
+                self.placed_texts = []
+
+            def place_order(self, body):
+                self.placed_texts.append(body.get("text"))
+                return super().place_order(body)
+
+            def get_order(self, oid):
+                self.n += 1
+                if self.n == 1:
+                    raise RuntimeError("timeout")
+                return {"id": oid, "status": "open", "left": 1}
+
+            def list_orders(self, contract=None):
+                return [
+                    {"id": i + 1, "text": o.get("text")}
+                    for i, o in enumerate(self.orders)
+                    if isinstance(o, dict) and o.get("text")
+                ]
+
+        c = Flaky()
+        ex = Executor(c, require_sl=True)
+        rep = ex.execute_signal(parse_signal({
+            "action": "open_long", "symbol": "BTC_USDT", "size": 1, "sl": 1, "label": "idem",
+        }))
+        # entry should succeed without placing twice
+        self.assertTrue(rep.ok)
+        self.assertEqual(c.placed_texts.count("t-idem"), 1)
+
+    def test_sl_size_uses_filled(self):
+        class FilledClient(FakeClient):
+            def place_order(self, body):
+                self.orders.append(body)
+                return {"id": len(self.orders), "size": body.get("size"), "left": 0,
+                        "finish_as": "filled", "status": "finished", **body}
+
+        c = FilledClient()
+        ex = Executor(c)
+        rep = ex.execute_signal(parse_signal({
+            "action": "open_long", "symbol": "BTC_USDT", "size": 5, "sl": 1, "label": "fill",
+        }))
+        s = rep.results[0]
+        self.assertEqual(s.detail.get("exit_size"), 5)
+        sl = (s.detail.get("sl_orders") or [{}])[0]
+        self.assertEqual((sl.get("order") or {}).get("initial", {}).get("size"), -5)
+
     def test_open_size_pct(self):
         client = FakeClient()
         ex = Executor(client, max_notional_usd=5000)
-        sig = parse_signal({"action": "open_long", "symbol": "BTC_USDT", "size_pct": 0.1})
+        sig = parse_signal({"action": "open_long", "symbol": "BTC_USDT", "size_pct": 0.1, "sl": 48000})
         # 10% of 1000 available = 100 USD → 20 contracts at 50000
         report = ex.execute_signal(sig)
         self.assertTrue(report.ok, report.to_dict())
