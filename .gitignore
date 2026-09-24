@@ -10,3 +10,20 @@ archive/failed/*
 logs/*
 !logs/.gitkeep
 *.log
+
+# monorepo: pa-data-source runtime (never commit data/secrets)
+pa-data-source/data/
+pa-data-source/logs/
+pa-data-source/aux-data/
+pa-data-source/gate-cli.exe
+pa-data-source/__pycache__/
+
+# test residue
+.market_read_test/
+.order_type_test/
+.multi_bot_test/
+.smoke_inbox/
+.soak_test/
+.playwright-cli/
+.worktrees/
+*.zip

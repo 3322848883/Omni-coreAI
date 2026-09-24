@@ -1,0 +1,4 @@
+interface:
+  display_name: "PA 数据源（节点1）"
+  short_description: "Gate.io 行情与账户数据采集、监控与健康检查"
+  default_prompt: "Use $pa-data-source to fetch and monitor Gate.io K-line and account data, then prepare the database for price action analysis."

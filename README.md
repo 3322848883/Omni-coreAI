@@ -1,4 +1,43 @@
-# gate-signal-bot
+# gate-io monorepo（gate-signal-bot + pa-data-source）
+
+一个仓库两个组件，**文件级接口**（只读 `kline.db`），进程分离、互不 import。
+
+| 目录 | 角色 |
+|------|------|
+| `gate_bot/` | 策略 JSON → 风控 → Gate 下单（执行） |
+| `pa-data-source/` | 行情/账户采集管道（WS+REST→SQLite），**零判断** |
+| `contracts/` | 两组件唯一接缝：`kline.db` schema v1 |
+
+```text
+pa-data-source（独立进程/watchdog）
+    └─ write → data/kline.db / kline_testnet.db
+                    │ 只读
+                    ▼
+gate_bot strategist（hybrid）→ LLM → 风控 → inbox → executor → Gate
+```
+
+长期稳定约定见 **`contracts/KLINE_SCHEMA.md`**；bot 读不到合规库时自动 REST，不硬读。
+
+### 跑数据管道（可选，独立进程）
+
+```bash
+cd pa-data-source
+# 依赖：pyyaml + websocket-client（见 pa-data-source/requirements.txt）
+.venv\Scripts\python.exe watchdog.py          # kline live/testnet + aux 整体守护
+.venv\Scripts\python.exe status.py --json     # 先查后用
+.venv\Scripts\python.exe query_kline.py -s BTC_USDT -i 15m -n 20
+```
+
+- 密钥：实盘 `GATE_API_KEY` / 测试网 `GATE_TESTNET_API_KEY`（环境变量，不落盘）
+- 数据落 `pa-data-source/data/`；**bot 只读该目录**
+- 备用源 `gate-cli.exe` 不进 git，需要时放到 `pa-data-source/` 下
+- bot 侧无需启动 pa：缺库自动 `rest_only`
+
+---
+
+---
+
+## gate-signal-bot
 
 Gate.io 策略 JSON 信号下单机器人：AI/策略把交易意图 JSON 写入指定文件夹，机器人自动识别并直接下单。
 
@@ -35,7 +74,7 @@ strategist:
   candles: 120
   market:
     mode: hybrid          # hybrid | rest_only | local_only
-    pa_data_root: ../pa-data-source-v2.11/data
+    pa_data_root: pa-data-source/data
     stale_factor: 2.0
   risk:
     min_confidence: 0.75
@@ -70,10 +109,10 @@ LLM 输出 **Plan**（chips 数组），经风控后转 `orders[]` 写入 inbox�
 - `hybrid` — 本地优先，末根年龄 > `stale_factor × 周期` 则回退 REST
 - `local_only` — 只读本地库，不打 K 线 REST
 
-路径：`GATE_BOT_PA_DATA` 环境变量 > `market.pa_data_root` > `../pa-data-source-v2.11/data`。  
+路径：`GATE_BOT_PA_DATA` 环境变量 > `market.pa_data_root` > 默认 `pa-data-source/data`（monorepo 内）。  
 `env: testnet` 自动读 `kline_testnet.db`，与实盘 `kline.db` 隔离。  
 可选 `health_url: http://127.0.0.1:18080/health`，非 200 时视本地库不可信。  
-契约见 `docs/compose/spec/market-data-hybrid.md`。
+契约见 **`contracts/KLINE_SCHEMA.md`** 与 `docs/compose/spec/market-data-hybrid.md`。
 
 ## 交易日志（trades）
 

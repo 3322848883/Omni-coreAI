@@ -40,7 +40,7 @@ default_replace: none
 #   candles: 120
 #   market:
 #     mode: hybrid                 # hybrid | rest_only | local_only
-#     pa_data_root: ../pa-data-source-v2.11/data
+#     pa_data_root: pa-data-source/data
 #     db: kline.db                 # testnet 自动改 kline_testnet.db
 #     stale_factor: 2.0
 #     # health_url: http://127.0.0.1:18080/health

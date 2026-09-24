@@ -1,0 +1,25 @@
+market_type: futures
+env: testnet       # 模拟盘：数据写入独立库 data/kline_testnet.db，与实盘完全隔离
+symbols:
+  - name: BTC_USDT
+    intervals: [1m, 5m, 15m, 1h, 4h, 1d]
+  - name: ETH_USDT
+    intervals: [1m, 5m, 15m, 1h, 4h, 1d]
+  - name: SOL_USDT
+    intervals: [1m, 5m, 15m, 1h, 4h, 1d]
+  - name: DOGE_USDT
+    intervals: [1m, 5m, 15m, 1h, 4h, 1d]
+  - name: XRP_USDT
+    intervals: [1m, 5m, 15m, 1h, 4h, 1d]
+indicators:
+  - ema: [20]
+output_dir: "./data"
+retention_days: 180
+max_candles: 2000
+log_level: INFO
+
+# === 账户推送配置（模拟盘） ===
+# 模拟盘独立密钥：用户级环境变量 GATE_TESTNET_API_KEY / GATE_TESTNET_API_SECRET（密钥不落盘，2026-08-30 已从 yaml 迁出）
+# 与实盘 GATE_API_KEY 完全隔离；环境变量缺失时账户推送自动关闭（行情照常）
+account_push: true
+account_push_interval: 60

@@ -1,0 +1,5 @@
+# pa-data-source 运行依赖（Python 3.9+）
+# 安装:  Windows 运行 install.bat / Linux 运行 bash server_setup.sh
+# 手动:  pip install -r requirements.txt
+pyyaml>=5.4
+websocket-client>=1.0

@@ -1,0 +1,29 @@
+market_type: futures
+env: live          # live=实盘（默认）| testnet=测试网；行情公开接口与账户均按此环境
+symbols:
+  - name: BTC_USDT
+    intervals: [1m, 5m, 15m, 1h, 4h, 1d]
+  - name: ETH_USDT
+    intervals: [1m, 5m, 15m, 1h, 4h, 1d]
+  - name: SOL_USDT
+    intervals: [1m, 5m, 15m, 1h, 4h, 1d]
+  - name: XAU_USDT
+    intervals: [1m, 5m, 15m, 1h, 4h, 1d]
+  - name: XAG_USDT
+    intervals: [1m, 5m, 15m, 1h, 4h, 1d]
+indicators:
+  - ema: [20]
+output_dir: "./data"
+retention_days: 180
+max_candles: 2000
+log_level: INFO
+
+# === 账户推送配置 ===
+# 密钥不落盘（可移植技能）：优先读取环境变量 GATE_API_KEY / GATE_API_SECRET；
+# 如确需写入本文件，请填入你自己的密钥（需要 Futures 权限）。
+# api_key: ""
+# api_secret: ""
+# 启用账户推送（持仓、余额、挂单）
+account_push: true
+# 账户汇总打印间隔（秒）
+account_push_interval: 60

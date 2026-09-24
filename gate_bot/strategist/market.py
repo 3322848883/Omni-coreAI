@@ -70,7 +70,8 @@ def resolve_pa_data_root(market_cfg: Optional[MarketConfig] = None, bot_root: Op
             p = (base / p).resolve()
         return p
     if bot_root:
-        return (bot_root / ".." / "pa-data-source-v2.11" / "data").resolve()
+        # monorepo default: <root>/pa-data-source/data
+        return (bot_root / "pa-data-source" / "data").resolve()
     return None
 
 
@@ -114,6 +115,12 @@ def _to_float(v: Any) -> Optional[float]:
 
 def load_local_candles(db_path: Optional[Path], symbol: str, interval: str, limit: int) -> Optional[list[dict[str, Any]]]:
     if not db_path or not Path(db_path).exists():
+        return None
+    try:
+        from contracts.kline_schema import validate_kline_schema
+
+        validate_kline_schema(Path(db_path))
+    except Exception:  # noqa: BLE001 — contract miss → treat as unreadable, fall back REST
         return None
     try:
         conn = sqlite3.connect(str(db_path), timeout=5)

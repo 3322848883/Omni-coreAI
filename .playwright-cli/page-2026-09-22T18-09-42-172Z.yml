@@ -1,5 +1,0 @@
-- generic [active] [ref=e1]:
-  - heading "Access Denied" [level=1] [ref=e2]
-  - text: You don't have permission to access "http://www.gate.com/docs/developers/agent/zh_CN/" on this server.
-  - paragraph [ref=e3]: "Reference #18.c31fd517.1790100582.c98b72b"
-  - paragraph [ref=e4]: https://errors.edgesuite.net/18.c31fd517.1790100582.c98b72b

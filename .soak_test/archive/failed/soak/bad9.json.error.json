@@ -1,7 +1,0 @@
-{
-  "error": "invalid JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
-  "code": "EXEC_OR_SCHEMA",
-  "message": "invalid JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
-  "file": "bad9.json",
-  "bot_id": "soak"
-}
