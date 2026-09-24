@@ -207,7 +207,7 @@ def signal_handler(sig, frame):
     running = False
 
 
-def _run_cli(args, timeout=30):
+def _run_cli(args, timeout=12):
     cmd = [GATE_CLI] + args + ["--format", "json"]
     try:
         result = subprocess.run(
@@ -1297,53 +1297,8 @@ def run_once():
     now = int(time.time())
     interfaces = {}
     try:
-        if _due("events", sched, now):
-            events = _fetch_events()
-            _write_snapshot("events.json", "news/events/get-latest-events", events)
-            n_new = _store_events(conn, events, seen)
-            interfaces["events"] = {
-                "status": "ok" if events is not None else "fail",
-                "count": len(events.get("items", [])) if isinstance(events, dict) else 0,
-                "new": n_new,
-            }
-            log.info("events: %s 条, 新增 %s 条", interfaces["events"]["count"], n_new)
-            sched["events"] = now
-
-        if _due("overview", sched, now):
-            overview = _fetch_overview()
-            _write_snapshot("overview.json", "info/marketsnapshot/get-market-overview", overview)
-            _store_overview(conn, overview)
-            interfaces["overview"] = {"status": "ok" if overview else "fail"}
-            log.info("overview: %s", "ok" if overview else "fail")
-            sched["overview"] = now
-
-        if _due("macro", sched, now):
-            macro = _fetch_macro()
-            _write_snapshot("macro.json", "info/macro/get-macro-summary", macro)
-            _store_macro(conn, macro)
-            interfaces["macro"] = {"status": "ok" if macro else "fail"}
-            log.info("macro: %s", "ok" if macro else "fail")
-            sched["macro"] = now
-
-        if _due("sentiment", sched, now):
-            sentiment = _fetch_sentiment()
-            _write_snapshot("sentiment.json", "news/feed/get-social-sentiment", sentiment)
-            _store_sentiment(conn, sentiment)
-            interfaces["sentiment"] = {"status": "ok" if sentiment else "fail"}
-            log.info("sentiment: %s", "ok" if sentiment else "fail")
-            sched["sentiment"] = now
-
-        if _due("reserves", sched, now):
-            reserves = _fetch_reserves()
-            _write_snapshot("reserves.json", "info/platformmetrics/get-exchange-reserves", reserves)
-            _store_reserves(conn, reserves)
-            interfaces["reserves"] = {"status": "ok" if reserves else "fail"}
-            log.info("reserves: %s", "ok" if reserves else "fail")
-            sched["reserves"] = now
-
-        # 合约市场结构数据（按品种遍历，5s 循环下低频接口由 _due 拦截）
-        # 注意：_due 在循环前统一判断，sched 更新在循环后——避免首品种触发后
-        # 更新调度时间导致其余品种被误判为未到点
+        # High-frequency futures public first (REST, sub-second) so slow gate-cli
+        # news/info tools cannot starve orderbook/trades storage.
         stats_due = _due("stats", sched, now)
         liq_due = _due("liquidations", sched, now)
         ob_due = _due("orderbook", sched, now)
@@ -1398,6 +1353,50 @@ def run_once():
             sched["trades"] = now
             interfaces["trades"] = {"status": "ok" if len(tr_ok) == len(CONTRACTS) else "fail",
                                     "contracts": tr_ok}
+
+        if _due("events", sched, now):
+            events = _fetch_events()
+            _write_snapshot("events.json", "news/events/get-latest-events", events)
+            n_new = _store_events(conn, events, seen)
+            interfaces["events"] = {
+                "status": "ok" if events is not None else "fail",
+                "count": len(events.get("items", [])) if isinstance(events, dict) else 0,
+                "new": n_new,
+            }
+            log.info("events: %s 条, 新增 %s 条", interfaces["events"]["count"], n_new)
+            sched["events"] = now
+
+        if _due("overview", sched, now):
+            overview = _fetch_overview()
+            _write_snapshot("overview.json", "info/marketsnapshot/get-market-overview", overview)
+            _store_overview(conn, overview)
+            interfaces["overview"] = {"status": "ok" if overview else "fail"}
+            log.info("overview: %s", "ok" if overview else "fail")
+            sched["overview"] = now
+
+        if _due("macro", sched, now):
+            macro = _fetch_macro()
+            _write_snapshot("macro.json", "info/macro/get-macro-summary", macro)
+            _store_macro(conn, macro)
+            interfaces["macro"] = {"status": "ok" if macro else "fail"}
+            log.info("macro: %s", "ok" if macro else "fail")
+            sched["macro"] = now
+
+        if _due("sentiment", sched, now):
+            sentiment = _fetch_sentiment()
+            _write_snapshot("sentiment.json", "news/feed/get-social-sentiment", sentiment)
+            _store_sentiment(conn, sentiment)
+            interfaces["sentiment"] = {"status": "ok" if sentiment else "fail"}
+            log.info("sentiment: %s", "ok" if sentiment else "fail")
+            sched["sentiment"] = now
+
+        if _due("reserves", sched, now):
+            reserves = _fetch_reserves()
+            _write_snapshot("reserves.json", "info/platformmetrics/get-exchange-reserves", reserves)
+            _store_reserves(conn, reserves)
+            interfaces["reserves"] = {"status": "ok" if reserves else "fail"}
+            log.info("reserves: %s", "ok" if reserves else "fail")
+            sched["reserves"] = now
 
         # 情报数据（P0）：市场热度榜 + 上币公告，15min 门控
         if _due("rankings", sched, now):
