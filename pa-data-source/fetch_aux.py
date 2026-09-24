@@ -207,8 +207,84 @@ def signal_handler(sig, frame):
     running = False
 
 
-def _run_cli(args, timeout=12):
-    cmd = [GATE_CLI] + args + ["--format", "json"]
+def _parse_cli_json(output: str):
+    """Parse gate-cli stdout. info/news tools may print a 'Result' banner before JSON."""
+    text = (output or "").strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    for open_ch in "{[":
+        i = text.find(open_ch)
+        if i < 0:
+            continue
+        try:
+            return json.loads(text[i:])
+        except json.JSONDecodeError:
+            # try up to last closer
+            j = text.rfind("}" if open_ch == "{" else "]")
+            if j > i:
+                try:
+                    return json.loads(text[i : j + 1])
+                except json.JSONDecodeError:
+                    continue
+    return None
+
+
+def _run_cli(args, timeout=25):
+    """Run gate-cli.
+
+    Do NOT pass --format to info/news tools: the flag is forwarded into the
+    Intel tool payload and the API rejects it ("unknown field format").
+    Intel transport can TLS-timeout; retry once for those cases.
+    """
+    use_format = not (args and args[0] in ("info", "news"))
+    cmd = [GATE_CLI] + args + (["--format", "json"] if use_format else [])
+    result = None
+    for attempt in (1, 2):
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=GATE_CLI_DIR,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+        except subprocess.TimeoutExpired:
+            log.error("gate-cli 超时(第%s次): %s", attempt, " ".join(args))
+            if attempt == 2:
+                return None
+            continue
+        except Exception as e:
+            log.error("gate-cli 执行异常: %s", e)
+            return None
+        if result.returncode == 0:
+            break
+        err = (result.stderr or result.stdout or "").strip()
+        log.error("gate-cli 失败(第%s次): %s -> %s", attempt, " ".join(args), err[:300])
+        transport_flaky = any(s in err.lower() for s in (
+            "intel_transport", "tls handshake", "timeout", "connection reset",
+        ))
+        if use_format and "format" in err.lower() and "not allowed" in err.lower():
+            return _run_cli_no_format(args, timeout)
+        if attempt == 1 and transport_flaky:
+            continue
+        return None
+    output = result.stdout.strip()
+    if not output:
+        log.error("gate-cli 输出为空: %s", " ".join(args))
+        return None
+    parsed = _parse_cli_json(output)
+    if parsed is None:
+        log.error("gate-cli 输出 JSON 解析失败: %s -> %s", " ".join(args), output[:200])
+    return parsed
+
+
+def _run_cli_no_format(args, timeout=25):
+    cmd = [GATE_CLI] + args
     try:
         result = subprocess.run(
             cmd,
@@ -218,24 +294,13 @@ def _run_cli(args, timeout=12):
             cwd=GATE_CLI_DIR,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
-    except subprocess.TimeoutExpired:
-        log.error("gate-cli 超时: %s", " ".join(args))
-        return None
     except Exception as e:
         log.error("gate-cli 执行异常: %s", e)
         return None
     if result.returncode != 0:
-        log.error("gate-cli 失败: %s -> %s", " ".join(args), result.stderr.strip())
+        log.error("gate-cli 失败: %s -> %s", " ".join(args), (result.stderr or "")[:300])
         return None
-    output = result.stdout.strip()
-    if not output:
-        log.error("gate-cli 输出为空: %s", " ".join(args))
-        return None
-    try:
-        return json.loads(output)
-    except json.JSONDecodeError as e:
-        log.error("gate-cli 输出 JSON 解析失败: %s -> %s", " ".join(args), e)
-        return None
+    return _parse_cli_json(result.stdout)
 
 
 def _fetch_futures_public(path, params=None):
