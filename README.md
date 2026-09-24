@@ -109,27 +109,32 @@ LLM 输出 **Plan**（chips 数组），经风控后转 `orders[]` 写入 inbox�
 | | `check_interval_sec` | 条件检查频率 |
 | **条件** | `price_vs_ema` | `symbol`, **`period` EMA 任意**, `side` |
 | | `ema_cross` | `fast` / **`slow` 任意**, `dir` |
+| | `ma_cross` | `fast`/`slow`, `ma` sma\|ema, `dir` |
+| | `macd_cross` | `fast`, `slow`, `signal`, `dir` |
+| | `boll_break` | `period`, `k`, `side` upper\|lower |
 | | `atr_spike` | **`period` ATR 任意**, `mult`, `lookback` |
 | | `rsi` | **`period` RSI 任意**, `op`, `level` |
 | | `price_break` | `lookback`, `side` |
+| | `volume_spike` | `mult`, `lookback` |
 | | 公共 | `cooldown_sec`, `candles`, `key` |
-| **快照指标** | `market.indicators` | **任意 `emaN`/`rsiN`/`atrN`**（ema9、rsi7、atr10…） |
+| **快照指标** | `market.indicators` | **`emaN`/`rsiN`/`atrN`/`maN`/`smaN`**、`macd`/`macd_dea`/`macd_hist`/`macd12_26_9`、`bollN_K`/`boll_upper`/`boll_middle`/`boll_lower` |
 | **行情** | `market.mode` / `pa_data_root` / `db` / `stale_factor` / `health_url` / `refresh` | |
 | **策略** | `timeframe` / `candles` / `prompt_file` / `write_hold` | |
 | **风控** | `min_confidence` / `max_notional_usd` / `max_chips` / `allow_actions` | 程序强制 |
 | **LLM** | `model` / `temperature` / `timeout_sec` / `max_tokens` / env 名 | |
 | **执行** | `position_policy` / `default_replace` / `label_prefix` / bot `max_notional_usd` | |
 
-指标类 **周期任意可配**（触发与快照均支持）：
+指标类 **周期任意** + MACD/BOLL/MA；**未知名启动即报错**（不静默 null）：
 
 ```yaml
 strategist:
   market:
-    indicators: [ema9, ema21, ema50, atr10, rsi7, rsi14]
+    indicators: [ema9, ma30, rsi7, atr10, macd, macd_dea, macd_hist, boll20]
   conditions:
-    - {type: ema_cross, symbol: BTC_USDT, fast: 9, slow: 21}
-    - {type: rsi, symbol: BTC_USDT, period: 7, op: gt, level: 80}
-    - {type: atr_spike, symbol: BTC_USDT, period: 10, mult: 1.4}
+    - {type: macd_cross, symbol: BTC_USDT, dir: up}
+    - {type: boll_break, symbol: BTC_USDT, side: upper}
+    - {type: ma_cross, symbol: BTC_USDT, fast: 7, slow: 30, ma: sma}
+    - {type: volume_spike, symbol: BTC_USDT, mult: 2}
 ```
 
 合计约 **50 项**可配（触发 5 + 条件约 20 + 指标名任意 + 行情 6 + 策略 4 + 风控 4 + LLM 5 + 执行 4）。

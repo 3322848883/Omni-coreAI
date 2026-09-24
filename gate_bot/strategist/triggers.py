@@ -8,6 +8,10 @@ Condition dict shapes (all optional fields documented in README):
   {"type": "atr_spike", "symbol": "BTC_USDT", "period": 14, "mult": 1.5, "lookback": 20}
   {"type": "price_break", "symbol": "BTC_USDT", "lookback": 20, "side": "high"|"low"}
   {"type": "rsi", "symbol": "BTC_USDT", "period": 14, "op": "gt"|"lt", "level": 70}
+  {"type": "ma_cross", "symbol": "BTC_USDT", "fast": 7, "slow": 30, "dir": "up"|"down"|"any", "ma": "sma"|"ema"}
+  {"type": "macd_cross", "symbol": "BTC_USDT", "fast": 12, "slow": 26, "signal": 9, "dir": "up"|"down"|"any"}
+  {"type": "boll_break", "symbol": "BTC_USDT", "period": 20, "k": 2, "side": "upper"|"lower"}
+  {"type": "volume_spike", "symbol": "BTC_USDT", "mult": 2, "lookback": 20}
 
 Each condition fires at most once per `cooldown_sec` (default 60) after it last fired.
 """
@@ -18,7 +22,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from .indicators import atr, ema, rsi
+from .indicators import atr, boll, ema, macd, rsi, sma
 
 log = logging.getLogger("gate_bot.triggers")
 
@@ -164,6 +168,72 @@ def evaluate_condition(client, cond: dict, timeframe: str, now: Optional[float] 
         if op == "gt":
             return val > level, f"rsi{period}={val:.2f} > {level}"
         return val < level, f"rsi{period}={val:.2f} < {level}"
+
+    if ctype == "ma_cross":
+        fast_n = int(cond.get("fast") or 7)
+        slow_n = int(cond.get("slow") or 30)
+        direction = str(cond.get("dir") or "any").lower()
+        kind = str(cond.get("ma") or "sma").lower()  # sma | ema
+        if len(closes) < slow_n + 2:
+            return False, "not enough for ma_cross"
+        f_s = (ema if kind == "ema" else sma)(closes, fast_n)
+        s_s = (ema if kind == "ema" else sma)(closes, slow_n)
+        if None in (f_s[-1], f_s[-2], s_s[-1], s_s[-2]):
+            return False, "ma not ready"
+        now_up = f_s[-1] > s_s[-1]
+        prev_up = f_s[-2] > s_s[-2]
+        crossed_up = now_up and not prev_up
+        crossed_down = (not now_up) and prev_up
+        if direction == "up" and crossed_up:
+            return True, f"ma{fast_n}>{slow_n} cross up"
+        if direction == "down" and crossed_down:
+            return True, f"ma{fast_n}<{slow_n} cross down"
+        if direction == "any" and (crossed_up or crossed_down):
+            return True, f"ma{fast_n}/{slow_n} cross {'up' if crossed_up else 'down'}"
+        return False, f"fast={f_s[-1]:.4f} slow={s_s[-1]:.4f}"
+
+    if ctype == "macd_cross":
+        fast_n = int(cond.get("fast") or 12)
+        slow_n = int(cond.get("slow") or 26)
+        sig_n = int(cond.get("signal") or 9)
+        direction = str(cond.get("dir") or "any").lower()
+        series = macd(closes, fast_n, slow_n, sig_n)
+        dif, dea = series["dif"], series["dea"]
+        if None in (dif[-1], dif[-2], dea[-1], dea[-2]):
+            return False, "macd not ready"
+        now_up = dif[-1] > dea[-1]
+        prev_up = dif[-2] > dea[-2]
+        crossed_up = now_up and not prev_up
+        crossed_down = (not now_up) and prev_up
+        if direction == "up" and crossed_up:
+            return True, f"macd cross up dif={dif[-1]:.4f} dea={dea[-1]:.4f}"
+        if direction == "down" and crossed_down:
+            return True, f"macd cross down dif={dif[-1]:.4f} dea={dea[-1]:.4f}"
+        if direction == "any" and (crossed_up or crossed_down):
+            return True, f"macd cross {'up' if crossed_up else 'down'}"
+        return False, f"dif={dif[-1]:.4f} dea={dea[-1]:.4f}"
+
+    if ctype == "boll_break":
+        period = int(cond.get("period") or 20)
+        kb = float(cond.get("k") or 2.0)
+        side = str(cond.get("side") or "upper").lower()  # upper | lower
+        series = boll(closes, period, kb)
+        up, lo = series["upper"][-1], series["lower"][-1]
+        if up is None or lo is None:
+            return False, "boll not ready"
+        if side == "upper":
+            return last > up, f"last={last:.4f} boll_upper={up:.4f}"
+        return last < lo, f"last={last:.4f} boll_lower={lo:.4f}"
+
+    if ctype == "volume_spike":
+        mult = float(cond.get("mult") or 2.0)
+        lookback = int(cond.get("lookback") or 20)
+        vols = [r["v"] for r in rows[-lookback - 1 : -1]]
+        if not vols:
+            return False, "volume window empty"
+        avg = sum(vols) / len(vols)
+        cur = rows[-1]["v"]
+        return cur > avg * mult, f"vol={cur:.0f} avg={avg:.0f} x{mult}"
 
     return False, f"unknown condition {ctype}"
 

@@ -108,6 +108,60 @@ class TestEvaluate(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("atr", reason)
 
+    def test_ma_cross_callable(self):
+        closes = [10, 9, 8, 7, 6, 5, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        c = FakeMD(closes)
+        ok, reason = evaluate_condition(
+            c, {"type": "ma_cross", "symbol": "BTC_USDT", "fast": 3, "slow": 5, "dir": "any"},
+            "1m",
+        )
+        self.assertIn(ok, (True, False))
+        self.assertTrue(reason)
+
+    def test_macd_cross_callable(self):
+        closes = [float(i) for i in range(1, 50)]
+        c = FakeMD(closes)
+        ok, reason = evaluate_condition(
+            c, {"type": "macd_cross", "symbol": "BTC_USDT", "fast": 3, "slow": 6, "signal": 3, "dir": "any"},
+            "1m",
+        )
+        self.assertIn(ok, (True, False))
+
+    def test_boll_break(self):
+        closes = [10.0] * 15 + [20.0]
+        c = FakeMD(closes)
+        ok, reason = evaluate_condition(
+            c, {"type": "boll_break", "symbol": "BTC_USDT", "period": 5, "k": 1, "side": "upper"},
+            "1m",
+        )
+        self.assertTrue(ok)
+        self.assertIn("boll_upper", reason)
+
+    def test_volume_spike(self):
+        class VC(FakeMD):
+            def public_get(self, path, qs=""):
+                rows = []
+                for i in range(30):
+                    v = 1.0 if i < 29 else 50.0
+                    rows.append([1000 + i, str(v), "10", "11", "9", "10", "0"])
+                return rows
+
+        ok, reason = evaluate_condition(
+            VC(), {"type": "volume_spike", "symbol": "BTC_USDT", "mult": 5, "lookback": 10},
+            "1m",
+        )
+        self.assertTrue(ok)
+        self.assertIn("vol", reason)
+
+    def test_parse_new_types(self):
+        conds = parse_conditions([
+            {"type": "macd_cross", "symbol": "BTC_USDT"},
+            {"type": "boll_break", "symbol": "BTC_USDT"},
+            {"type": "ma_cross", "symbol": "BTC_USDT"},
+            {"type": "volume_spike", "symbol": "BTC_USDT"},
+        ])
+        self.assertEqual(len(conds), 4)
+
     def test_cooldown(self):
         c = FakeMD()
         cond = {"type": "price_vs_ema", "symbol": "BTC_USDT", "period": 5, "side": "above", "cooldown_sec": 999}

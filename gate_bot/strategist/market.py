@@ -46,6 +46,14 @@ class MarketConfig:
         else:
             self.stale_factor = float(self.stale_factor)
         self.indicators = [str(x) for x in (self.indicators or [])]
+        if self.indicators:
+            from .indicators import IndicatorNameError, parse_indicator_name
+
+            for name in self.indicators:
+                try:
+                    parse_indicator_name(name)
+                except IndicatorNameError as e:
+                    raise ValueError(str(e)) from e
         allowed = {"ticker", "stats", "orderbook", "last"}
         self.refresh = [str(x).lower() for x in (self.refresh or []) if str(x).lower() in allowed]
 

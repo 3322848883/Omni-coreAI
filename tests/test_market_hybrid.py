@@ -9,11 +9,16 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from gate_bot.strategist.indicators import (  # noqa: E402
+    IndicatorNameError,
     attach_indicators,
     atr,
+    boll,
     ema,
     latest_indicators,
+    macd,
+    parse_indicator_name,
     rsi,
+    sma,
 )
 from gate_bot.strategist.market import (  # noqa: E402
     MarketConfig,
@@ -133,6 +138,65 @@ class TestIndicators(unittest.TestCase):
         self.assertAlmostEqual(out[14], 0.0)
         self.assertGreater(out[-1], 0.0)
         self.assertLess(out[-1], 100.0)
+
+    def test_sma(self):
+        out = sma([1.0, 2.0, 3.0, 4.0], 2)
+        self.assertIsNone(out[0])
+        self.assertAlmostEqual(out[1], 1.5)
+        self.assertAlmostEqual(out[3], 3.5)
+
+    def test_macd_series(self):
+        closes = [float(i) for i in range(1, 60)]
+        m = macd(closes, 3, 6, 3)
+        self.assertEqual(len(m["dif"]), 59)
+        self.assertIsNotNone(m["dif"][-1])
+        self.assertIsNotNone(m["dea"][-1])
+        self.assertIsNotNone(m["hist"][-1])
+        self.assertAlmostEqual(m["hist"][-1], m["dif"][-1] - m["dea"][-1])
+
+    def test_boll_bands(self):
+        closes = [10.0, 11.0, 9.0, 10.5, 10.0, 10.2, 9.8, 10.1, 10.0, 10.05]
+        s = boll(closes, 5, 2.0)
+        self.assertIsNotNone(s["middle"][-1])
+        self.assertGreater(s["upper"][-1], s["middle"][-1])
+        self.assertLess(s["lower"][-1], s["middle"][-1])
+
+    def test_parse_indicator_names(self):
+        self.assertEqual(parse_indicator_name("ma7")["kind"], "ma")
+        self.assertEqual(parse_indicator_name("sma20")["period"], 20)
+        self.assertEqual(parse_indicator_name("macd")["field"], "dif")
+        self.assertEqual(parse_indicator_name("macd_dea")["field"], "dea")
+        self.assertEqual(parse_indicator_name("macd_difference")["field"], "hist")
+        self.assertEqual(parse_indicator_name("macd12_26_9")["fast"], 12)
+        self.assertEqual(parse_indicator_name("boll20")["period"], 20)
+        self.assertEqual(parse_indicator_name("boll20_2")["k"], 2.0)
+        self.assertEqual(parse_indicator_name("boll_upper_band")["field"], "upper")
+
+    def test_unknown_indicator_raises(self):
+        with self.assertRaises(IndicatorNameError):
+            parse_indicator_name("foo")
+        with self.assertRaises(IndicatorNameError):
+            attach_indicators([{"c": 1.0}], ["macd_cross", "zzz"])
+
+    def test_attach_ma_macd_boll(self):
+        rows = []
+        for i in range(60):
+            c = 1.0 + i * 0.01
+            rows.append({"t": i, "o": c, "h": c + 0.1, "l": c - 0.1, "c": c, "v": 1.0})
+        out = attach_indicators(rows, ["ma7", "sma20", "macd", "macd_dea", "macd_hist", "boll20"])
+        last = out[-1]
+        self.assertIsNotNone(last.get("ma7"))
+        self.assertIsNotNone(last.get("sma20"))
+        self.assertIsNotNone(last.get("macd"))
+        self.assertIsNotNone(last.get("macd_dea"))
+        self.assertIsNotNone(last.get("macd_hist"))
+        self.assertIsNotNone(last.get("boll_upper"))
+        self.assertIsNotNone(last.get("boll_middle"))
+        self.assertIsNotNone(last.get("boll_lower"))
+
+    def test_market_config_rejects_unknown_indicator(self):
+        with self.assertRaises(ValueError):
+            MarketConfig(mode="rest_only", indicators=["ema20", "foo"])
 
     def test_custom_indicator_periods(self):
         rows = []

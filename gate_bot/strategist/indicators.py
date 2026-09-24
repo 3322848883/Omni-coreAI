@@ -1,12 +1,36 @@
-"""Local technical indicators (EMA / RSI / ATR) for strategist snapshots.
+"""Local technical indicators for strategist snapshots and triggers.
 
-Main path keeps pa-data-source ema20/atr14 when present and warm-starts any
-gap from the last known DB value (never recomputes a detached window).
-Formulas match pa-data-source kline_watcher: EMA k=2/(n+1), ATR/RSI Wilder.
+Supported names (custom periods):
+  emaN / rsiN / atrN / maN / smaN
+  macd | macd_dea | macd_hist | macd_difference
+  macdF_S_SIG   (e.g. macd12_26_9 → dif=EMA12-EMA26, dea=EMA9(dif))
+  bollN | bollN_K | boll | boll_upper|middle|lower | boll_*_band
+      (default N=20, K=2; columns boll_upper/boll_middle/boll_lower)
+
+EMA k=2/(n+1); ATR/RSI Wilder — match pa-data-source kline_watcher.
+Unknown names raise ValueError (no silent null).
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
+
+__all__ = [
+    "ema",
+    "sma",
+    "rsi",
+    "atr",
+    "macd",
+    "boll",
+    "parse_indicator_name",
+    "attach_indicators",
+    "latest_indicators",
+    "IndicatorNameError",
+]
+
+
+class IndicatorNameError(ValueError):
+    pass
 
 
 def ema(closes: list[float], period: int) -> list[Optional[float]]:
@@ -16,12 +40,26 @@ def ema(closes: list[float], period: int) -> list[Optional[float]]:
     if period <= 0 or n < period:
         return out
     k = 2.0 / (period + 1)
-    sma = sum(closes[:period]) / period
-    out[period - 1] = sma
-    prev = sma
+    sma0 = sum(closes[:period]) / period
+    out[period - 1] = sma0
+    prev = sma0
     for i in range(period, n):
         prev = closes[i] * k + prev * (1.0 - k)
         out[i] = prev
+    return out
+
+
+def sma(values: list[float], period: int) -> list[Optional[float]]:
+    """Simple moving average."""
+    n = len(values)
+    out: list[Optional[float]] = [None] * n
+    if period <= 0 or n < period:
+        return out
+    run = sum(values[:period])
+    out[period - 1] = run / period
+    for i in range(period, n):
+        run += values[i] - values[i - period]
+        out[i] = run / period
     return out
 
 
@@ -78,6 +116,60 @@ def atr(
     return out
 
 
+def macd(
+    closes: list[float],
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+) -> dict[str, list[Optional[float]]]:
+    """MACD: dif=EMA(fast)-EMA(slow), dea=EMA(signal) of dif, hist=dif-dea."""
+    ef = ema(closes, fast)
+    es = ema(closes, slow)
+    dif: list[Optional[float]] = []
+    for a, b in zip(ef, es):
+        dif.append(None if a is None or b is None else a - b)
+    # EMA of dif (treat None as skip — seed after first non-None run)
+    dea: list[Optional[float]] = [None] * len(dif)
+    k = 2.0 / (signal + 1)
+    state: Optional[float] = None
+    seed: list[float] = []
+    for i, d in enumerate(dif):
+        if d is None:
+            continue
+        if state is None:
+            seed.append(d)
+            if len(seed) >= signal:
+                state = sum(seed) / signal
+                dea[i] = state
+        else:
+            state = d * k + state * (1.0 - k)
+            dea[i] = state
+    hist: list[Optional[float]] = [
+        None if (d is None or s is None) else d - s for d, s in zip(dif, dea)
+    ]
+    return {"dif": dif, "dea": dea, "hist": hist}
+
+
+def boll(
+    closes: list[float], period: int = 20, k: float = 2.0
+) -> dict[str, list[Optional[float]]]:
+    """Bollinger: middle=SMA(period), band=middle±k*population std."""
+    n = len(closes)
+    middle = sma(closes, period)
+    upper: list[Optional[float]] = [None] * n
+    lower: list[Optional[float]] = [None] * n
+    for i in range(n):
+        m = middle[i]
+        if m is None:
+            continue
+        window = closes[i - period + 1 : i + 1]
+        var = sum((x - m) ** 2 for x in window) / period
+        sd = var ** 0.5
+        upper[i] = m + k * sd
+        lower[i] = m - k * sd
+    return {"upper": upper, "middle": middle, "lower": lower}
+
+
 def _f(v: Any) -> Optional[float]:
     if v is None or v == "":
         return None
@@ -87,16 +179,10 @@ def _f(v: Any) -> Optional[float]:
         return None
 
 
-def _fill_ema_from(
-    rows: list[dict[str, Any]],
-    key: str,
-    period: int,
-    close_key: str = "c",
-) -> None:
-    """Write `key` in-place; keep existing values and warm-start gaps from state."""
+def _fill_ema_from(rows, key, period, close_key="c") -> None:
     k = 2.0 / (period + 1)
     state: Optional[float] = None
-    closes: list[Optional[float]] = [_f(r.get(close_key)) for r in rows]
+    closes = [_f(r.get(close_key)) for r in rows]
     n = len(rows)
     for i in range(n):
         existing = _f(rows[i].get(key))
@@ -114,9 +200,9 @@ def _fill_ema_from(
                 if any(x is None for x in window):
                     rows[i][key] = None
                 else:
-                    sma = sum(window) / period  # type: ignore[arg-type]
-                    rows[i][key] = sma
-                    state = sma
+                    s = sum(window) / period
+                    rows[i][key] = s
+                    state = s
             else:
                 rows[i][key] = None
         else:
@@ -124,12 +210,22 @@ def _fill_ema_from(
             rows[i][key] = state
 
 
-def _fill_atr_from(
-    rows: list[dict[str, Any]],
-    key: str,
-    period: int,
-) -> None:
-    """Wilder ATR in-place; keep existing values and warm-start gaps from state."""
+def _fill_sma_from(rows, key, period) -> None:
+    closes = [_f(r.get("c")) for r in rows]
+    for i in range(len(rows)):
+        if _f(rows[i].get(key)) is not None:
+            continue
+        if i + 1 < period:
+            rows[i][key] = None
+            continue
+        window = closes[i - period + 1 : i + 1]
+        if any(x is None for x in window):
+            rows[i][key] = None
+        else:
+            rows[i][key] = sum(window) / period
+
+
+def _fill_atr_from(rows, key, period) -> None:
     state: Optional[float] = None
     n = len(rows)
     tr_window: list[float] = []
@@ -164,8 +260,7 @@ def _fill_atr_from(
         prev_c = c
 
 
-def _fill_rsi_from(rows: list[dict[str, Any]], key: str, period: int) -> None:
-    """Wilder RSI in-place over rows with numeric closes; gaps leave None."""
+def _fill_rsi_from(rows, key, period) -> None:
     closes = [_f(r.get("c")) for r in rows]
     n = len(rows)
     gains: list[float] = []
@@ -193,37 +288,142 @@ def _fill_rsi_from(rows: list[dict[str, Any]], key: str, period: int) -> None:
         rows[i][key] = _rsi_value(avg_gain, avg_loss)
 
 
-def _parse_indicator_name(name: str) -> tuple[str, int]:
-    """'ema20'/'rsi14'/'atr10' → (kind, period); unknown → ('', 0)."""
+def _fill_macd_from(rows, fast, slow, signal, prefix="") -> None:
+    """Fill macd / macd_dea / macd_hist (or custom keys via mapping in caller)."""
+    closes = [_f(r.get("c")) for r in rows]
+    series = macd([c if c is not None else 0.0 for c in closes], fast, slow, signal)
+    keys = {
+        "dif": prefix + "macd" if not prefix else "macd",
+        "dea": "macd_dea",
+        "hist": "macd_hist",
+    }
+    if prefix == "macd_difference":
+        keys["hist"] = "macd_difference"
+    for i in range(len(rows)):
+        rows[i]["macd"] = series["dif"][i]
+        rows[i]["macd_dea"] = series["dea"][i]
+        rows[i]["macd_hist"] = series["hist"][i]
+        rows[i]["macd_difference"] = series["hist"][i]  # Gate CLI alias
+
+
+def _fill_boll_from(rows, period, k, only: Optional[str] = None) -> None:
+    closes = [_f(r.get("c")) for r in rows]
+    series = boll([c if c is not None else 0.0 for c in closes], period, k)
+    mapping = {
+        "upper": "boll_upper",
+        "middle": "boll_middle",
+        "lower": "boll_lower",
+    }
+    for i in range(len(rows)):
+        for part, key in mapping.items():
+            if only and part != only:
+                continue
+            rows[i][key] = series[part][i]
+            # Gate CLI aliases
+            rows[i][key + "_band"] = series[part][i]
+
+
+_MACD_RE = re.compile(r"^macd(?:_(dea|hist|difference))?$")
+_MACD_PARAM_RE = re.compile(r"^macd(\d+)_(\d+)_(\d+)$")
+_BOLL_RE = re.compile(r"^boll(?:(\d+)(?:_(\d+(?:\.\d+)?))?)?$")
+_BOLL_PART_RE = re.compile(r"^boll_(upper|middle|lower)(?:_band)?$")
+
+
+def parse_indicator_name(name: str) -> dict[str, Any]:
+    """Parse indicator name → spec dict; raise IndicatorNameError if unknown."""
     n = (name or "").strip().lower()
-    for kind in ("ema", "rsi", "atr"):
-        if n.startswith(kind) and n[len(kind):].isdigit():
-            return kind, int(n[len(kind):])
-    return "", 0
+    for kind in ("ema", "rsi", "atr", "ma", "sma"):
+        if n.startswith(kind) and n[len(kind) :].isdigit():
+            return {"kind": kind, "period": int(n[len(kind) :]), "name": n}
+
+    m = _MACD_PARAM_RE.match(n)
+    if m:
+        return {
+            "kind": "macd",
+            "fast": int(m.group(1)),
+            "slow": int(m.group(2)),
+            "signal": int(m.group(3)),
+            "field": "dif",
+            "name": n,
+        }
+    m = _MACD_RE.match(n)
+    if m:
+        part = m.group(1) or "dif"
+        if part == "difference":
+            part = "hist"
+        field = {"dif": "dif", "dea": "dea", "hist": "hist"}[part]
+        return {"kind": "macd", "fast": 12, "slow": 26, "signal": 9, "field": field, "name": n}
+
+    m = _BOLL_PART_RE.match(n)
+    if m:
+        return {
+            "kind": "boll",
+            "period": 20,
+            "k": 2.0,
+            "field": m.group(1),
+            "name": n,
+        }
+    m = _BOLL_RE.match(n)
+    if m:
+        period = int(m.group(1) or 20)
+        k = float(m.group(2) or 2)
+        return {"kind": "boll", "period": period, "k": k, "field": "all", "name": n}
+
+    raise IndicatorNameError(
+        f"unknown indicator {name!r}; supported: emaN/rsiN/atrN/maN/smaN, "
+        "macd|macd_dea|macd_hist|macd_difference|macdF_S_SIG, "
+        "bollN_K|boll|boll_upper|boll_middle|boll_lower"
+    )
 
 
 def attach_indicators(rows: list[dict[str, Any]], wanted: list[str] | None = None) -> list[dict[str, Any]]:
-    """Attach indicator columns to candle rows.
-
-    Accepts any emaN / rsiN / atrN (custom periods). Keeps non-null DB values
-    (e.g. pa ema20/atr14) and warm-starts gaps from the last known state.
-    """
+    """Attach indicator columns; raises IndicatorNameError on unknown names."""
     if not rows:
         return rows
     wanted = list(wanted or ["ema20", "ema50", "atr14", "rsi14"])
-    for name in wanted:
-        kind, period = _parse_indicator_name(name)
-        if kind == "ema" and period > 0:
-            _fill_ema_from(rows, name, period)
-        elif kind == "atr" and period > 0:
-            _fill_atr_from(rows, name, period)
-        elif kind == "rsi" and period > 0:
-            _fill_rsi_from(rows, name, period)
+    specs = [parse_indicator_name(n) for n in wanted]
+
+    # dedupe expensive multi-output families
+    done_macd: set[tuple] = set()
+    done_boll: set[tuple] = set()
+    for spec in specs:
+        kind = spec["kind"]
+        if kind == "ema":
+            _fill_ema_from(rows, spec["name"], spec["period"])
+        elif kind in ("ma", "sma"):
+            _fill_sma_from(rows, spec["name"], spec["period"])
+        elif kind == "atr":
+            _fill_atr_from(rows, spec["name"], spec["period"])
+        elif kind == "rsi":
+            _fill_rsi_from(rows, spec["name"], spec["period"])
+        elif kind == "macd":
+            key = (spec["fast"], spec["slow"], spec["signal"])
+            if key not in done_macd:
+                _fill_macd_from(rows, spec["fast"], spec["slow"], spec["signal"])
+                done_macd.add(key)
+            # ensure requested alias key exists
+            field = spec["field"]
+            src = {"dif": "macd", "dea": "macd_dea", "hist": "macd_hist"}[field]
+            for i, r in enumerate(rows):
+                r[spec["name"]] = r.get(src)
+        elif kind == "boll":
+            key = (spec["period"], spec["k"])
+            if key not in done_boll:
+                _fill_boll_from(rows, spec["period"], spec["k"])
+                done_boll.add(key)
+            field = spec["field"]
+            if field == "all":
+                # `boll20` column aliases middle band for latest_indicators
+                for i, r in enumerate(rows):
+                    r[spec["name"]] = r.get("boll_middle")
+                continue
+            src = f"boll_{field}"
+            for i, r in enumerate(rows):
+                r[spec["name"]] = r.get(src)
     return rows
 
 
 def latest_indicators(rows: list[dict[str, Any]], wanted: list[str] | None = None) -> dict[str, Any]:
-    """Indicator values from the last row (may be None if that bar is still forming)."""
     wanted = list(wanted or ["ema20", "ema50", "atr14", "rsi14"])
     if not rows:
         return {k: None for k in wanted}

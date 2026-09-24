@@ -2,6 +2,7 @@
 from .bridge import chips_to_signal, write_hold_audit, write_signal_file
 from .llm_client import LLMClient, LLMConfig, LLMError
 from .market import MarketConfig
+from .indicators import IndicatorNameError, parse_indicator_name
 from .triggers import check_conditions, parse_conditions
 from .prompt import build_system_prompt, build_user_prompt, load_strategy_prompt
 from .risk import RiskConfig, apply_risk
@@ -20,6 +21,8 @@ __all__ = [
     "MarketConfig",
     "check_conditions",
     "parse_conditions",
+    "parse_indicator_name",
+    "IndicatorNameError",
     "RiskConfig",
     "apply_risk",
     "collect_snapshot",
