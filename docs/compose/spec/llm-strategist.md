@@ -77,6 +77,7 @@ commits: 58d5281..27b5e82
 ```
 
 - 解析失败 / 非 JSON → 本轮 hold，记日志，**不写 inbox**（不乱下单）
+- 解析器兼容 code fence / 前后杂文 / 平衡花括号提取（reasoning 模型可能带思考痕迹）
 - `hold` chip 不产生下单文件（可写 hold 审计文件）
 - 通过风控后映射为 SignalFile：`orders[]` + `meta.plan_cycle` + `replace`
 

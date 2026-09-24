@@ -98,7 +98,8 @@ AI/策略把信号写成 **一个 JSON 文件**，放入 `inbox/<bot_id>/`。
 }
 ```
 
-注意：`sl_mode: limit_order` 是**限价卖/买平仓单**，若价格已可成交会**立即成交**（不是“到价再触发”的止损）；真止损请用 `sl_mode: trigger`。限价开仓未成交时，`limit_order` 的 TP/SL 也需已有持仓才能挂 `reduce_only`。
+注意：`sl_mode: limit_order` 是**限价卖/买平仓单**，若价格已可成交会**立即成交**（不是“到价再触发”的止损）；真止损请用 `sl_mode: trigger`。限价开仓未成交时，`limit_order` 的 TP/SL 也需已有持仓才能挂 `reduce_only`。  
+另：`limit_order` 价格须在 Gate **偏离带**内（过远报 `PRICE_TOO_DEVIATED`）；需要远止盈时优先 `trigger`。
 
 ## 加减仓 × 持仓模式
 | `trigger_price` | 突破单必填 | `stop_entry_*` 的触发价 |

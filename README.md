@@ -4,7 +4,7 @@
 
 | 目录 | 角色 |
 |------|------|
-| `gate_bot/` | 策略 JSON → 风控 → Gate 下单（执行） |
+| `gate_bot/` | 策略 JSON / LLM Plan → 风控 → Gate 下单（执行） |
 | `pa-data-source/` | 行情/账户采集管道（WS+REST→SQLite），**零判断** |
 | `contracts/` | 两组件唯一接缝：`kline.db` schema v1 |
 
@@ -13,7 +13,7 @@ pa-data-source（独立进程/watchdog）
     └─ write → data/kline.db / kline_testnet.db
                     │ 只读
                     ▼
-gate_bot strategist（hybrid）→ LLM → 风控 → inbox → executor → Gate
+gate_bot strategist：快照 → LLM Plan → 风控 → inbox → executor → Gate → trades 日志
 ```
 
 长期稳定约定见 **`contracts/KLINE_SCHEMA.md`**；bot 读不到合规库时自动 REST，不硬读。
@@ -30,10 +30,8 @@ cd pa-data-source
 
 - 密钥：实盘 `GATE_API_KEY` / 测试网 `GATE_TESTNET_API_KEY`（环境变量，不落盘）
 - 数据落 `pa-data-source/data/`；**bot 只读该目录**
-- 备用源 `gate-cli.exe` 不进 git，需要时放到 `pa-data-source/` 下
+- 备用源 `gate-cli.exe` 不进 git，需要时放到 `pa-data-source/` 下（aux 舆情类要用）
 - bot 侧无需启动 pa：缺库自动 `rest_only`
-
----
 
 ---
 
@@ -46,12 +44,17 @@ Gate.io 策略 JSON 信号下单机器人：AI/策略把交易意图 JSON 写入
 - **环境**：实盘 `live` + 模拟盘 `testnet` 双模式，密钥不混用
 - **持仓模式**：按 API Key 自动识别 `single / dual / dual_long_short`
 - **无 dry-run**：合法信号直接下单；失败文件归档到 `archive/failed/`
+- **空仓 flatten/close_all**：视为 no-op 成功（`POSITION_EMPTY` 不算失败）
 
 ## LLM 策略层（strategist）
 
 AI 生成方案 → 程序风控 → 写 `inbox` → 现有执行器下单（VergeX 式多品种 chips）。
 
 ```bash
+# 环境变量（密钥不落盘）
+# $env:OPENAI_BASE_URL = "http://<host>:<port>/v1"
+# $env:OPENAI_API_KEY  = "<key>"
+
 # 单轮：采集快照 → LLM → 风控 → 写 inbox
 .venv\Scripts\python.exe -m gate_bot plan --bot alpha
 
@@ -85,21 +88,24 @@ strategist:
   llm:
     base_url_env: OPENAI_BASE_URL
     api_key_env: OPENAI_API_KEY
-    model: deepseek-chat
-    temperature: 0.2
-    timeout_sec: 60
+    model: global:deepseek-v4.1-flash   # OpenAI 兼容任意模型 id
+    temperature: 0.1
+    timeout_sec: 90
+    max_tokens: 4096        # reasoning 模型需较大额度
 ```
+
+联调样例：`config/bots/_llm_test.example.yaml`（复制为 `llm-test.yaml`）。
 
 LLM 输出 **Plan**（chips 数组），经风控后转 `orders[]` 写入 inbox；`hold`/低置信不产生下单。  
 契约详见 `docs/compose/spec/llm-strategist.md` 与 `prompts/vergex_default.md`。
 
-### 数据来源（market hybrid）
+### 数据来源（market hybrid + P1）
 
 快照按数据特性分源，**不改 pa-data-source**（只读它的库）：
 
 | 字段 | 来源 |
 |------|------|
-| `candles` + `ema20`/`atr14` | 默认 REST；`hybrid` 读 `kline.db`（过期/缺库自动 REST） |
+| `candles` + `ema20`/`atr14` | 默认 REST；`hybrid` 读 `kline.db`（过期/schema 不符/缺库自动 REST） |
 | `ema50` / `rsi14` | 本地计算 |
 | `last`、持仓、余额 | **强制实时 API**（账户失败则本轮 abort，不写 inbox） |
 | `ticker` | 实时：funding_rate / mark_price / index_price / 24h 高低量 |
@@ -139,14 +145,45 @@ LLM 输出 **Plan**（chips 数组），经风控后转 `orders[]` 写入 inbox�
 
 与 `archive/**/result.json`（按信号文件）互补：**trades 按时间流水**，适合审计回看。
 
+## 测试（全套 harness）
+
+```bash
+# 单元测试（契约/schema/执行/策略/指标）
+.venv\Scripts\python.exe -m unittest discover -s tests
+
+# 行情读取 + hybrid + 指标
+.venv\Scripts\python.exe scripts\test_market_read.py
+
+# 订单全类型 testnet（market/limit/post_only/ioc/fok、TP-SL、突破、grid…）
+.venv\Scripts\python.exe scripts\testnet_all_orders.py
+
+# 策略提示词 + LLM Plan（需 OPENAI_BASE_URL / OPENAI_API_KEY）
+.venv\Scripts\python.exe scripts\test_strategy_prompt.py
+
+# 策略 → 交易所全链路（快照→LLM→风控→inbox→执行→挂单→日志）
+.venv\Scripts\python.exe scripts\test_full_chain.py
+```
+
+| 套件 | 参考规模 |
+|------|----------|
+| unittest | 95 |
+| market_read | 36 |
+| testnet_all_orders | 57 |
+| strategy_prompt | 8 |
+| full_chain | 10（策略→交易所） |
+
 ## 上线准备（Checklist）
 
-1. **密钥**：环境变量 `GATE_API_KEY` / `GATE_API_SECRET`（或 `GATE_TESTNET_*`），**不要写进 yaml**
+1. **密钥**：环境变量 `GATE_API_KEY` / `GATE_API_SECRET`（或 `GATE_TESTNET_*`），LLM 用 `OPENAI_BASE_URL` / `OPENAI_API_KEY`，**不要写进 yaml / 不要进 git**
 2. **配置**：复制 `config/bots/_example.yaml` → `config/bots/<bot_id>.yaml`，设 `env`、`symbols`、`max_notional_usd`
 3. **自检**：`python -m gate_bot status`；先 `once --bot <id>` 小文件试跑
-4. **信号源**：AI 只写 `inbox/<bot_id>/`，模板见 **`templates/README.md`**
-5. **建议**：`max_notional_usd` 从小开始；确认持仓模式 single/dual 与策略一致
-6. **已知限制**：`trail` 追踪单需资金密码，当前搁置（见 templates/README.md）
+4. **策略联调**：复制 `config/bots/_llm_test.example.yaml` → `llm-test.yaml`，先 `plan --bot llm-test`
+5. **信号源**：AI 只写 `inbox/<bot_id>/`，模板见 **`templates/README.md`**
+6. **建议**：`max_notional_usd` 从小开始；确认持仓模式 single/dual 与策略一致
+7. **已知限制**：
+   - `trail` 追踪单需资金密码 / 测试网不支持，当前搁置
+   - `limit_order` 模式 TP/SL 价须在 Gate 偏离带内（过远 `PRICE_TOO_DEVIATED`）；真止损用 `sl_mode: trigger`
+   - pa aux 新闻/宏观走 Gate Intel，偶发 TLS 超时（与密钥无关）；盘口/成交/OI 不受影响
 
 ## 多机器人怎么加（账户 × 信号源 可自由组合）
 

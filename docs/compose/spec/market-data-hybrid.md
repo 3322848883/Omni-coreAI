@@ -33,6 +33,8 @@ strategist 快照目前每轮只做 REST 现拉：`last` + 60 根 K + 账户。�
 | `candles` | `kline.db`（hybrid/local_only） | 末根 `t` 距今 ≤ `stale_factor × interval` | hybrid→REST candles；local_only→仍用本地并标 `stale` |
 | `ema20` / `atr14` | 库列（local 且非空） | 随 candle | 缺口从末次库值 warm-start；**不重算已有库值** |
 | `ema50` / `rsi14` | 本地算（库无此列） | 输入长度足够 | 不足则该指标为 `null` |
+| `ticker` funding/mark/index/24h | 实时 REST（`refresh`） | — | 记 `degraded`，继续 |
+| `stats` OI/多空比、`orderbook` | 实时 REST（`refresh`） | 可裁剪 | 记 `degraded`，继续 |
 | `last` | **实时 REST** ticker | — | 跳过该字段并记 `degraded` |
 | `positions` / `available` / `position_mode` | **实时私有 API** | — | **abort 本轮**，不调 LLM、不写 inbox |
 | 下单报价 | executor `get_last_price` | — | 不变；禁止用库价 |
