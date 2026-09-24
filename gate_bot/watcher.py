@@ -209,6 +209,8 @@ def run_bot_once(bot: BotConfig, paths: ProjectPaths) -> dict:
                     bot.create_client(),
                     symbols_whitelist=bot.symbols or None,
                     max_notional_usd=bot.max_notional_usd,
+                    position_policy=bot.position_policy,
+                    default_replace=bot.default_replace,
                 )
             except GateApiError as e:
                 _archive_failed(paths, bot.bot_id, taken, path.name, f"credentials: {e}")

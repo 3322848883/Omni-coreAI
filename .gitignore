@@ -30,6 +30,7 @@ pa-data-source/*.lock
 .full_chain_test/
 .prod_test/
 .prod_e2e/
+.multi_prod/
 .multi_bot_test/
 .smoke_inbox/
 .soak_test/
