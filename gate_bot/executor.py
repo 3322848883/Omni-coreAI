@@ -401,13 +401,19 @@ class Executor:
             except GateApiError as e:
                 last_err = f"{kind}#{attempt} {e}"
                 continue
-            rec = dict(rec or {})
-            order = rec.get("order") if isinstance(rec.get("order"), dict) else rec
+            raw = dict(rec or {})
+            inner = raw.get("order")
+            if isinstance(inner, dict):
+                order = dict(inner)
+            else:
+                # raw is the order payload itself (place_price_order / _place_trigger)
+                order = {k: v for k, v in raw.items() if k not in ("order", "check")}
             check = (
                 self._confirm_price_order_landed(order, kind=kind)
                 if price_order
                 else self._confirm_order_landed(order, kind=kind)
             )
+            rec = dict(raw)
             rec["order"] = order
             rec["check"] = check
             if check.get("ok", True) and (check.get("confirmed") or order.get("finish_as") == "finished"):
