@@ -75,7 +75,14 @@ def evaluate_condition(client, cond: dict, timeframe: str, now: Optional[float] 
     symbol = cond.get("symbol") or ""
     if not symbol:
         return False, "no symbol"
-    limit = int(cond.get("candles") or 80)
+    # ensure enough history for the longest indicator period
+    period_hint = max(
+        int(cond.get("period") or 20),
+        int(cond.get("fast") or 9),
+        int(cond.get("slow") or 21),
+        int(cond.get("lookback") or 20) + 5,
+    )
+    limit = int(cond.get("candles") or max(80, period_hint + 30))
     try:
         rows = _load_candles(client, symbol, timeframe, max(limit, 30))
     except Exception as e:  # noqa: BLE001

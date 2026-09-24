@@ -134,6 +134,17 @@ class TestIndicators(unittest.TestCase):
         self.assertGreater(out[-1], 0.0)
         self.assertLess(out[-1], 100.0)
 
+    def test_custom_indicator_periods(self):
+        rows = []
+        for i in range(40):
+            c = 1.0 + i * 0.01
+            rows.append({"t": i, "o": c, "h": c + 0.1, "l": c - 0.1, "c": c, "v": 1})
+        out = attach_indicators(rows, ["ema9", "ema21", "rsi7", "atr10"])
+        self.assertIsNotNone(out[-1].get("ema9"))
+        self.assertIsNotNone(out[-1].get("ema21"))
+        self.assertIsNotNone(out[-1].get("rsi7"))
+        self.assertIsNotNone(out[-1].get("atr10"))
+
     def test_latest_indicators(self):
         rows = [{"ema20": 1.0, "ema50": 2.0, "atr14": 3.0, "rsi14": 4.0}]
         self.assertEqual(

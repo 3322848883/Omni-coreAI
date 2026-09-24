@@ -193,24 +193,32 @@ def _fill_rsi_from(rows: list[dict[str, Any]], key: str, period: int) -> None:
         rows[i][key] = _rsi_value(avg_gain, avg_loss)
 
 
+def _parse_indicator_name(name: str) -> tuple[str, int]:
+    """'ema20'/'rsi14'/'atr10' → (kind, period); unknown → ('', 0)."""
+    n = (name or "").strip().lower()
+    for kind in ("ema", "rsi", "atr"):
+        if n.startswith(kind) and n[len(kind):].isdigit():
+            return kind, int(n[len(kind):])
+    return "", 0
+
+
 def attach_indicators(rows: list[dict[str, Any]], wanted: list[str] | None = None) -> list[dict[str, Any]]:
     """Attach indicator columns to candle rows.
 
-    Keeps non-null DB-provided ema20/atr14 and continues any gap from the last
-    known value (warm-start). Always computes ema50/rsi14 when requested.
+    Accepts any emaN / rsiN / atrN (custom periods). Keeps non-null DB values
+    (e.g. pa ema20/atr14) and warm-starts gaps from the last known state.
     """
     if not rows:
         return rows
     wanted = list(wanted or ["ema20", "ema50", "atr14", "rsi14"])
     for name in wanted:
-        if name == "ema20":
-            _fill_ema_from(rows, "ema20", 20)
-        elif name == "ema50":
-            _fill_ema_from(rows, "ema50", 50)
-        elif name == "atr14":
-            _fill_atr_from(rows, "atr14", 14)
-        elif name == "rsi14":
-            _fill_rsi_from(rows, "rsi14", 14)
+        kind, period = _parse_indicator_name(name)
+        if kind == "ema" and period > 0:
+            _fill_ema_from(rows, name, period)
+        elif kind == "atr" and period > 0:
+            _fill_atr_from(rows, name, period)
+        elif kind == "rsi" and period > 0:
+            _fill_rsi_from(rows, name, period)
     return rows
 
 

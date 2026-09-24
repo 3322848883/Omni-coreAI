@@ -99,6 +99,41 @@ strategist:
 LLM 输出 **Plan**（chips 数组），经风控后转 `orders[]` 写入 inbox；`hold`/低置信不产生下单。  
 契约详见 `docs/compose/spec/llm-strategist.md` 与 `prompts/vergex_default.md`。
 
+### 全部可配参数（每 bot / 每策略独立）
+
+| 层 | 参数 | 说明 |
+|----|------|------|
+| **触发** | `interval_sec` | 定时秒（300=5m，600=10m…） |
+| | `event_on_kline_close` | K 收盘事件开关 |
+| | `event_timeframe` | 事件周期 `1m/5m/15m/30m/1h/4h/1d` |
+| | `check_interval_sec` | 条件检查频率 |
+| **条件** | `price_vs_ema` | `symbol`, **`period` EMA 任意**, `side` |
+| | `ema_cross` | `fast` / **`slow` 任意**, `dir` |
+| | `atr_spike` | **`period` ATR 任意**, `mult`, `lookback` |
+| | `rsi` | **`period` RSI 任意**, `op`, `level` |
+| | `price_break` | `lookback`, `side` |
+| | 公共 | `cooldown_sec`, `candles`, `key` |
+| **快照指标** | `market.indicators` | **任意 `emaN`/`rsiN`/`atrN`**（ema9、rsi7、atr10…） |
+| **行情** | `market.mode` / `pa_data_root` / `db` / `stale_factor` / `health_url` / `refresh` | |
+| **策略** | `timeframe` / `candles` / `prompt_file` / `write_hold` | |
+| **风控** | `min_confidence` / `max_notional_usd` / `max_chips` / `allow_actions` | 程序强制 |
+| **LLM** | `model` / `temperature` / `timeout_sec` / `max_tokens` / env 名 | |
+| **执行** | `position_policy` / `default_replace` / `label_prefix` / bot `max_notional_usd` | |
+
+指标类 **周期任意可配**（触发与快照均支持）：
+
+```yaml
+strategist:
+  market:
+    indicators: [ema9, ema21, ema50, atr10, rsi7, rsi14]
+  conditions:
+    - {type: ema_cross, symbol: BTC_USDT, fast: 9, slow: 21}
+    - {type: rsi, symbol: BTC_USDT, period: 7, op: gt, level: 80}
+    - {type: atr_spike, symbol: BTC_USDT, period: 10, mult: 1.4}
+```
+
+合计约 **50 项**可配（触发 5 + 条件约 20 + 指标名任意 + 行情 6 + 策略 4 + 风控 4 + LLM 5 + 执行 4）。
+
 ### AI 触发时机（plan-loop，可按策略配置）
 
 | 触发 | 配置 | 行为 |
