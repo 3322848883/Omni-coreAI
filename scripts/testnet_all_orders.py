@@ -140,11 +140,12 @@ def main() -> int:
     run("tpsl_trigger", {"action": "open_long", "symbol": "BTC_USDT", "size": 1, "type": "market",
                          "tp": px(+500), "sl": px(-500), "tp_mode": "trigger", "sl_mode": "trigger",
                          "trigger_price_type": "mark", "label": "t-tpsl-t"})
+    # limit_order TP/SL must stay inside Gate's price band (testnet rejects far ticks)
     run("tpsl_limit_order", {"action": "open_long", "symbol": "BTC_USDT", "size": 1, "type": "market",
-                             "tp": px(+200), "sl": px(-200), "tp_mode": "limit_order", "sl_mode": "limit_order",
+                             "tp": px(+80), "sl": px(-80), "tp_mode": "limit_order", "sl_mode": "limit_order",
                              "label": "t-tpsl-l"})
     run("tp_limit_sl_trigger", {"action": "open_long", "symbol": "BTC_USDT", "size": 1, "type": "market",
-                                "tp": px(+150), "sl": px(-150), "tp_mode": "limit_order", "sl_mode": "trigger",
+                                "tp": px(+60), "sl": px(-60), "tp_mode": "limit_order", "sl_mode": "trigger",
                                 "trigger_price_type": "mark", "label": "t-tpsl-mix"})
     run("tpsl_trigger_limit_type", {"action": "open_long", "symbol": "BTC_USDT", "size": 1, "type": "market",
                                     "tp": px(+600), "sl": px(-600), "tp_type": "limit", "sl_type": "limit",
