@@ -57,3 +57,27 @@ def write_signal_file(inbox: Path, payload: dict[str, Any], cycle_id: str = "") 
         }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
+
+
+def write_hold_audit(history_dir: Path, plan: Plan, cycle_id: str = "") -> Path:
+    """Write hold-only audit when plan produces no orders."""
+    history_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    safe = (cycle_id or plan.cycle_id or "hold").replace(":", "").replace("/", "-")[:24]
+    path = history_dir / f"{ts}-{safe}.hold.json"
+    path.write_text(
+        json.dumps(
+            {
+                "cycle_id": plan.cycle_id or cycle_id,
+                "reasoning": plan.reasoning,
+                "kind": "llm_plan_hold",
+                "chips": [
+                    {**c.to_signal_dict(), "confidence": c.confidence} for c in plan.chips
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return path

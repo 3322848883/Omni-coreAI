@@ -64,10 +64,11 @@ class TestRisk(unittest.TestCase):
         acts = {c.symbol: c.action for c in r.accepted}
         self.assertEqual(acts.get("ETH_USDT"), "hold")
 
-    def test_max_notional_truncate(self):
+    def test_max_notional_reject(self):
         plan = parse_plan({"chips": [{"symbol": "BTC_USDT", "action": "open_long", "confidence": 0.9, "size_usd": 100}]})
         r = apply_risk(plan, RiskConfig(min_confidence=0.5, max_notional_usd=40))
-        self.assertEqual(r.accepted[0].size_usd, 40)
+        self.assertFalse(r.accepted)  # oversized → reject (not silent truncate)
+        self.assertTrue(r.rejected)
 
     def test_allow_actions(self):
         r = apply_risk(self._plan(), RiskConfig(min_confidence=0.5, allow_actions={"hold", "close"}))

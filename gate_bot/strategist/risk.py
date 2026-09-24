@@ -53,10 +53,12 @@ def apply_risk(plan: Plan, risk: RiskConfig) -> RiskResult:
                 )
             if risk.max_notional_usd is not None and chip.size_usd is not None:
                 if chip.size_usd > risk.max_notional_usd:
+                    # spec default: reject oversized notional (do not silently truncate)
                     out.notes.append(
-                        f"truncate {chip.symbol} size_usd {chip.size_usd} → {risk.max_notional_usd}"
+                        f"reject {chip.symbol} size_usd {chip.size_usd} > max {risk.max_notional_usd}"
                     )
-                    chip = Chip(**{**chip.__dict__, "size_usd": risk.max_notional_usd})
+                    out.rejected.append(chip)
+                    continue
             if chip.size_usd is None and chip.size is None and chip.action.startswith(("open", "add", "stop_entry")):
                 out.notes.append(f"reject {chip.symbol} {chip.action}: missing size")
                 out.rejected.append(chip)

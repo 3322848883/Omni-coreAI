@@ -50,6 +50,7 @@ class PlanRunner:
         self.llm = llm or LLMClient(cfg.llm)
         self.strategy_prompt = load_strategy_prompt(cfg.prompt_file or None)
         self._last_kline_t: Optional[int] = None
+        self._last_cycle_id: Optional[str] = None
         self._busy = threading.Lock()
 
     def run_once(self) -> dict[str, Any]:
@@ -78,6 +79,9 @@ class PlanRunner:
             return {"ok": False, "cycle_id": cycle_id, "error": str(e)}
         if not plan.cycle_id:
             plan.cycle_id = cycle_id
+        if plan.cycle_id == self._last_cycle_id:
+            return {"ok": True, "cycle_id": plan.cycle_id, "skipped": "duplicate_cycle", "orders": 0}
+        self._last_cycle_id = plan.cycle_id
         risk_result = apply_risk(plan, self.cfg.risk)
         payload = chips_to_signal(plan, risk_result, bot_id=self.inbox.name)
         orders = payload.get("orders") or []

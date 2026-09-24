@@ -1,16 +1,35 @@
 ---
 feature: llm-strategist
-status: in-progress
+status: delivered
 updated: 2026-03-02
 branch: master
-commits: 
+commits: 58d5281..27b5e82
 ---
 
 # LLM Strategist — AI 生成方案 + 程序执行
 
 ## Report
 
-## [S1] Problem
+**What was built** — `gate_bot/strategist`：OpenAI 兼容 LLM 客户端、VergeX 式 Plan/chips 解析、行情+账户快照、策略 prompt（`prompts/vergex_default.md`）、**每 bot 独立风控**（min_confidence / max_notional / allow_actions / max_chips）、chips→现有 SignalFile 写 `inbox`、`plan` / `plan-loop` CLI（interval + K 线收盘触发、cycle 去重）。执行仍走 watcher/executor，复用 position_policy / replace。
+
+**Verification** — `python -m unittest discover -s tests`：**59 PASS**（含 plan 解析、风控矩阵、bridge→parse_signal、LLM mock）。`python -m gate_bot --help` 含 plan/plan-loop；`from gate_bot.strategist import write_hold_audit` 可导入；独立复审确认 critical 全部关闭。
+
+**Journey log** —
+1. 先落地 chips 契约再写执行桥，保证输出可被 `parse_signal` 消费。
+2. 复审指出 `write_hold_audit` 缺失会使 plan-loop 起不来——测试未覆盖 CLI import；补函数 + import 冒烟。
+3. 超限 `size_usd` 按规格改为**拒绝**（勿静默截断）。
+4. prompt 用字符串拼接避免 JSON 花括号被 `.format` 吃掉。
+
+## Tasks
+
+- [x] T1: `strategist/schema.py` — Plan/chip 解析与校验 — acceptance: 合法/非法 Plan 单测通过 (covers: S2)
+- [x] T2: `strategist/llm_client.py` — OpenAI 兼容 chat.completions — acceptance: mock 响应解析成功/超时报错 (covers: S2)
+- [x] T3: `strategist/snapshot.py` — 行情+账户快照组装 — acceptance: mock gate_client 产出 market/account/policy JSON (covers: S2)
+- [x] T4: `strategist/prompt.py` + `prompts/vergex_default.md` — prompt 组装 — acceptance: 含 snapshot+风控约束+输出 schema (covers: S2)
+- [x] T5: `strategist/risk.py` — 按 bot risk 过滤/截断 chips — acceptance: 风控矩阵单测 (covers: S2)
+- [x] T6: `strategist/bridge.py` — chips→SignalFile 写 inbox — acceptance: 产出可被 parse_signal 执行的 JSON (covers: S2)
+- [x] T7: CLI `plan` / `plan-loop`（interval + kline close） — acceptance: once 写文件；loop 可启动停止 (covers: S2)
+- [x] T8: README 策略层文档 + 全量单测 — acceptance: unittest 全绿；README 含 Plan schema (covers: S2)
 
 `gate-signal-bot` 只能执行**外部**写入的 JSON 信号。需要内置 LLM 策略层：按周期/事件采集行情与账户快照，由 AI 生成 **VergeX 式多品种决策**，经**每 bot 独立风控**后转成现有 signal JSON，交给执行器下单，形成完整策略交易闭环。
 
