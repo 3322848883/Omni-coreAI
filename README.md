@@ -32,6 +32,11 @@ strategist:
   event_on_kline_close: true
   symbols: [BTC_USDT, ETH_USDT]
   prompt_file: prompts/vergex_default.md
+  candles: 120
+  market:
+    mode: hybrid          # hybrid | rest_only | local_only
+    pa_data_root: ../pa-data-source-v2.11/data
+    stale_factor: 2.0
   risk:
     min_confidence: 0.75
     max_notional_usd: 50
@@ -47,6 +52,28 @@ strategist:
 
 LLM 输出 **Plan**（chips 数组），经风控后转 `orders[]` 写入 inbox；`hold`/低置信不产生下单。  
 契约详见 `docs/compose/spec/llm-strategist.md` 与 `prompts/vergex_default.md`。
+
+### 数据来源（market hybrid）
+
+快照按数据特性分源，**不改 pa-data-source**（只读它的库）：
+
+| 字段 | 来源 |
+|------|------|
+| `candles` + `ema20`/`atr14` | 默认 REST；`hybrid` 读 `kline.db`（过期/缺库自动 REST） |
+| `ema50` / `rsi14` | 本地计算 |
+| `last`、持仓、余额 | **强制实时 API**（账户失败则本轮 abort，不写 inbox） |
+| 下单报价 | executor 实时 `get_last_price`（不用库价） |
+
+`mode`：
+
+- `rest_only`（默认）— 每轮 REST，零外部依赖
+- `hybrid` — 本地优先，末根年龄 > `stale_factor × 周期` 则回退 REST
+- `local_only` — 只读本地库，不打 K 线 REST
+
+路径：`GATE_BOT_PA_DATA` 环境变量 > `market.pa_data_root` > `../pa-data-source-v2.11/data`。  
+`env: testnet` 自动读 `kline_testnet.db`，与实盘 `kline.db` 隔离。  
+可选 `health_url: http://127.0.0.1:18080/health`，非 200 时视本地库不可信。  
+契约见 `docs/compose/spec/market-data-hybrid.md`。
 
 ## 交易日志（trades）
 
