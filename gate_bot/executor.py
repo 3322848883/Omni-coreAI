@@ -12,6 +12,11 @@ from .sizing import default_trigger_limit_price, pct_to_size_usd, round_price, u
 
 log = logging.getLogger("gate_bot.executor")
 
+
+def _is_flat_error(e: Exception) -> bool:
+    msg = str(e).lower()
+    return "no position" in msg or "position_empty" in msg
+
 PRICE_TYPE_MAP = {"latest": 0, "mark": 1, "index": 2}
 
 
@@ -430,16 +435,20 @@ class Executor:
             if dual:
                 for side in ("long", "short"):
                     try:
-                        orders.append(self.client.close_position(sym, side=side).get("id"))
+                        oid = self.client.close_position(sym, side=side).get("id")
+                        if oid is not None:
+                            orders.append(oid)
                     except GateApiError as e:
-                        if "no position" in str(e).lower():
+                        if _is_flat_error(e):
                             continue
                         raise
             else:
                 try:
-                    orders.append(self.client.close_position(sym, side=None).get("id"))
+                    oid = self.client.close_position(sym, side=None).get("id")
+                    if oid is not None:
+                        orders.append(oid)
                 except GateApiError as e:
-                    if "no position" in str(e).lower():
+                    if _is_flat_error(e):
                         continue
                     raise
         return StepResult("close_all", symbol, True, detail={"closed_order_ids": orders})

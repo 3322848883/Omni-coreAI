@@ -295,14 +295,20 @@ class GateClient:
             raise GateApiError("dual position mode requires side=long|short for close")
 
         if not dual and size == 0:
-            return self.place_order({
-                "contract": contract,
-                "size": 0,
-                "close": True,
-                "price": "0",
-                "tif": "ioc",
-                "reduce_only": True,
-            })
+            try:
+                return self.place_order({
+                    "contract": contract,
+                    "size": 0,
+                    "close": True,
+                    "price": "0",
+                    "tif": "ioc",
+                    "reduce_only": True,
+                })
+            except GateApiError as e:
+                # flatten/close_all on an already-flat book is a no-op success
+                if _is_empty_position_error(e):
+                    return {"id": None, "status": "already_flat", "contract": contract}
+                raise
 
         positions = self.get_positions()
         target = [
@@ -326,6 +332,11 @@ class GateClient:
             "tif": "ioc",
             "reduce_only": True,
         })
+
+
+def _is_empty_position_error(e: Exception) -> bool:
+    msg = str(e).lower()
+    return "position_empty" in msg or "no position" in msg
 
 
 def _pos_is_side(pos: dict, side: str) -> bool:

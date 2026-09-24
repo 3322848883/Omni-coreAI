@@ -49,6 +49,16 @@ class TestSchema(unittest.TestCase):
         self.assertEqual(infer_trigger_rules("open_short", True), 2)
         self.assertEqual(infer_trigger_rules("open_short", False), 1)
 
+    def test_flatten_empty_is_noop_success(self):
+        class FlatClient(FakeClient):
+            def close_position(self, contract, side=None, size=0):
+                raise GateApiError("400 POSITION_EMPTY", status=400, label="POSITION_EMPTY")
+
+        ex = Executor(FlatClient())
+        rep = ex.execute_signal(parse_signal({"action": "flatten", "symbol": "BTC_USDT"}))
+        self.assertTrue(rep.ok)
+        self.assertEqual(rep.results[0].detail.get("closed_order_ids"), [])
+
     def test_watch_alias_is_hold_no_exec(self):
         for a in ("hold", "watch", "skip", ""):
             sig = parse_signal({"action": a, "meta": {"reasoning": "x"}})
