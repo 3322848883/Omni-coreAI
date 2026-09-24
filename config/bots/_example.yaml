@@ -28,3 +28,20 @@ label_prefix: alpha       # 写入订单 text: t-<label>
 position_policy: strict
 # 新方案默认替换：none | symbol | all（JSON 里 replace 可覆盖）
 default_replace: none
+
+# LLM 策略层（可选）+ 行情混合接入
+# strategist:
+#   enabled: true
+#   interval_sec: 300
+#   timeframe: 15m
+#   event_on_kline_close: true
+#   symbols: [BTC_USDT, ETH_USDT]
+#   prompt_file: prompts/vergex_default.md
+#   candles: 120
+#   market:
+#     mode: hybrid                 # hybrid | rest_only | local_only
+#     pa_data_root: ../pa-data-source-v2.11/data
+#     db: kline.db                 # testnet 自动改 kline_testnet.db
+#     stale_factor: 2.0
+#     # health_url: http://127.0.0.1:18080/health
+#     indicators: [ema20, ema50, atr14, rsi14]

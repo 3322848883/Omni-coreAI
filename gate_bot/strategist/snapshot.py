@@ -1,9 +1,12 @@
-"""Market + account snapshot for strategist prompts."""
+"""Hybrid market snapshot for strategist prompts."""
 from __future__ import annotations
 
-from typing import Any
+from pathlib import Path
+from typing import Any, Optional
 
 from ..gate_client import GateApiError, GateClient
+from .indicators import attach_indicators, latest_indicators
+from .market import MarketConfig, resolve_candles
 
 
 def collect_snapshot(
@@ -11,28 +14,55 @@ def collect_snapshot(
     symbols: list[str],
     candles: int = 60,
     interval: str = "15m",
+    market_cfg: Optional[MarketConfig] = None,
+    env: str = "live",
+    bot_root: Optional[Path] = None,
 ) -> dict[str, Any]:
+    cfg = market_cfg or MarketConfig()
     market: dict[str, Any] = {}
+    meta: dict[str, Any] = {
+        "market_mode": cfg.mode,
+        "candle_source": {},
+        "degraded": [],
+        "stale": [],
+    }
+
     for sym in symbols:
         entry: dict[str, Any] = {"symbol": sym}
         try:
             entry["last"] = client.get_last_price(sym)
         except GateApiError as e:
-            entry["error"] = str(e)
+            entry["last_error"] = str(e)
+            meta["degraded"].append(f"{sym}:last")
+
         try:
-            raw = client.public_get(
-                "/api/v4/futures/usdt/candlesticks",
-                f"contract={sym}&interval={interval}&limit={candles}",
+            result = resolve_candles(
+                client,
+                sym,
+                interval,
+                candles,
+                market_cfg=cfg,
+                env=env,
+                bot_root=bot_root,
             )
-            rows = []
-            for r in raw or []:
-                if isinstance(r, (list, tuple)) and len(r) >= 6:
-                    rows.append({"t": r[0], "v": r[1], "c": r[2], "h": r[3], "l": r[4], "o": r[5]})
-                elif isinstance(r, dict):
-                    rows.append(r)
+            rows = attach_indicators(list(result.rows), cfg.indicators or None)
             entry["candles"] = rows
+            entry["candle_source"] = result.source
+            entry["stale"] = result.stale
+            meta["candle_source"][sym] = result.source
+            if result.stale:
+                meta["stale"].append(sym)
+            for d in result.degraded:
+                tag = f"{sym}:{d}"
+                if tag not in meta["degraded"]:
+                    meta["degraded"].append(tag)
+            if result.error:
+                entry["candles_error"] = result.error
+            if rows:
+                entry["indicators"] = latest_indicators(rows, cfg.indicators or None)
         except Exception as e:  # noqa: BLE001
             entry["candles_error"] = str(e)
+            meta["degraded"].append(f"{sym}:candles_error")
         market[sym] = entry
 
     account: dict[str, Any] = {}
@@ -43,18 +73,32 @@ def collect_snapshot(
             "available": acc.get("available"),
             "total": acc.get("total"),
         }
-        account["positions"] = [
-            {
-                "contract": p.get("contract"),
-                "mode": p.get("mode"),
-                "size": p.get("size"),
-                "entry_price": p.get("entry_price"),
-                "leverage": p.get("leverage"),
-            }
-            for p in (client.get_positions() or [])
-            if int(p.get("size") or 0) != 0
-        ]
-    except GateApiError as e:
-        account["error"] = str(e)
+    except Exception as e:  # noqa: BLE001
+        account = {"error": f"account: {e}"}
+        meta["degraded"].append("account")
+    if "error" not in account:
+        try:
+            account["positions"] = [
+                {
+                    "contract": p.get("contract"),
+                    "mode": p.get("mode"),
+                    "size": p.get("size"),
+                    "entry_price": p.get("entry_price"),
+                    "leverage": p.get("leverage"),
+                }
+                for p in (client.get_positions() or [])
+                if int(p.get("size") or 0) != 0
+            ]
+        except Exception as e:  # noqa: BLE001
+            # Keep available/total if already fetched; still mark error so plan aborts.
+            account["error"] = f"positions: {e}"
+            account.setdefault("positions", [])
+            meta["degraded"].append("positions")
 
-    return {"interval": interval, "candles_len": candles, "market": market, "account": account}
+    return {
+        "interval": interval,
+        "candles_len": candles,
+        "market": market,
+        "account": account,
+        "meta": meta,
+    }

@@ -12,6 +12,7 @@ from typing import Any, Optional
 from ..gate_client import GateClient
 from .bridge import chips_to_signal, write_hold_audit, write_signal_file
 from .llm_client import LLMClient, LLMConfig, LLMError
+from .market import MarketConfig
 from .prompt import build_system_prompt, build_user_prompt, load_strategy_prompt
 from .risk import RiskConfig, apply_risk
 from .schema import PlanError, parse_plan_text
@@ -30,6 +31,9 @@ class StrategistConfig:
     prompt_file: str = "prompts/vergex_default.md"
     write_hold: bool = True
     candles: int = 60
+    market: MarketConfig = field(default_factory=MarketConfig)
+    env: str = "live"
+    bot_root: Optional[Path] = None
     risk: RiskConfig = field(default_factory=RiskConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
 
@@ -56,8 +60,23 @@ class PlanRunner:
     def run_once(self) -> dict[str, Any]:
         cycle_id = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         snapshot = collect_snapshot(
-            self.client, self.cfg.symbols, candles=self.cfg.candles, interval=self.cfg.timeframe
+            self.client,
+            self.cfg.symbols,
+            candles=self.cfg.candles,
+            interval=self.cfg.timeframe,
+            market_cfg=self.cfg.market,
+            env=self.cfg.env,
+            bot_root=self.cfg.bot_root,
         )
+        account = snapshot.get("account") or {}
+        if account.get("error"):
+            # Never plan or write inbox without a complete live account view.
+            return {
+                "ok": False,
+                "cycle_id": cycle_id,
+                "error": "account_unavailable",
+                "detail": account.get("error"),
+            }
         system = build_system_prompt(self.strategy_prompt)
         user = build_user_prompt(
             snapshot,

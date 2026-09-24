@@ -20,11 +20,13 @@ def _root_from_args(args) -> Path:
 def _build_plan_runner(bot, paths: ProjectPaths):
     from .strategist.llm_client import LLMClient, LLMConfig
     from .strategist.loop import PlanRunner, StrategistConfig
+    from .strategist.market import MarketConfig
     from .strategist.risk import RiskConfig
 
     s = dict(bot.strategist or {})
     risk = dict(s.get("risk") or {})
     llm = dict(s.get("llm") or {})
+    mk = dict(s.get("market") or {})
     cfg = StrategistConfig(
         enabled=bool(s.get("enabled", True)),
         interval_sec=int(s.get("interval_sec") or 300),
@@ -34,6 +36,16 @@ def _build_plan_runner(bot, paths: ProjectPaths):
         prompt_file=str(s.get("prompt_file") or "prompts/vergex_default.md"),
         write_hold=bool(s.get("write_hold", True)),
         candles=int(s.get("candles") or 60),
+        market=MarketConfig(
+            mode=str(mk.get("mode") or "rest_only"),
+            pa_data_root=mk.get("pa_data_root"),
+            db=str(mk.get("db") or "kline.db"),
+            stale_factor=2.0 if mk.get("stale_factor") is None else float(mk.get("stale_factor")),
+            health_url=mk.get("health_url"),
+            indicators=[str(x) for x in (mk.get("indicators") or ["ema20", "ema50", "atr14", "rsi14"])],
+        ),
+        env=bot.env,
+        bot_root=paths.root,
         risk=RiskConfig(
             min_confidence=float(risk.get("min_confidence") or 0.75),
             max_notional_usd=float(risk["max_notional_usd"]) if risk.get("max_notional_usd") is not None else bot.max_notional_usd,
