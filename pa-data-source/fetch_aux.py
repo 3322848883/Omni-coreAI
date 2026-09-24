@@ -1354,6 +1354,11 @@ def run_once():
             interfaces["trades"] = {"status": "ok" if len(tr_ok) == len(CONTRACTS) else "fail",
                                     "contracts": tr_ok}
 
+        # Refresh status now so slow gate-cli news/info tools cannot make
+        # aux_status look stale while high-frequency data is already stored.
+        if stats_due or liq_due or ob_due or tr_due:
+            _write_status(interfaces, {}, _collect_db_tables(conn))
+
         if _due("events", sched, now):
             events = _fetch_events()
             _write_snapshot("events.json", "news/events/get-latest-events", events)
