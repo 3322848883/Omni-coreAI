@@ -2,6 +2,7 @@
 from .bridge import chips_to_signal, write_hold_audit, write_signal_file
 from .llm_client import LLMClient, LLMConfig, LLMError
 from .market import MarketConfig
+from .triggers import check_conditions, parse_conditions
 from .prompt import build_system_prompt, build_user_prompt, load_strategy_prompt
 from .risk import RiskConfig, apply_risk
 from .schema import Chip, Plan, PlanError, parse_plan, parse_plan_text
@@ -17,6 +18,8 @@ __all__ = [
     "LLMConfig",
     "LLMError",
     "MarketConfig",
+    "check_conditions",
+    "parse_conditions",
     "RiskConfig",
     "apply_risk",
     "collect_snapshot",

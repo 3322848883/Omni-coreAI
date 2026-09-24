@@ -27,6 +27,7 @@ pa-data-source/*.lock
 .market_read_test/
 .order_type_test/
 .full_chain_test/
+.prod_test/
 .multi_bot_test/
 .smoke_inbox/
 .soak_test/

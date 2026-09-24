@@ -99,35 +99,69 @@ strategist:
 LLM 输出 **Plan**（chips 数组），经风控后转 `orders[]` 写入 inbox；`hold`/低置信不产生下单。  
 契约详见 `docs/compose/spec/llm-strategist.md` 与 `prompts/vergex_default.md`。
 
-### AI 触发时机（plan-loop）
+### AI 触发时机（plan-loop，可按策略配置）
 
 | 触发 | 配置 | 行为 |
 |------|------|------|
-| **定时** | `interval_sec: 300` | 每 N 秒跑一轮 Plan（与行情周期无关） |
-| **事件：K 线收盘** | `event_on_kline_close: true` + `timeframe: 15m` | 第一个 `symbols` 的该周期 K 线时间戳前进时立刻再跑一轮 |
-| 手动单轮 | `plan --bot <id>` | 不进 loop，跑完退出 |
+| **定时** | `interval_sec: 300`（5m）/ `600`（10m）/ 任意秒 | 每 N 秒跑一轮 Plan |
+| **事件：K 线收盘** | `event_on_kline_close: true` + `event_timeframe: 5m` | 该周期 K 线 `t` 前进时立刻跑 |
+| **事件：条件** | `conditions[]` | EMA / ATR / RSI / 价格突破 等满足时跑 |
+| 手动单轮 | `plan --bot <id>` | 不进 loop |
 
-细节：
-
-```text
-每秒检查 ──► interval 到点？ ──是──► run_once(trigger=interval)
-              │否
-              └──► kline 收盘？ ──是──► run_once(trigger=kline_close)
+```yaml
+strategist:
+  interval_sec: 300              # 5 分钟策略；10 分钟用 600
+  timeframe: 5m                  # 快照 K 周期（可与事件周期不同）
+  event_on_kline_close: true
+  event_timeframe: 1m            # 收盘/条件事件用 1m（默认= timeframe）
+  check_interval_sec: 1.0        # 条件检查频率
+  conditions:                    # 可选，多条任一命中即触发（带冷却）
+    - type: price_vs_ema         # 价格相对 EMA
+      symbol: BTC_USDT
+      period: 20
+      side: above                # above | below
+      cooldown_sec: 60
+    - type: ema_cross            # 快慢 EMA 交叉
+      symbol: BTC_USDT
+      fast: 9
+      slow: 21
+      dir: up                    # up | down | any
+    - type: atr_spike            # ATR 突然放大
+      symbol: BTC_USDT
+      period: 14
+      mult: 1.5                  # 当前 ATR > mult × 近 lookback 均值
+      lookback: 20
+    - type: price_break          # N 根高低点突破
+      symbol: ETH_USDT
+      lookback: 20
+      side: high                 # high | low
+    - type: rsi
+      symbol: BTC_USDT
+      period: 14
+      op: gt                     # gt | lt
+      level: 70
 ```
 
-- 两种触发 **二选一优先定时**（同一秒定时已触发则本秒不再看收盘）
-- `cycle_id` 去重：模型重复输出同一 cycle 会跳过，不重复下单
-- 重入保护：上一轮 Plan 未结束则跳过本轮（不并发调 LLM）
-- `timeframe` 同时决定：事件触发的周期 + 快照 K 线周期
-- 账户 API 失败：本轮 abort，不调 LLM、不写 inbox
+```text
+每 check_interval_sec 检查
+  1) interval 到点？     → run_once(trigger=interval)
+  2) K 线收盘？          → run_once(trigger=kline_close)
+  3) 任一 condition 命中？ → run_once(trigger=cond[...])
+```
 
-| 场景 | 建议 |
-|------|------|
-| 15m 策略，跟 K 走 | `interval_sec: 300`（兜底）+ `event_on_kline_close: true` |
-| 只要定时巡检 | `event_on_kline_close: false` |
-| 只要收盘信号 | `interval_sec` 设很大（如 86400），靠事件触发 |
+- 优先级：定时 > 收盘 > 条件（同刻不重复跑）
+- 条件有 **cooldown_sec**（默认 60s），防连打
+- `cycle_id` 去重；重入锁；账户失败 abort
+- 日志：`plan[interval|kline_close|cond[...]]`
 
-日志：`plan[interval] …` / `plan[kline_close] …`（含 orders 数与 cycle_id）。
+| 策略场景 | 建议 |
+|----------|------|
+| 5 分钟短线 | `interval_sec: 300`, `event_timeframe: 5m` |
+| 10 分钟波段 | `interval_sec: 600`, `timeframe: 10m` |
+| 跟 1m 事件 + 5m 快照 | `event_timeframe: 1m`, `timeframe: 5m` |
+| 只追突破 | `event_on_kline_close: false`, `conditions: [price_break…]` |
+| EMA 金叉进场 | `conditions: [ema_cross dir=up]` |
+| 波动率放大加关注 | `conditions: [atr_spike]` |
 
 ### 策略提示词：可换 vs 固定
 
@@ -221,6 +255,9 @@ user   = 【品种宇宙】+【策略风控】+【市场与账户快照】→ �
 
 # 策略 → 交易所全链路（快照→LLM→风控→inbox→执行→挂单→日志）
 .venv\Scripts\python.exe scripts\test_full_chain.py
+
+# 生产级：触发配置 + 真实 AI + 全订单类型 + 交易所
+.venv\Scripts\python.exe scripts\test_production.py
 ```
 
 | 套件 | 参考规模 |
@@ -230,6 +267,7 @@ user   = 【品种宇宙】+【策略风控】+【市场与账户快照】→ �
 | testnet_all_orders | 57 |
 | strategy_prompt | 8 |
 | full_chain | 10（策略→交易所） |
+| production | 24（触发+AI+订单+交易所） |
 
 ## 上线准备（Checklist）
 
