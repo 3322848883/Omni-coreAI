@@ -544,7 +544,8 @@ class TestExecutor(unittest.TestCase):
         self.assertTrue(rep.ok)
         self.assertEqual(c.placed_texts.count("t-idem"), 1)
 
-    def test_sl_size_uses_filled(self):
+    def test_entry_and_exit_hang_simultaneous_same_size(self):
+        """Entry + TP/SL hung together at planned size (not wait-for-fill)."""
         class FilledClient(FakeClient):
             def place_order(self, body):
                 self.orders.append(body)
@@ -554,12 +555,15 @@ class TestExecutor(unittest.TestCase):
         c = FilledClient()
         ex = Executor(c)
         rep = ex.execute_signal(parse_signal({
-            "action": "open_long", "symbol": "BTC_USDT", "size": 5, "sl": 1, "label": "fill",
+            "action": "open_long", "symbol": "BTC_USDT", "size": 5, "sl": 1, "tp": 2, "label": "sim",
         }))
         s = rep.results[0]
+        self.assertEqual(s.detail.get("hang_mode"), "simultaneous")
         self.assertEqual(s.detail.get("exit_size"), 5)
         sl = (s.detail.get("sl_orders") or [{}])[0]
+        tp = (s.detail.get("tp_orders") or [{}])[0]
         self.assertEqual((sl.get("order") or {}).get("initial", {}).get("size"), -5)
+        self.assertEqual((tp.get("order") or {}).get("initial", {}).get("size"), -5)
 
     def test_open_size_pct(self):
         client = FakeClient()

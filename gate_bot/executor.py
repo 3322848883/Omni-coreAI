@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional
 
 from .gate_client import GateApiError, GateClient, resolve_symbol
@@ -377,7 +378,7 @@ class Executor:
             )
 
     def _check_account_risk(self, intent: Intent) -> None:
-        """Account-level halt / exposure limits (pre-trade)."""
+        """Account-level halt / exposure / daily-loss limits (pre-trade, all configurable)."""
         ar = self.account_risk or {}
         action = (intent.meta or {}).get("requested_action") or intent.action
         manage = {"hold", "close", "close_all", "flatten", "cancel_all", "cancel_price_all",
@@ -385,6 +386,21 @@ class Executor:
         if ar.get("halt") and action not in manage:
             raise GateApiError("HALTED: account_risk.halt=true; only close/cancel allowed")
         if action not in manage and action.startswith(("open", "add", "stop_entry")):
+            # daily loss vs day-start equity (strategy-adjustable)
+            dlimit = ar.get("daily_loss_limit_usd")
+            if dlimit is not None:
+                try:
+                    total = float((self.client.get_account() or {}).get("total") or 0)
+                    start = self._day_start_equity(total)
+                    if start > 0 and (start - total) > float(dlimit):
+                        raise GateApiError(
+                            f"DAILY_LOSS_LIMIT: loss={start - total:.2f} > {dlimit} "
+                            f"(day_start={start:.2f} now={total:.2f})"
+                        )
+                except GateApiError:
+                    raise
+                except Exception:  # noqa: BLE001
+                    pass
             max_lev = ar.get("max_leverage")
             if max_lev is not None and intent.leverage and int(intent.leverage) > int(max_lev):
                 raise GateApiError(
@@ -423,6 +439,24 @@ class Executor:
                     raise
                 except Exception:  # noqa: BLE001 — if cannot measure, do not silently allow huge size
                     raise GateApiError("MAX_TOTAL_NOTIONAL: cannot measure account exposure")
+
+    def _day_start_equity(self, current_total: float) -> float:
+        """Persist UTC-day start equity for daily_loss_limit (per bot process root)."""
+        from datetime import datetime, timezone
+        import json as _json
+
+        day = datetime.now(timezone.utc).strftime("%Y%m%d")
+        root = Path(getattr(self, "state_dir", None) or Path.cwd() / "history" / "_account_risk")
+        path = root / f"equity_{day}.json"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists():
+                data = _json.loads(path.read_text(encoding="utf-8"))
+                return float(data.get("start_equity") or 0)
+            path.write_text(_json.dumps({"start_equity": current_total}), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            return current_total
+        return current_total
 
     def _check_notional(self, size_usd: Optional[float]) -> None:
         if self.max_notional_usd is not None and size_usd is not None:
@@ -479,17 +513,18 @@ class Executor:
                 error="entry_not_confirmed: " + str(entry_err),
             )
 
-        # auto TP/SL: trigger (price_order) or resting reduce_only limit
+        # auto TP/SL: hang TOGETHER with entry (same planned size) — 不等成交再挂
         pos_side = "long" if intent.action == "open_long" else "short"
         trigger_side = "short" if pos_side == "long" else "long"
-        # SL size follows FILLED contracts (not planned) when available
         entry_order = (entry_rec or {}).get("order") or {}
         filled = abs(int(entry_order.get("size") or 0)) - abs(int(entry_order.get("left") or 0))
         if entry_order.get("finish_as") == "filled":
             filled = abs(int(entry_order.get("size") or 0))
-        exit_size = int(filled) if filled and filled > 0 else int(contracts)
+        # simultaneous hang: exit legs use the SAME size as entry plan
+        exit_size = int(contracts)
         detail["exit_size"] = exit_size
         detail["filled_size"] = filled
+        detail["hang_mode"] = "simultaneous"
         tp_orders = []
         sl_orders = []
         exit_errors = []

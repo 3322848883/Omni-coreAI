@@ -28,6 +28,15 @@ label_prefix: alpha       # 写入订单 text: t-<label>
 position_policy: strict
 # 新方案默认替换：none | symbol | all（JSON 里 replace 可覆盖）
 default_replace: none
+# 订单归属：own=只管本 label 单；all=整币种全撤（多策略共账户用 own）
+order_scope: own
+# ── 策略风控参数（按策略可调）──
+require_sl: true            # false = 允许无止损开仓（不推荐）
+account_risk:
+  halt: false               # true=只允许平仓/撤单
+  max_leverage: 10
+  max_total_notional_usd: 500
+  # daily_loss_limit_usd: 50
 
 # LLM 策略层（可选）+ 行情混合接入
 # strategist:
