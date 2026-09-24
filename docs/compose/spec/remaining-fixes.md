@@ -111,10 +111,10 @@ if available in (None, "") or positions 获取失败 → account.error → run_o
 
 ## Tasks
 
-- [ ] T1: F7 未知 condition 配置期拒绝 — acceptance: parse 抛 ValueError；单测 (covers: S2.2)
-- [ ] T2: F1 `all`/`any` 组合条件 + 深度限制 — acceptance: 组合单测 + 文档 (covers: S2.2; depends: T1)
-- [ ] T3: F5 RSI 跨 gap + F6 account available 校验 — acceptance: gap 单测 + abort 单测 (covers: S2.2)
-- [ ] T4: F4 指标 API 收敛 + 一致性对照测试 — acceptance: fill 与纯函数一致 (covers: S2.2)
-- [ ] T5: F8 limit_order 偏离带收价重试一次 — acceptance: mock 400 后成功 (covers: S2.2)
-- [ ] T6: F11 清理 hist/ 等脏目录 + gitignore — acceptance: git status 干净 (covers: S2.2)
-- [ ] T7: README/matrix 更新 + 全量测试 + testnet 生产复跑 — acceptance: 119+ 全绿；prod 24/24 (covers: S2.2, S2.4; depends: T1–T6)
+- [x] T1: F7 未知 condition 配置期拒绝 — acceptance: parse 抛 ValueError；单测 (covers: S2.2)
+- [x] T2: F1 `all`/`any` 组合条件 + 深度限制 — acceptance: 组合单测 + 文档 (covers: S2.2; depends: T1)
+- [x] T3: F5 RSI 跨 gap + F6 account available 校验 — acceptance: gap 单测 + abort 单测 (covers: S2.2)
+- [x] T4: F4 指标 API 收敛 + 一致性对照测试 — acceptance: fill 与纯函数一致（真实 K 线 `scripts/test_indicators_real.py`） (covers: S2.2)
+- [x] T5: F8 limit_order 偏离带收价重试一次 — acceptance: mock 400 后成功 (covers: S2.2)
+- [x] T6: F11 清理 hist/ 等脏目录 + gitignore — acceptance: git status 干净 (covers: S2.2)
+- [x] T7: README/matrix 更新 + 全量测试 + testnet 生产复跑 — acceptance: 124 全绿；prod 24/24；indicators_real 16/16 (covers: S2.2, S2.4; depends: T1–T6)
