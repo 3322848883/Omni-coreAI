@@ -25,6 +25,7 @@ pa-data-source/*.lock
 # test residue
 .market_read_test/
 .order_type_test/
+.full_chain_test/
 .multi_bot_test/
 .smoke_inbox/
 .soak_test/
