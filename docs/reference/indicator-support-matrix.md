@@ -12,6 +12,19 @@
 | **P1 行情** | funding/mark/index、OI、多空比、盘口5档 | premium、basis、买卖比成交流 | marketanalysis 13 场景更全 |
 | **测试** | 107 单测（EMA/RSI/ATR/5条件） | MACD/BOLL/MA **0 测试** | — |
 
+## 0. 真实数据验证记录（testnet BTC_USDT 15m，120 根）
+
+| 项 | 实测结果 |
+|----|----------|
+| 自定义周期 | `ema9=83987.6` / `ema21=83868.2` / `rsi7=52.8` / `atr10=389.3` ✅ |
+| 标准周期 | `ema20` / `ema50` / `rsi14` / `atr14` ✅ |
+| 静默忽略 R1 | `macd/boll_upper_band/ma7/sma20/foo` → **全 null，无告警** ⚠️ |
+| 条件真实触发 | `rsi`/`atr_spike` fired=True；`price_vs_ema`/`ema_cross`/`price_break` 按行情未触发但返回 reason ✅ |
+| 缺失条件 | `volume_spike`/`macd_cross`/`boll_break`/`ma_cross` → `unknown condition` ⚠️ |
+| Gate CLI 名称 | `rsi,macd,ema7,boll_upper_band,ma7,close_price` **均被接受**（返回 count=0，Intel 空数据） |
+| 单测 | **107 OK** |
+| 生产套件 testnet + 真实 AI | **24/24 PASS**（含 interval/kline_close 触发 + 全订单） |
+
 ## 2. 指标名解析矩阵（实测）
 
 | 名称 | 解析结果 | 快照可算 | 备注 |
