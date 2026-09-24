@@ -277,18 +277,49 @@ class Executor:
             "quanto_multiplier": meta.quanto_multiplier,
         }
 
-        # auto TP/SL close-trigger
+        # auto TP/SL: trigger (price_order) or resting reduce_only limit
         pos_side = "long" if intent.action == "open_long" else "short"
         trigger_side = "short" if pos_side == "long" else "long"
         tp_orders = []
         sl_orders = []
         if intent.tp is not None:
-            tp_orders.append(self._place_trigger(intent, trigger_side, intent.tp, is_tp=True, meta=meta, size=contracts))
+            if intent.tp_mode == "limit_order":
+                tp_orders.append(self._place_limit_exit(intent, pos_side, intent.tp, is_tp=True, meta=meta, size=contracts))
+            else:
+                tp_orders.append(self._place_trigger(intent, trigger_side, intent.tp, is_tp=True, meta=meta, size=contracts))
         if intent.sl is not None:
-            sl_orders.append(self._place_trigger(intent, trigger_side, intent.sl, is_tp=False, meta=meta, size=contracts))
+            if intent.sl_mode == "limit_order":
+                sl_orders.append(self._place_limit_exit(intent, pos_side, intent.sl, is_tp=False, meta=meta, size=contracts))
+            else:
+                sl_orders.append(self._place_trigger(intent, trigger_side, intent.sl, is_tp=False, meta=meta, size=contracts))
         detail["tp_orders"] = tp_orders
         detail["sl_orders"] = sl_orders
         return StepResult(intent.action, intent.symbol, True, detail=detail)
+
+    def _place_limit_exit(self, intent: Intent, pos_side: str, price: float, is_tp: bool, meta, size: int) -> dict:
+        """Resting reduce_only LIMIT exit (限价止盈/止损挂单), not a price trigger.
+
+        long  → sell limit (negative size)
+        short → buy limit (positive size)
+        Note: a stop-loss limit that is immediately marketable will fill at once;
+        use sl_mode=trigger for true stop semantics.
+        """
+        api_size = -abs(size) if pos_side == "long" else abs(size)
+        body = {
+            "contract": intent.symbol,
+            "size": api_size,
+            "price": str(round_price(float(price), meta)),
+            "tif": "gtc",
+            "reduce_only": True,
+            "text": f"t-{intent.label}-{'lp' if is_tp else 'ls'}",
+        }
+        order = self.client.place_order(body)
+        return {
+            "mode": "limit_order",
+            "kind": "tp" if is_tp else "sl",
+            "order": order,
+            "body": body,
+        }
 
     def _trail(self, intent: Intent) -> StepResult:
         self._check_symbol(intent.symbol)

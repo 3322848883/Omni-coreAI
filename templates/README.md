@@ -72,7 +72,35 @@ AI/策略把信号写成 **一个 JSON 文件**，放入 `inbox/<bot_id>/`。
 | `size` / `size_usd` / `size_pct` / `margin_pct` | 四选一 | 张 / 名义 U / 可用余额比例 / 保证金比例×杠杆 |
 | `type` | 可省 | `market`(默认)/`limit`/`post_only`/`ioc`/`fok` |
 | `price` | limit 等必填 | 委托价 |
-| `tp` / `sl` | 可省 | 止盈/止损触发价（平仓单，禁 market） |
+| `tp` / `sl` | 可省 | 止盈/止损价 |
+| `tp_mode` / `sl_mode` | 可省 | **`trigger`（默认）**=条件计划委托；**`limit_order`**=盘口 reduce_only **限价挂单** |
+| `tp_type` / `sl_type` | 可省 | 条件单触发后委托方式，默认 `limit`（禁 market 平仓） |
+
+### 限价单止盈止损 vs 条件单止盈止损
+
+| mode | 实现 | 适用 |
+|------|------|------|
+| **`trigger`**（默认） | `price_orders` 计划委托：到触发价再下平仓单 | 真止损、触发式止盈 |
+| **`limit_order`** | 普通委托：`reduce_only + tif=gtc` 限价挂在盘口 | **限价止盈**（maker）；需立刻在订单簿可见时 |
+
+```json
+{
+  "action": "open_long",
+  "symbol": "BTC_USDT",
+  "size_usd": 100,
+  "type": "limit",
+  "price": 70000,
+  "tp": 73000,
+  "sl": 68500,
+  "tp_mode": "limit_order",
+  "sl_mode": "trigger",
+  "meta": {"signal_id": "20260302-lim-tpsl"}
+}
+```
+
+注意：`sl_mode: limit_order` 是**限价卖/买平仓单**，若价格已可成交会**立即成交**（不是“到价再触发”的止损）；真止损请用 `sl_mode: trigger`。限价开仓未成交时，`limit_order` 的 TP/SL 也需已有持仓才能挂 `reduce_only`。
+
+## 加减仓 × 持仓模式
 | `trigger_price` | 突破单必填 | `stop_entry_*` 的触发价 |
 | `trigger_rule` | 可省 | 1=≥，2=≤；多头默认 1/2，空头对调 |
 | `leverage` | 可省 | 下单前改杠杆 |

@@ -148,5 +148,20 @@ class TestLLMClient(unittest.TestCase):
             os.environ.pop("OPENAI_API_KEY", None)
 
 
+class TestTradeLogger(unittest.TestCase):
+    def test_write_and_tail(self):
+        from gate_bot.tradelog import TradeLogger
+
+        with tempfile.TemporaryDirectory() as td:
+            log = TradeLogger(Path(td) / "t.jsonl")
+            log.log_execution("alpha", {"signal_id": "s1"}, {"ok": True, "steps": []})
+            log.log_plan("alpha", {"cycle_id": "c1", "orders": 1})
+            rows = log.tail(10)
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0]["type"], "execution")
+            self.assertEqual(rows[1]["type"], "plan")
+            self.assertEqual(rows[0]["bot_id"], "alpha")
+
+
 if __name__ == "__main__":
     unittest.main()

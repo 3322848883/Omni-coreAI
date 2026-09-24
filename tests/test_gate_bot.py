@@ -147,6 +147,42 @@ class TestSchema(unittest.TestCase):
         rep = ex.execute_signal(parse_signal({"action": "open_long", "symbol": "BTC_USDT", "size": 1}))
         self.assertTrue(rep.ok)
 
+    def test_limit_order_tpsl_resting_reduce_only(self):
+        client = FakeClient()
+        ex = Executor(client)
+        sig = parse_signal({
+            "action": "open_long",
+            "symbol": "BTC_USDT",
+            "size": 1,
+            "type": "market",
+            "tp": 55000,
+            "sl": 48000,
+            "tp_mode": "limit_order",
+            "sl_mode": "limit_order",
+            "label": "ex",
+        })
+        report = ex.execute_signal(sig)
+        self.assertTrue(report.ok)
+        # 1 entry + 2 reduce_only limits; no price_orders (not conditional)
+        self.assertEqual(len(client.orders), 3)
+        self.assertEqual(len(client.price_orders), 0)
+        tp, sl = client.orders[1], client.orders[2]
+        self.assertTrue(tp.get("reduce_only"))
+        self.assertEqual(tp.get("tif"), "gtc")
+        self.assertEqual(tp.get("size"), -1)  # sell to close long
+        self.assertTrue(sl.get("reduce_only"))
+        self.assertEqual(sl.get("size"), -1)
+
+    def test_default_tpsl_stays_trigger(self):
+        client = FakeClient()
+        ex = Executor(client)
+        ex.execute_signal(parse_signal({
+            "action": "open_long", "symbol": "BTC_USDT", "size": 1,
+            "tp": 55000, "sl": 48000,
+        }))
+        self.assertEqual(len(client.orders), 1)
+        self.assertEqual(len(client.price_orders), 2)
+
     def test_empty_action_is_hold(self):
         self.assertEqual(parse_signal({"symbol": "BTC_USDT"}).intents[0].action, "hold")
         self.assertEqual(parse_signal({"action": ""}).intents[0].action, "hold")

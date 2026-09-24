@@ -77,6 +77,17 @@ def cmd_plan_loop(args) -> int:
     return 0
 
 
+def cmd_trades(args) -> int:
+    from .tradelog import TradeLogger, trade_log_path
+
+    paths = ProjectPaths(_root_from_args(args))
+    paths.ensure()
+    log = TradeLogger(trade_log_path(paths.root, args.bot))
+    rows = log.tail(args.tail)
+    print(json.dumps(rows, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_status(args) -> int:
     paths = ProjectPaths(_root_from_args(args))
     paths.ensure()
@@ -175,6 +186,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_proc.add_argument("file")
     p_proc.add_argument("--bot", required=True)
     p_proc.set_defaults(func=cmd_process)
+
+    p_tr = sub.add_parser("trades", help="print trade journal (JSONL tail)")
+    p_tr.add_argument("--bot", required=True)
+    p_tr.add_argument("--tail", type=int, default=50)
+    p_tr.set_defaults(func=cmd_trades)
 
     p_st = sub.add_parser("status", help="show bots and backlog")
     p_st.set_defaults(func=cmd_status)

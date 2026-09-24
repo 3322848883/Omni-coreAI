@@ -71,6 +71,9 @@ class Intent:
     sl: Optional[float] = None
     tp_type: str = "limit"
     sl_type: str = "limit"
+    # trigger = price_order (conditional); limit_order = resting reduce_only limit
+    tp_mode: str = "trigger"
+    sl_mode: str = "trigger"
     tp_limit_price: Optional[float] = None
     sl_limit_price: Optional[float] = None
     trigger_price_type: str = "latest"
@@ -296,6 +299,13 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
     sl = _f(data.get("sl"), "sl")
     tp_type = str(data.get("tp_type") or "limit").lower()
     sl_type = str(data.get("sl_type") or "limit").lower()
+    tp_mode = str(data.get("tp_mode") or "trigger").lower()
+    sl_mode = str(data.get("sl_mode") or "trigger").lower()
+    for name, m in (("tp_mode", tp_mode), ("sl_mode", sl_mode)):
+        if m not in ("trigger", "limit_order", "limit"):
+            raise SchemaError(f"{name} must be trigger|limit_order")
+        if m == "limit":
+            pass  # alias
     if tp is not None and tp_type not in ORDER_TYPES:
         raise SchemaError(f"tp_type invalid: {tp_type!r}")
     if sl is not None and sl_type not in ORDER_TYPES:
@@ -348,6 +358,8 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
         sl=sl,
         tp_type=tp_type,
         sl_type=sl_type,
+        tp_mode="limit_order" if tp_mode in ("limit_order", "limit") else "trigger",
+        sl_mode="limit_order" if sl_mode in ("limit_order", "limit") else "trigger",
         tp_limit_price=_f(data.get("tp_limit_price"), "tp_limit_price"),
         sl_limit_price=_f(data.get("sl_limit_price"), "sl_limit_price"),
         trigger_price_type=trigger_price_type,

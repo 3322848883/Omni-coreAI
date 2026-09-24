@@ -134,6 +134,17 @@ def process_file(path: Path, bot: BotConfig, paths: ProjectPaths, executor: Opti
 
     report: ExecReport = executor.execute_signal(signal)
     result = report.to_dict()
+    try:
+        from .tradelog import TradeLogger, trade_log_path
+
+        TradeLogger(trade_log_path(paths.root, bot.bot_id)).log_execution(
+            bot.bot_id,
+            (signal.meta or {}),
+            result,
+            source="watcher",
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("trade log write failed: %s", e)
     if report.ok:
         dest = paths.bot_done(bot.bot_id) / original_name
         os.replace(tmp, dest)

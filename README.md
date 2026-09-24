@@ -48,6 +48,25 @@ strategist:
 LLM 输出 **Plan**（chips 数组），经风控后转 `orders[]` 写入 inbox；`hold`/低置信不产生下单。  
 契约详见 `docs/compose/spec/llm-strategist.md` 与 `prompts/vergex_default.md`。
 
+## 交易日志（trades）
+
+每笔执行追加写入 **`logs/trades/<bot_id>.jsonl`**（JSONL，一行一条）。
+
+```bash
+# 查看最近 N 条
+.venv\Scripts\python.exe -m gate_bot trades --bot alpha --tail 50
+```
+
+| 字段 | 说明 |
+|------|------|
+| `ts` | UTC 时间 |
+| `type` | `execution`（下单执行）/ `plan`（LLM 规划轮） |
+| `bot_id` / `source` | 机器人、来源 |
+| `plan_cycle` / `strategy` | 计划周期、策略名 |
+| `ok` / `steps` | 成败与每步 action/order_id |
+
+与 `archive/**/result.json`（按信号文件）互补：**trades 按时间流水**，适合审计回看。
+
 ## 上线准备（Checklist）
 
 1. **密钥**：环境变量 `GATE_API_KEY` / `GATE_API_SECRET`（或 `GATE_TESTNET_*`），**不要写进 yaml**
