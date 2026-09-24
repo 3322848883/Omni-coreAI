@@ -125,7 +125,8 @@ def parse_plan(data: Any) -> Plan:
     )
 
 
-def parse_plan_text(text: str) -> Plan:
+def _extract_json_object(text: str):
+    """Extract the first balanced JSON object from LLM output."""
     import json
 
     t = (text or "").strip()
@@ -135,7 +136,41 @@ def parse_plan_text(text: str) -> Plan:
             t = t[4:]
         t = t.strip()
     try:
-        data = json.loads(t)
-    except json.JSONDecodeError as e:
-        raise PlanError(f"LLM output is not valid JSON: {e}") from e
+        return json.loads(t)
+    except json.JSONDecodeError:
+        pass
+    start = t.find("{")
+    if start < 0:
+        raise PlanError("LLM output has no JSON object")
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(t)):
+        ch = t[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(t[start : i + 1])
+                except json.JSONDecodeError as e:
+                    raise PlanError(f"LLM output is not valid JSON: {e}") from e
+    raise PlanError("LLM output JSON object is truncated/unterminated")
+
+
+def parse_plan_text(text: str) -> Plan:
+    import json
+
+    data = _extract_json_object(text)
     return parse_plan(data)

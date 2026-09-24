@@ -22,6 +22,7 @@ _SYSTEM_HEAD = (
     "4) type=limit 等必须给 price。\\n"
     "5) 同 symbol 优先管理已有仓。\\n"
     "6) 不确定就 hold。\\n"
+    "7) reasoning 必须 ≤30 字，禁止长篇分析。\\n"
 )
 
 PLAN_SCHEMA_HINT = (

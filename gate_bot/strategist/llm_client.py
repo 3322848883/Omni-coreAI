@@ -21,7 +21,7 @@ class LLMConfig:
     model: str = "deepseek-chat"
     temperature: float = 0.2
     timeout_sec: int = 60
-    max_tokens: int = 2048
+    max_tokens: int = 4096
     default_base_url: str = "https://api.deepseek.com/v1"
 
     def base_url(self) -> str:
@@ -73,8 +73,15 @@ class LLMClient:
             raise LLMError(f"LLM request failed: {e}") from e
         try:
             data = json.loads(raw)
-            content = data["choices"][0]["message"]["content"]
+            choice = data["choices"][0]
+            content = choice["message"].get("content")
+            self.last_finish_reason = choice.get("finish_reason")
+            self.last_usage = data.get("usage") or {}
         except Exception as e:  # noqa: BLE001
             raise LLMError(f"LLM response parse failed: {e}") from e
         self.last_latency = time.time() - t0
+        if not content:
+            raise LLMError(
+                f"LLM empty content (finish_reason={getattr(self, 'last_finish_reason', None)})"
+            )
         return str(content)

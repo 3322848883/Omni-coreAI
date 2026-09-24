@@ -1,0 +1,41 @@
+# DeepSeek / OpenAI-compatible 策略联调 bot（testnet，小名义）
+# 复制为 config/bots/llm-test.yaml 后使用。密钥只读环境变量，不写本文件。
+
+bot_id: llm-test
+enabled: true
+env: testnet
+api_key_env: GATE_TESTNET_API_KEY
+api_secret_env: GATE_TESTNET_API_SECRET
+symbols:
+  - BTC_USDT
+  - ETH_USDT
+max_notional_usd: 30
+max_orders_per_file: 5
+label_prefix: llm
+position_policy: free
+default_replace: none
+
+strategist:
+  enabled: true
+  interval_sec: 300
+  timeframe: 15m
+  event_on_kline_close: true
+  symbols: [BTC_USDT, ETH_USDT]
+  prompt_file: prompts/vergex_default.md
+  candles: 40
+  write_hold: true
+  market:
+    mode: rest_only
+    refresh: [ticker, stats, orderbook]
+  risk:
+    min_confidence: 0.7
+    max_notional_usd: 30
+    max_chips: 2
+    allow_actions: [hold, open_long, open_short, close, reduce_long, reduce_short]
+  llm:
+    base_url_env: OPENAI_BASE_URL
+    api_key_env: OPENAI_API_KEY
+    model: global:deepseek-v4.1-flash
+    temperature: 0.1
+    timeout_sec: 90
+    max_tokens: 4096

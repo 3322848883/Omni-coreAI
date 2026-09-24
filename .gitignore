@@ -11,6 +11,9 @@ logs/*
 !logs/.gitkeep
 *.log
 
+# runtime bot configs may be local-only (examples stay tracked)
+config/bots/llm-test.yaml
+
 # monorepo: pa-data-source runtime (never commit data/secrets)
 pa-data-source/data/
 pa-data-source/logs/
