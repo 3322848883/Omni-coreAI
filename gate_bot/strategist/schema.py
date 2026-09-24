@@ -1,0 +1,141 @@
+"""Plan / chips schema for LLM strategist (VergeX-style multi-symbol decisions)."""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Optional
+
+CHIP_ACTIONS = {
+    "open_long",
+    "open_short",
+    "add_long",
+    "add_short",
+    "reduce_long",
+    "reduce_short",
+    "close",
+    "close_all",
+    "hold",
+    "stop_entry_long",
+    "stop_entry_short",
+    "flatten",
+    "cancel_all",
+    "cancel_price_all",
+}
+
+CHIP_ORDER_TYPES = {"market", "limit", "post_only", "ioc", "fok"}
+
+
+class PlanError(Exception):
+    pass
+
+
+@dataclass
+class Chip:
+    symbol: str
+    action: str
+    confidence: float = 0.0
+    size_usd: Optional[float] = None
+    size: Optional[int] = None
+    tp: Optional[float] = None
+    sl: Optional[float] = None
+    order_type: str = "market"
+    price: Optional[float] = None
+    trigger_price: Optional[float] = None
+    reasoning: str = ""
+
+    def to_signal_dict(self) -> dict:
+        d: dict[str, Any] = {"action": self.action, "symbol": self.symbol, "type": self.order_type}
+        if self.size is not None:
+            d["size"] = self.size
+        if self.size_usd is not None:
+            d["size_usd"] = self.size_usd
+        if self.price is not None:
+            d["price"] = self.price
+        if self.tp is not None:
+            d["tp"] = self.tp
+        if self.sl is not None:
+            d["sl"] = self.sl
+        if self.trigger_price is not None:
+            d["trigger_price"] = self.trigger_price
+        if self.reasoning:
+            d.setdefault("meta", {})["reasoning"] = self.reasoning
+        return d
+
+
+@dataclass
+class Plan:
+    cycle_id: str
+    reasoning: str = ""
+    chips: list[Chip] = field(default_factory=list)
+    raw: dict = field(default_factory=dict)
+
+
+def _f(v) -> Optional[float]:
+    if v is None or v == "":
+        return None
+    return float(v)
+
+
+def parse_plan(data: Any) -> Plan:
+    if not isinstance(data, dict):
+        raise PlanError("plan must be a JSON object")
+    chips_raw = data.get("chips") or []
+    if not isinstance(chips_raw, list):
+        raise PlanError("chips must be an array")
+    if len(chips_raw) > 50:
+        raise PlanError("chips too large (max 50)")
+    chips: list[Chip] = []
+    for i, raw in enumerate(chips_raw):
+        if not isinstance(raw, dict):
+            raise PlanError(f"chips[{i}] must be object")
+        action = str(raw.get("action") or "").strip().lower()
+        if action not in CHIP_ACTIONS:
+            raise PlanError(f"chips[{i}].action unsupported: {action!r}")
+        symbol = str(raw.get("symbol") or "").strip()
+        if not symbol:
+            raise PlanError(f"chips[{i}].symbol required")
+        conf = float(raw.get("confidence") or 0)
+        if not 0 <= conf <= 1:
+            if 0 < conf <= 100:
+                conf = conf / 100.0
+            else:
+                raise PlanError(f"chips[{i}].confidence out of range")
+        order_type = str(raw.get("type") or "market").lower()
+        if order_type not in CHIP_ORDER_TYPES:
+            raise PlanError(f"chips[{i}].type unsupported: {order_type!r}")
+        chips.append(
+            Chip(
+                symbol=symbol,
+                action=action,
+                confidence=conf,
+                size_usd=_f(raw.get("size_usd")),
+                size=int(raw["size"]) if raw.get("size") is not None else None,
+                tp=_f(raw.get("tp")),
+                sl=_f(raw.get("sl")),
+                order_type=order_type,
+                price=_f(raw.get("price")),
+                trigger_price=_f(raw.get("trigger_price")),
+                reasoning=str(raw.get("reasoning") or ""),
+            )
+        )
+    return Plan(
+        cycle_id=str(data.get("cycle_id") or ""),
+        reasoning=str(data.get("reasoning") or ""),
+        chips=chips,
+        raw=data,
+    )
+
+
+def parse_plan_text(text: str) -> Plan:
+    import json
+
+    t = (text or "").strip()
+    if t.startswith("```"):
+        t = t.strip("`")
+        if t.startswith("json"):
+            t = t[4:]
+        t = t.strip()
+    try:
+        data = json.loads(t)
+    except json.JSONDecodeError as e:
+        raise PlanError(f"LLM output is not valid JSON: {e}") from e
+    return parse_plan(data)

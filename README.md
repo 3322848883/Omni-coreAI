@@ -8,6 +8,46 @@ Gate.io 策略 JSON 信号下单机器人：AI/策略把交易意图 JSON 写入
 - **持仓模式**：按 API Key 自动识别 `single / dual / dual_long_short`
 - **无 dry-run**：合法信号直接下单；失败文件归档到 `archive/failed/`
 
+## LLM 策略层（strategist）
+
+AI 生成方案 → 程序风控 → 写 `inbox` → 现有执行器下单（VergeX 式多品种 chips）。
+
+```bash
+# 单轮：采集快照 → LLM → 风控 → 写 inbox
+.venv\Scripts\python.exe -m gate_bot plan --bot alpha
+
+# 常驻：interval_sec 定时 + K线收盘事件
+.venv\Scripts\python.exe -m gate_bot plan-loop --bot alpha
+# 另开进程执行
+.venv\Scripts\python.exe -m gate_bot run --bot alpha
+```
+
+`config/bots/<id>.yaml` 片段（**风控属于策略，每 bot 独立**）：
+
+```yaml
+strategist:
+  enabled: true
+  interval_sec: 300
+  timeframe: 15m
+  event_on_kline_close: true
+  symbols: [BTC_USDT, ETH_USDT]
+  prompt_file: prompts/vergex_default.md
+  risk:
+    min_confidence: 0.75
+    max_notional_usd: 50
+    max_chips: 3
+    allow_actions: [open_long, open_short, reduce_long, reduce_short, close, hold, stop_entry_long, stop_entry_short]
+  llm:
+    base_url_env: OPENAI_BASE_URL
+    api_key_env: OPENAI_API_KEY
+    model: deepseek-chat
+    temperature: 0.2
+    timeout_sec: 60
+```
+
+LLM 输出 **Plan**（chips 数组），经风控后转 `orders[]` 写入 inbox；`hold`/低置信不产生下单。  
+契约详见 `docs/compose/spec/llm-strategist.md` 与 `prompts/vergex_default.md`。
+
 ## 上线准备（Checklist）
 
 1. **密钥**：环境变量 `GATE_API_KEY` / `GATE_API_SECRET`（或 `GATE_TESTNET_*`），**不要写进 yaml**

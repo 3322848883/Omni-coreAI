@@ -31,6 +31,8 @@ class BotConfig:
     position_policy: str = "strict"
     # none | symbol | all — default replace before new plan (anti pile-up)
     default_replace: str = "none"
+    # LLM strategist (per-bot strategy + risk)
+    strategist: dict = field(default_factory=dict)
 
     def create_client(self) -> GateClient:
         key, secret = load_credentials(self.env, self.api_key_env, self.api_secret_env)
@@ -59,6 +61,7 @@ def load_bot_config(path: Path) -> BotConfig:
         label_prefix=str(data.get("label_prefix") or ""),
         position_policy=str(data.get("position_policy") or "strict").strip().lower(),
         default_replace=str(data.get("default_replace") or "none").strip().lower(),
+        strategist=dict(data.get("strategist") or {}),
     )
 
 

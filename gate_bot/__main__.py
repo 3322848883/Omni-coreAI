@@ -17,6 +17,66 @@ def _root_from_args(args) -> Path:
     return Path(args.root).resolve() if getattr(args, "root", None) else Path.cwd().resolve()
 
 
+def _build_plan_runner(bot, paths: ProjectPaths):
+    from .strategist.llm_client import LLMClient, LLMConfig
+    from .strategist.loop import PlanRunner, StrategistConfig
+    from .strategist.risk import RiskConfig
+
+    s = dict(bot.strategist or {})
+    risk = dict(s.get("risk") or {})
+    llm = dict(s.get("llm") or {})
+    cfg = StrategistConfig(
+        enabled=bool(s.get("enabled", True)),
+        interval_sec=int(s.get("interval_sec") or 300),
+        timeframe=str(s.get("timeframe") or "15m"),
+        event_on_kline_close=bool(s.get("event_on_kline_close", True)),
+        symbols=[str(x) for x in (s.get("symbols") or bot.symbols or [])],
+        prompt_file=str(s.get("prompt_file") or "prompts/vergex_default.md"),
+        write_hold=bool(s.get("write_hold", True)),
+        candles=int(s.get("candles") or 60),
+        risk=RiskConfig(
+            min_confidence=float(risk.get("min_confidence") or 0.75),
+            max_notional_usd=float(risk["max_notional_usd"]) if risk.get("max_notional_usd") is not None else bot.max_notional_usd,
+            max_chips=int(risk.get("max_chips") or 3),
+            allow_actions=set(risk["allow_actions"]) if risk.get("allow_actions") else None,
+        ),
+        llm=LLMConfig(
+            base_url_env=str(llm.get("base_url_env") or "OPENAI_BASE_URL"),
+            api_key_env=str(llm.get("api_key_env") or "OPENAI_API_KEY"),
+            model=str(llm.get("model") or "deepseek-chat"),
+            temperature=float(llm.get("temperature") or 0.2),
+            timeout_sec=int(llm.get("timeout_sec") or 60),
+            max_tokens=int(llm.get("max_tokens") or 2048),
+        ),
+    )
+    client = bot.create_client()
+    history = paths.root / "history" / bot.bot_id
+    return PlanRunner(client, cfg, paths.bot_inbox(bot.bot_id), history, llm=LLMClient(cfg.llm))
+
+
+def cmd_plan(args) -> int:
+    paths = ProjectPaths(_root_from_args(args))
+    paths.ensure()
+    bot = load_bot_config(paths.config_dir / f"{args.bot}.yaml")
+    runner = _build_plan_runner(bot, paths)
+    result = runner.run_once()
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result.get("ok") else 2
+
+
+def cmd_plan_loop(args) -> int:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    paths = ProjectPaths(_root_from_args(args))
+    paths.ensure()
+    bot = load_bot_config(paths.config_dir / f"{args.bot}.yaml")
+    runner = _build_plan_runner(bot, paths)
+    try:
+        runner.run_forever()
+    except KeyboardInterrupt:
+        print("bye")
+    return 0
+
+
 def cmd_status(args) -> int:
     paths = ProjectPaths(_root_from_args(args))
     paths.ensure()
@@ -118,6 +178,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_st = sub.add_parser("status", help="show bots and backlog")
     p_st.set_defaults(func=cmd_status)
+
+    p_plan = sub.add_parser("plan", help="one LLM plan cycle → write inbox")
+    p_plan.add_argument("--bot", required=True)
+    p_plan.set_defaults(func=cmd_plan)
+
+    p_pl = sub.add_parser("plan-loop", help="LLM strategist loop (interval + kline close)")
+    p_pl.add_argument("--bot", required=True)
+    p_pl.set_defaults(func=cmd_plan_loop)
     return parser
 
 
