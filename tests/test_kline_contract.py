@@ -64,9 +64,9 @@ class TestKlineContract(unittest.TestCase):
         self.assertTrue((pa / "kline_watcher.py").exists())
         self.assertTrue((pa / "watchdog.py").exists())
         self.assertTrue((pa / "watchlist.yaml").exists())
-        # no committed runtime dbs
-        dbs = list(pa.glob("data/*.db")) + list(pa.glob("*.db"))
-        self.assertEqual(dbs, [])
+        # runtime data dir is gitignored (dbs may exist on disk while pipeline runs)
+        gi = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("pa-data-source/data/", gi)
 
 
 if __name__ == "__main__":
