@@ -99,6 +99,35 @@ strategist:
 LLM 输出 **Plan**（chips 数组），经风控后转 `orders[]` 写入 inbox；`hold`/低置信不产生下单。  
 契约详见 `docs/compose/spec/llm-strategist.md` 与 `prompts/vergex_default.md`。
 
+### 策略提示词：可换 vs 固定
+
+| 部分 | 可否更换 | 位置 |
+|------|----------|------|
+| **策略人格**（决策风格/进出场偏好） | ✅ 可换 | `strategist.prompt_file` 指向的 md |
+| 输出契约（Plan JSON、action 枚举、必填字段） | ❌ 固定 | `gate_bot/strategist/prompt.py` |
+| 安全规则（开仓必须 sl、不确定 hold、reasoning 从简） | ❌ 固定 | 同上 |
+| 行情/账户快照 | 每轮自动生成 | 不写在策略文件里 |
+| 风控（min_confidence / max_notional / allow_actions） | 按 bot 配置 | yaml `strategist.risk`（**程序强制**） |
+| 模型 / 温度 / max_tokens | 按 bot 配置 | yaml `strategist.llm` |
+
+组装（每轮相同）：
+
+```text
+system = 固定契约与安全规则 + 【策略人格】+ prompt_file
+user   = 【品种宇宙】+【策略风控】+【市场与账户快照】→ 请输出 Plan JSON
+```
+
+自定义策略步骤：
+
+1. 新建 `prompts/my_strategy.md`（只写**判断风格**：决策顺序、进出场、禁止项）  
+2. bot yaml：`prompt_file: prompts/my_strategy.md`  
+3. 需要时单独调该 bot 的 `risk` / `symbols` / `max_notional_usd`  
+4. `plan --bot <id>` 看 reasoning 是否符合风格  
+
+多策略 = 多个 `prompt_file` + 多个 bot 配置 + 各自 inbox（见「多机器人怎么加」）。  
+**提示词改不了动作语义**：突破只能用 `stop_entry_*`，止损用 `sl`；超名义上限仍会被风控拒绝。  
+模板与示例见 `prompts/README.md`。
+
 ### 数据来源（market hybrid + P1）
 
 快照按数据特性分源，**不改 pa-data-source**（只读它的库）：

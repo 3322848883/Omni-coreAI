@@ -166,7 +166,7 @@ python -m gate_bot plan-loop --bot <id>       # 常驻：interval + kline-close
 - [ ] T1: `strategist/schema.py` — Plan/chip 解析与校验 — acceptance: 合法/非法 Plan 单测通过 (covers: S2)
 - [ ] T2: `strategist/llm_client.py` — OpenAI 兼容 chat.completions — acceptance: mock 响应解析成功/超时报错 (covers: S2)
 - [ ] T3: `strategist/snapshot.py` — 行情+账户快照组装 — acceptance: mock gate_client 产出 market/account/policy JSON (covers: S2)
-- [ ] T4: `strategist/prompt.py` + `prompts/vergex_default.md` — prompt 组装 — acceptance: 含 snapshot+风控约束+输出 schema (covers: S2)
+- [x] T4: `strategist/prompt.py` + `prompts/vergex_default.md` — prompt 组装 — acceptance: 含 snapshot+风控约束+输出 schema (covers: S2)（固定契约 + 可换 `prompt_file` 人格，见 `prompts/README.md`）
 - [ ] T5: `strategist/risk.py` — 按 bot risk 过滤/截断 chips — acceptance: 风控矩阵单测 (covers: S2)
 - [ ] T6: `strategist/bridge.py` — chips→SignalFile 写 inbox — acceptance: 产出可被 parse_signal 执行的 JSON (covers: S2)
 - [ ] T7: CLI `plan` / `plan-loop`（interval + kline close） — acceptance: once 写文件；loop 可启动停止 (covers: S2)
