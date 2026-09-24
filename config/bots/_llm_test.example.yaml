@@ -17,9 +17,9 @@ default_replace: none
 
 strategist:
   enabled: true
-  interval_sec: 300
-  timeframe: 15m
-  event_on_kline_close: true
+  interval_sec: 300              # 定时触发
+  timeframe: 15m                 # 收盘事件周期 / 快照周期
+  event_on_kline_close: true     # K 线收盘事件触发
   symbols: [BTC_USDT, ETH_USDT]
   prompt_file: prompts/vergex_default.md
   candles: 40

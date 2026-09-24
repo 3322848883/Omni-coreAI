@@ -116,6 +116,7 @@ strategist:
 
 - **风控属于策略**：每 bot 一套 `risk`；与 bot 级 `max_notional_usd` / `position_policy` / `default_replace` 取更严。
 - 触发：`interval_sec` 定时 + `event_on_kline_close`（K 线收盘事件），同一 cycle_id 去重。
+- 触发细节：每秒轮询；定时优先于同秒的收盘事件；`_kline_closed` 以首个 symbol 的 `timeframe` K 线 `t` 前进为准；`run_once` 非重入；账户失败 abort。
 
 ### 风控（写 inbox 前强制）
 
@@ -169,5 +170,5 @@ python -m gate_bot plan-loop --bot <id>       # 常驻：interval + kline-close
 - [x] T4: `strategist/prompt.py` + `prompts/vergex_default.md` — prompt 组装 — acceptance: 含 snapshot+风控约束+输出 schema (covers: S2)（固定契约 + 可换 `prompt_file` 人格，见 `prompts/README.md`）
 - [ ] T5: `strategist/risk.py` — 按 bot risk 过滤/截断 chips — acceptance: 风控矩阵单测 (covers: S2)
 - [ ] T6: `strategist/bridge.py` — chips→SignalFile 写 inbox — acceptance: 产出可被 parse_signal 执行的 JSON (covers: S2)
-- [ ] T7: CLI `plan` / `plan-loop`（interval + kline close） — acceptance: once 写文件；loop 可启动停止 (covers: S2)
+- [x] T7: CLI `plan` / `plan-loop`（interval + kline close） — acceptance: once 写文件；loop 可启动停止 (covers: S2)
 - [ ] T8: README 策略层文档 + 全量单测 — acceptance: unittest 全绿；README 含 Plan schema (covers: S2)
