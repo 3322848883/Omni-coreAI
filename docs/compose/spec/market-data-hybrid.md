@@ -1,14 +1,24 @@
 ---
 feature: market-data-hybrid
-status: in-progress
+status: delivered
 updated: 2026-08-31
 branch: feat/market-hybrid
-commits: # leave empty while in progress; fill at delivery
+commits: bd2cf1f..9fc2422
 ---
 
 # Market Data Hybrid — 行情混合接入
 
 ## Report
+
+**What was built** — strategist 快照按数据特性分源：`hybrid|rest_only|local_only` 三态读 pa-data-source `kline.db`（只读），指标 ema20/50、atr14、rsi14 在缺口处从末次库值 warm-start（不重算已知库值）；`last`/持仓/余额强制实时 API，account 不完整则本轮 abort 不写 inbox；testnet 自动切 `kline_testnet.db`；stale（末根年龄 > `stale_factor×周期`）自动 REST 降级并写入 `meta.degraded`。默认 `rest_only` 保持零依赖旧行为。
+
+**Verification** — `python -m unittest discover -s tests`：**86 PASS**（新增 indicators warm-start/空值、market 三 mode/降级/ms 时间戳、snapshot meta、account abort 且 inbox 为空）。独立复审第一轮 FAIL（warm-start 与 account 边界），修复后复审 **PASS**，无新增 critical。
+
+**Journey log** —
+1. 复审误报「EMA 应用 Wilder 1/n」——对照 pa `kline_watcher.compute_ema` 的 `k=2/(n+1)` 判定公式正确，仅收紧 docstring。
+2. 递归指标不能在窗口内独立重算填缺口，必须从末次库值续算（warm-start）。
+3. `get_positions` 失败不应抹掉已取到的 `available`，但仍应 abort 规划。
+4. 门禁用 epoch 秒判断时要兼容 ms 时间戳，否则永远不 stale。
 
 ## [S1] Problem
 
@@ -21,7 +31,7 @@ strategist 快照目前每轮只做 REST 现拉：`last` + 60 根 K + 账户。�
 | 字段 | 主源 | 门禁 | 降级 |
 |------|------|------|------|
 | `candles` | `kline.db`（hybrid/local_only） | 末根 `t` 距今 ≤ `stale_factor × interval` | hybrid→REST candles；local_only→仍用本地并标 `stale` |
-| `ema20` / `atr14` | 库列（local 且非空） | 随 candle | 缺则本地算；**主路径不重算已有库值** |
+| `ema20` / `atr14` | 库列（local 且非空） | 随 candle | 缺口从末次库值 warm-start；**不重算已有库值** |
 | `ema50` / `rsi14` | 本地算（库无此列） | 输入长度足够 | 不足则该指标为 `null` |
 | `last` | **实时 REST** ticker | — | 跳过该字段并记 `degraded` |
 | `positions` / `available` / `position_mode` | **实时私有 API** | — | **abort 本轮**，不调 LLM、不写 inbox |
@@ -97,7 +107,7 @@ strategist/snapshot.py
 | 末根过期 | `stale=True`，hybrid→REST，`degraded+= "candles_stale"` |
 | REST K 失败且无本地 | 该 symbol `candles_error` |
 | `health_url` 非 200（仅 hybrid/local_only 且配置了） | 视本地不可信，hybrid→REST |
-| last 失败 | `degraded+= "<sym>_last"`，继续 |
+| last 失败 | `degraded+= "<sym>:last"`，继续 |
 | account 失败 | abort 本轮 |
 
 ### 测试边界
