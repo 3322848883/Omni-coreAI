@@ -76,6 +76,7 @@ strategist:
     mode: hybrid          # hybrid | rest_only | local_only
     pa_data_root: pa-data-source/data
     stale_factor: 2.0
+    refresh: [ticker, stats, orderbook]   # ticker 含 funding/mark/index/24h
   risk:
     min_confidence: 0.75
     max_notional_usd: 50
@@ -101,7 +102,12 @@ LLM 输出 **Plan**（chips 数组），经风控后转 `orders[]` 写入 inbox�
 | `candles` + `ema20`/`atr14` | 默认 REST；`hybrid` 读 `kline.db`（过期/缺库自动 REST） |
 | `ema50` / `rsi14` | 本地计算 |
 | `last`、持仓、余额 | **强制实时 API**（账户失败则本轮 abort，不写 inbox） |
+| `ticker` | 实时：funding_rate / mark_price / index_price / 24h 高低量 |
+| `stats` | 实时：OI、多空比（lsr_taker/account）、爆仓量 |
+| `orderbook` | 实时：买卖各 5 档 |
 | 下单报价 | executor 实时 `get_last_price`（不用库价） |
+
+`market.refresh` 可裁剪：`[ticker]` 最省；默认 `[ticker, stats, orderbook]`。
 
 `mode`：
 

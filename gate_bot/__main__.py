@@ -43,6 +43,7 @@ def _build_plan_runner(bot, paths: ProjectPaths):
             stale_factor=2.0 if mk.get("stale_factor") is None else float(mk.get("stale_factor")),
             health_url=mk.get("health_url"),
             indicators=[str(x) for x in (mk.get("indicators") or ["ema20", "ema50", "atr14", "rsi14"])],
+            refresh=[str(x) for x in (mk.get("refresh") or ["ticker", "stats", "orderbook"])],
         ),
         env=bot.env,
         bot_root=paths.root,

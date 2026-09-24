@@ -45,3 +45,4 @@ default_replace: none
 #     stale_factor: 2.0
 #     # health_url: http://127.0.0.1:18080/health
 #     indicators: [ema20, ema50, atr14, rsi14]
+#     refresh: [ticker, stats, orderbook]

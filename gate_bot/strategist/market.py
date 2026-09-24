@@ -32,6 +32,8 @@ class MarketConfig:
     stale_factor: float = 2.0
     health_url: Optional[str] = None
     indicators: list[str] = field(default_factory=lambda: ["ema20", "ema50", "atr14", "rsi14"])
+    # P1 realtime refresh blocks (always REST): ticker includes funding/mark/index/24h
+    refresh: list[str] = field(default_factory=lambda: ["ticker", "stats", "orderbook"])
 
     def __post_init__(self) -> None:
         mode = str(self.mode or "rest_only").strip().lower()
@@ -44,6 +46,8 @@ class MarketConfig:
         else:
             self.stale_factor = float(self.stale_factor)
         self.indicators = [str(x) for x in (self.indicators or [])]
+        allowed = {"ticker", "stats", "orderbook", "last"}
+        self.refresh = [str(x).lower() for x in (self.refresh or []) if str(x).lower() in allowed]
 
 
 @dataclass

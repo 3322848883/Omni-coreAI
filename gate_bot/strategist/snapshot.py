@@ -8,6 +8,47 @@ from ..gate_client import GateApiError, GateClient
 from .indicators import attach_indicators, latest_indicators
 from .market import MarketConfig, resolve_candles
 
+TICKER_FIELDS = (
+    "last",
+    "mark_price",
+    "index_price",
+    "funding_rate",
+    "funding_rate_indicative",
+    "high_24h",
+    "low_24h",
+    "change_percentage",
+    "change_price",
+    "volume_24h_quote",
+    "highest_bid",
+    "lowest_ask",
+    "total_size",
+)
+
+STATS_FIELDS = (
+    "time",
+    "open_interest",
+    "open_interest_usd",
+    "lsr_taker",
+    "lsr_account",
+    "top_lsr_account",
+    "long_liq_size",
+    "short_liq_size",
+    "mark_price",
+)
+
+
+def _f(v: Any) -> Optional[float]:
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _pick(raw: dict, fields: tuple[str, ...]) -> dict[str, Any]:
+    return {k: _f(raw.get(k)) if k != "time" else raw.get(k) for k in fields}
+
 
 def collect_snapshot(
     client: GateClient,
@@ -19,21 +60,56 @@ def collect_snapshot(
     bot_root: Optional[Path] = None,
 ) -> dict[str, Any]:
     cfg = market_cfg or MarketConfig()
+    refresh = set(cfg.refresh or [])
     market: dict[str, Any] = {}
     meta: dict[str, Any] = {
         "market_mode": cfg.mode,
         "candle_source": {},
         "degraded": [],
         "stale": [],
+        "refresh": sorted(refresh),
     }
 
     for sym in symbols:
         entry: dict[str, Any] = {"symbol": sym}
-        try:
-            entry["last"] = client.get_last_price(sym)
-        except GateApiError as e:
-            entry["last_error"] = str(e)
-            meta["degraded"].append(f"{sym}:last")
+        ticker_raw: dict = {}
+
+        # ticker: last + funding + mark/index + 24h (one REST call)
+        if "ticker" in refresh or "last" in refresh or not refresh:
+            try:
+                ticker_raw = client.get_ticker(sym)
+                entry["last"] = _f(ticker_raw.get("last"))
+                if "ticker" in refresh or not refresh:
+                    entry["ticker"] = _pick(ticker_raw, TICKER_FIELDS)
+            except GateApiError as e:
+                entry["last_error"] = str(e)
+                meta["degraded"].append(f"{sym}:last")
+        else:
+            try:
+                entry["last"] = client.get_last_price(sym)
+            except GateApiError as e:
+                entry["last_error"] = str(e)
+                meta["degraded"].append(f"{sym}:last")
+
+        if "stats" in refresh:
+            try:
+                rows = client.get_contract_stats(sym, limit=1)
+                if rows:
+                    entry["stats"] = _pick(rows[-1], STATS_FIELDS)
+            except Exception as e:  # noqa: BLE001
+                entry["stats_error"] = str(e)
+                meta["degraded"].append(f"{sym}:stats")
+
+        if "orderbook" in refresh:
+            try:
+                ob = client.get_orderbook_top(sym, limit=5)
+                entry["orderbook"] = {
+                    "bids": [{"p": _f(b.get("p")), "s": _f(b.get("s"))} for b in ob.get("bids") or []],
+                    "asks": [{"p": _f(a.get("p")), "s": _f(a.get("s"))} for a in ob.get("asks") or []],
+                }
+            except Exception as e:  # noqa: BLE001
+                entry["orderbook_error"] = str(e)
+                meta["degraded"].append(f"{sym}:orderbook")
 
         try:
             result = resolve_candles(
@@ -90,7 +166,6 @@ def collect_snapshot(
                 if int(p.get("size") or 0) != 0
             ]
         except Exception as e:  # noqa: BLE001
-            # Keep available/total if already fetched; still mark error so plan aborts.
             account["error"] = f"positions: {e}"
             account.setdefault("positions", [])
             meta["degraded"].append("positions")

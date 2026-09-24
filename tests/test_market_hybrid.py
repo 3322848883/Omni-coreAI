@@ -161,6 +161,44 @@ class FakeClient:
     def get_last_price(self, symbol):
         return self.last
 
+    def get_ticker(self, symbol):
+        return {
+            "contract": symbol,
+            "last": str(self.last),
+            "mark_price": str(self.last * 0.999),
+            "index_price": str(self.last * 1.001),
+            "funding_rate": "0.0001",
+            "funding_rate_indicative": "0.00012",
+            "high_24h": str(self.last * 1.02),
+            "low_24h": str(self.last * 0.98),
+            "change_percentage": "1.5",
+            "change_price": "12.5",
+            "volume_24h_quote": "123456",
+            "highest_bid": str(self.last - 1),
+            "lowest_ask": str(self.last + 1),
+            "total_size": "999",
+        }
+
+    def get_contract_stats(self, symbol, limit=1):
+        return [{
+            "time": 1790000000,
+            "open_interest": 111.0,
+            "open_interest_usd": 222.0,
+            "lsr_taker": 1.1,
+            "lsr_account": 1.2,
+            "top_lsr_account": 0.9,
+            "long_liq_size": 0,
+            "short_liq_size": 0,
+            "mark_price": 99.5,
+        }]
+
+    def get_orderbook_top(self, symbol, limit=5):
+        return {
+            "bids": [{"p": "99", "s": "10"}, {"p": "98", "s": "20"}],
+            "asks": [{"p": "101", "s": "11"}, {"p": "102", "s": "21"}],
+            "current": 100,
+        }
+
     def get_account(self):
         if self.fail_account:
             raise GateApiError("account down")
@@ -343,6 +381,40 @@ class TestSnapshot(unittest.TestCase):
         self.assertIn("indicators", entry)
         self.assertIn("market_mode", snap["meta"])
         self.assertEqual(snap["meta"]["market_mode"], "rest_only")
+
+    def test_snapshot_p1_ticker_stats_orderbook(self):
+        client = FakeClient(rest_rows=[[int(time.time()), "1", "1", "1", "1", "1", "0"]])
+        snap = collect_snapshot(
+            client,
+            ["BTC_USDT"],
+            candles=5,
+            interval="15m",
+            market_cfg=MarketConfig(mode="rest_only", refresh=["ticker", "stats", "orderbook"]),
+        )
+        e = snap["market"]["BTC_USDT"]
+        self.assertAlmostEqual(e["last"], 100.0)
+        self.assertIn("funding_rate", e["ticker"])
+        self.assertAlmostEqual(e["ticker"]["funding_rate"], 0.0001)
+        self.assertIn("mark_price", e["ticker"])
+        self.assertIn("index_price", e["ticker"])
+        self.assertAlmostEqual(e["stats"]["open_interest"], 111.0)
+        self.assertEqual(len(e["orderbook"]["bids"]), 2)
+        self.assertEqual(e["orderbook"]["asks"][0]["p"], 101.0)
+        self.assertIn("ticker", snap["meta"]["refresh"])
+
+    def test_snapshot_refresh_subset(self):
+        client = FakeClient(rest_rows=[[int(time.time()), "1", "1", "1", "1", "1", "0"]])
+        snap = collect_snapshot(
+            client,
+            ["BTC_USDT"],
+            candles=5,
+            interval="15m",
+            market_cfg=MarketConfig(mode="rest_only", refresh=["ticker"]),
+        )
+        e = snap["market"]["BTC_USDT"]
+        self.assertIn("ticker", e)
+        self.assertNotIn("stats", e)
+        self.assertNotIn("orderbook", e)
 
     def test_account_error_flag(self):
         client = FakeClient(fail_account=True)

@@ -175,14 +175,30 @@ class GateClient:
             raise GateApiError(f"unknown contract: {symbol}")
         return contracts[symbol]
 
-    def get_last_price(self, symbol: str) -> float:
+    def get_ticker(self, symbol: str) -> dict:
         raw = self.public_get(f"{FUTURES_API}/tickers", f"contract={symbol}")
         if isinstance(raw, list):
             raw = raw[0] if raw else {}
-        last = (raw or {}).get("last")
-        if last is None:
+        if not isinstance(raw, dict) or raw.get("last") is None:
             raise GateApiError(f"no ticker for {symbol}")
-        return float(last)
+        return raw
+
+    def get_last_price(self, symbol: str) -> float:
+        return float(self.get_ticker(symbol).get("last"))
+
+    def get_contract_stats(self, symbol: str, limit: int = 1) -> list:
+        raw = self.public_get(
+            f"{FUTURES_API}/contract_stats", f"contract={symbol}&limit={int(limit)}"
+        )
+        return list(raw or [])
+
+    def get_orderbook_top(self, symbol: str, limit: int = 5) -> dict:
+        raw = self.public_get(f"{FUTURES_API}/order_book", f"contract={symbol}&limit={int(limit)}") or {}
+        return {
+            "bids": raw.get("bids") or [],
+            "asks": raw.get("asks") or [],
+            "current": raw.get("current"),
+        }
 
     def set_leverage(self, symbol: str, leverage: int) -> Any:
         # Official: leverage is a QUERY param; dual uses dual_comp path.
