@@ -28,7 +28,7 @@ class TradeLogger:
         report: dict,
         source: str = "watcher",
     ) -> dict[str, Any]:
-        return self.write(
+        row = self.write(
             {
                 "type": "execution",
                 "bot_id": bot_id,
@@ -39,6 +39,24 @@ class TradeLogger:
                 "steps": report.get("steps"),
             }
         )
+        # SQLite ledger (best-effort)
+        try:
+            from .ledger import Ledger, default_ledger_path
+
+            root = Path(getattr(self, "root", None) or self.path.parent.parent.parent)
+            led = Ledger(default_ledger_path(root))
+            led.insert_trade(
+                bot_id,
+                plan_cycle=row.get("plan_cycle"),
+                action="execution",
+                ok=bool(report.get("ok")),
+                steps=report.get("steps"),
+                source=source,
+            )
+            led.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return row
 
     def log_plan(self, bot_id: str, plan_result: dict[str, Any]) -> dict[str, Any]:
         return self.write({"type": "plan", "bot_id": bot_id, **plan_result})

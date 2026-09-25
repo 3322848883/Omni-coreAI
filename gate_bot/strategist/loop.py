@@ -170,6 +170,9 @@ class PlanRunner:
         if not orders:
             if self.cfg.write_hold:
                 write_hold_audit(self.history_dir, plan, cycle_id=plan.cycle_id)
+            self._record_plan(cycle_id=plan.cycle_id, trigger=trigger, orders=0,
+                              notes=risk_result.notes + rejected_triggers,
+                              reasoning=plan.reasoning)
             return {
                 "ok": True,
                 "cycle_id": plan.cycle_id,
@@ -179,6 +182,8 @@ class PlanRunner:
                 "trigger": trigger,
             }
         path = write_signal_file(self.inbox, payload, cycle_id=plan.cycle_id)
+        self._record_plan(cycle_id=plan.cycle_id, trigger=trigger, orders=len(orders),
+                          notes=risk_result.notes + rejected_triggers, reasoning=plan.reasoning)
         return {
             "ok": True,
             "cycle_id": plan.cycle_id,
@@ -188,6 +193,17 @@ class PlanRunner:
             "rejected": len(risk_result.rejected),
             "trigger": trigger,
         }
+
+    def _record_plan(self, **kw: Any) -> None:
+        try:
+            from ..ledger import Ledger, default_ledger_path
+
+            root = self.cfg.bot_root or Path.cwd()
+            led = Ledger(default_ledger_path(root))
+            led.insert_plan(self.inbox.name, **kw)
+            led.close()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _kline_closed(self) -> bool:
         """True when latest candle timestamp for first symbol advances."""

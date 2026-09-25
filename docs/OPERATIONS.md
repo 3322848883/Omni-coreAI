@@ -20,6 +20,19 @@
 - **只跑 `run`**：只吃 inbox 里的信号下单。  
 - **正式实盘**：两个都要，且**各只开一个实例**（防重复下单）。
 
+### 推荐：统一 Supervisor（多 bot 一键托管）
+
+```powershell
+python -m gate_bot migrate          # 旧目录 → data/bots/<id>/*
+python -m gate_bot supervisor       # 启动所有 enabled bot 的 plan-loop + run
+python -m gate_bot status           # 含 heartbeats / PID
+```
+
+- 每 bot 每组件 **PID 锁**（`data/bots/<id>/state/*.lock`）防双开  
+- 崩溃约 5s 拉起；**≤5 次/小时** 防重启风暴  
+- 存储：`data/bots.db` 台账 + `data/bots/<id>/` 文件树  
+- 详细设计：`docs/compose/spec/runtime-upgrade.md`
+
 ---
 
 ## 2. Windows：开机自启 + 崩溃拉起

@@ -136,6 +136,15 @@ def cmd_status(args) -> int:
                 "failed": len(failed_files),
             }
         )
+    try:
+        from .ledger import Ledger, default_ledger_path
+
+        led = Ledger(default_ledger_path(paths.root))
+        out["heartbeats"] = led.heartbeats()
+        led.close()
+    except Exception as e:  # noqa: BLE001
+        out["heartbeats"] = []
+        out["ledger_error"] = str(e)
     print(json.dumps(out, ensure_ascii=False, indent=2))
     return 0
 
@@ -193,6 +202,38 @@ def cmd_run(args) -> int:
     return 0
 
 
+def cmd_supervisor(args) -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    from .supervisor import Supervisor
+
+    sup = Supervisor(
+        _root_from_args(args),
+        bot_ids=args.bot,
+        auto_migrate=bool(args.auto_migrate),
+        check_interval_sec=float(args.check_interval or 2.0),
+    )
+    try:
+        sup.run_forever()
+    except KeyboardInterrupt:
+        print("bye")
+    return 0
+
+
+def cmd_migrate(args) -> int:
+    root = _root_from_args(args)
+    from .migrate import migrate_all, migrate_bot
+
+    if args.bot:
+        reports = [migrate_bot(root, args.bot, dry_run=bool(args.dry_run))]
+    else:
+        reports = migrate_all(root, dry_run=bool(args.dry_run))
+    print(json.dumps(reports, ensure_ascii=False, indent=2, default=str))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="gate_bot", description="Gate strategy signal bot")
     parser.add_argument("--root", default=None, help="project root (default cwd)")
@@ -226,6 +267,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_pl = sub.add_parser("plan-loop", help="LLM strategist loop (interval + kline close)")
     p_pl.add_argument("--bot", required=True)
     p_pl.set_defaults(func=cmd_plan_loop)
+
+    p_sup = sub.add_parser("supervisor", help="multi-bot process supervisor (plan-loop+run)")
+    p_sup.add_argument("--bot", action="append", default=None, help="limit to bot id(s)")
+    p_sup.add_argument("--auto-migrate", action="store_true")
+    p_sup.add_argument("--check-interval", type=float, default=2.0)
+    p_sup.set_defaults(func=cmd_supervisor)
+
+    p_mig = sub.add_parser("migrate", help="legacy layout → data/bots/<id> + import jsonl")
+    p_mig.add_argument("--bot", default=None)
+    p_mig.add_argument("--dry-run", action="store_true")
+    p_mig.set_defaults(func=cmd_migrate)
     return parser
 
 
