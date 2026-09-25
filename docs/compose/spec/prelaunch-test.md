@@ -1,39 +1,42 @@
 ---
 feature: prelaunch-test
-status: in-progress
+status: delivered
 updated: 2026-10-20
 branch: feat/prelaunch-test
-commits: 
+commits: 422c1ee..d02c2b8
 ---
 
 # 上线前全量测试方案（模拟盘 + 实盘）
 
 ## Report
 
-**What was built** — `scripts/prelaunch_runner.py`（矩阵网关 + `.prelaunch_test/report.json`）与分域模块 `prelaunch_orders/fault/live.py`，覆盖 M1–M20。实测：readonly 14 PASS、orders 13 PASS、fault 9 PASS + 1 SKIP（testnet 流动性）、live 小额闭环 4 PASS、regress 141 单测 OK。过程中修掉真实产品缺口：`order_scope=own` 下 `cancel_all`/`cancel_price_all` 会误撤他 bot 挂单。
+**What was built** — `scripts/prelaunch_runner.py`（矩阵网关 + `.prelaunch_test/report.json`）与分域模块 `prelaunch_orders/fault/live.py`，覆盖 M1–M20（含 M4 条件触发、M5 AI 触发策略）。实测：readonly 23 PASS、orders 13 PASS、fault 9 PASS + 1 SKIP（testnet 流动性）、live 小额闭环 4 PASS、regress 142 单测 OK。产品修复：`order_scope=own` 下 `cancel_all`/`cancel_price_all` 误撤他 bot 挂单；label 匹配改为分段安全（`t-{label}` / `t-{label}-`）。
 
 **Verification** —
-- `python -m unittest discover -s tests` → 141 OK
-- `python scripts/prelaunch_runner.py --phase readonly --env testnet` → PASS=14 FAIL=0
-- `python scripts/prelaunch_runner.py --phase orders --env testnet` → PASS=13 FAIL=0
-- `python scripts/prelaunch_runner.py --phase fault` → PASS=9 FAIL=0 SKIP=1（M16 testnet 无成交）
-- `python scripts/prelaunch_runner.py --phase live` → M19 entry+三腿+journal+flatten，无残留
-- `python scripts/prelaunch_runner.py --phase regress` → M20 141 tests OK
+- `python -m unittest discover -s tests` → 142 OK
+- `prelaunch --phase readonly --env testnet` → PASS=23（含 M4/M5）
+- `prelaunch --phase orders --env testnet` → PASS=13（M14 owned=1 texts=['t-m14']）
+- `prelaunch --phase fault` → PASS=9 SKIP=1（M16 testnet 无成交）
+- `prelaunch --phase live` → M19 entry+三腿+journal+flatten，无残留
+- `prelaunch --phase regress` → M20 142 OK
+- 复审：M4/M5、M14、分段匹配关闭；无新 critical
 
 **Journey log** —
-1. M12 暴露 P1：`cancel_all` 直接调交易所全撤接口，无视 `order_scope=own`。修复为显式 bot label（非默认 `signal`）时只撤 `t-{label}*`；默认 label 保留清扫语义。
-2. testnet 市价单易触发 `MARKET_PRICE_TOO_DEVIATED` → 回退 `gtc` 限价挂住（设计内 fallback），薄簿下 taker 限价也可能不成交 → M16 记 ENV SKIP，减仓路径由单测+实盘 M19 覆盖。
-3. EMA 独立复算需 **SMA 播种**（与 `indicators.ema` 一致），用首值播种会假失败。
-4. 实盘 min_notional：优先 `size_usd`；1 张名义 >10U 的币自动跳过或 `size=1` 并记账。
+1. M12 暴露 P1：`cancel_all` 调交易所全撤接口，无视 `order_scope=own`。修复为显式 bot label（非默认 `signal`）时只撤 `t-{label}` / `t-{label}-*`。
+2. testnet 市价易触发 `MARKET_PRICE_TOO_DEVIATED` → 回退 `gtc` 限价挂住；薄簿下 taker 也可能不成交 → M16 记 ENV SKIP。
+3. EMA 独立复算需 SMA 播种，否则假失败。
+4. 首轮 review 抓到 M4/M5 未覆盖、M14 空断言（label 默认 signal）——已补跑并改 `default_label`。
+5. 归属前缀必须分段匹配，否则 `bot` 会命中 `bota`。
 
 ### 真实问题清单
 
 | ID | 现象 | 根因 | 级别 | 状态 |
 |----|------|------|------|------|
-| PRE-01 | 多 bot 下 cancel_all 误撤他单 | `_cancel_all`/`_cancel_price_all` 未按 label 前缀过滤 | **P1** | **已修** + 回归单测 |
-| PRE-02 | 市价单可能变成 gtc 挂单不成交 | `MARKET_PRICE_TOO_DEVIATED` 回退 last 价限价 | P2 | 已知行为；文档化，实盘路径已验证 |
+| PRE-01 | 多 bot 下 cancel_all 误撤他单 | `_cancel_all`/`_cancel_price_all` 未按 label 过滤 | **P1** | **已修** + 回归单测 |
+| PRE-02 | 市价单可能变成 gtc 挂单不成交 | `MARKET_PRICE_TOO_DEVIATED` 回退 last 价限价 | P2 | 已知行为；实盘路径已验证 |
 | PRE-03 | testnet 减仓用例无法成交 | 测试网簿太薄 | P2 ENV | SKIP；单测+M19 覆盖 |
-| PRE-04 | 各币 1 张 min_notional 差异大 | quanto 不同 | P2 | 快照已暴露 `contract`；实单自动选币 |
+| PRE-04 | 各币 1 张 min_notional 差异大 | quanto 不同 | P2 | 快照已暴露 `contract` |
+| PRE-05 | label 前缀误匹配（bot↔bota） | `startswith` 非分段 | P2 | **已修** `_text_owned` |
 
 ## [S1] Problem
 
