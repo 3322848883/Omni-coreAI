@@ -472,6 +472,8 @@ gate-signal-bot/
 
 ## 安装
 
+> 换机器 / 上服务器见 **`AGENTS.md` §8**（`--root` / `GATE_BOT_ROOT` / `GATE_BOT_PA_DATA`；Linux 用 `.venv/bin/python`）。
+
 ```bash
 cd gate-signal-bot
 pip install -r requirements.txt   # pyyaml

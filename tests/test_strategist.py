@@ -282,6 +282,26 @@ class TestPromptSandbox(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 load_strategy_prompt(bad, prompts_root=root)
 
+    def test_prompt_resolves_via_bot_root_not_cwd(self):
+        """Server/cron: prompt_file must load from bot_root even if cwd is elsewhere."""
+        import os
+        import tempfile
+        from gate_bot.strategist.prompt import load_strategy_prompt
+
+        with tempfile.TemporaryDirectory() as td:
+            bot_root = Path(td)
+            (bot_root / "prompts").mkdir()
+            (bot_root / "prompts" / "my.md").write_text("策略人格X", encoding="utf-8")
+            old = Path.cwd()
+            try:
+                os.chdir(tempfile.gettempdir())
+                text = load_strategy_prompt("prompts/my.md", bot_root=bot_root)
+                text2 = load_strategy_prompt("my.md", bot_root=bot_root)
+            finally:
+                os.chdir(old)
+        self.assertEqual(text.strip(), "策略人格X")
+        self.assertEqual(text2.strip(), "策略人格X")
+
     def test_llm_plan_cannot_escape_inbox(self):
         from gate_bot.strategist.bridge import write_signal_file
         import tempfile

@@ -1,7 +1,7 @@
 # Gate CLI / Gate Skills 指标能力核实（2026-09-24）
 
 来源：本机 `gate-cli.exe info mcp-spec`（offline）+ `gate/gate-skills` 本地克隆  
-`C:\Users\w6485\Desktop\测试\gate-skills` 与 https://github.com/gate/gate-skills
+本机可参考 gate-skills 仓库（路径随克隆位置而定）与 https://github.com/gate/gate-skills
 
 ## 1. gate-cli 指标序列（`info_markettrend_get_indiator_history`）
 

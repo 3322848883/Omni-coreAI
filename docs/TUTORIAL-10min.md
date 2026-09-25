@@ -56,9 +56,9 @@ $env:GATE_TESTNET_API_SECRET = "你的测试网Secret"
 ## 2. 复制一份机器人配置
 
 ```powershell
-cd C:\Users\w6485\Desktop\测试\gate-signal-bot
+cd <你的仓库目录>    # 例如 /opt/gate-signal-bot 或任意克隆路径
 Copy-Item config\bots\_example.yaml config\bots\mybot.yaml
-notepad config\bots\mybot.yaml
+notepad config\bots\mybot.yaml    # Linux 用 vim/nano
 ```
 
 **只改这 5 处（示意）**：

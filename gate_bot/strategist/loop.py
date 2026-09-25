@@ -71,7 +71,10 @@ class PlanRunner:
         self.inbox = inbox
         self.history_dir = history_dir
         self.llm = llm or LLMClient(cfg.llm)
-        self.strategy_prompt = load_strategy_prompt(cfg.prompt_file or None)
+        self.strategy_prompt = load_strategy_prompt(
+            cfg.prompt_file or None,
+            bot_root=cfg.bot_root,
+        )
         self._last_kline_t: Optional[int] = None
         self._last_cycle_id: Optional[str] = None
         self._busy = threading.Lock()

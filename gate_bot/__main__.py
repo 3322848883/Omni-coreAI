@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -14,7 +15,13 @@ from .watcher import ProjectPaths, process_file, run_bot_once, run_forever
 
 
 def _root_from_args(args) -> Path:
-    return Path(args.root).resolve() if getattr(args, "root", None) else Path.cwd().resolve()
+    """Project root: --root > GATE_BOT_ROOT > cwd. Works under systemd/cron without cd."""
+    if getattr(args, "root", None):
+        return Path(args.root).expanduser().resolve()
+    env = os.environ.get("GATE_BOT_ROOT")
+    if env:
+        return Path(env).expanduser().resolve()
+    return Path.cwd().resolve()
 
 
 def _build_plan_runner(bot, paths: ProjectPaths):

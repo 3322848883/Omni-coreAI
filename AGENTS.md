@@ -130,3 +130,41 @@ LLM 策略另需 `OPENAI_BASE_URL` / `OPENAI_API_KEY`，然后：
 - LLM 输出只是 Plan，**最终约束在 yaml 风控 + 执行器**。
 - 不要把不可信 JSON 直接丢进生产 `inbox/`。
 - 实盘先小额；密钥不要给提币权限。
+
+---
+
+## 8. 换机器 / 装到服务器（可移植性）
+
+**代码不绑本机路径**，换目录/换 OS 只需处理环境与启动方式。
+
+| 项 | Windows | Linux / 服务器 |
+|----|---------|----------------|
+| Python | `.venv\Scripts\python.exe` | `python3` 或 `.venv/bin/python` |
+| 装依赖 | `pip install -r requirements.txt` | 同左（建议 venv） |
+| 项目根 | 当前目录或 `--root` | `--root /opt/gate-signal-bot` 或 **`GATE_BOT_ROOT`** |
+| 行情库 | 默认 `<root>/pa-data-source/data` | 可用 **`GATE_BOT_PA_DATA`** 改到数据盘 |
+| 密钥 | 终端 `$env:...` / 系统环境变量 | systemd `Environment=` 或 `.env` 由外部注入 |
+
+```bash
+# Linux 服务器示例
+export GATE_BOT_ROOT=/opt/gate-signal-bot
+export GATE_API_KEY=...
+export GATE_API_SECRET=...
+export GATE_BOT_PA_DATA=/data/gate-kline   # 可选
+
+cd /opt/gate-signal-bot
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+python -m gate_bot status --root "$GATE_BOT_ROOT"
+python -m gate_bot run --root "$GATE_BOT_ROOT"
+```
+
+systemd 建议：`WorkingDirectory=/opt/gate-signal-bot`，并设 `GATE_BOT_ROOT` 与密钥环境变量。
+
+**相对路径规则**（代码已按此实现）：
+- 配置：`<root>/config/bots/`
+- 信号：`<root>/inbox/<bot_id>/`
+- 策略人格：`<root>/prompts/`（`prompt_file` 不依赖 cwd）
+- 行情：`GATE_BOT_PA_DATA` 或 yaml `pa_data_root` 或 `<root>/pa-data-source/data`
+
+自检：**在任意 cwd 下**执行 `python -m gate_bot --root /path/to/repo status` 应正常。

@@ -35,8 +35,16 @@ PLAN_SCHEMA_HINT = (
 SYSTEM_PROMPT = _SYSTEM_HEAD + PLAN_SCHEMA_HINT
 
 
-def load_strategy_prompt(path: str | Path | None, prompts_root: str | Path | None = None) -> str:
-    """Load strategy persona text (role + style). Restricted to prompts/ (no arbitrary FS read)."""
+def load_strategy_prompt(
+    path: str | Path | None,
+    prompts_root: str | Path | None = None,
+    bot_root: str | Path | None = None,
+) -> str:
+    """Load strategy persona text (role + style). Restricted to prompts/ (no arbitrary FS read).
+
+    Resolution order is cwd-independent when `bot_root` (or `prompts_root`) is given:
+    absolute path under prompts/, bot_root/<path>, prompts_root/<path>, prompts_root/<name>.
+    """
     if not path:
         return (
             "你是加密货币永续合约策略引擎。"
@@ -44,13 +52,24 @@ def load_strategy_prompt(path: str | Path | None, prompts_root: str | Path | Non
             "策略：趋势跟随。跟随明显方向，震荡 hold。"
             "有仓时优先管理；新仓必须带 sl。单币单计划。"
         )
-    root = (Path(prompts_root) if prompts_root else (Path.cwd() / "prompts")).resolve()
+    if prompts_root is not None:
+        root = Path(prompts_root).expanduser().resolve()
+    elif bot_root is not None:
+        root = (Path(bot_root).expanduser().resolve() / "prompts")
+    else:
+        root = (Path.cwd() / "prompts").resolve()
     raw = Path(path)
-    candidates = []
+    candidates: list[Path] = []
     if raw.is_absolute():
         candidates.append(raw.resolve())
     else:
-        candidates.append((Path.cwd() / raw).resolve())
+        # Prefer project root over cwd so systemd/cron --root still works
+        bases = []
+        if bot_root is not None:
+            bases.append(Path(bot_root).expanduser().resolve())
+        bases.append(Path.cwd())
+        for base in bases:
+            candidates.append((base / raw).resolve())
         candidates.append((root / raw).resolve())
         candidates.append((root / raw.name).resolve())
 
