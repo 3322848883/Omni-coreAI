@@ -1,0 +1,56 @@
+# ETH 区间中值策略机器人
+# 复制为 config/bots/eth-range.yaml 后修改
+
+bot_id: eth-range
+enabled: true
+env: testnet                 # 先模拟盘；上实盘改 live + GATE_API_KEY
+api_key_env: GATE_TESTNET_API_KEY
+api_secret_env: GATE_TESTNET_API_SECRET
+
+symbols:
+  - ETH_USDT
+
+max_notional_usd: 50
+label_prefix: ethr
+position_policy: strict      # 有仓只管理，不开新方案
+default_replace: symbol
+order_scope: own
+require_sl: true
+
+account_risk:
+  halt: false
+  max_leverage: 5
+  max_total_notional_usd: 50
+
+strategist:
+  enabled: true
+  prompt_file: prompts/eth_range_mid.md
+  interval_sec: 900          # 15m 节奏
+  timeframe: 15m
+  event_on_kline_close: true
+  event_timeframe: 15m
+  candles: 120
+  write_hold: true
+  tools:
+    enabled: true            # AI 按需拉行情，不全量灌入
+    max_rounds: 3
+  market:
+    mode: hybrid
+    # 默认只给主周期精简快照；其余由 AI 用工具拉
+    indicators: [atr14, ema20, ema50, rsi14, macd, boll20]
+    timeframes: []           # 空 = 不预先塞多周期；需要时 tool_calls
+    extra_candles: 15
+  risk:
+    min_confidence: 0.7
+    max_chips: 1
+    max_notional_usd: 50
+  llm:
+    base_url_env: OPENAI_BASE_URL
+    api_key_env: OPENAI_API_KEY
+    model: global:deepseek-v4.1-flash
+    temperature: 0.1
+    timeout_sec: 90
+    max_tokens: 2048
+  ai_triggers:
+    enabled: true            # 破边界后再跑 Plan（追单判断）
+    max_active: 2

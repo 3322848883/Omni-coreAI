@@ -24,6 +24,7 @@ from .prompt import build_system_prompt, build_user_prompt, load_strategy_prompt
 from .risk import RiskConfig, apply_risk
 from .schema import PlanError, parse_plan_text
 from .snapshot import collect_snapshot
+from .tools import TOOL_GUIDE, extract_tool_calls, run_tool
 from .triggers import check_conditions, parse_conditions
 from .trigger_store import AITriggerPolicy, AITriggerStore, TriggerPolicyError, validate_trigger_payload
 
@@ -51,6 +52,8 @@ class StrategistConfig:
     bot_root: Optional[Path] = None
     risk: RiskConfig = field(default_factory=RiskConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
+    # on-demand market tools for the LLM (not a full dump)
+    tools: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.event_timeframe:
@@ -132,7 +135,10 @@ class PlanRunner:
                 "detail": account.get("error"),
                 "trigger": trigger,
             }
-        system = build_system_prompt(self.strategy_prompt)
+        system = build_system_prompt(
+            self.strategy_prompt,
+            tools_guide=TOOL_GUIDE if self.cfg.tools.get("enabled") else "",
+        )
         user = build_user_prompt(
             snapshot,
             {
@@ -145,7 +151,7 @@ class PlanRunner:
             },
             self.cfg.symbols,
         )
-        text = self.llm.chat(system, user)
+        text = self._chat_with_tools(system, user)
         try:
             plan = parse_plan_text(text)
         except PlanError as e:
@@ -204,6 +210,71 @@ class PlanRunner:
             led.close()
         except Exception:  # noqa: BLE001
             pass
+
+    def _llm_send(self, messages: list) -> str:
+        if hasattr(self.llm, "chat_messages"):
+            return self.llm.chat_messages(messages)
+        # test doubles / older clients: only chat(system, user)
+        system = messages[0]["content"] if messages else ""
+        user = "\n\n".join(
+            m.get("content") or "" for m in messages[1:] if m.get("role") == "user"
+        )
+        return self.llm.chat(system, user)
+
+    def _chat_with_tools(self, system: str, user: str) -> str:
+        """Multi-round: model may request market tools; final reply is Plan JSON."""
+        tools_on = bool(self.cfg.tools.get("enabled"))
+        max_rounds = int(self.cfg.tools.get("max_rounds") or 3)
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        text = self._llm_send(messages)
+        if not tools_on:
+            return text
+        for _round in range(max(1, max_rounds)):
+            calls = extract_tool_calls(text)
+            if not calls:
+                return text
+            results = []
+            for c in calls[:8]:
+                name = c.get("tool") or c.get("name") or ""
+                args = c.get("args") or c.get("arguments") or {}
+                results.append(
+                    {
+                        "tool": name,
+                        "ok": True,
+                        "result": run_tool(
+                            self.client,
+                            name,
+                            args,
+                            env=self.cfg.env,
+                            bot_root=self.cfg.bot_root,
+                            market_cfg=self.cfg.market,
+                        ),
+                    }
+                )
+            messages.append({"role": "assistant", "content": text})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "【工具结果】\n"
+                    + json.dumps(results, ensure_ascii=False)
+                    + "\n\n若信息足够，请只输出最终 Plan JSON；仍需数据则继续 tool_calls。",
+                }
+            )
+            text = self._llm_send(messages)
+        # last round: if still tool_calls, force plan once
+        if extract_tool_calls(text):
+            messages.append({"role": "assistant", "content": text})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "工具轮数已用尽。请不要再调用工具，根据已有信息直接输出 Plan JSON（可 hold）。",
+                }
+            )
+            text = self._llm_send(messages)
+        return text
 
     def _kline_closed(self) -> bool:
         """True when latest candle timestamp for first symbol advances."""

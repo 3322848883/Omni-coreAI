@@ -23,6 +23,18 @@ INTERVAL_SECONDS = {
     "1d": 86400,
 }
 
+ALL_TIMEFRAMES = tuple(INTERVAL_SECONDS.keys())
+
+# Broad default set when indicators: all
+ALL_INDICATORS = (
+    "ema9", "ema20", "ema50", "ema200",
+    "sma20", "sma50",
+    "rsi7", "rsi14",
+    "atr14",
+    "macd", "macd_dea", "macd_hist",
+    "boll20", "boll_upper", "boll_middle", "boll_lower",
+)
+
 
 @dataclass
 class MarketConfig:
@@ -32,6 +44,9 @@ class MarketConfig:
     stale_factor: float = 2.0
     health_url: Optional[str] = None
     indicators: list[str] = field(default_factory=lambda: ["ema20", "ema50", "atr14", "rsi14"])
+    # additional candle timeframes for multi-TF analysis (primary stays `interval`/timeframe)
+    extra_timeframes: list[str] = field(default_factory=list)
+    extra_candles: int = 20
     # P1 realtime refresh blocks (always REST): ticker includes funding/mark/index/24h
     refresh: list[str] = field(default_factory=lambda: ["ticker", "stats", "orderbook"])
 
@@ -46,6 +61,8 @@ class MarketConfig:
         else:
             self.stale_factor = float(self.stale_factor)
         self.indicators = [str(x) for x in (self.indicators or [])]
+        if self.indicators and any(str(x).lower() in ("all", "*") for x in self.indicators):
+            self.indicators = list(ALL_INDICATORS)
         if self.indicators:
             from .indicators import IndicatorNameError, parse_indicator_name
 
@@ -54,6 +71,13 @@ class MarketConfig:
                     parse_indicator_name(name)
                 except IndicatorNameError as e:
                     raise ValueError(str(e)) from e
+        self.extra_timeframes = [str(x).lower() for x in (self.extra_timeframes or []) if x]
+        if any(tf in ("all", "*") for tf in self.extra_timeframes) or self.extra_timeframes == ["all"]:
+            self.extra_timeframes = list(ALL_TIMEFRAMES)
+        for tf in self.extra_timeframes:
+            if tf not in INTERVAL_SECONDS:
+                raise ValueError(f"market.extra_timeframes unknown interval {tf!r}")
+        self.extra_candles = max(5, int(self.extra_candles or 20))
         allowed = {"ticker", "stats", "orderbook", "last"}
         self.refresh = [str(x).lower() for x in (self.refresh or []) if str(x).lower() in allowed]
 

@@ -43,6 +43,7 @@ def _build_plan_runner(bot, paths: ProjectPaths):
         conditions=list(s.get("conditions") or []),
         check_interval_sec=float(s.get("check_interval_sec") or 1.0),
         ai_triggers=dict(s.get("ai_triggers") or {}),
+        tools=dict(s.get("tools") or {}),
         symbols=[str(x) for x in (s.get("symbols") or bot.symbols or [])],
         prompt_file=str(s.get("prompt_file") or "prompts/vergex_default.md"),
         write_hold=bool(s.get("write_hold", True)),
@@ -54,6 +55,10 @@ def _build_plan_runner(bot, paths: ProjectPaths):
             stale_factor=2.0 if mk.get("stale_factor") is None else float(mk.get("stale_factor")),
             health_url=mk.get("health_url"),
             indicators=[str(x) for x in (mk.get("indicators") or ["ema20", "ema50", "atr14", "rsi14"])],
+            extra_timeframes=(
+                list(mk.get("timeframes") or mk.get("extra_timeframes") or [])
+            ),
+            extra_candles=int(mk.get("extra_candles") or 20),
             refresh=[str(x) for x in (mk.get("refresh") or ["ticker", "stats", "orderbook"])],
         ),
         env=bot.env,

@@ -1,0 +1,17 @@
+{
+  "cycle_id": "eth_range_mid_001",
+  "reasoning": "价格处2670-2808区间中部，方向不明，观望",
+  "kind": "llm_plan_hold",
+  "chips": [
+    {
+      "action": "hold",
+      "symbol": "ETH_USDT",
+      "type": "market",
+      "size_usd": 0.0,
+      "meta": {
+        "reasoning": "区间中部震荡，无边际，等破位"
+      },
+      "confidence": 0.55
+    }
+  ]
+}

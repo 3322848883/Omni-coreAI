@@ -1,0 +1,16 @@
+{
+  "cycle_id": "btc-pa-1790362800",
+  "reasoning": "急跌后低位窄幅区间，价处EMA20中部无边缘优势，观望",
+  "kind": "llm_plan_hold",
+  "chips": [
+    {
+      "action": "hold",
+      "symbol": "BTC_USDT",
+      "type": "market",
+      "meta": {
+        "reasoning": "区间中部无优势，等突破或边缘再动手"
+      },
+      "confidence": 0.72
+    }
+  ]
+}

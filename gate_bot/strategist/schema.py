@@ -50,6 +50,7 @@ class Chip:
     order_type: str = "market"
     price: Optional[float] = None
     trigger_price: Optional[float] = None
+    leverage: Optional[int] = None
     reasoning: str = ""
 
     def to_signal_dict(self) -> dict:
@@ -66,6 +67,8 @@ class Chip:
             d["sl"] = self.sl
         if self.trigger_price is not None:
             d["trigger_price"] = self.trigger_price
+        if self.leverage is not None:
+            d["leverage"] = self.leverage
         if self.reasoning:
             d.setdefault("meta", {})["reasoning"] = self.reasoning
         return d
@@ -127,6 +130,7 @@ def parse_plan(data: Any) -> Plan:
                 order_type=order_type,
                 price=_f(raw.get("price")),
                 trigger_price=_f(raw.get("trigger_price")),
+                leverage=int(raw["leverage"]) if raw.get("leverage") is not None else None,
                 reasoning=str(raw.get("reasoning") or ""),
             )
         )

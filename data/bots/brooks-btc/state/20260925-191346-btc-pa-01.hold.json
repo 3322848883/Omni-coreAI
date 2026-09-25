@@ -1,0 +1,17 @@
+{
+  "cycle_id": "btc-pa-01",
+  "reasoning": "区间中部，无清晰信号，观望",
+  "kind": "llm_plan_hold",
+  "chips": [
+    {
+      "action": "hold",
+      "symbol": "BTC_USDT",
+      "type": "market",
+      "size_usd": 0.0,
+      "meta": {
+        "reasoning": "价格处于83200-84880区间中部，EMA20附近，多空不明"
+      },
+      "confidence": 0.75
+    }
+  ]
+}

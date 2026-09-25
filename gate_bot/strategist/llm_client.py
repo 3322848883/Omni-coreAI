@@ -43,15 +43,20 @@ class LLMClient:
         self.cfg = cfg or LLMConfig()
 
     def chat(self, system: str, user: str) -> str:
+        return self.chat_messages(
+            [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ]
+        )
+
+    def chat_messages(self, messages: list) -> str:
         url = f"{self.cfg.base_url()}/chat/completions"
         body = {
             "model": self.cfg.model,
             "temperature": self.cfg.temperature,
             "max_tokens": self.cfg.max_tokens,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
+            "messages": messages,
         }
         req = urllib.request.Request(
             url,

@@ -490,6 +490,47 @@ class TestSnapshot(unittest.TestCase):
         self.assertIn("min_notional_usd", cm)
         self.assertGreater(cm["quanto_multiplier"], 0)
 
+    def test_snapshot_multi_timeframe_extras(self):
+        now = int(time.time())
+        rows = [[now - (30 - i) * 900, "1", str(1 + i * 0.01), "2", "0.5", "1", "0"] for i in range(30)]
+        client = FakeClient(rest_rows=rows)
+        from gate_bot.strategist.market import MarketConfig
+
+        snap = collect_snapshot(
+            client,
+            ["BTC_USDT"],
+            candles=20,
+            interval="15m",
+            market_cfg=MarketConfig(
+                mode="rest_only",
+                extra_timeframes=["1h", "4h"],
+                extra_candles=10,
+            ),
+        )
+        tf = snap["market"]["BTC_USDT"].get("tf") or {}
+        self.assertIn("1h", tf)
+        self.assertIn("4h", tf)
+        self.assertNotIn("15m", tf)  # primary is entry-level fields
+        self.assertGreaterEqual(len(tf["1h"].get("candles") or []), 1)
+        self.assertIn("indicators", tf["1h"])
+
+    def test_snapshot_timeframes_and_indicators_all(self):
+        now = int(time.time())
+        rows = [[now - (40 - i) * 900, "1", str(1 + i * 0.01), "2", "0.5", "1", "0"] for i in range(40)]
+        client = FakeClient(rest_rows=rows)
+        from gate_bot.strategist.market import ALL_TIMEFRAMES, MarketConfig
+
+        cfg = MarketConfig(mode="rest_only", extra_timeframes=["all"], indicators=["all"])
+        self.assertEqual(set(cfg.extra_timeframes), set(ALL_TIMEFRAMES))
+        self.assertIn("macd", cfg.indicators)
+        self.assertIn("boll_upper", cfg.indicators)
+        snap = collect_snapshot(client, ["BTC_USDT"], candles=15, interval="15m", market_cfg=cfg)
+        tf = snap["market"]["BTC_USDT"].get("tf") or {}
+        for t in ALL_TIMEFRAMES:
+            if t == "15m":
+                continue
+            self.assertIn(t, tf)
+
     def test_snapshot_p1_ticker_stats_orderbook(self):
         client = FakeClient(rest_rows=[[int(time.time()), "1", "1", "1", "1", "1", "0"]])
         snap = collect_snapshot(

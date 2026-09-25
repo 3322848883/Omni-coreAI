@@ -14,7 +14,7 @@ _SYSTEM_HEAD = (
     '"action":"open_long|open_short|add_long|add_short|reduce_long|reduce_short|close|close_all|hold|'
     'stop_entry_long|stop_entry_short|flatten|cancel_all|cancel_price_all",'
     '"confidence":0.0,"size_usd":50,"tp":null,"sl":null,"type":"market|limit|post_only|ioc|fok",'
-    '"price":null,"trigger_price":null,"reasoning":"..."}]}\n'
+    '"price":null,"trigger_price":null,"leverage":null,"reasoning":"..."}]}\n'
     "规则: 1) action 英文枚举; 突破进场用 stop_entry_*，止损止盈用 tp/sl。\n"
     "2) confidence 0~1，低于 min_confidence 应 hold。\n"
     "3) 仓位优先写 size_usd（名义 USDT）；size 是合约张数。用 size 前必须查该 symbol 的 "
@@ -33,6 +33,14 @@ PLAN_SCHEMA_HINT = (
 )
 
 SYSTEM_PROMPT = _SYSTEM_HEAD + PLAN_SCHEMA_HINT
+
+
+def build_system_prompt(strategy_prompt: str, tools_guide: str = "") -> str:
+    """Fixed contract + optional tool guide (system layer) + strategy persona."""
+    head = SYSTEM_PROMPT
+    if tools_guide:
+        head = head + "\n\n" + tools_guide
+    return head + "\n\n【策略人格】\n" + strategy_prompt
 
 
 def load_strategy_prompt(
@@ -85,8 +93,12 @@ def load_strategy_prompt(
     raise PermissionError(f"prompt_file must exist under {root}: {path}")
 
 
-def build_system_prompt(strategy_prompt: str) -> str:
-    return SYSTEM_PROMPT + "\n\n【策略人格】\n" + strategy_prompt
+def build_system_prompt(strategy_prompt: str, tools_guide: str = "") -> str:
+    """Fixed contract + optional tool guide (system layer) + strategy persona."""
+    head = SYSTEM_PROMPT
+    if tools_guide:
+        head = head + "\n\n" + tools_guide
+    return head + "\n\n【策略人格】\n" + strategy_prompt
 
 
 def build_user_prompt(snapshot: dict[str, Any], risk: dict[str, Any], symbols: list[str]) -> str:

@@ -1,0 +1,25 @@
+{
+  "cycle_id": "vergex-2024-15m-01",
+  "reasoning": "BTC破EMA20偏空但RSI反弹，ETH盘口异常，均无清晰止损位，空仓观望。",
+  "kind": "llm_plan_hold",
+  "chips": [
+    {
+      "action": "hold",
+      "symbol": "BTC_USDT",
+      "type": "market",
+      "meta": {
+        "reasoning": "价破EMA20但底部反弹，方向不明"
+      },
+      "confidence": 0.75
+    },
+    {
+      "action": "hold",
+      "symbol": "ETH_USDT",
+      "type": "market",
+      "meta": {
+        "reasoning": "长影剧烈震荡，盘口价差异常，避入"
+      },
+      "confidence": 0.8
+    }
+  ]
+}

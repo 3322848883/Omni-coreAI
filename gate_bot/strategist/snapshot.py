@@ -155,6 +155,35 @@ def collect_snapshot(
                 entry["candles_error"] = result.error
             if rows:
                 entry["indicators"] = latest_indicators(rows, cfg.indicators or None)
+
+            # multi-timeframe extras (compact: last N bars + latest indicators)
+            extra_tfs = [str(tf).lower() for tf in (getattr(cfg, "extra_timeframes", None) or [])]
+            extra_tfs = [tf for tf in extra_tfs if tf and tf != str(interval).lower()]
+            if extra_tfs:
+                entry["tf"] = {}
+                n_extra = int(getattr(cfg, "extra_candles", 20) or 20)
+                for tf in extra_tfs:
+                    try:
+                        xres = resolve_candles(
+                            client, sym, tf, n_extra,
+                            market_cfg=cfg, env=env, bot_root=bot_root,
+                        )
+                        xrows = attach_indicators(list(xres.rows), cfg.indicators or None)
+                        entry["tf"][tf] = {
+                            "candles": xrows[-n_extra:] if xrows else [],
+                            "indicators": latest_indicators(xrows, cfg.indicators or None) if xrows else {},
+                            "source": xres.source,
+                            "stale": xres.stale,
+                        }
+                        if xres.stale:
+                            meta["stale"].append(f"{sym}:{tf}")
+                        for d in xres.degraded:
+                            tag = f"{sym}:{tf}:{d}"
+                            if tag not in meta["degraded"]:
+                                meta["degraded"].append(tag)
+                    except Exception as e:  # noqa: BLE001
+                        entry.setdefault("tf", {})[tf] = {"error": str(e)[:80]}
+                        meta["degraded"].append(f"{sym}:{tf}:error")
         except Exception as e:  # noqa: BLE001
             entry["candles_error"] = str(e)
             meta["degraded"].append(f"{sym}:candles_error")

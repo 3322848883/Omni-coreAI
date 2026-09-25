@@ -1,0 +1,64 @@
+# Brooks 价格行为 · BTC — 正式配置
+# 模板：_brooks_btc.example.yaml ｜ 策略：prompts/brooks_btc_pa.md
+
+bot_id: brooks-btc
+enabled: true
+
+# ── 环境与账户 ─────────────────────────────────
+env: live                      # live | testnet（上线前请 testnet 全绿）
+api_key_env: GATE_API_KEY
+api_secret_env: GATE_API_SECRET
+
+# ── 交易范围 ───────────────────────────────────
+symbols:
+  - BTC_USDT
+
+# ── 风控（硬限制，AI 越不过）────────────────────
+max_notional_usd: 10000        # 单笔名义上限
+max_orders_per_file: 5
+max_files_per_run: 20
+poll_interval_sec: 2
+label_prefix: brk              # 订单归属 t-brk*
+position_policy: strict        # 有仓只管理，不开新方案
+default_replace: symbol        # 同币新单替换旧挂单
+order_scope: own               # 只撤自己的单
+require_sl: true               # 开仓必须带止损
+
+account_risk:
+  halt: false
+  max_leverage: 50
+  max_total_notional_usd: 10000
+  # daily_loss_limit：按要求不启用熔断
+
+# ── LLM 策略层 ─────────────────────────────────
+strategist:
+  enabled: true
+  prompt_file: prompts/brooks_btc_pa.md
+  interval_sec: 900            # 定时兜底（15 分钟）
+  timeframe: 15m               # 主分析/执行周期
+  event_on_kline_close: true
+  event_timeframe: 15m
+  candles: 120
+  write_hold: true
+  tools:
+    enabled: true
+    max_rounds: 3
+  market:
+    mode: hybrid               # hybrid 优先本地 kline.db，缺则 REST
+    indicators: [ema20, atr14]  # Brooks：基本只用 EMA20 + ATR 止损
+    timeframes: []             # 不预灌多周期，AI 按需 tool_calls
+    extra_candles: 15
+  ai_triggers:
+    enabled: true              # 事件触发再次唤醒
+    max_active: 5
+  risk:
+    min_confidence: 0.6        # 低于此 confidence → hold
+    max_chips: 1
+    max_notional_usd: 10000
+  llm:
+    base_url_env: OPENAI_BASE_URL
+    api_key_env: OPENAI_API_KEY
+    model: deepseek-chat        # DeepSeek 官方：deepseek-chat / deepseek-reasoner
+    temperature: 0.1
+    timeout_sec: 120
+    max_tokens: 8192            # 官方 chat 上限通常 8k 量级

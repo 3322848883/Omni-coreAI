@@ -1,0 +1,659 @@
+<!-- AI生成 -->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>交易策略提示词调研报告 · 15+ 优质模板</title>
+  <link rel="stylesheet" href="report.css" />
+</head>
+<body>
+<p data-aigc-mark="1" style="margin:0 0 8px;font-size:10px;line-height:1.3;color:#6b6560;font-weight:400;">AI生成</p>
+
+  <div class="wrap">
+    <header class="hero">
+      <h1>全网交易策略提示词调研报告</h1>
+      <p class="sub">交易所 · AI 交易系统 · 社区 — 精选 19 个可落地模板，供 gate-signal-bot 选型定制</p>
+      <div class="meta-row">
+        <span class="chip">调研日期 <strong>2026-09-26</strong></span>
+        <span class="chip">来源 <strong>官方文档 / GitHub / 论文 / 产品博客</strong></span>
+        <span class="chip">候选 <strong>19 主推 + 名誉提及</strong></span>
+        <span class="chip">用途 <strong>永续多品种信号机</strong></span>
+      </div>
+    </header>
+
+    <nav class="toc" aria-label="目录">
+      <a href="#summary"><span class="n">01</span>结论速览</a>
+      <a href="#matrix"><span class="n">02</span>对比矩阵</a>
+      <a href="#prompts"><span class="n">03</span>15 个精选提示词</a>
+      <a href="#skeleton"><span class="n">04</span>合成骨架建议</a>
+      <a href="#adopt"><span class="n">05</span>采纳建议</a>
+      <a href="#limits"><span class="n">06</span>局限与证据</a>
+    </nav>
+
+    <section id="summary">
+      <h2>结论速览</h2>
+      <p class="lede">从交易所官方文档、开源 AI 交易框架、社区提示词库中筛出结构完整、可直接改造成「多品种永续 Plan JSON」的模板。按对 gate-signal-bot 的可移植性排序。</p>
+      <div class="summary-grid">
+        <div class="stat"><div class="num">19</div><div class="lbl">主推提示词模板</div></div>
+        <div class="stat"><div class="num">3</div><div class="lbl">来源大类</div></div>
+        <div class="stat"><div class="num">6</div><div class="lbl">策略风格覆盖</div></div>
+        <div class="stat"><div class="num">9</div><div class="lbl">可偷用的跨系统模式</div></div>
+      </div>
+      <div class="rec-box">
+        <h3>三分钟结论</h3>
+        <ol>
+          <li><strong>最值得抄结构</strong>：Algorier 12 段策略规格 + XCryptoBot 槽位模板 — 合起来就是你们 `prompt_file` 该有的骨架。</li>
+          <li><strong>最值得抄风控措辞</strong>：TradeAlgo 风险评估五段 + prompTrading 9 点预检 — 可直接嵌进系统提示词规则区。</li>
+          <li><strong>最值得抄执行安全</strong>：Bitget Agent Skill 的 dry-run / [CAUTION] / 确认 — 对应你们 inbox 落盘 + 程序风控。</li>
+          <li><strong>最值得抄分析纪律</strong>：TradingAgents「≤8 互补指标 + 禁止编造回测」— 防幻觉关键。</li>
+          <li><strong>社区最全的风格库</strong>：Tradecraft 104 skills（趋势/均值/突破/网格/剥头皮/风控）— 各取一段写成 `multi_*.md` 人格。</li>
+        </ol>
+      </div>
+    </section>
+
+    <section id="matrix">
+      <h2>对比矩阵</h2>
+      <p class="lede">「移植分」= 对 gate-signal-bot（多品种永续、Plan JSON、程序风控）的直接可用程度（1–5）。</p>
+      <table>
+        <thead>
+          <tr>
+            <th>#</th><th>名称</th><th>类型</th><th>核心能力</th><th>移植分</th><th>优先级</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>1</td><td>Algorier 12 段策略框架</td><td><span class="badge b-ex">产品/方法</span></td><td>完整策略规格清单、防前视</td><td><span class="score">5</span></td><td><span class="badge b-high">P0</span></td></tr>
+          <tr><td>2</td><td>XCryptoBot 20+ 槽位模板</td><td><span class="badge b-ex">交易所/机器人</span></td><td>可复制参数表、批量生成</td><td><span class="score">5</span></td><td><span class="badge b-high">P0</span></td></tr>
+          <tr><td>3</td><td>TradingAgents 分析师/交易员</td><td><span class="badge b-ai">AI 系统</span></td><td>限指标、绝对价位、结构化输出</td><td><span class="score">5</span></td><td><span class="badge b-high">P0</span></td></tr>
+          <tr><td>4</td><td>TradeAlgo 风险评估五段</td><td><span class="badge b-ex">产品/方法</span></td><td>论点/仓位/时机/情景/缓解</td><td><span class="score">5</span></td><td><span class="badge b-high">P0</span></td></tr>
+          <tr><td>5</td><td>Bitget Agent Skill</td><td><span class="badge b-ex">交易所</span></td><td>多步工具链 + 写操作确认</td><td><span class="score">4</span></td><td><span class="badge b-high">P0</span></td></tr>
+          <tr><td>6</td><td>Tradecraft 104 技能包</td><td><span class="badge b-com">社区</span></td><td>六风格全覆盖 + 体制过滤</td><td><span class="score">5</span></td><td><span class="badge b-high">P0</span></td></tr>
+          <tr><td>7</td><td>Cryptohopper 规格写法</td><td><span class="badge b-ex">交易所/机器人</span></td><td>反模糊、纸面模式、一次一改</td><td><span class="score">4</span></td><td><span class="badge b-med">P1</span></td></tr>
+          <tr><td>8</td><td>prompTrading 单句策略 + 9 点风控</td><td><span class="badge b-com">社区</span></td><td>一句话打包 + 预交易检查</td><td><span class="score">5</span></td><td><span class="badge b-high">P0</span></td></tr>
+          <tr><td>9</td><td>PionexGPT NL→信号句式</td><td><span class="badge b-ex">交易所</span></td><td>进场/离场成对自然语言</td><td><span class="score">4</span></td><td><span class="badge b-med">P1</span></td></tr>
+          <tr><td>10</td><td>DocsBot 期货机器人系统提示</td><td><span class="badge b-ex">提示词库</span></td><td>Steps/Output/Notes 骨架</td><td><span class="score">3</span></td><td><span class="badge b-med">P1</span></td></tr>
+          <tr><td>11</td><td>openfinclaw 回测压力测试提示</td><td><span class="badge b-com">社区</span></td><td>「告诉我哪里会崩」+ 成本滑点</td><td><span class="score">4</span></td><td><span class="badge b-med">P1</span></td></tr>
+          <tr><td>12</td><td>awesome-chatgpt 风险经理三件套</td><td><span class="badge b-com">社区</span></td><td>角色扮演审计交易计划</td><td><span class="score">3</span></td><td><span class="badge b-med">P1</span></td></tr>
+          <tr><td>13</td><td>Bybit Skills 打包分发</td><td><span class="badge b-ex">交易所</span></td><td>SKILL.md 版本化人格</td><td><span class="score">4</span></td><td><span class="badge b-med">P1</span></td></tr>
+          <tr><td>14</td><td>Cryptohopper 模板包种子流</td><td><span class="badge b-ex">交易所/机器人</span></td><td>网格/DCA/信号种子提示</td><td><span class="score">3</span></td><td><span class="badge b-med">P1</span></td></tr>
+          <tr><td>15</td><td>PromptFolio / ai-hedge-fund 代理</td><td><span class="badge b-com">社区</span></td><td>纯提示词配置策略</td><td><span class="score">3</span></td><td><span class="badge b-med">P2</span></td></tr>
+          <tr><td>16</td><td>FinMem 分层记忆 + 引用 ID</td><td><span class="badge b-ai">AI 系统</span></td><td>可审计决策、盈亏风偏翻转</td><td><span class="score">5</span></td><td><span class="badge b-high">P0</span></td></tr>
+          <tr><td>17</td><td>FinCon 经理-分析师 + 风控</td><td><span class="badge b-ai">AI 系统</span></td><td>组合级暴露、VaR/CVaR</td><td><span class="score">4</span></td><td><span class="badge b-high">P0</span></td></tr>
+          <tr><td>18</td><td>FinAgent 失败关闭 HOLD</td><td><span class="badge b-ai">AI 系统</span></td><td>XML 输出、偏好旋钮、组合约束</td><td><span class="score">5</span></td><td><span class="badge b-high">P0</span></td></tr>
+          <tr><td>19</td><td>FinGPT-Forecaster 分析段落</td><td><span class="badge b-ai">AI 系统</span></td><td>[利多]/[风险]/[预测] 可解析</td><td><span class="score">4</span></td><td><span class="badge b-med">P1</span></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="prompts">
+      <h2>15 个精选提示词</h2>
+      <p class="lede">点击筛选查看来源类别。每条含出处、摘录/结构、亮点、对本项目的适配。</p>
+      <div class="filters" id="filters">
+        <button class="active" data-f="all">全部</button>
+        <button data-f="exchange">交易所 / 机器人</button>
+        <button data-f="ai">AI 系统</button>
+        <button data-f="community">社区</button>
+        <button data-f="p0">仅 P0</button>
+      </div>
+
+      <!-- 1 -->
+      <article class="card" data-cat="exchange p0" id="p1">
+        <h3>1. Algorier — 12 段交易策略提示框架 <span class="badge b-ex">P0</span> <span class="score">5/5</span></h3>
+        <p class="src">来源：<a href="https://algorier.com/blog/trading-strategy-prompt/" target="_blank" rel="noopener">algorier.com/blog/trading-strategy-prompt</a></p>
+        <blockquote>Weak: "Create a crypto trading strategy."
+
+Strong: "Create a long-only Bitcoin trend-following strategy for the 4-hour chart. Confirm each signal at bar close and enter at the next bar open. Define measurable entry and exit rules, risk 0.5% of equity per trade, and allow only one open position. Specify which metrics should be measured during backtesting, but do not invent performance results. State every assumption and ask clarifying questions if any rule is ambiguous."
+
+12 components: Market/Instrument · Direction · Timeframe · Entry Conditions ·
+**Signal Confirmation Timing** · Exit Conditions · Execution Method ·
+Risk & Position Sizing · Portfolio/Operating Constraints · Backtest Scope & Costs ·
+Evaluation Metrics · Clarification & Output Instructions</blockquote>
+        <div class="cols">
+          <div class="panel-sm"><h4>亮点</h4><ul>
+            <li>最完整的「策略规格」清单，防遗漏</li>
+            <li>明确「信号确认时刻 vs 执行时刻」，防前视</li>
+            <li>「禁止编造绩效」硬约束</li>
+          </ul></div>
+          <div class="panel-sm"><h4>如何接入 gate-signal-bot</h4><ul>
+            <li>直接当 `prompt_file` 章节骨架</li>
+            <li>多品种时循环 Market，共享 Risk</li>
+            <li>补 funding / mark_price / 强平距离</li>
+          </ul></div>
+        </div>
+      </article>
+
+      <!-- 2 -->
+      <article class="card" data-cat="exchange p0" id="p2">
+        <h3>2. XCryptoBot — 20+ 可复制策略提示（3Commas 向） <span class="badge b-ex">P0</span> <span class="score">5/5</span></h3>
+        <p class="src">来源：<a href="https://xcryptobot.com/blog/chatgpt-prompts-crypto-trading-strategies-2026" target="_blank" rel="noopener">xcryptobot.com — chatgpt-prompts-crypto-trading-strategies-2026</a></p>
+        <blockquote>【自定义槽位模板】
+Create a [STRATEGY TYPE] trading strategy for [CRYPTO PAIR] with:
+Capital: [AMOUNT] · Risk Tolerance: [LOW/MEDIUM/HIGH] ·
+Time Horizon: [TIMEFRAME] · Market Condition: [BULL/BEAR/SIDEWAYS]
+The strategy should: [GOAL 1/2/3]
+Include: Entry conditions · Exit conditions · Position sizing · Risk management ·
+Expected performance metrics
+**Format as [3COMMAS/TRADINGVIEW/EXCEL] compatible settings.**
+
+【RSI 示例】
+Buy when RSI &lt; 30 · Sell when RSI &gt; 70 · 14-period RSI on 4h ·
+Position sizing based on RSI strength · SL/TP rules · Format as actionable bot settings.</blockquote>
+        <div class="cols">
+          <div class="panel-sm"><h4>亮点</h4><ul>
+            <li>槽位模板可批量喂多品种</li>
+            <li>强制「输出成机器人可读设置表」</li>
+            <li>覆盖 DCA/网格/RSI/多指标/风控/行情体制</li>
+          </ul></div>
+          <div class="panel-sm"><h4>如何接入</h4><ul>
+            <li>「Format as …」改为「只输出 Plan JSON」</li>
+            <li>加杠杆 / 资金费率 / 强平价字段</li>
+            <li>与你们 chip schema 对齐</li>
+          </ul></div>
+        </div>
+      </article>
+
+      <!-- 3 -->
+      <article class="card" data-cat="ai p0" id="p3">
+        <h3>3. TradingAgents — 市场分析师 / 交易员系统提示 <span class="badge b-ai">P0</span> <span class="score">5/5</span></h3>
+        <p class="src">来源：<a href="https://github.com/TauricResearch/TradingAgents" target="_blank" rel="noopener">github.com/TauricResearch/TradingAgents</a> · 109k stars</p>
+        <blockquote>【Market Analyst】
+You are a trading assistant... select the **most relevant indicators**...
+choose up to **8 indicators** that provide complementary insights without redundancy.
+[Moving Averages / MACD / RSI / Bollinger / ATR / VWMA + Usage & Tips each]
+Call get_stock_data first... treat get_verified_market_snapshot as source of truth...
+Do not claim historical validation unless supported by tool output with concrete dates and prices.
+
+【Trader】
+Based on analysis, provide buy / sell / hold.
+Ground concrete price levels (entry, stop-loss, position sizing) in the technical report's
+price structure — current price, support/resistance, ATR, volatility...
+State entry and stop-loss as **absolute price levels** (e.g. 189.5),
+never a percentage or a range.
+
+【TraderProposal JSON】
+{ action: Buy|Hold|Sell, reasoning: 2-4 sentences,
+  entry_price: float|null, stop_loss: float|null, position_sizing: str|null }</blockquote>
+        <div class="cols">
+          <div class="panel-sm"><h4>亮点</h4><ul>
+            <li>限定互补指标数量，抗冗余幻觉</li>
+            <li>绝对价位而非百分比，利于下单</li>
+            <li>多智能体辩论：分析师→交易员→风控</li>
+          </ul></div>
+          <div class="panel-sm"><h4>如何接入</h4><ul>
+            <li>分析师段可写进你们策略人格</li>
+            <li>TraderProposal → Chip JSON 映射</li>
+            <li>ATR 定 SL 直接可抄</li>
+          </ul></div>
+        </div>
+      </article>
+
+      <!-- 4 -->
+      <article class="card" data-cat="exchange p0" id="p4">
+        <h3>4. TradeAlgo — 交易前风险评估五段 <span class="badge b-ex">P0</span> <span class="score">5/5</span></h3>
+        <p class="src">来源：<a href="https://www.tradealgo.com/trading-guides/ai-trading/chatgpt-trading-prompts-guide" target="_blank" rel="noopener">tradealgo.com — chatgpt-trading-prompts-guide</a></p>
+        <blockquote>I am considering the following trade:
+Position: [LONG/SHORT] [TICKER] at $[PRICE]
+Position size: [X]% of portfolio · Time horizon: [DURATION] · Thesis: [THESIS]
+
+Provide a comprehensive risk assessment:
+· THESIS RISKS
+· POSITION SIZING RISK (ATR context)
+· TIMING RISKS
+· ALTERNATIVE SCENARIOS (best / base / worst / black swan)
+· RISK MITIGATION (stop-loss, hedges, add/reduce/exit rules)
+
+【策略健壮性评估】
+LOGICAL CONSISTENCY · POTENTIAL BIASES (survivorship, lookahead, data snooping) ·
+REGIME DEPENDENCY · PRACTICAL CONCERNS · IMPROVEMENTS</blockquote>
+        <div class="cols">
+          <div class="panel-sm"><h4>亮点</h4><ul>
+            <li>结构化强制覆盖全部风险面</li>
+            <li>黑天鹅 + 体制依赖语言</li>
+            <li>适合独立「风控门」提示词</li>
+          </ul></div>
+          <div class="panel-sm"><h4>如何接入</h4><ul>
+            <li>可做第二段 LLM（Plan 后复核）</li>
+            <li>仓位 % → 杠杆 / 保证金 / 强平距离</li>
+            <li>与 yaml `account_risk` 互补</li>
+          </ul></div>
+        </div>
+      </article>
+
+      <!-- 5 -->
+      <article class="card" data-cat="exchange p0" id="p5">
+        <h3>5. Bitget Agent Skill — 多步交易与写安全 <span class="badge b-ex">P0</span> <span class="score">4/5</span></h3>
+        <p class="src">来源：<a href="https://github.com/Bitget-AI/agent-skill" target="_blank" rel="noopener">github.com/Bitget-AI/agent-skill</a></p>
+        <blockquote>Trigger recognition (EN/ZH): "buy BTC at market" / 「帮我买 BTC」…
+Multi-step: "check my positions, and if I have no BTC open a 10x long"
+  → query first, reason, then place order.
+**[CAUTION] before every write operation** and wait for confirmation.
+Paper trading: "use demo account" switches to sandbox automatically.
+Compose CLI: bgc order --action place ... --dry-run preview → confirm → run.</blockquote>
+        <div class="cols">
+          <div class="panel-sm"><h4>亮点</h4><ul>
+            <li>先查仓再下单的决策链</li>
+            <li>写操作 dry-run / 确认 / CAUTION</li>
+            <li>官方交易所级安全规范</li>
+          </ul></div>
+          <div class="panel-sm"><h4>如何接入</h4><ul>
+            <li>对应你们 inbox → 程序风控 → 下单</li>
+            <li>指令里写清「禁止绕过风控」</li>
+            <li>demo = testnet 映射</li>
+          </ul></div>
+        </div>
+      </article>
+
+      <!-- 6 -->
+      <article class="card" data-cat="community p0" id="p6">
+        <h3>6. Tradecraft — 104 交易技能包 <span class="badge b-com">P0</span> <span class="score">5/5</span></h3>
+        <p class="src">来源：<a href="https://github.com/mahmoud20138/Tradecraft" target="_blank" rel="noopener">github.com/mahmoud20138/Tradecraft</a></p>
+        <blockquote>breakout-strategy-engine: volatility squeeze, range breakout, momentum + filters
+mean-reversion-engine: Bollinger bounce, RSI extreme fade, Z-score + **regime guard
+  ONLY use in ranging regimes**
+grid-trading-engine: fixed-interval grid (best in RANGING)
+asian-session-scalper: Tokyo low-vol scalping
+jdub-price-action: Direction → Location → Execution (3-bar confirm)
+risk-and-portfolio: sizing, stop placement, drawdown, Kelly, ATR sizing
+market-regime-classifier: trending / ranging / volatile / quiet → auto strategy pick</blockquote>
+        <div class="cols">
+          <div class="panel-sm"><h4>亮点</h4><ul>
+            <li>六风格全覆盖，含体制过滤</li>
+            <li>风险% / 最小盈亏比 / 形态等级表</li>
+            <li>技能 YAML 前置触发词</li>
+          </ul></div>
+          <div class="panel-sm"><h4>如何接入</h4><ul>
+            <li>每个引擎抽一段写 `multi_breakout/meanrev/grid`</li>
+            <li>体制分类器 → 选策略人格</li>
+            <li>注意：默认 MT5/yfinance，需改 Gate 行情</li>
+          </ul></div>
+        </div>
+      </article>
+
+      <!-- 7 -->
+      <article class="card" data-cat="exchange p1" id="p7">
+        <h3>7. Cryptohopper — 有效提示词写法（规格化） <span class="badge b-ex">P1</span> <span class="score">4/5</span></h3>
+        <p class="src">来源：<a href="https://www.cryptohopper.ai/en/docs/prompt-engineering" target="_blank" rel="noopener">cryptohopper.ai/en/docs/prompt-engineering</a></p>
+        <blockquote>Vague: "Make me a trading bot."
+
+Specific: "A grid bot for ETH/USDT with 10 grid levels between $2,000 and $3,000,
+0.5% take-profit per level, and a dashboard showing open orders, filled orders,
+and total realized P&amp;L. Start in paper mode."
+
+Pattern: pair + strategy → numeric rules (entry/exit, TP/SL) → interface →
+iterate **one change at a time**. Default **paper mode**.</blockquote>
+        <div class="cols">
+          <div class="panel-sm"><h4>亮点</h4><ul>
+            <li>反模糊对照，减少模型瞎补</li>
+            <li>纸面模式为默认安全策略</li>
+            <li>一次只改一处的运维纪律</li>
+          </ul></div>
+          <div class="panel-sm"><h4>如何接入</h4><ul>
+            <li>写进 prompts/README「怎么写策略人格」</li>
+            <li>参数生成类任务用其规格句式</li>
+          </ul></div>
+        </div>
+      </article>
+
+      <!-- 8 -->
+      <article class="card" data-cat="community p0" id="p8">
+        <h3>8. prompTrading — 单句策略 + 9 点预检风控 <span class="badge b-com">P0</span> <span class="score">5/5</span></h3>
+        <p class="src">来源：<a href="https://github.com/xlabsg/prompTrading" target="_blank" rel="noopener">github.com/xlabsg/prompTrading</a></p>
+        <blockquote>"Build an intraday breakout strategy on BTC/USDT 15m candles with a volume
+surge filter, 2.5x ATR trailing stop, and dynamic profit targets based on
+recent swing highs."
+
+Defense-in-Depth Risk Engine — 9 Invasive Pre-Trade Checks:
+max order size · leverage caps · price sanity · balance validation · …
+Profit-Activated Trailing Stops · Dynamic TP/SL (S/R + ATR)</blockquote>
+        <div class="cols">
+          <div class="panel-sm"><h4>亮点</h4><ul>
+            <li>一句话打包 TF/入场/止损/止盈</li>
+            <li>9 点预检可直接当风控提示词</li>
+            <li>动态 TP/SL 贴合合约</li>
+          </ul></div>
+          <div class="panel-sm"><h4>如何接入</h4><ul>
+            <li>单句模板做触发条件描述</li>
+            <li>9 点检查 ↔ 你们 require_sl / notional</li>
+          </ul></div>
+        </div>
+      </article>
+
+      <!-- 9 -->
+      <article class="card" data-cat="exchange p1" id="p9">
+        <h3>9. PionexGPT — 自然语言进离场句式 <span class="badge b-ex">P1</span> <span class="score">4/5</span></h3>
+        <p class="src">来源：<a href="https://www.pionex.com/blog/automate-your-trading-ideas-on-pionex-with-pionexgpt-and-tradingview/" target="_blank" rel="noopener">pionex.com — PionexGPT &amp; TradingView</a></p>
+        <blockquote>Create a strategy using the exponential moving average indicator.
+Buy when the exponential moving average of 9 is greater than
+the exponential moving average of 21.
+Exit a long position when the exponential moving average of 9 is
+less than the exponential moving average of 21.
+
+Pipeline: NL strategy → Pine Script → TradingView backtest → Signal Bot webhook</blockquote>
+        <div class="cols">
+          <div class="panel-sm"><h4>亮点</h4><ul>
+            <li>进场/离场成对最小完备句</li>
+            <li>NL→代码→回测→执行流水线</li>
+            <li>适合让 AI 写 triggers 条件</li>
+          </ul></div>
+          <div class="panel-sm"><h4>如何接入</h4><ul>
+            <li>改写为 emit Plan JSON / triggers[]</li>
+            <li>For {symbol} on {tf} … 批量包装</li>
+          </ul></div>
+        </div>
+      </article>
+
+      <!-- 10 -->
+      <article class="card" data-cat="exchange p1" id="p10">
+        <h3>10. DocsBot — 期货交易机器人系统提示骨架 <span class="badge b-ex">P1</span> <span class="score">3/5</span></h3>
+        <p class="src">来源：<a href="https://docsbot.ai/prompts/technical/futures-trading-bot" target="_blank" rel="noopener">docsbot.ai/prompts/technical/futures-trading-bot</a></p>
+        <blockquote>Create a comprehensive futures trading bot:
+· Connect via API · Real-time + historical analysis
+· Trend / mean-reversion / momentum strategies
+· Risk: SL, TP, position sizing · Auto-execute · Logging
+
+# Steps 1…8 (basics → strategy → API → analysis → execution → risk → logging → test first)
+# Output Format  well-commented Python + config + explanations
+# Notes  robust errors · **no real API keys** · test before live</blockquote>
+        <div class="cols">
+          <div class="panel-sm"><h4>亮点</h4><ul>
+            <li>Steps / Output / Notes 经典三段</li>
+            <li>强制先推理再写代码</li>
+            <li>期货向风险表述</li>
+          </ul></div>
+          <div class="panel-sm"><h4>如何接入</h4><ul>
+            <li>更适合「生成策略代码」而非 live Plan</li>
+            <li>借骨架写内部工具提示词</li>
+          </ul></div>
+        </div>
+      </article>
+
+      <!-- 11 -->
+      <article class="card" data-cat="community p1" id="p11">
+        <h3>11. openfinclaw-cli — 回测与压力测试提示 <span class="badge b-com">P1</span> <span class="score">4/5</span></h3>
+        <p class="src">来源：<a href="https://github.com/mirror29/openfinclaw-cli" target="_blank" rel="noopener">github.com/mirror29/openfinclaw-cli</a></p>
+        <blockquote>Strategy generation
+· "Design a momentum strategy on US mega-cap tech. Backtest 2y.
+   **Tell me where it breaks.**"
+· "Write a mean-reversion strategy on BTC and show drawdown behavior through 2022."
+· "A-shares 沪深 300 日内轮动策略，年化目标 15%，最大回撤 &lt; 10%。"
+
+Backtest &amp; stress-test
+· "Backtest a 50/200 SMA crossover on SPY from 2015. Include costs and slippage."
+· "Stress-test my forked strategy against the 2020 and 2022 crashes."</blockquote>
+        <div class="cols">
+          <div class="panel-sm"><h4>亮点</h4><ul>
+            <li>「告诉我哪里会崩」反脆弱提问</li>
+            <li>强制成本/滑点/压力情景</li>
+            <li>中英跨市场示例</li>
+          </ul></div>
+          <div class="panel-sm"><h4>如何接入</h4><ul>
+            <li>策略上线前评估子任务</li>
+            <li>禁止把回测当实盘承诺</li>
+          </ul></div>
+        </div>
+      </article>
+
+      <!-- 12 -->
+      <article class="card" data-cat="community p1" id="p12">
+        <h3>12. awesome-chatgpt-prompts — 风险经理 / 投资经理三件套 <span class="badge b-com">P1</span> <span class="score">3/5</span></h3>
+        <p class="src">来源：<a href="https://github.com/f/prompts.chat" target="_blank" rel="noopener">github.com/f/prompts.chat</a>（171k stars）</p>
+        <blockquote>【Financial Analyst】
+... qualified individuals enabled with experience on understanding charts using
+technical analysis tools while interpreting macroeconomic environment ...
+requires **clear verdicts** ...
+
+【Investment Manager】
+... inflation rate or return estimates ... safest possible options ...
+allocate funds depending upon requirement &amp; interests ...
+
+【Accountant / Risk Manager】
+I want you to act as an accountant ... consider budgeting, investment strategies
+and **risk management** when creating a financial plan ...</blockquote>
+        <div class="cols">
+          <div class="panel-sm"><h4>亮点</h4><ul>
+            <li>经典角色扮演，结构清晰</li>
+            <li>「clear verdicts」强输出</li>
+            <li>适合独立风控审计角色</li>
+          </ul></div>
+          <div class="panel-sm"><h4>如何接入</h4><ul>
+            <li>补硬风控数字（回撤/Kelly/单笔风险）</li>
+            <li>去掉税务合规段</li>
+          </ul></div>
+        </div>
+      </article>
+
+      <!-- 13 -->
+      <article class="card" data-cat="exchange p1" id="p13">
+        <h3>13. Bybit Skills — 交易所技能包分发 <span class="badge b-ex">P1</span> <span class="score">4/5</span></h3>
+        <p class="src">来源：<a href="https://github.com/bybit-exchange/skills" target="_blank" rel="noopener">github.com/bybit-exchange/skills</a></p>
+        <blockquote>name: bybit-trading
+description: Bybit AI Trading Skill — Trade on Bybit using natural language.
+  Covers spot, derivatives, earn… Works with Claude, ChatGPT, OpenClaw…
+metadata:
+  version: 1.7.5
+  author: Bybit
+
+# Bybit Trading Skill — Trade on Bybit
+(spot / derivatives / earn modules; URL-installable, versioned)</blockquote>
+        <div class="cols">
+          <div class="panel-sm"><h4>亮点</h4><ul>
+            <li>官方版本化技能包</li>
+            <li>自然语言覆盖合约模块</li>
+            <li>人格 + 工具映射分离</li>
+          </ul></div>
+          <div class="panel-sm"><h4>如何接入</h4><ul>
+            <li>按此模式打包你们 SKILL / prompt_file</li>
+            <li>触发词中英对照</li>
+          </ul></div>
+        </div>
+      </article>
+
+      <!-- 14 -->
+      <article class="card" data-cat="exchange p1" id="p14">
+        <h3>14. Cryptohopper 模板包 — 种子提示流 <span class="badge b-ex">P1</span> <span class="score">3/5</span></h3>
+        <p class="src">来源：<a href="https://www.cryptohopper.ai/en/docs/crypto-template-pack" target="_blank" rel="noopener">cryptohopper.ai/en/docs/crypto-template-pack</a></p>
+        <blockquote>Start from ready-made Grid Bot · DCA Bot · Portfolio Dashboard ·
+News+Signals · Backtester.
+Pick one to **seed the prompt**, then refine to match your strategy.
+Template is a starting point — change pair, adjust rules, one change at a time.
+Trading templates **default to paper mode**.</blockquote>
+        <div class="cols">
+          <div class="panel-sm"><h4>亮点</h4><ul>
+            <li>种子→细化工作流</li>
+            <li>五类起步意图路由</li>
+          </ul></div>
+          <div class="panel-sm"><h4>如何接入</h4><ul>
+            <li>做成 prompts/ 种子文件集</li>
+            <li>与 examples/signals 对应</li>
+          </ul></div>
+        </div>
+      </article>
+
+      <!-- 15 -->
+      <article class="card" data-cat="community p2" id="p15">
+        <h3>15. PromptFolio / ai-hedge-fund — 纯提示词配置策略 <span class="badge b-com">P2</span> <span class="score">3/5</span></h3>
+        <p class="src">来源：<a href="https://github.com/Magmute/PromptFolio" target="_blank" rel="noopener">github.com/Magmute/PromptFolio</a></p>
+        <blockquote>Prompt-Based Trading: Configure strategies using only prompts —
+no coding required.
+Built-in AI Agents: Pre-configured trading agents migrated from ai-hedge-fund
+to automate investment analysis and portfolio management.</blockquote>
+        <div class="cols">
+          <div class="panel-sm"><h4>亮点</h4><ul>
+            <li>纯提示词策略配置范式</li>
+            <li>对冲基金代理提示词血统</li>
+          </ul></div>
+          <div class="panel-sm"><h4>如何接入</h4><ul>
+            <li>只抽提示词模式，不要 Mongo 基建</li>
+            <li>仓库偏新，慎直接上生产</li>
+          </ul></div>
+        </div>
+      </article>
+      <!-- 16 FinMem -->
+      <article class="card" data-cat="ai p0" id="p16">
+        <h3>16. FinMem — 分层记忆 + 强制引用 ID <span class="badge b-ai">P0</span> <span class="score">5/5</span></h3>
+        <p class="src">来源：<a href="https://github.com/pipiku915/FinMem-LLM-StockTrading" target="_blank" rel="noopener">github.com/pipiku915/FinMem-LLM-StockTrading</a> · arXiv 2311.13743</p>
+        <blockquote>Given the information, can you make an investment decision?
+Consider short-term / mid-term / long-term / reflection-term information + price momentum.
+When cumulative return is positive or zero → risk-seeking investor;
+when negative → risk-averse (negative info weighs more).
+You should provide exactly one of: buy | sell | hold.
+**You also need to provide the id of the information to support your decision.**
+
+JSON: { investment_decision, summary_reason,
+  short/middle/long/reflection_memory_index: [{memory_index}] }
+// Guardrails ValidChoices(on_fail="reask") — 引用必须真实存在</blockquote>
+        <div class="cols">
+          <div class="panel-sm"><h4>亮点</h4><ul>
+            <li>决策必须挂证据 ID，可审计</li>
+            <li>盈亏驱动风险偏好翻转（便宜有效的体制过滤）</li>
+            <li>Schema 不合法自动 reask</li>
+          </ul></div>
+          <div class="panel-sm"><h4>如何接入</h4><ul>
+            <li>chip 因子 ID → <code>meta.reasoning</code></li>
+            <li>连亏 chip → 收紧确认、降 <code>size_usd</code></li>
+          </ul></div>
+        </div>
+      </article>
+
+      <!-- 17 FinCon -->
+      <article class="card" data-cat="ai p0" id="p17">
+        <h3>17. FinCon — 经理-分析师层级 + 量化风控 <span class="badge b-ai">P0</span> <span class="score">4/5</span></h3>
+        <p class="src">来源：<a href="https://arxiv.org/html/2407.06567v1" target="_blank" rel="noopener">arxiv.org/html/2407.06567</a>（FinCon）</p>
+        <blockquote>Manager: "You are an experienced trading manager...
+consolidate investment insights from analysts and make trading actions on {symbols}"
+
+Analysts: news / market data / 10-K / audio → distill insights + sentiment
+
+Risk-control: PnL, VaR, CVaR, Cumulative Return, Sharpe, Max Drawdown
+Memory retrieval = relevancy + importance (forgetting-curve decay)
+Critical memory IDs get +5 importance via Guardrails</blockquote>
+        <div class="cols">
+          <div class="panel-sm"><h4>亮点</h4><ul>
+            <li>真实投研汇报线，跨品种净敞口</li>
+            <li>风控用 VaR/CVaR，不只「设个止损」</li>
+            <li>分析师按 PnL 贡献接收反馈</li>
+          </ul></div>
+          <div class="panel-sm"><h4>如何接入</h4><ul>
+            <li>Manager = 多 chip 组合层</li>
+            <li>Analyst = funding/OI、CVD、新闻分源</li>
+            <li>风控输出映射杠杆/仓位上限</li>
+          </ul></div>
+        </div>
+      </article>
+
+      <!-- 18 FinAgent -->
+      <article class="card" data-cat="ai p0" id="p18">
+        <h3>18. FinAgent — 失败关闭 HOLD + 偏好旋钮 <span class="badge b-ai">P0</span> <span class="score">5/5</span></h3>
+        <p class="src">来源：<a href="https://github.com/effective-p/FinAgent" target="_blank" rel="noopener">github.com/effective-p/FinAgent</a> · arXiv 2402.18485</p>
+        <blockquote>[Symbol] … [Trading Preference] aggressive|moderate|conservative
+[Current Portfolio] cash / position / total_value
+[Technical signals] MACD, KDJ, RSI, ZMR, BB
+[Market Intelligence] latest + past
+[Low/High-Level Reflection] reasoning + improvement
+Constraints: if cash &gt; previous cash → favor BUY; if position==0 → no SELL.
+action must be exactly BUY | SELL | HOLD.
+
+&lt;output&gt;
+  &lt;analysis&gt;3-5 sentences&lt;/analysis&gt;
+  &lt;action&gt;…&lt;/action&gt;
+  &lt;reasoning&gt;2-3 sentences&lt;/reasoning&gt;
+&lt;/output&gt;
+// invalid action default → HOLD（fail-closed）</blockquote>
+        <div class="cols">
+          <div class="panel-sm"><h4>亮点</h4><ul>
+            <li>非法输出默认 hold，实盘刚需</li>
+            <li>激进/中性/保守风险偏好一等公民</li>
+            <li>组合状态写进提示词约束动作</li>
+          </ul></div>
+          <div class="panel-sm"><h4>如何接入</h4><ul>
+            <li>meme 币 conservative、BTC moderate</li>
+            <li>组合块换成持仓 + 未实现盈亏</li>
+            <li>XML→Plan JSON；HLR→交易日志反思</li>
+          </ul></div>
+        </div>
+      </article>
+
+      <!-- 19 FinGPT -->
+      <article class="card" data-cat="ai p1" id="p19">
+        <h3>19. FinGPT-Forecaster — 固定段落分析提示 <span class="badge b-ai">P1</span> <span class="score">4/5</span></h3>
+        <p class="src">来源：<a href="https://github.com/AI4Finance-Foundation/FinGPT/tree/master/fingpt/FinGPT_Forecaster" target="_blank" rel="noopener">AI4Finance / FinGPT_Forecaster</a></p>
+        <blockquote>SYSTEM: You are a seasoned stock market analyst...
+[Positive Developments]: 1. ...
+[Potential Concerns]: 1. ...
+[Prediction &amp; Analysis]: ...
+
+User: Company intro + price path + news headlines + basic financials.
+Come up with **2-4 most important factors** respectively and keep them concise.
+Then predict price movement for next {period}. No data after {curday}.</blockquote>
+        <div class="cols">
+          <div class="panel-sm"><h4>亮点</h4><ul>
+            <li>段落标题即解析协议</li>
+            <li>2–4 因子限制跑偏</li>
+            <li>禁止用截止日之后的数据</li>
+          </ul></div>
+          <div class="panel-sm"><h4>如何接入</h4><ul>
+            <li>chip 级「简报」再转 Plan JSON</li>
+            <li>basic financials → funding / OI / 基差</li>
+          </ul></div>
+        </div>
+      </article>
+    </section>
+
+    <section id="skeleton">
+      <h2>合成骨架建议（可直接改 prompts/*.md）</h2>
+      <p class="lede">综合 Algorier 规格清单 + TradingAgents 纪律 + TradeAlgo 风控段 + 你们现有 Plan JSON 契约。</p>
+      <div class="skeleton">你是加密货币永续合约多品种策略引擎。
+目标：保本优先，宁可 hold，不可乱开仓。
+
+【策略规格 · 每个 symbol】
+1. 品种 / 周期 / 方向偏好 / 当前体制（trend|chop|vol）
+2. 选出 ≤6 个互补指标（禁止堆砌同源指标）
+3. 可度量的进场条件；信号在 K 线收盘确认；下一 K 开盘执行
+4. 绝对价位 SL/TP（禁止只写百分比）；ATR 定距离；杠杆 ≤L
+5. 单笔风险 ≤R% 权益；每 symbol 最多 1 仓；最多 N 个 symbol
+6. 不确定 / 体制不匹配 / 低于 min_confidence → hold
+
+【输出】只输出 Plan JSON（禁止 Markdown）：
+{cycle_id, reasoning≤30字, chips:[{
+  symbol, action, confidence, size_usd(优先), tp, sl,
+  type, price, trigger_price, reasoning}]}
+禁止编造成交/收益/回测数字。歧义时写 assumptions 或 hold。</div>
+    </section>
+
+    <section id="adopt">
+      <h2>采纳建议（供你勾选定制）</h2>
+      <table>
+        <thead>
+          <tr><th>优先级</th><th>动作</th><th>来源</th><th>落点</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><span class="badge b-high">P0</span></td><td>用 12 段规格重写策略人格目录结构</td><td>#1 Algorier</td><td><code>prompts/README.md</code></td></tr>
+          <tr><td><span class="badge b-high">P0</span></td><td>系统提示词补「绝对价位 / 禁止编造绩效 / 体制过滤」</td><td>#3 #4 #6</td><td><code>gate_bot/strategist/prompt.py</code></td></tr>
+          <tr><td><span class="badge b-high">P0</span></td><td>风险门第二提示（可选 LLM 复核）</td><td>#4 #8</td><td>新 <code>prompts/risk_gate.md</code></td></tr>
+          <tr><td><span class="badge b-high">P0</span></td><td>槽位模板批量生成多品种 Plan</td><td>#2</td><td>脚本 / 测试</td></tr>
+          <tr><td><span class="badge b-med">P1</span></td><td>按 Tradecraft 补 breakout/meanrev/grid 人格细节</td><td>#6</td><td><code>prompts/multi_*.md</code></td></tr>
+          <tr><td><span class="badge b-med">P1</span></td><td>triggers[] 条件用 NL 进离场句式约束</td><td>#9</td><td>system 规则 / 例</td></tr>
+          <tr><td><span class="badge b-med">P1</span></td><td>写清 dry-run/testnet 默认与写确认</td><td>#5 #7</td><td>README + 策略人格</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="limits">
+      <h2>局限与证据</h2>
+      <ul>
+        <li class="muted">Reddit / 知乎 / 币安广场本会话被 403 或人机验证拦截，社区样本以 GitHub 主源为主。</li>
+        <li class="muted">交易所产品中提示词常以 Skill/MCP 形式发布，不一定给出完整 chat prompt 原文；已尽量摘录可执行规则。</li>
+        <li class="muted">证据与更长摘录见 <code>docs/research/prompts-exchanges.md</code>、<code>prompts-community.md</code>（及 evidence 附件）。</li>
+        <li class="muted">所有模板仅供研究与工程改造，不构成投资建议；实盘须小额并走程序风控。</li>
+      </ul>
+    </section>
+
+    <footer>
+      gate-signal-bot 提示词调研 · 生成于 2026-09-26 ·
+      基线 master <code>b2d37e4</code> ·
+      源码包 <code>gate-signal-bot-master.zip</code>
+    </footer>
+  </div>
+  <script src="report.js"></script>
+</body>
+</html>
