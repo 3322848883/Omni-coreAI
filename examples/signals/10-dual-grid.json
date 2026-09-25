@@ -1,0 +1,30 @@
+{
+  "comment": "L4 双向网格：多空同时挂网（dual 持仓模式下各自成仓；single 下为净额对冲）",
+  "orders": [
+    {
+      "action": "grid",
+      "symbol": "BTC_USDT",
+      "side": "long",
+      "type": "limit",
+      "sl": 81500,
+      "levels": [
+        {"price": 83000, "size": 1},
+        {"price": 82500, "size": 1}
+      ],
+      "label": "dg-l"
+    },
+    {
+      "action": "grid",
+      "symbol": "BTC_USDT",
+      "side": "short",
+      "type": "limit",
+      "sl": 86000,
+      "levels": [
+        {"price": 84500, "size": 1},
+        {"price": 85000, "size": 1}
+      ],
+      "label": "dg-s"
+    }
+  ],
+  "meta": {"signal_id": "ex-10", "kind": "dual_grid"}
+}

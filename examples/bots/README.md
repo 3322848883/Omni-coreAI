@@ -69,3 +69,11 @@ strategist:
 | 典型 action | open_long | grid / orders[] | stop_entry_* |
 | 触发 | 定时/K线 | RSI 超卖等 | price_break / atr |
 | 风控重点 | 单笔 notional | 总敞口 | 突破假信号 |
+
+## 双向持仓（hedge / dual）支持
+
+- 账户为 **dual** 时：多空**分两本**，双向网格各自成仓
+- 账户为 **single** 时：多空**净额对冲**（反向单可能只是减仓）
+- 平仓/减仓 dual 必须 `side: long|short`（或 `reduce_long/short`）
+
+双向网格样例：`examples/signals/10-dual-grid.json`

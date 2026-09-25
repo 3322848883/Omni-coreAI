@@ -7,7 +7,8 @@
 | **L1 基础** | `signals/` | 单笔开仓、止盈止损、平仓、hold |
 | **L2 订单类型** | `signals/` | limit / post_only / ioc / fok、trigger vs limit_order |
 | **L3 突破/保护** | `signals/` | stop_entry 突破、TP-SL 组合 |
-| **L4 多单网格** | `signals/grid-*.json` | 网格、`orders[]` 多腿 |
+| **L4 多单网格** | `signals/06-*.json` | 单向网格 |
+| **L4b 双向网格** | `signals/10-dual-grid.json` | 多空同时挂网（dual 持仓） |
 | **L5 事件触发** | `triggers/` | 定时、K 收盘、EMA/ATR/RSI/突破条件 |
 | **L6 多机器人** | `bots/` + `combo/` | 单订单机器人 / 网格机器人 / 三策略组合 |
 | **L7 LLM Plan** | `plans/` | 好 Plan vs 坏 Plan（供提示词/复盘） |
