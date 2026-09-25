@@ -124,8 +124,11 @@ def migrate_all(root: Path, dry_run: bool = False, bot_ids: list[str] | None = N
         if not base.is_dir():
             continue
         for p in base.iterdir():
-            if p.is_dir() and not p.name.startswith("."):
-                ids.add(p.name)
+            name = p.name
+            if name.startswith(".") or name.startswith("_"):
+                continue
+            if p.is_dir():
+                ids.add(name)
             elif p.is_file() and p.suffix == ".jsonl":
                 ids.add(p.stem)
     return [migrate_bot(root, bid, dry_run=dry_run) for bid in sorted(ids)]
