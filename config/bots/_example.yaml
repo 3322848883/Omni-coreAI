@@ -19,7 +19,7 @@ max_notional_usd: 500     # 单笔名义 USDT 上限
 max_orders_per_file: 20
 max_files_per_run: 50
 poll_interval_sec: 2
-label_prefix: alpha       # 写入订单 text: t-<label>
+label_prefix: alpha       # bot 命名空间：订单 text 强制 t-alpha[-<label>]，防跨 bot 误撤/伪造
 
 # 有仓时的进场管控（bot 级，不影响其它 bot）
 #   strict     = 一账户一策略：有仓只收加/减/平/调TP-SL，拒新方案（默认）

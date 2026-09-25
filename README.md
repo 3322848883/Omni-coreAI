@@ -286,6 +286,13 @@ user   = 【品种宇宙】+【策略风控】+【市场与账户快照】→ �
 # 单元测试（契约/schema/执行/策略/指标）
 .venv\Scripts\python.exe -m unittest discover -s tests
 
+# 上线前全量矩阵 M1–M20（推荐，见 docs/compose/spec/prelaunch-test.md）
+.venv\Scripts\python.exe scripts\prelaunch_runner.py --phase readonly --env testnet
+.venv\Scripts\python.exe scripts\prelaunch_runner.py --phase orders --env testnet
+.venv\Scripts\python.exe scripts\prelaunch_runner.py --phase fault
+.venv\Scripts\python.exe scripts\prelaunch_runner.py --phase live          # ≤10U 小额实单
+.venv\Scripts\python.exe scripts\prelaunch_runner.py --phase regress
+
 # 行情读取 + hybrid + 指标
 .venv\Scripts\python.exe scripts\test_market_read.py
 
@@ -294,6 +301,7 @@ user   = 【品种宇宙】+【策略风控】+【市场与账户快照】→ �
 
 # 策略提示词 + LLM Plan（需 OPENAI_BASE_URL / OPENAI_API_KEY）
 .venv\Scripts\python.exe scripts\test_strategy_prompt.py
+.venv\Scripts\python.exe scripts\test_llm_sizing_modes.py
 
 # 策略 → 交易所全链路（快照→LLM→风控→inbox→执行→挂单→日志）
 .venv\Scripts\python.exe scripts\test_full_chain.py
@@ -304,26 +312,32 @@ user   = 【品种宇宙】+【策略风控】+【市场与账户快照】→ �
 
 | 套件 | 参考规模 |
 |------|----------|
-| unittest | 95 |
+| unittest | **148** |
+| **prelaunch 矩阵** | **M1–M20**（testnet+live，含故障注入） |
 | market_read | 36 |
 | testnet_all_orders | 57 |
-| strategy_prompt | 8 |
+| strategy_prompt / llm_sizing | 8 / 7 场景 |
 | full_chain | 10（策略→交易所） |
 | production | 24（触发+AI+订单+交易所） |
 | examples/testnet | 25（全部案例含双向网格/两种止盈） |
 
 ## 上线准备（Checklist）
 
+> **放行基线**：`master` `b2d37e4` 已通过 prelaunch 全量（0 FAIL），见 `docs/compose/spec/prelaunch-test.md`。
+
 1. **密钥**：环境变量 `GATE_API_KEY` / `GATE_API_SECRET`（或 `GATE_TESTNET_*`），LLM 用 `OPENAI_BASE_URL` / `OPENAI_API_KEY`，**不要写进 yaml / 不要进 git**
-2. **配置**：复制 `config/bots/_example.yaml` → `config/bots/<bot_id>.yaml`，设 `env`、`symbols`、`max_notional_usd`
+2. **配置**：复制 `config/bots/_example.yaml` → `config/bots/<bot_id>.yaml`，设 `env`、`symbols`、`max_notional_usd`、**`label_prefix`**（多 bot 隔离命名空间）
 3. **自检**：`python -m gate_bot status`；先 `once --bot <id>` 小文件试跑
 4. **策略联调**：复制 `config/bots/_llm_test.example.yaml` → `llm-test.yaml`，先 `plan --bot llm-test`
 5. **信号源**：AI 只写 `inbox/<bot_id>/`，模板见 **`templates/README.md`**
-6. **建议**：`max_notional_usd` 从小开始；确认持仓模式 single/dual 与策略一致
-7. **已知限制**：
+6. **上线首日**：`max_notional_usd` 从小开始（建议 ≤10U）；确认持仓模式 single/dual 与策略一致；跑一轮 `prelaunch_runner --phase live`
+7. **仓位口径**：策略优先 `size_usd`（名义 U）；用 `size`（张）前查快照 `contract.min_notional_usd`
+8. **已知限制**：
    - `trail` 追踪单需资金密码 / 测试网不支持，当前搁置
    - `limit_order` 模式 TP/SL 价须在 Gate 偏离带内（过远 `PRICE_TOO_DEVIATED`）；真止损用 `sl_mode: trigger`
+   - 市价单若遇价格偏离，自动回退为 **公允价带内 IOC**（不成即撤，不挂死）
    - pa aux 新闻/宏观走 Gate Intel，偶发 TLS 超时（与密钥无关）；盘口/成交/OI 不受影响
+   - 多 bot 归属靠 `label_prefix` 命名空间，**不是**加密鉴权；勿把不可信 JSON 放进生产 inbox
 
 ## 多机器人怎么加（账户 × 信号源 可自由组合）
 
