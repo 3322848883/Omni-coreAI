@@ -271,6 +271,28 @@ class TestPlanTriggers(unittest.TestCase):
         self.assertEqual(r.get("error"), "account_unavailable")
 
 
+class TestPromptSandbox(unittest.TestCase):
+    def test_prompt_limited_to_prompts_dir(self):
+        from gate_bot.strategist.prompt import load_strategy_prompt
+
+        root = Path(__file__).resolve().parents[1] / "prompts"
+        self.assertIn("策略", load_strategy_prompt("vergex_default.md", prompts_root=root))
+        self.assertIn("策略", load_strategy_prompt(root / "vergex_default.md", prompts_root=root))
+        for bad in ("C:/Windows/win.ini", "../gate_bot/executor.py", "/etc/passwd"):
+            with self.assertRaises(PermissionError):
+                load_strategy_prompt(bad, prompts_root=root)
+
+    def test_llm_plan_cannot_escape_inbox(self):
+        from gate_bot.strategist.bridge import write_signal_file
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            inbox = Path(td)
+            p = write_signal_file(inbox, {"orders": [{"action": "hold"}]}, cycle_id="../../evil:../x")
+            self.assertEqual(p.parent, inbox.resolve())
+            self.assertNotIn("..", p.name.replace("..-", ""))  # no path sep
+
+
 class _HoldLLM:
     def chat(self, system, user):
         return json.dumps({"chips": [{"symbol": "BTC_USDT", "action": "hold", "confidence": 0.9}]})

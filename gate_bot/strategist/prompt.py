@@ -35,13 +35,33 @@ PLAN_SCHEMA_HINT = (
 SYSTEM_PROMPT = _SYSTEM_HEAD + PLAN_SCHEMA_HINT
 
 
-def load_strategy_prompt(path: str | Path | None) -> str:
+def load_strategy_prompt(path: str | Path | None, prompts_root: str | Path | None = None) -> str:
+    """Load strategy persona text. Restricted to prompts/ (no arbitrary FS read)."""
     if not path:
         return (
             "策略：趋势跟随。跟随明显方向，震荡 hold。"
             "有仓时优先管理；新仓必须带 sl。单币单计划。"
         )
-    return Path(path).read_text(encoding="utf-8")
+    root = (Path(prompts_root) if prompts_root else (Path.cwd() / "prompts")).resolve()
+    raw = Path(path)
+    candidates = []
+    if raw.is_absolute():
+        candidates.append(raw.resolve())
+    else:
+        candidates.append((Path.cwd() / raw).resolve())
+        candidates.append((root / raw).resolve())
+        candidates.append((root / raw.name).resolve())
+
+    def _under_root(p: Path) -> bool:
+        try:
+            return p == root or root in p.parents
+        except Exception:  # noqa: BLE001
+            return False
+
+    for cand in candidates:
+        if _under_root(cand) and cand.is_file():
+            return cand.read_text(encoding="utf-8")
+    raise PermissionError(f"prompt_file must exist under {root}: {path}")
 
 
 def build_system_prompt(strategy_prompt: str) -> str:
