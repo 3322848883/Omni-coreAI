@@ -88,6 +88,8 @@ class Supervisor:
         out_fh = open(log, "ab")
         err_fh = open(err, "ab")
         env = os.environ.copy()
+        # child CLI skips PidLock — supervisor already holds lock_plan/lock_run
+        env["GATE_LOCK_HELD"] = "1"
         flags = 0
         if os.name == "nt":
             flags = 0x00000008 | 0x00000200  # DETACHED | NEW_PROCESS_GROUP

@@ -94,10 +94,13 @@ def cmd_plan_loop(args) -> int:
     paths.ensure()
     from .pidlock import PidLock
 
-    lock = PidLock(paths.bot_paths(args.bot).lock_plan).acquire()
-    if lock is None:
-        print(f"plan-loop already running for {args.bot}", flush=True)
-        return 3
+    # supervisor already holds this lock for the child it spawned
+    lock = None
+    if os.environ.get("GATE_LOCK_HELD") != "1":
+        lock = PidLock(paths.bot_paths(args.bot).lock_plan).acquire()
+        if lock is None:
+            print(f"plan-loop already running for {args.bot}", flush=True)
+            return 3
     bot = load_bot_config(paths.config_dir / f"{args.bot}.yaml")
     runner = _build_plan_runner(bot, paths)
     try:
@@ -105,7 +108,8 @@ def cmd_plan_loop(args) -> int:
     except KeyboardInterrupt:
         print("bye")
     finally:
-        lock.release()
+        if lock is not None:
+            lock.release()
     return 0
 
 
@@ -204,19 +208,27 @@ def cmd_run(args) -> int:
     paths.ensure()
     from .pidlock import PidLock
 
-    # per-bot run lock when a single bot is selected; otherwise global
-    lock_name = f"{args.bot or 'all'}.run.lock"
-    lock = PidLock(paths.root / "data" / "bots" / lock_name).acquire()
-    if lock is None:
-        print(f"run already running ({lock_name})", flush=True)
-        return 3
+    # same lock path as supervisor: bot_paths().lock_run when --bot is set
+    if args.bot:
+        lock_path = paths.bot_paths(args.bot).lock_run
+        lock_name = f"{args.bot}/state/run.lock"
+    else:
+        lock_path = paths.root / "data" / "bots" / "_all.run.lock"
+        lock_name = "_all.run.lock"
+    lock = None
+    if os.environ.get("GATE_LOCK_HELD") != "1":
+        lock = PidLock(lock_path).acquire()
+        if lock is None:
+            print(f"run already running ({lock_name})", flush=True)
+            return 3
     bots = load_all_bots(paths.config_dir)
     try:
         run_forever(bots, paths, only=args.bot)
     except KeyboardInterrupt:
         print("bye")
     finally:
-        lock.release()
+        if lock is not None:
+            lock.release()
     return 0
 
 
