@@ -1,2 +1,0 @@
-[console_scripts]
-gate-bot = gate_bot.__main__:main

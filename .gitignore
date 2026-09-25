@@ -38,3 +38,10 @@ pa-data-source/*.lock
 .worktrees/
 .prelaunch_test/
 *.zip
+
+# runtime bot data (layout v2)
+data/bots/
+data/bots.db
+data/bots.db-shm
+data/bots.db-wal
+*.egg-info/
