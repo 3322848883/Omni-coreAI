@@ -1,0 +1,53 @@
+# ETH 区间中值 · 网关测试机器人（非 brooks）
+bot_id: eth-range-gw
+enabled: true
+env: testnet
+api_key_env: GATE_TESTNET_API_KEY
+api_secret_env: GATE_TESTNET_API_SECRET
+
+symbols:
+  - ETH_USDT
+
+max_notional_usd: 50
+label_prefix: erg
+position_policy: strict
+default_replace: symbol
+order_scope: own
+require_sl: true
+
+account_risk:
+  max_leverage: 5
+  max_total_notional_usd: 50
+
+strategist:
+  enabled: true
+  prompt_file: prompts/eth_range_mid.md
+  interval_sec: 900
+  timeframe: 15m
+  event_on_kline_close: true
+  event_timeframe: 15m
+  candles: 80
+  write_hold: true
+  tools:
+    enabled: true
+    native: true
+    max_rounds: 3
+  market:
+    mode: rest_only
+    indicators: [ema20, atr14]
+    timeframes: []
+    extra_candles: 15
+  ai_triggers:
+    enabled: true
+    max_active: 2
+  risk:
+    min_confidence: 0.5
+    max_chips: 1
+    max_notional_usd: 50
+  llm:
+    base_url_env: OPENAI_BASE_URL
+    api_key_env: OPENAI_API_KEY
+    model: global:deepseek-v4.1-flash
+    thinking: false
+    timeout_sec: 120
+    max_tokens: 8192

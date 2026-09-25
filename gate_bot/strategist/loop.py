@@ -287,6 +287,11 @@ class PlanRunner:
                     "content": json.dumps(result, ensure_ascii=False),
                 })
         # force final without tools
+        messages.append({
+            "role": "user",
+            "content": "工具结果已足够。禁止再调用工具，禁止使用特殊标记。"
+            "请只输出最终 Plan JSON 对象。",
+        })
         msg = self.llm.chat_message_full(messages)
         return msg.get("content") or ""
 
