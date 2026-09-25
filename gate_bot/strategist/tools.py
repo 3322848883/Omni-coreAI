@@ -36,6 +36,7 @@ TOOL_NAMES = (
     "klines", "indicators", "ticker", "orderbook", "contract", "stats", "account",
     # aux-cache (pa-data-source) — existing data only
     "trades_flow", "liquidations", "market_stats", "tech_analysis", "coin_info", "onchain", "social",
+    "overview", "sentiment", "macro",
 )
 
 
@@ -268,6 +269,42 @@ NATIVE_TOOLS = [
                     "limit": {"type": "integer", "minimum": 1, "maximum": 30},
                 },
                 "required": ["coin"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "overview",
+            "description": "Market overview: fear/greed, BTC/ETH dominance, total mcap, AHR999.",
+            "parameters": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 20}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "sentiment",
+            "description": "Aggregate social sentiment per coin (mentions, long/short ratios).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "coin": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "macro",
+            "description": "Macro series (CPI, rates, GDP, NFP) and calendar events.",
+            "parameters": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 20}},
             },
         },
     },
@@ -522,6 +559,45 @@ def run_tool(
                 (coin.replace("USDT", ""), lim),
             )
             return {"coin": coin, "social": rows}
+
+        if name == "overview":
+            lim = max(1, min(int(args.get("limit") or 3), 20))
+            rows = _aux_query(
+                bot_root,
+                "SELECT fetched_ts, btc_price, btc_dominance, eth_dominance, fear_greed, fear_greed_label, "
+                "total_market_cap, total_volume_24h, market_cap_change_24h, altcoin_season_index, ahr999 "
+                "FROM overview_ts ORDER BY fetched_ts DESC LIMIT ?",
+                (lim,),
+            )
+            return {"overview": rows}
+
+        if name == "sentiment":
+            coin = str(args.get("coin") or args.get("symbol") or "").replace("_", "").upper()
+            lim = max(1, min(int(args.get("limit") or 5), 20))
+            q = ("SELECT fetched_ts, coin, mention_count, overall_sentiment, sentiment_label, "
+                 "positive_ratio, neutral_ratio, negative_ratio FROM sentiment_ts")
+            if coin:
+                rows = _aux_query(bot_root, q + " WHERE coin=? ORDER BY fetched_ts DESC LIMIT ?",
+                                  (coin.replace("USDT", ""), lim))
+            else:
+                rows = _aux_query(bot_root, q + " ORDER BY fetched_ts DESC LIMIT ?", (lim,))
+            return {"sentiment": rows}
+
+        if name == "macro":
+            lim = max(1, min(int(args.get("limit") or 5), 20))
+            series = _aux_query(
+                bot_root,
+                "SELECT fetched_ts, cpi_yoy, fed_funds_rate, gdp_growth, nonfarm_payroll, pce_yoy, "
+                "unemployment_rate FROM macro_ts ORDER BY fetched_ts DESC LIMIT ?",
+                (lim,),
+            )
+            events = _aux_query(
+                bot_root,
+                "SELECT event_id, event_date, event_name, event_type, event_time, status "
+                "FROM macro_events ORDER BY event_date DESC LIMIT ?",
+                (lim,),
+            )
+            return {"macro_series": series, "macro_events": events}
     except GateApiError as e:
         return {"error": str(e)[:160], "tool": name}
     except Exception as e:  # noqa: BLE001
