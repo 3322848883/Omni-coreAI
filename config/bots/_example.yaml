@@ -55,3 +55,10 @@ account_risk:
 #     # health_url: http://127.0.0.1:18080/health
 #     indicators: [ema20, ema50, atr14, rsi14]
 #     refresh: [ticker, stats, orderbook]
+#   ai_triggers:                   # AI 可自设事件触发（命中只跑 Plan，不下单）
+#     enabled: true
+#     allow_types: [price_break, price_vs_ema, ema_cross, macd_cross, atr_spike, rsi, volume_spike]
+#     max_active: 5
+#     default_ttl_sec: 86400
+#     default_cooldown_sec: 60
+#     allow_modify: true

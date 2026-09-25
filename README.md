@@ -145,6 +145,7 @@ strategist:
 |------|------|------|
 | **定时** | `interval_sec: 300`（5m）/ `600`（10m）/ 任意秒 | 每 N 秒跑一轮 Plan |
 | **事件：K 线收盘** | `event_on_kline_close: true` + `event_timeframe: 5m` | 该周期 K 线 `t` 前进时立刻跑 |
+| **AI 自设触发** | `ai_triggers.enabled` + Plan `triggers[]` | AI 分析后登记条件，命中再跑 Plan（不下单） |
 | **事件：条件** | `conditions[]` | EMA / ATR / RSI / 价格突破 等满足时跑 |
 | 手动单轮 | `plan --bot <id>` | 不进 loop |
 
