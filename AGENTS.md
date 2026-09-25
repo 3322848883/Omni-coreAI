@@ -155,11 +155,12 @@ export GATE_BOT_PA_DATA=/data/gate-kline   # 可选
 cd /opt/gate-signal-bot
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
+pip install -e .          # 任意目录都能 python -m gate_bot
 python -m gate_bot status --root "$GATE_BOT_ROOT"
 python -m gate_bot run --root "$GATE_BOT_ROOT"
 ```
 
-systemd 建议：`WorkingDirectory=/opt/gate-signal-bot`，并设 `GATE_BOT_ROOT` 与密钥环境变量。
+systemd 建议：`WorkingDirectory=/opt/gate-signal-bot`，并设 `GATE_BOT_ROOT` 与密钥环境变量；或 `ExecStart=/opt/gate-signal-bot/.venv/bin/python -m gate_bot run --root /opt/gate-signal-bot`。
 
 **相对路径规则**（代码已按此实现）：
 - 配置：`<root>/config/bots/`
