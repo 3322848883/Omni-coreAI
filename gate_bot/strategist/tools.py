@@ -18,19 +18,18 @@ from .snapshot import collect_snapshot
 
 # Human-readable tool contract (injected into system prompt when tools enabled)
 TOOL_GUIDE = """【行情工具 · 按需调用】
-不要假设你已经看到全部数据。需要更多 K 线/指标/盘口时，只输出 JSON：
-{"tool_calls":[{"tool":"<name>","args":{...}}]}
-可连续多轮；每轮只放真正缺的数据请求。最终决策时只输出 Plan JSON。
+不要假设你已经看到全部数据。需要更多 K 线/指标/盘口/账户时，**优先使用已提供的 tools 函数调用**（function calling）。
+若环境未提供 tools，则可用 JSON 协议：{"tool_calls":[{"tool":"<name>","args":{...}}]}
+最终决策只输出 Plan JSON。
 
-可用工具：
-- klines: {symbol, tf: 1m|5m|15m|30m|1h|4h|1d, limit<=200} → OHLCV
-- indicators: {symbol, tf, names:[ema20,rsi14,atr14,macd,boll,...], limit}
-- ticker: {symbol} → last/mark/funding/24h
-- orderbook: {symbol, limit<=50}
-- contract: {symbol} → quanto/min_notional/rounds/leverage_max
-- stats: {symbol} → OI/多空比等
-- account: {} → 余额/持仓
-默认已给：最新价、主周期少量 K、基础指标。更长历史、更高周期用工具拉。
+可用函数：
+- klines(symbol, tf, limit) → OHLCV
+- indicators(symbol, tf, names, limit)
+- ticker(symbol) → last/mark/funding/24h
+- orderbook(symbol, limit)
+- contract(symbol) → quanto/min_notional/rounds
+- stats(symbol) / account()
+默认快照只有主周期少量数据；更长历史、更高周期用工具拉。
 """
 
 TOOL_NAMES = ("klines", "indicators", "ticker", "orderbook", "contract", "stats", "account")
