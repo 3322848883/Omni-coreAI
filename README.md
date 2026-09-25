@@ -73,6 +73,7 @@ AI 生成方案 → 程序风控 → 写 `inbox` → 现有执行器下单（多
 .venv\Scripts\python.exe -m gate_bot plan --bot alpha
 
 # 常驻：interval_sec 定时 + K线收盘事件（见「AI 触发时机」）
+# 生产请用任务计划/systemd 保活，见 docs/OPERATIONS.md
 .venv\Scripts\python.exe -m gate_bot plan-loop --bot alpha
 # 另开进程执行
 .venv\Scripts\python.exe -m gate_bot run --bot alpha

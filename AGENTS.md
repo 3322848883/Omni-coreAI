@@ -88,6 +88,7 @@ LLM 策略另需 `OPENAI_BASE_URL` / `OPENAI_API_KEY`，然后：
 |----------|--------|
 | **10 分钟图文教程（推荐先做）** | `docs/TUTORIAL-10min.md` |
 | **如何添加新机器人（照抄清单）** | `docs/HOWTO-add-bot.md` |
+| **持续运行 / 7×24 运维** | `docs/OPERATIONS.md` |
 | 总览 / 配置 / 运行 | **`README.md`** |
 | 信号字段全集、示例 | `templates/README.md` |
 | 止损 vs 突破 | `templates/STOP-ENTRY-vs-STOP-LOSS.md` |
