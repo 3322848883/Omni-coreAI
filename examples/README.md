@@ -8,6 +8,7 @@
 | **L2 订单类型** | `signals/` | limit / post_only / ioc / fok、trigger vs limit_order |
 | **L3 突破/保护** | `signals/` | stop_entry 突破、TP-SL 组合 |
 | **L4 多单网格** | `signals/06-*.json` | 单向网格 |
+| **L4a 网格止盈** | `11-grid-per-level-tp.json` / `12-grid-shared-tp.json` | 每档一止盈 / 梯度共用一个止盈 |
 | **L4b 双向网格** | `signals/10-dual-grid.json` | 多空同时挂网（dual 持仓） |
 | **L5 事件触发** | `triggers/` | 定时、K 收盘、EMA/ATR/RSI/突破条件 |
 | **L6 多机器人** | `bots/` + `combo/` | 单订单机器人 / 网格机器人 / 三策略组合 |

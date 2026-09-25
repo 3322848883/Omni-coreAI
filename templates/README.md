@@ -109,6 +109,7 @@ AI/策略把信号写成 **一个 JSON 文件**，放入 `inbox/<bot_id>/`。
 | `trigger_expiration` | 可省 | 过期秒数（实盘支持） |
 | `side` | dual 减仓必填 | `long` / `short` |
 | `levels` | grid | `[{price, size\|size_usd\|size_pct}]` |
+| `tp_scope` / `sl_scope` | grid | `per_level`（每档对应，默认）\| `shared`（共用一个止盈/止损） |
 | `orders` | 多腿 | 与顶层 `action` 互斥 |
 | `label` | 建议 | 订单标签 `t-<label>` |
 | `meta` | 建议 | `signal_id`/`reasoning`/`kind`，不参与下单 |

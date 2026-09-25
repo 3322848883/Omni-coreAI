@@ -308,6 +308,7 @@ user   = 【品种宇宙】+【策略风控】+【市场与账户快照】→ �
 | strategy_prompt | 8 |
 | full_chain | 10（策略→交易所） |
 | production | 24（触发+AI+订单+交易所） |
+| examples/testnet | 25（全部案例含双向网格/两种止盈） |
 
 ## 上线准备（Checklist）
 
