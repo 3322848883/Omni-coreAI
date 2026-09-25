@@ -112,16 +112,40 @@ LLM 策略另需 `OPENAI_BASE_URL` / `OPENAI_API_KEY`，然后：
 .venv\Scripts\python.exe -m gate_bot status
 .venv\Scripts\python.exe -m gate_bot once --bot <id>
 .venv\Scripts\python.exe -m gate_bot plan --bot <id>
+# 多 bot 托管 / 迁移
+.venv\Scripts\python.exe -m gate_bot migrate
+.venv\Scripts\python.exe -m gate_bot supervisor --bot brooks-btc
+# 无窗口启动
+.\scripts\start_brooks_btc_bg.bat
 .venv\Scripts\python.exe scripts\prelaunch_runner.py --phase readonly --env testnet
 ```
 
 ---
 
+## 5b. LLM 与工具（DeepSeek 官方）
+
+| 项 | 默认 |
+|----|------|
+| 模型 | **`deepseek-flash`**（可 `deepseek-v4-pro`） |
+| 思考 | `thinking: true`，**`reasoning_effort: max`** |
+| JSON | `response_format: json_object`（最终 Plan） |
+| 隔离 | `user_id`（KVCache / 限流） |
+
+**AI 可按需调用 14 个工具**（原生 function calling）：
+
+- 行情：`klines` `indicators` `ticker` `orderbook` `contract` `stats` `account`
+- aux 库：`trades_flow` `liquidations` `market_stats` `tech_analysis` `coin_info` `onchain` `social`
+
+快照只给主周期精简数据，其余用工具拉。设计：`docs/compose/spec/runtime-upgrade.md`、`gate_bot/strategist/tools.py`。
+
+---
+
 ## 6. 验证习惯
 
-- 改代码：先跑 `unittest`（约 148 项）。
+- 改代码：先跑 `unittest`（约 169 项）。
 - 改下单 / 风控：跑 `scripts/prelaunch_runner.py --phase orders --env testnet`。
 - 改提示词：`plan --bot` 看 reasoning 是否符合人格。
+- 改 LLM/工具：`scripts/_verify_effect.py` / `scripts/_verify_json.py`。
 - 上线：`prelaunch --phase live` 小额闭环后才加大额度。
 
 ---

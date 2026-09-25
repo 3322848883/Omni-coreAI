@@ -26,10 +26,13 @@
 python -m gate_bot migrate          # 旧目录 → data/bots/<id>/*
 python -m gate_bot supervisor       # 启动所有 enabled bot 的 plan-loop + run
 python -m gate_bot status           # 含 heartbeats / PID
+# 无控制台窗口（pythonw）
+.\scripts\start_brooks_btc_bg.bat
 ```
 
 - 每 bot 每组件 **PID 锁**（`data/bots/<id>/state/*.lock`）防双开  
 - 崩溃约 5s 拉起；**≤5 次/小时** 防重启风暴  
+- **子进程使用 `pythonw.exe`**，不弹黑框  
 - 存储：`data/bots.db` 台账 + `data/bots/<id>/` 文件树  
 - 详细设计：`docs/compose/spec/runtime-upgrade.md`
 

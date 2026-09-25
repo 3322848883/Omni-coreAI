@@ -48,10 +48,19 @@ class Supervisor:
         self.children: list[Child] = []
         self._stop = False
         self.ledger = Ledger(default_ledger_path(self.root))
-        self._py = sys.executable
+        self._py = self._windowless_python()
 
     def _log(self, msg: str) -> None:
         print(f"{log_prefix} {msg}", flush=True)
+
+    def _windowless_python(self) -> str:
+        """Prefer pythonw.exe on Windows so children do not open consoles."""
+        exe = Path(sys.executable)
+        if os.name == "nt":
+            w = exe.parent / "pythonw.exe"
+            if w.exists():
+                return str(w)
+        return str(exe)
 
     def prepare(self) -> None:
         bots = load_all_bots(self.root / "config" / "bots")
