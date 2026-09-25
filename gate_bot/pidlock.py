@@ -32,13 +32,28 @@ class PidLock:
         self._fh = None
 
     def acquire(self) -> Optional["PidLock"]:
+        # atomic create; if exists, steal only when owner pid is dead
+        try:
+            fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(str(os.getpid()))
+            return self
+        except FileExistsError:
+            pass
         try:
             old = int((self.path.read_text(encoding="utf-8") or "0").strip() or "0")
         except Exception:  # noqa: BLE001
             old = 0
         if old and _pid_alive(old) and old != os.getpid():
             return None
-        self.path.write_text(str(os.getpid()), encoding="utf-8")
+        # dead/empty/stale → take over
+        try:
+            self.path.unlink(missing_ok=True)
+            fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(str(os.getpid()))
+        except Exception:  # noqa: BLE001
+            return None
         return self
 
     def release(self) -> None:

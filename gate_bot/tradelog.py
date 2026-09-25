@@ -78,4 +78,6 @@ class TradeLogger:
 
 
 def trade_log_path(root: Path, bot_id: str) -> Path:
-    return root / "logs" / "trades" / f"{bot_id}.jsonl"
+    from .paths import bot_paths
+
+    return bot_paths(root, bot_id, create=True).logs / "trades.jsonl"

@@ -28,38 +28,37 @@ class ProjectPaths:
 
     @property
     def inbox(self) -> Path:
-        return self.root / "inbox"
+        return self.root / "data" / "bots"
 
     @property
     def done_dir(self) -> Path:
-        return self.root / "archive" / "done"
+        return self.root / "data" / "bots"
 
     @property
     def failed_dir(self) -> Path:
-        return self.root / "archive" / "failed"
+        return self.root / "data" / "bots"
 
     @property
     def logs(self) -> Path:
-        return self.root / "logs"
+        return self.root / "data" / "bots"
 
     def ensure(self) -> None:
-        for p in (self.config_dir, self.inbox, self.done_dir, self.failed_dir, self.logs):
-            p.mkdir(parents=True, exist_ok=True)
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+        (self.root / "data" / "bots").mkdir(parents=True, exist_ok=True)
+
+    def bot_paths(self, bot_id: str, create: bool = True):
+        from .paths import bot_paths as _bp
+
+        return _bp(self.root, bot_id, create=create)
 
     def bot_inbox(self, bot_id: str) -> Path:
-        path = self.inbox / bot_id
-        path.mkdir(parents=True, exist_ok=True)
-        return path
+        return self.bot_paths(bot_id).inbox
 
     def bot_done(self, bot_id: str) -> Path:
-        path = self.done_dir / bot_id
-        path.mkdir(parents=True, exist_ok=True)
-        return path
+        return self.bot_paths(bot_id).archive_done
 
     def bot_failed(self, bot_id: str) -> Path:
-        path = self.failed_dir / bot_id
-        path.mkdir(parents=True, exist_ok=True)
-        return path
+        return self.bot_paths(bot_id).archive_failed
 
 
 def _pick_inbox_files(inbox: Path, limit: int) -> list[Path]:

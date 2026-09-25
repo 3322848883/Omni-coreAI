@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -60,9 +61,10 @@ def migrate_bot(root: Path, bot_id: str, dry_run: bool = False, copy: bool = Fal
             continue
         report["moved"][name] = _move_tree(src, dst, copy=copy)
 
-    # import trades jsonl → sqlite
+    # import trades jsonl → sqlite once
+    mark = bp.state / ".jsonl_imported"
     jsonl = bp.logs / "trades.jsonl"
-    if jsonl.exists():
+    if jsonl.exists() and not mark.exists():
         led = Ledger(default_ledger_path(root))
         try:
             for line in jsonl.read_text(encoding="utf-8").splitlines():
@@ -95,6 +97,7 @@ def migrate_bot(root: Path, bot_id: str, dry_run: bool = False, copy: bool = Fal
                     report["imported_trades"] += 1
         finally:
             led.close()
+        mark.write_text(str(int(time.time())), encoding="utf-8")
     return report
 
 

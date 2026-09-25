@@ -74,7 +74,7 @@ def _build_plan_runner(bot, paths: ProjectPaths):
         ),
     )
     client = bot.create_client()
-    history = paths.root / "history" / bot.bot_id
+    history = paths.bot_paths(bot.bot_id).state
     return PlanRunner(client, cfg, paths.bot_inbox(bot.bot_id), history, llm=LLMClient(cfg.llm))
 
 
@@ -92,12 +92,20 @@ def cmd_plan_loop(args) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     paths = ProjectPaths(_root_from_args(args))
     paths.ensure()
+    from .pidlock import PidLock
+
+    lock = PidLock(paths.bot_paths(args.bot).lock_plan).acquire()
+    if lock is None:
+        print(f"plan-loop already running for {args.bot}", flush=True)
+        return 3
     bot = load_bot_config(paths.config_dir / f"{args.bot}.yaml")
     runner = _build_plan_runner(bot, paths)
     try:
         runner.run_forever()
     except KeyboardInterrupt:
         print("bye")
+    finally:
+        lock.release()
     return 0
 
 
@@ -194,11 +202,21 @@ def cmd_run(args) -> int:
     )
     paths = ProjectPaths(_root_from_args(args))
     paths.ensure()
+    from .pidlock import PidLock
+
+    # per-bot run lock when a single bot is selected; otherwise global
+    lock_name = f"{args.bot or 'all'}.run.lock"
+    lock = PidLock(paths.root / "data" / "bots" / lock_name).acquire()
+    if lock is None:
+        print(f"run already running ({lock_name})", flush=True)
+        return 3
     bots = load_all_bots(paths.config_dir)
     try:
         run_forever(bots, paths, only=args.bot)
     except KeyboardInterrupt:
         print("bye")
+    finally:
+        lock.release()
     return 0
 
 

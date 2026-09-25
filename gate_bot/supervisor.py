@@ -114,7 +114,11 @@ class Supervisor:
 
     def _reap(self) -> None:
         for ch in self.children:
-            if ch.stopped or ch.popen is None:
+            if ch.stopped:
+                continue
+            if ch.popen is None:
+                # retry start (e.g. lock was briefly held); do not burn restart budget
+                self._start(ch)
                 continue
             rc = ch.popen.poll()
             if rc is None:

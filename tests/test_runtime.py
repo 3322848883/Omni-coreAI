@@ -89,7 +89,38 @@ class TestMigrate(unittest.TestCase):
             rep2 = migrate_bot(root, "b1")
             self.assertIn("skipped", rep2)
 
+    def test_migrate_import_not_duplicated(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            trades = root / "logs" / "trades"
+            trades.mkdir(parents=True)
+            (trades / "b3.jsonl").write_text(
+                json.dumps({"type": "execution", "ok": True, "steps": [], "plan_cycle": "c"}) + "\n",
+                encoding="utf-8",
+            )
+            migrate_bot(root, "b3")
+            migrate_bot(root, "b3")
+            led = Ledger(default_ledger_path(root))
+            self.assertEqual(len(led.recent_trades("b3", limit=50)), 1)
+            led.close()
+
+    def test_project_paths_v2(self):
+        from gate_bot.watcher import ProjectPaths
+
+        with tempfile.TemporaryDirectory() as td:
+            pp = ProjectPaths(Path(td))
+            inbox = pp.bot_inbox("b9")
+            self.assertTrue(str(inbox).replace("\\", "/").endswith("data/bots/b9/inbox"))
+            self.assertTrue(pp.bot_done("b9").exists())
+
     def test_dry_run(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "inbox" / "b2").mkdir(parents=True)
+            (root / "inbox" / "b2" / "x.json").write_text("{}", encoding="utf-8")
+            rep = migrate_bot(root, "b2", dry_run=True)
+            self.assertTrue(rep["dry_run"])
+            self.assertFalse((BotPaths(root, "b2").inbox / "x.json").exists())
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             (root / "inbox" / "b2").mkdir(parents=True)
