@@ -76,6 +76,7 @@ def _build_plan_runner(bot, paths: ProjectPaths):
             temperature=float(llm.get("temperature") or 0.2),
             timeout_sec=int(llm.get("timeout_sec") or 60),
             max_tokens=int(llm.get("max_tokens") or 2048),
+            thinking=bool(llm.get("thinking", True)),
         ),
     )
     client = bot.create_client()

@@ -1,41 +1,41 @@
-# Brooks 价格行为 · BTC — 正式配置
-# 模板：_brooks_btc.example.yaml ｜ 策略：prompts/brooks_btc_pa.md
+﻿# Brooks 浠锋牸琛屼负 路 BTC 鈥?姝ｅ紡閰嶇疆
+# 妯℃澘锛歘brooks_btc.example.yaml 锝?绛栫暐锛歱rompts/brooks_btc_pa.md
 
 bot_id: brooks-btc
 enabled: true
 
-# ── 环境与账户 ─────────────────────────────────
-env: live                      # live | testnet（上线前请 testnet 全绿）
+# 鈹€鈹€ 鐜涓庤处鎴?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+env: live                      # live | testnet锛堜笂绾垮墠璇?testnet 鍏ㄧ豢锛?
 api_key_env: GATE_API_KEY
 api_secret_env: GATE_API_SECRET
 
-# ── 交易范围 ───────────────────────────────────
+# 鈹€鈹€ 浜ゆ槗鑼冨洿 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 symbols:
   - BTC_USDT
 
-# ── 风控（硬限制，AI 越不过）────────────────────
-max_notional_usd: 10000        # 单笔名义上限
+# 鈹€鈹€ 椋庢帶锛堢‖闄愬埗锛孉I 瓒婁笉杩囷級鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+max_notional_usd: 10000        # 鍗曠瑪鍚嶄箟涓婇檺
 max_orders_per_file: 5
 max_files_per_run: 20
 poll_interval_sec: 2
-label_prefix: brk              # 订单归属 t-brk*
-position_policy: strict        # 有仓只管理，不开新方案
-default_replace: symbol        # 同币新单替换旧挂单
-order_scope: own               # 只撤自己的单
-require_sl: true               # 开仓必须带止损
+label_prefix: brk              # 璁㈠崟褰掑睘 t-brk*
+position_policy: strict        # 鏈変粨鍙鐞嗭紝涓嶅紑鏂版柟妗?
+default_replace: symbol        # 鍚屽竵鏂板崟鏇挎崲鏃ф寕鍗?
+order_scope: own               # 鍙挙鑷繁鐨勫崟
+require_sl: true               # 寮€浠撳繀椤诲甫姝㈡崯
 
 account_risk:
   halt: false
   max_leverage: 50
   max_total_notional_usd: 10000
-  # daily_loss_limit：按要求不启用熔断
+  # daily_loss_limit锛氭寜瑕佹眰涓嶅惎鐢ㄧ啍鏂?
 
-# ── LLM 策略层 ─────────────────────────────────
+# 鈹€鈹€ LLM 绛栫暐灞?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 strategist:
   enabled: true
   prompt_file: prompts/brooks_btc_pa.md
-  interval_sec: 900            # 定时兜底（15 分钟）
-  timeframe: 15m               # 主分析/执行周期
+  interval_sec: 900            # 瀹氭椂鍏滃簳锛?5 鍒嗛挓锛?
+  timeframe: 15m               # 涓诲垎鏋?鎵ц鍛ㄦ湡
   event_on_kline_close: true
   event_timeframe: 15m
   candles: 120
@@ -44,21 +44,23 @@ strategist:
     enabled: true
     max_rounds: 3
   market:
-    mode: hybrid               # hybrid 优先本地 kline.db，缺则 REST
-    indicators: [ema20, atr14]  # Brooks：基本只用 EMA20 + ATR 止损
-    timeframes: []             # 不预灌多周期，AI 按需 tool_calls
+    mode: hybrid               # hybrid 浼樺厛鏈湴 kline.db锛岀己鍒?REST
+    indicators: [ema20, atr14]  # Brooks锛氬熀鏈彧鐢?EMA20 + ATR 姝㈡崯
+    timeframes: []             # 涓嶉鐏屽鍛ㄦ湡锛孉I 鎸夐渶 tool_calls
     extra_candles: 15
   ai_triggers:
-    enabled: true              # 事件触发再次唤醒
+    enabled: true              # 浜嬩欢瑙﹀彂鍐嶆鍞ら啋
     max_active: 5
   risk:
-    min_confidence: 0.6        # 低于此 confidence → hold
+    min_confidence: 0.6        # 浣庝簬姝?confidence 鈫?hold
     max_chips: 1
     max_notional_usd: 10000
   llm:
     base_url_env: OPENAI_BASE_URL
     api_key_env: OPENAI_API_KEY
-    model: deepseek-chat        # DeepSeek 官方：deepseek-chat / deepseek-reasoner
+    model: deepseek-chat        # DeepSeek 瀹樻柟锛歞eepseek-chat / deepseek-reasoner
+    thinking: true
     temperature: 0.1
     timeout_sec: 120
-    max_tokens: 8192            # 官方 chat 上限通常 8k 量级
+    max_tokens: 8192            # 瀹樻柟 chat 涓婇檺閫氬父 8k 閲忕骇
+
