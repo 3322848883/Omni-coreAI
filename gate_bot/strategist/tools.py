@@ -32,7 +32,49 @@ TOOL_GUIDE = """【行情工具 · 按需调用】
 默认快照只有主周期少量数据；更长历史、更高周期用工具拉。
 """
 
-TOOL_NAMES = ("klines", "indicators", "ticker", "orderbook", "contract", "stats", "account")
+TOOL_NAMES = (
+    "klines", "indicators", "ticker", "orderbook", "contract", "stats", "account",
+    # aux-cache (pa-data-source) — existing data only
+    "trades_flow", "liquidations", "market_stats", "tech_analysis", "coin_info", "onchain", "social",
+)
+
+
+def _aux_db(bot_root=None):
+    """Return path to pa-data-source aux_cache.db or None."""
+    import os
+    from pathlib import Path
+
+    env = os.environ.get("GATE_BOT_AUX") or os.environ.get("GATE_AUX_DB")
+    if env:
+        p = Path(env).expanduser()
+        return p if p.is_file() else None
+    bases = []
+    if bot_root:
+        bases.append(Path(bot_root) / "pa-data-source" / "aux-data" / "aux_cache.db")
+    bases.append(Path.cwd() / "pa-data-source" / "aux-data" / "aux_cache.db")
+    for p in bases:
+        if p.is_file():
+            return p
+    return None
+
+
+def _aux_query(bot_root, sql: str, params: tuple = (), limit_cols=None) -> list:
+    import sqlite3
+
+    db = _aux_db(bot_root)
+    if not db:
+        return [{"error": "aux_cache.db not found (pa-data-source not running?)"}]
+    try:
+        conn = sqlite3.connect(str(db), timeout=5)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(sql, params).fetchall()
+            out = [dict(r) for r in rows]
+            return out
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        return [{"error": f"aux query failed: {e}"[:160]}]
 
 # Official Chat Completions tools (function calling)
 NATIVE_TOOLS = [
@@ -126,6 +168,102 @@ NATIVE_TOOLS = [
             "name": "account",
             "description": "Account balances and open positions.",
             "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "trades_flow",
+            "description": "Recent public trades from local aux cache (tape).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "liquidations",
+            "description": "Recent liquidations from local aux cache.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "market_stats",
+            "description": "Open interest, long/short ratios, liq sizes from aux cache.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tech_analysis",
+            "description": "Aggregated technical analysis summary from aux cache.",
+            "parameters": {
+                "type": "object",
+                "properties": {"symbol": {"type": "string"}},
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "coin_info",
+            "description": "Coin metadata and sentiment score from aux cache.",
+            "parameters": {
+                "type": "object",
+                "properties": {"symbol": {"type": "string"}},
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "onchain",
+            "description": "On-chain activity snapshot from aux cache.",
+            "parameters": {
+                "type": "object",
+                "properties": {"token": {"type": "string"}},
+                "required": ["token"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "social",
+            "description": "Recent social posts + sentiment from aux cache.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "coin": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 30},
+                },
+                "required": ["coin"],
+            },
         },
     },
 ]
@@ -242,6 +380,87 @@ def run_tool(
                 "position_mode": acc.get("position_mode"),
                 "positions": pos,
             }
+
+        # ── aux_cache.db (existing pa-data-source data) ──
+        if name == "trades_flow":
+            sym = str(args.get("symbol") or args.get("contract") or args.get("sym") or "")
+            lim = max(1, min(int(args.get("limit") or 50), 200))
+            rows = _aux_query(
+                bot_root,
+                "SELECT time, contract, price, size FROM trades WHERE contract=? ORDER BY time DESC LIMIT ?",
+                (sym, lim),
+            )
+            return {"symbol": sym, "trades": rows}
+
+        if name == "liquidations":
+            sym = str(args.get("symbol") or args.get("contract") or args.get("sym") or "")
+            lim = max(1, min(int(args.get("limit") or 50), 200))
+            rows = _aux_query(
+                bot_root,
+                "SELECT time, contract, size, order_size, order_price, fill_price FROM liquidations "
+                "WHERE contract=? ORDER BY time DESC LIMIT ?",
+                (sym, lim),
+            )
+            return {"symbol": sym, "liquidations": rows}
+
+        if name == "market_stats":
+            sym = str(args.get("symbol") or args.get("contract") or args.get("sym") or "")
+            rows = _aux_query(
+                bot_root,
+                "SELECT fetched_ts, contract, lsr_taker, lsr_account, long_liq_size, short_liq_size, "
+                "open_interest, open_interest_usd, top_lsr_account, mark_price "
+                "FROM market_stats_ts WHERE contract=? ORDER BY fetched_ts DESC LIMIT ?",
+                (sym, max(1, min(int(args.get("limit") or 5), 20))),
+            )
+            return {"symbol": sym, "market_stats": rows}
+
+        if name == "tech_analysis":
+            sym = str(args.get("symbol") or args.get("sym") or "").replace("_", "").upper() or ""
+            # aux may store BTC or BTCUSDT
+            keys = [sym, sym.replace("USDT", "")] if sym else []
+            rows = []
+            for k in keys:
+                rows = _aux_query(
+                    bot_root,
+                    "SELECT fetched_ts, symbol, period, signal, timeframes_json FROM tech_analysis_ts "
+                    "WHERE symbol=? ORDER BY fetched_ts DESC LIMIT 3",
+                    (k,),
+                )
+                if rows and not (rows[0] or {}).get("error"):
+                    break
+            return {"symbol": sym, "tech_analysis": rows}
+
+        if name == "coin_info":
+            sym = str(args.get("symbol") or args.get("sym") or "").replace("_", "").upper()
+            rows = _aux_query(
+                bot_root,
+                "SELECT fetched_ts, symbol, name, chain, category, market_value, sentiment_score "
+                "FROM coin_info_ts WHERE symbol=? ORDER BY fetched_ts DESC LIMIT 2",
+                (sym.replace("USDT", ""),),
+            )
+            return {"symbol": sym, "coin_info": rows}
+
+        if name == "onchain":
+            token = str(args.get("token") or args.get("symbol") or "").replace("_", "").upper()
+            rows = _aux_query(
+                bot_root,
+                "SELECT fetched_ts, token, chain, daily_active_addresses, daily_transfer_volume, "
+                "new_address_count_7d, holder_count, data_quality FROM onchain_ts "
+                "WHERE token=? ORDER BY fetched_ts DESC LIMIT 2",
+                (token.replace("USDT", ""),),
+            )
+            return {"token": token, "onchain": rows}
+
+        if name == "social":
+            coin = str(args.get("coin") or args.get("symbol") or "").replace("_", "").upper()
+            lim = max(1, min(int(args.get("limit") or 10), 30))
+            rows = _aux_query(
+                bot_root,
+                "SELECT fetched_ts, coin, author, content, upvotes, sentiment_label, sentiment_score "
+                "FROM social_posts_ts WHERE coin=? ORDER BY fetched_ts DESC LIMIT ?",
+                (coin.replace("USDT", ""), lim),
+            )
+            return {"coin": coin, "social": rows}
     except GateApiError as e:
         return {"error": str(e)[:160], "tool": name}
     except Exception as e:  # noqa: BLE001
