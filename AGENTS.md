@@ -136,6 +136,8 @@ LLM 策略另需 `OPENAI_BASE_URL` / `OPENAI_API_KEY`，然后：
 - 行情：`klines` `indicators` `ticker` `orderbook` `contract` `stats` `account`
 - aux 库：`trades_flow` `liquidations` `market_stats` `tech_analysis` `coin_info` `onchain` `social`
 
+**账户信息一律 REST**（全 bot 通用，不限某策略）：`account()` / 快照 `account` = 余额 + `positions` + `open_orders` + `protections`(TP/SL)，`source: "rest"`。**不用** `account.db` 做持仓判断（库同步不可靠）；库仅历史审计。K 线可 hybrid（本地 kline 优先）。
+
 快照只给主周期精简数据，其余用工具拉。设计：`docs/compose/spec/runtime-upgrade.md`、`gate_bot/strategist/tools.py`。
 
 ---
