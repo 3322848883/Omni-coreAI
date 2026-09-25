@@ -24,6 +24,7 @@ gate_bot strategist：快照 → LLM Plan → 风控 → inbox → executor → 
 
 | 我要… | 打开 |
 |-------|------|
+| **10 分钟图文上手** | [`docs/TUTORIAL-10min.md`](docs/TUTORIAL-10min.md) |
 | 快速上手 / AI 代理入口 | [`AGENTS.md`](AGENTS.md) |
 | 信号 JSON 字段与示例 | `templates/README.md` |
 | 策略人格怎么写 | `prompts/README.md` |
