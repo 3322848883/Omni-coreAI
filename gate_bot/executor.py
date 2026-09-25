@@ -343,9 +343,9 @@ class Executor:
         if action == "close_all":
             return self._close_all(intent.symbol)
         if action == "cancel_all":
-            return self._cancel_all(intent.symbol)
+            return self._cancel_all(intent.symbol, intent.label or "")
         if action == "cancel_price_all":
-            return self._cancel_price_all(intent.symbol)
+            return self._cancel_price_all(intent.symbol, intent.label or "")
         if action in ("stop_entry_long", "stop_entry_short"):
             return self._stop_entry(intent)
         if action == "close":
@@ -871,7 +871,33 @@ class Executor:
                     raise
         return StepResult("close_all", symbol, True, detail={"closed_order_ids": orders})
 
-    def _cancel_all(self, symbol: str) -> StepResult:
+    def _cancel_all(self, symbol: str, label: str = "") -> StepResult:
+        prefix = self._text_prefix(label)
+        # own-scope isolation only for an explicit bot label; default "signal"
+        # keeps legacy wipe so cleanup/manage paths still work.
+        use_own = self.order_scope == "own" and prefix and label not in ("", "signal")
+        if use_own:
+            # only this bot's open orders (text prefix), never wipe the book
+            if symbol:
+                self._check_symbol(symbol)
+                symbols = [symbol]
+            else:
+                rows = self.client.list_orders() or []
+                symbols = sorted({o.get("contract") for o in rows if o.get("contract")})
+            cancelled = []
+            for sym in symbols:
+                for o in self._owned_open_orders(sym, prefix):
+                    oid = str(o.get("id") or "")
+                    if not oid:
+                        continue
+                    try:
+                        self.client.cancel_order(oid)
+                        cancelled.append(oid)
+                    except GateApiError:
+                        pass
+            return StepResult("cancel_all", symbol, True, detail={
+                "cancelled": cancelled, "order_scope": "own", "prefix": prefix,
+            })
         if symbol:
             self._check_symbol(symbol)
             result = self.client.cancel_all_orders(symbol)
@@ -886,9 +912,35 @@ class Executor:
             result = {sym: self.client.cancel_all_orders(sym) for sym in symbols}
         return StepResult("cancel_all", symbol, True, detail={"result": result})
 
-    def _cancel_price_all(self, symbol: str) -> StepResult:
+    def _cancel_price_all(self, symbol: str, label: str = "") -> StepResult:
         if symbol:
             self._check_symbol(symbol)
+        prefix = self._text_prefix(label)
+        use_own = self.order_scope == "own" and prefix and label not in ("", "signal")
+        if use_own:
+            symbols = [symbol] if symbol else sorted({
+                (p.get("contract") or (p.get("initial") or {}).get("contract") or "")
+                for p in (self.client.list_price_orders(symbol) or [])
+            } - {""})
+            if not symbol:
+                symbols = sorted({
+                    (p.get("contract") or (p.get("initial") or {}).get("contract") or "")
+                    for p in (self.client.list_price_orders(None) or [])
+                } - {""})
+            cancelled = []
+            for sym in symbols or ([symbol] if symbol else []):
+                for p in self._owned_price_orders(sym, prefix):
+                    pid = str(p.get("id") or "")
+                    if not pid:
+                        continue
+                    try:
+                        self.client.cancel_price_order(pid)
+                        cancelled.append(pid)
+                    except GateApiError:
+                        pass
+            return StepResult("cancel_price_all", symbol, True, detail={
+                "cancelled": cancelled, "order_scope": "own", "prefix": prefix,
+            })
         result = self.client.cancel_all_price_orders(symbol or None)
         return StepResult("cancel_price_all", symbol, True, detail={"result": result})
 

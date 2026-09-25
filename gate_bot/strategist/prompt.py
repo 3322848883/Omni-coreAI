@@ -1,4 +1,4 @@
-"""Prompt assembly (VergeX-style multi-chip decision)."""
+"""Prompt assembly: fixed system contract + strategy persona (role/style)."""
 from __future__ import annotations
 
 import json
@@ -7,22 +7,22 @@ from typing import Any
 
 from .schema import CHIP_ACTIONS, CHIP_ORDER_TYPES
 
+# Fixed contract only: output format + hard rules. Role/style live in the strategy persona.
 _SYSTEM_HEAD = (
-    "你是谨慎的加密货币永续策略引擎（VergeX 风格多品种决策）。\\n"
-    "目标：保本优先，宁可 hold，不可乱开仓。\\n"
-    "只输出一个 JSON 对象，不要 Markdown 前后缀。\\n"
+    "只输出一个 JSON 对象，不要 Markdown 前后缀。\n"
     '格式: {"cycle_id":"...","reasoning":"...","chips":[{"symbol":"BTC_USDT",'
     '"action":"open_long|open_short|add_long|add_short|reduce_long|reduce_short|close|close_all|hold|'
     'stop_entry_long|stop_entry_short|flatten|cancel_all|cancel_price_all",'
     '"confidence":0.0,"size_usd":50,"tp":null,"sl":null,"type":"market|limit|post_only|ioc|fok",'
-    '"price":null,"trigger_price":null,"reasoning":"..."}]}\\n'
-    "规则: 1) action 英文枚举; 突破进场用 stop_entry_*，止损止盈用 tp/sl。\\n"
-    "2) confidence 0~1，低于 min_confidence 应 hold。\\n"
-    "3) open/add/stop_entry 必须 size_usd 或 size。\\n"
-    "4) type=limit 等必须给 price。\\n"
-    "5) 同 symbol 优先管理已有仓。\\n"
-    "6) 不确定就 hold。\\n"
-    "7) reasoning 必须 ≤30 字，禁止长篇分析。\\n"
+    '"price":null,"trigger_price":null,"reasoning":"..."}]}\n'
+    "规则: 1) action 英文枚举; 突破进场用 stop_entry_*，止损止盈用 tp/sl。\n"
+    "2) confidence 0~1，低于 min_confidence 应 hold。\n"
+    "3) 仓位优先写 size_usd（名义 USDT）；size 是合约张数。用 size 前必须查该 symbol 的 "
+    "contract.min_notional_usd / quanto_multiplier（1张≈min_notional_usd 名义，不足1张会被拒）。\n"
+    "4) type=limit 等必须给 price。\n"
+    "5) 同 symbol 优先管理已有仓。\n"
+    "6) 不确定就 hold。\n"
+    "7) reasoning 必须 ≤30 字，禁止长篇分析。\n"
 )
 
 PLAN_SCHEMA_HINT = (
@@ -36,9 +36,11 @@ SYSTEM_PROMPT = _SYSTEM_HEAD + PLAN_SCHEMA_HINT
 
 
 def load_strategy_prompt(path: str | Path | None, prompts_root: str | Path | None = None) -> str:
-    """Load strategy persona text. Restricted to prompts/ (no arbitrary FS read)."""
+    """Load strategy persona text (role + style). Restricted to prompts/ (no arbitrary FS read)."""
     if not path:
         return (
+            "你是加密货币永续合约策略引擎。"
+            "核心原则：保住本金，其次才是收益。"
             "策略：趋势跟随。跟随明显方向，震荡 hold。"
             "有仓时优先管理；新仓必须带 sl。单币单计划。"
         )

@@ -76,6 +76,9 @@ def main() -> int:
     )
     rec("snapshot_ok", bool(snapshot.get("market")) and "account" in snapshot,
         "symbols=%s degraded=%s" % (list(snapshot["market"]), snapshot["meta"].get("degraded")))
+    cm0 = (snapshot["market"].get(symbols[0]) or {}).get("contract") or {}
+    rec("contract_meta", "quanto_multiplier" in cm0 and "min_notional_usd" in cm0,
+        "quanto=%s min_notional=%s" % (cm0.get("quanto_multiplier"), cm0.get("min_notional_usd")))
     user = build_user_prompt(
         snapshot,
         {"min_confidence": 0.7, "max_notional_usd": 30, "max_chips": 2,

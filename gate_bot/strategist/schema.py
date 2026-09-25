@@ -1,4 +1,4 @@
-"""Plan / chips schema for LLM strategist (VergeX-style multi-symbol decisions)."""
+"""Plan / chips schema for LLM strategist (multi-symbol decisions)."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

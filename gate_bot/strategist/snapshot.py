@@ -91,6 +91,25 @@ def collect_snapshot(
                 entry["last_error"] = str(e)
                 meta["degraded"].append(f"{sym}:last")
 
+        # contract meta: AI needs quanto / min unit to size positions correctly
+        try:
+            cm = client.get_contract(sym)
+            last_px = entry.get("last") or _f((ticker_raw or {}).get("last"))
+            min_notional = None
+            if last_px and cm.quanto_multiplier:
+                min_notional = float(last_px) * float(cm.quanto_multiplier)
+            entry["contract"] = {
+                "quanto_multiplier": cm.quanto_multiplier,
+                "order_size_round": cm.order_size_round,
+                "order_price_round": cm.order_price_round,
+                "leverage_max": cm.leverage_max,
+                "min_notional_usd": min_notional,
+                "note": "张数=size_usd/(last*quanto); 1张≈min_notional_usd 名义",
+            }
+        except Exception as e:  # noqa: BLE001
+            entry["contract_error"] = str(e)
+            meta["degraded"].append(f"{sym}:contract")
+
         if "stats" in refresh:
             try:
                 rows = client.get_contract_stats(sym, limit=1)

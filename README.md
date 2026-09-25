@@ -48,7 +48,7 @@ Gate.io 策略 JSON 信号下单机器人：AI/策略把交易意图 JSON 写入
 
 ## LLM 策略层（strategist）
 
-AI 生成方案 → 程序风控 → 写 `inbox` → 现有执行器下单（VergeX 式多品种 chips）。
+AI 生成方案 → 程序风控 → 写 `inbox` → 现有执行器下单（多品种 chips）。
 
 ```bash
 # 环境变量（密钥不落盘）
@@ -218,7 +218,8 @@ strategist:
 组装（每轮相同）：
 
 ```text
-system = 固定契约与安全规则 + 【策略人格】+ prompt_file
+system = 固定输出契约与安全规则（无角色/风格）
+       + 【策略人格】= prompt_file（角色 + 决策风格）
 user   = 【品种宇宙】+【策略风控】+【市场与账户快照】→ 请输出 Plan JSON
 ```
 
@@ -690,11 +691,22 @@ python -m gate_bot process path\to\sig.json --bot alpha
 
 ### 张数换算
 
+**优先写 `size_usd`（名义 U）**，机器人按下列公式换算张数；`size` 是合约张数，各币 1 张名义不同（BTC≈0.0001 BTC、ETH=0.01 ETH、SOL=1 SOL…），写错会开错仓。
+
 ```text
 contracts = floor( size_usd / (price * quanto_multiplier) )
 ```
 
 `price`：限价用委托价，市价用最新价。不足 1 张会失败归档，不会下 0 张。
+
+AI 快照 `market[symbol].contract` 暴露换算所需元数据：
+
+| 字段 | 含义 |
+|------|------|
+| `quanto_multiplier` | 1 张 = 多少标的（张数换算） |
+| `min_notional_usd` | 1 张 ≈ 名义 U（`last * quanto`） |
+| `order_size_round` / `order_price_round` | 数量/价格精度 |
+| `leverage_max` | 该合约最大杠杆 |
 
 ## 安全约定
 

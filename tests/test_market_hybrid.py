@@ -256,6 +256,10 @@ class FakeClient:
     def get_last_price(self, symbol):
         return self.last
 
+    def get_contract(self, symbol):
+        from gate_bot.gate_client import ContractMeta
+        return ContractMeta(symbol, 0.0001, 1.0, 0.1, 100)
+
     def get_ticker(self, symbol):
         return {
             "contract": symbol,
@@ -476,6 +480,15 @@ class TestSnapshot(unittest.TestCase):
         self.assertIn("indicators", entry)
         self.assertIn("market_mode", snap["meta"])
         self.assertEqual(snap["meta"]["market_mode"], "rest_only")
+
+    def test_snapshot_contract_meta_for_ai(self):
+        client = FakeClient(rest_rows=[[int(time.time()), "1", "1", "1", "1", "1", "0"]])
+        snap = collect_snapshot(client, ["BTC_USDT"], candles=5, interval="15m")
+        cm = snap["market"]["BTC_USDT"].get("contract")
+        self.assertIsNotNone(cm)
+        self.assertIn("quanto_multiplier", cm)
+        self.assertIn("min_notional_usd", cm)
+        self.assertGreater(cm["quanto_multiplier"], 0)
 
     def test_snapshot_p1_ticker_stats_orderbook(self):
         client = FakeClient(rest_rows=[[int(time.time()), "1", "1", "1", "1", "1", "0"]])

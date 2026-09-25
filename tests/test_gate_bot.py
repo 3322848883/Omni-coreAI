@@ -459,6 +459,53 @@ class TestExecutor(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertEqual(len(client.orders), 0)
 
+    def test_cancel_all_own_scope_only_touches_label_prefix(self):
+        """order_scope=own + explicit bot label must not wipe another bot's book (prelaunch M12)."""
+        client = FakeClient()
+        client.orders = [
+            {"contract": "BTC_USDT", "size": 1, "text": "t-bota-1"},
+            {"contract": "BTC_USDT", "size": 1, "text": "t-botb-1"},
+            {"contract": "BTC_USDT", "size": 1, "text": "t-botb-2"},
+        ]
+        client.cancelled = []
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], order_scope="own")
+        report = ex.execute_signal(
+            parse_signal({"action": "cancel_all", "symbol": "BTC_USDT", "label": "bota"})
+        )
+        self.assertTrue(report.ok)
+        self.assertEqual(client.cancelled, [("order", "1")])
+        self.assertNotIn(("order", "2"), client.cancelled)
+        self.assertNotIn(("order", "3"), client.cancelled)
+        self.assertNotIn("BTC_USDT", client.cancelled)
+
+    def test_cancel_all_default_label_still_wipes(self):
+        """Default label 'signal' keeps legacy wipe so cleanup paths work."""
+        client = FakeClient()
+        client.orders = [
+            {"contract": "BTC_USDT", "size": 1, "text": "t-bota-1"},
+            {"contract": "BTC_USDT", "size": 1, "text": "t-other"},
+        ]
+        client.cancelled = []
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], order_scope="own")
+        report = ex.execute_signal(parse_signal({"action": "cancel_all", "symbol": "BTC_USDT"}))
+        self.assertTrue(report.ok)
+        self.assertIn("BTC_USDT", client.cancelled)
+
+    def test_cancel_price_all_own_scope_only_touches_label_prefix(self):
+        client = FakeClient()
+        client.price_orders = [
+            {"initial": {"text": "t-bota-1", "contract": "BTC_USDT"}},
+            {"initial": {"text": "t-botb-1", "contract": "BTC_USDT"}},
+        ]
+        client.cancelled = []
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], order_scope="own")
+        report = ex.execute_signal(
+            parse_signal({"action": "cancel_price_all", "symbol": "BTC_USDT", "label": "bota"})
+        )
+        self.assertTrue(report.ok)
+        self.assertEqual(client.cancelled, [("price", "101")])
+        self.assertNotIn(("price", "102"), client.cancelled)
+
     def test_close_dual_requires_side(self):
         client = FakeClient()
         client.dual = True
@@ -486,7 +533,8 @@ class TestExecutor(unittest.TestCase):
             {"contract": "ETH_USDT"},
             {"contract": "BTC_USDT"},
         ]
-        ex = Executor(client)
+        # order_scope=all keeps legacy wipe when cancelling without a unique bot label
+        ex = Executor(client, order_scope="all")
         self.assertTrue(ex.execute_signal(parse_signal({"action": "cancel_all"})).ok)
         self.assertEqual(client.cancelled, ["BTC_USDT", "ETH_USDT"])
 
