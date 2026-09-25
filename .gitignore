@@ -36,4 +36,5 @@ pa-data-source/*.lock
 .soak_test/
 .playwright-cli/
 .worktrees/
+.prelaunch_test/
 *.zip
