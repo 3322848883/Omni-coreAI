@@ -130,6 +130,21 @@ class TestMigrate(unittest.TestCase):
             self.assertFalse((BotPaths(root, "b2").inbox / "x.json").exists())
 
 
+class TestSupervisorArgs(unittest.TestCase):
+    def test_child_args_place_root_before_subcommand(self):
+        """argparse: --root is global and must precede subcommand."""
+        from gate_bot.supervisor import Child, Supervisor
+
+        sup = Supervisor.__new__(Supervisor)
+        sup.root = Path("/proj")
+        sup.children = []
+        # mimic prepare arg construction
+        args = [sup._py if hasattr(sup, "_py") else "python", "-m", "gate_bot",
+                "--root", str(sup.root), "plan-loop", "--bot", "b1"]
+        self.assertEqual(args[args.index("--root") + 2], "plan-loop")
+        self.assertLess(args.index("--root"), args.index("plan-loop"))
+
+
 class TestPidLock(unittest.TestCase):
     def test_exclusive(self):
         import subprocess

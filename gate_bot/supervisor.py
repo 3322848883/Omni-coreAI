@@ -69,9 +69,15 @@ class Supervisor:
             bp = bot_paths(self.root, bid, create=True)
             runtime = dict(getattr(cfg, "strategist", {}) or {}).get("runtime") or {}
             if runtime.get("plan_loop", True):
-                self.children.append(Child(bid, "plan", [self._py, "-m", "gate_bot", "plan-loop", "--bot", bid, "--root", str(self.root)]))
+                self.children.append(Child(bid, "plan", [
+                    self._py, "-m", "gate_bot", "--root", str(self.root),
+                    "plan-loop", "--bot", bid,
+                ]))
             if runtime.get("run", True):
-                self.children.append(Child(bid, "run", [self._py, "-m", "gate_bot", "run", "--bot", bid, "--root", str(self.root)]))
+                self.children.append(Child(bid, "run", [
+                    self._py, "-m", "gate_bot", "--root", str(self.root),
+                    "run", "--bot", bid,
+                ]))
             self._log(f"armed {bid} → {bp.base}")
 
     def _start(self, ch: Child) -> bool:

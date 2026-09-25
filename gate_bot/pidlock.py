@@ -13,12 +13,19 @@ def _pid_alive(pid: int) -> bool:
         if os.name == "nt":
             import ctypes
 
-            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            h = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
-            if h:
-                ctypes.windll.kernel32.CloseHandle(h)
-                return True
-            return False
+            kernel32 = ctypes.windll.kernel32
+            kernel32.OpenProcess.restype = ctypes.c_void_p
+            kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+            kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+            kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+            STILL_ACTIVE = 259
+            h = kernel32.OpenProcess(0x1000, 0, int(pid))
+            if not h:
+                return False
+            code = ctypes.c_uint32(0)
+            ok = kernel32.GetExitCodeProcess(h, ctypes.byref(code))
+            kernel32.CloseHandle(h)
+            return bool(ok) and code.value == STILL_ACTIVE
         os.kill(pid, 0)
         return True
     except Exception:  # noqa: BLE001
