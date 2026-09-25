@@ -1,0 +1,41 @@
+# LLM providers — configure once; bots pick by name
+# usage in config/bots/<id>.yaml:
+#   llm:
+#     provider: deepseek-official
+#     model: deepseek-flash        # optional override
+
+default: deepseek-official
+
+providers:
+  deepseek-official:
+    label: DeepSeek 官方
+    base_url: https://api.deepseek.com/v1
+    api_key_env: OPENAI_API_KEY
+    model: deepseek-flash
+    thinking: true
+    reasoning_effort: max
+    timeout_sec: 120
+    max_tokens: 8192
+    json_mode: true
+
+  gw-flash:
+    label: 自建网关 deepseek-v4.1-flash
+    base_url: http://69.12.85.185:7863/v1
+    api_key_env: OPENAI_API_KEY
+    model: global:deepseek-v4.1-flash
+    thinking: false
+    reasoning_effort: high
+    timeout_sec: 120
+    max_tokens: 8192
+    json_mode: true
+
+  gw-v4-pro:
+    label: 自建网关 deepseek-v4-pro
+    base_url: http://69.12.85.185:7863/v1
+    api_key_env: OPENAI_API_KEY
+    model: global:deepseek-v4.1-pro
+    thinking: true
+    reasoning_effort: high
+    timeout_sec: 120
+    max_tokens: 8192
+    json_mode: true

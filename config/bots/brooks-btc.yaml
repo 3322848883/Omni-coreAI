@@ -56,12 +56,5 @@ strategist:
     max_chips: 1
     max_notional_usd: 10000
   llm:
-    base_url_env: OPENAI_BASE_URL
-    api_key_env: OPENAI_API_KEY
-    model: deepseek-flash
-    thinking: true
-    reasoning_effort: max
-    user_id: brooks-btc
-    timeout_sec: 120
-    max_tokens: 8192
+    provider: deepseek-official
 

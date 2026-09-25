@@ -69,18 +69,11 @@ def _build_plan_runner(bot, paths: ProjectPaths):
             max_chips=int(risk.get("max_chips") or 3),
             allow_actions=set(risk["allow_actions"]) if risk.get("allow_actions") else None,
         ),
-        llm=LLMConfig(
-            base_url_env=str(llm.get("base_url_env") or "OPENAI_BASE_URL"),
-            api_key_env=str(llm.get("api_key_env") or "OPENAI_API_KEY"),
-            model=str(llm.get("model") or "deepseek-flash"),
-            temperature=float(llm.get("temperature") or 0.2),
-            timeout_sec=int(llm.get("timeout_sec") or 120),
-            max_tokens=int(llm.get("max_tokens") or 8192),
-            thinking=bool(llm.get("thinking", True)),
-            reasoning_effort=str(llm.get("reasoning_effort") or "max"),
-            user_id=str(llm.get("user_id") or ""),
-        ),
+        llm=LLMConfig(),
     )
+    from .providers import resolve_llm_config
+
+    cfg.llm = resolve_llm_config(paths.root, bot_id=bot.bot_id, llm=llm)
     client = bot.create_client()
     history = paths.bot_paths(bot.bot_id).state
     return PlanRunner(client, cfg, paths.bot_inbox(bot.bot_id), history, llm=LLMClient(cfg.llm))
