@@ -115,11 +115,60 @@ def run_orders(REP, gate_client, env: str = "testnet") -> None:
         }
         rep = ex.execute_signal(parse_signal(grid))
         ok = rep.ok and len(rep.results) >= 2
-        REP.rec("M9", "grid_per_level", ok, f"steps={len(rep.results)} ok={rep.ok}")
+        REP.rec("M9", "grid_long_per_level", ok, f"steps={len(rep.results)} ok={rep.ok}")
         _cleanup(ex, symbol)
     except Exception as e:  # noqa: BLE001
-        REP.rec("M9", "grid_per_level", False, str(e)[:100])
+        REP.rec("M9", "grid_long_per_level", False, str(e)[:100])
         REP.problem("M9", str(e), level="P2")
+
+    try:
+        last = client.get_last_price(symbol)
+        grid_s = {
+            "action": "grid", "symbol": symbol, "side": "short", "type": "limit",
+            "levels": [
+                {"price": round(last * 1.03, 1), "size_usd": 12},
+                {"price": round(last * 1.04, 1), "size_usd": 12},
+            ],
+            "tp": round(last * 0.99, 1), "sl": round(last * 1.08, 1),
+            "tp_scope": "shared", "sl_scope": "shared",
+            "label": "m9-short",
+        }
+        rep = ex.execute_signal(parse_signal(grid_s))
+        ok = rep.ok and len(rep.results) >= 2
+        # shared TP: only last level carries size_override exit
+        shared = [s for s in rep.results if (s.detail or {}).get("tp_size_override") or
+                  any((t or {}).get("size_override") for t in (s.detail or {}).get("tp_orders") or [])]
+        REP.rec("M9", "grid_short_shared_tp", ok,
+                f"steps={len(rep.results)} shared_tp_steps={len(shared)}")
+        _cleanup(ex, symbol)
+    except Exception as e:  # noqa: BLE001
+        REP.rec("M9", "grid_short_shared_tp", False, str(e)[:100])
+        REP.problem("M9-short", str(e), level="P2")
+
+    try:
+        dual = {
+            "orders": [
+                {
+                    "action": "grid", "symbol": symbol, "side": "long", "type": "limit",
+                    "levels": [{"price": round(last * 0.97, 1), "size_usd": 11}],
+                    "tp": round(last * 1.01, 1), "sl": round(last * 0.93, 1),
+                    "label": "m9-dual-l",
+                },
+                {
+                    "action": "grid", "symbol": symbol, "side": "short", "type": "limit",
+                    "levels": [{"price": round(last * 1.03, 1), "size_usd": 11}],
+                    "tp": round(last * 0.99, 1), "sl": round(last * 1.08, 1),
+                    "label": "m9-dual-s",
+                },
+            ]
+        }
+        rep = ex.execute_signal(parse_signal(dual))
+        REP.rec("M9", "grid_dual_via_orders", rep.ok or len(rep.results) >= 2,
+                f"steps={len(rep.results)} ok={rep.ok}")
+        _cleanup(ex, symbol)
+    except Exception as e:  # noqa: BLE001
+        REP.rec("M9", "grid_dual_via_orders", False, str(e)[:100])
+        REP.problem("M9-dual", str(e), level="P2")
 
     # ── M10 sizing ──
     print("\n[M10] sizing modes")
@@ -205,7 +254,7 @@ def run_orders(REP, gate_client, env: str = "testnet") -> None:
             "cycle_id": "prelaunch-dup-1",
             "chips": [{
                 "symbol": symbol, "action": "open_long", "confidence": 0.9,
-                "size_usd": 12, "sl": round(last * 0.99, 1), "order_type": "limit",
+                "size_usd": 12, "sl": round(last * 0.99, 1), "type": "limit",
                 "price": round(last * 0.97, 1),
             }],
         })

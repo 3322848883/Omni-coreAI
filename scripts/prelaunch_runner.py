@@ -340,17 +340,31 @@ def m11_risk() -> None:
 
 def m13_journal() -> None:
     from gate_bot.tradelog import TradeLogger
+    from gate_bot.strategist.bridge import write_hold_audit
+    from gate_bot.strategist.schema import parse_plan
 
     p = ROOT / ".prelaunch_test" / "trades.jsonl"
     p.parent.mkdir(parents=True, exist_ok=True)
     if p.exists():
         p.unlink()
     log = TradeLogger(p)
-    log.write({"type": "smoke", "bot_id": "prelaunch", "ok": True})
+    log.write({"type": "smoke", "bot_id": "prelaunch", "ok": True, "plan_cycle": "m13-cycle"})
     line = p.read_text(encoding="utf-8").strip().splitlines()[-1]
     row = json.loads(line)
-    ok = row.get("ts") and row.get("type") == "smoke"
+    ok = row.get("ts") and row.get("type") == "smoke" and row.get("plan_cycle") == "m13-cycle"
     REP.rec("M13", "journal_fields", ok, f"keys={sorted(row.keys())}")
+    REP.rec("M13", "journal_cycle_id", row.get("plan_cycle") == "m13-cycle",
+            f"cycle={row.get('plan_cycle')}")
+    # write_hold audit
+    try:
+        hist = ROOT / ".prelaunch_test" / "history"
+        plan = parse_plan({"cycle_id": "m13-hold", "chips": [{"symbol": "BTC_USDT", "action": "hold"}]})
+        hp = write_hold_audit(hist, plan, cycle_id="m13-hold")
+        payload = json.loads(hp.read_text(encoding="utf-8"))
+        REP.rec("M13", "write_hold_audit", payload.get("cycle_id") == "m13-hold",
+                f"file={hp.name} kind={payload.get('kind')}")
+    except Exception as e:  # noqa: BLE001
+        REP.rec("M13", "write_hold_audit", False, str(e)[:80])
 
 
 def phase_readonly(env: str = "live") -> None:

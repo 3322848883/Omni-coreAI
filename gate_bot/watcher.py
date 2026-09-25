@@ -131,6 +131,9 @@ def process_file(path: Path, bot: BotConfig, paths: ProjectPaths, executor: Opti
             position_policy=bot.position_policy,
             default_replace=bot.default_replace,
             order_scope=getattr(bot, "order_scope", "own"),
+            require_sl=getattr(bot, "require_sl", True),
+            account_risk=getattr(bot, "account_risk", None) or {},
+            label_prefix=getattr(bot, "label_prefix", "") or bot.bot_id,
         )
 
     report: ExecReport = executor.execute_signal(signal)
@@ -249,6 +252,7 @@ def run_bot_once(bot: BotConfig, paths: ProjectPaths) -> dict:
                     order_scope=getattr(bot, "order_scope", "own"),
                     require_sl=getattr(bot, "require_sl", True),
                     account_risk=getattr(bot, "account_risk", None),
+                    label_prefix=getattr(bot, "label_prefix", "") or bot.bot_id,
                 )
             except GateApiError as e:
                 _archive_failed(paths, bot.bot_id, taken, path.name, f"credentials: {e}")

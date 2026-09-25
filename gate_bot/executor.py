@@ -65,6 +65,7 @@ class Executor:
         order_scope: str = "own",
         require_sl: bool = True,
         account_risk: Optional[dict] = None,
+        label_prefix: str = "",
     ):
         self.client = client
         self.symbols_whitelist = (
@@ -79,6 +80,8 @@ class Executor:
         self.require_sl = bool(require_sl)
         # account-level risk: halt / max_total_notional_usd / daily_loss_limit_usd / max_leverage
         self.account_risk = dict(account_risk or {})
+        # bot namespace: order texts always under t-{label_prefix}*; signal labels cannot escape
+        self.label_prefix = str(label_prefix or "").strip()
 
     def execute_signal(self, signal: SignalFile) -> ExecReport:
         report = ExecReport()
@@ -135,6 +138,26 @@ class Executor:
     def _text_prefix(self, label: str) -> str:
         return f"t-{label}" if label else ""
 
+    def _bot_tag(self, label: str) -> str:
+        """Ownership tag. When label_prefix is set, signal labels cannot escape the bot namespace."""
+        label = (label or "signal").strip()
+        if self.label_prefix:
+            if label == self.label_prefix or label.startswith(self.label_prefix + "-"):
+                return label
+            return f"{self.label_prefix}-{label}"
+        return label
+
+    def _own_scope_tag(self, label: str) -> str:
+        """Tag used to filter cancel/replace under order_scope=own."""
+        if self.label_prefix:
+            return self.label_prefix
+        return (label or "").strip()
+
+    def _own_prefix(self, label: str = "") -> str:
+        """text prefix used for own-scope ownership filtering."""
+        tag = self._own_scope_tag(label)
+        return self._text_prefix(tag)
+
     def _text_owned(self, text: str, label: str) -> bool:
         """Segment-safe ownership: t-{label} or t-{label}-*, never t-{label}XX."""
         if not label:
@@ -174,7 +197,7 @@ class Executor:
         for intent in intents:
             if not intent.symbol:
                 continue
-            prefix = self._text_prefix(intent.label)
+            prefix = self._own_prefix(intent.label)
             if not prefix:
                 continue
             slot = snap.setdefault(intent.symbol, {"prefix": prefix, "price_ids": set(), "order_ids": set()})
@@ -213,7 +236,7 @@ class Executor:
         for intent in intents:
             if not intent.symbol:
                 continue
-            prefix = self._text_prefix(intent.label)
+            prefix = self._own_prefix(intent.label)
             keep_price.setdefault(intent.symbol, set())
             keep_orders.setdefault(intent.symbol, set())
             for p in self._owned_price_orders(intent.symbol, prefix):
@@ -503,8 +526,8 @@ class Executor:
         order_size = contracts if intent.action == "open_long" else -contracts
         body: dict[str, Any] = {"contract": intent.symbol, "size": order_size}
         self._apply_order_type(body, intent.order_type, intent.price, meta)
-        if intent.label:
-            body["text"] = f"t-{intent.label}"
+        if intent.label or self.label_prefix:
+            body["text"] = f"t-{self._bot_tag(intent.label)}"
 
         entry_rec, entry_err = self._place_entry_leg(lambda: self.client.place_order(body), body)
         detail: dict[str, Any] = {
@@ -707,7 +730,7 @@ class Executor:
                 "price": str(round_price(p, meta)),
                 "tif": "gtc",
                 "reduce_only": True,
-                "text": f"t-{intent.label}-{'lp' if is_tp else 'ls'}",
+                "text": f"t-{self._bot_tag(intent.label)}-{'lp' if is_tp else 'ls'}",
             }
 
         body = _body(px)
@@ -793,8 +816,8 @@ class Executor:
                 "price": str(round_price(float(intent.price), meta)),
                 "tif": {"limit": "gtc", "post_only": "poc", "ioc": "ioc", "fok": "fok"}[intent.order_type],
             }
-        if intent.label:
-            initial["text"] = f"t-{intent.label}"
+        if intent.label or self.label_prefix:
+            initial["text"] = f"t-{self._bot_tag(intent.label)}"
         body = {
             "initial": initial,
             "trigger": {
@@ -882,10 +905,11 @@ class Executor:
         return StepResult("close_all", symbol, True, detail={"closed_order_ids": orders})
 
     def _cancel_all(self, symbol: str, label: str = "") -> StepResult:
-        prefix = self._text_prefix(label)
-        # own-scope isolation only for an explicit bot label; default "signal"
+        prefix = self._own_prefix(label)
+        # own-scope isolation for bot namespace / explicit label; default "signal"
         # keeps legacy wipe so cleanup/manage paths still work.
-        use_own = self.order_scope == "own" and prefix and label not in ("", "signal")
+        own_tag = self._own_scope_tag(label)
+        use_own = self.order_scope == "own" and prefix and own_tag not in ("", "signal")
         if use_own:
             # only this bot's open orders (text prefix), never wipe the book
             if symbol:
@@ -928,8 +952,9 @@ class Executor:
     def _cancel_price_all(self, symbol: str, label: str = "") -> StepResult:
         if symbol:
             self._check_symbol(symbol)
-        prefix = self._text_prefix(label)
-        use_own = self.order_scope == "own" and prefix and label not in ("", "signal")
+        prefix = self._own_prefix(label)
+        own_tag = self._own_scope_tag(label)
+        use_own = self.order_scope == "own" and prefix and own_tag not in ("", "signal")
         if use_own:
             symbols = [symbol] if symbol else sorted({
                 (p.get("contract") or (p.get("initial") or {}).get("contract") or "")
@@ -1022,7 +1047,7 @@ class Executor:
                 "price": init_price,
                 "tif": init_tif,
                 "reduce_only": True,
-                "text": f"t-{intent.label}-{'tp' if is_tp else 'sl'}",
+                "text": f"t-{self._bot_tag(intent.label)}-{'tp' if is_tp else 'sl'}",
             },
             "trigger": {
                 "strategy_type": 0,

@@ -224,18 +224,50 @@ class GateClient:
             result = self.rest_signed_request("POST", f"{FUTURES_API}/orders", "", body)
         except GateApiError as e:
             # market slippage: fall back once to a taker limit (cross the book, IOC)
-            if e.label == "MARKET_PRICE_TOO_DEVIATED" and str(body.get("price", "0")) == "0":
+            # Gate may label the reject MARKET_PRICE_TOO_DEVIATED or PRICE_TOO_DEVIATED
+            if (
+                e.label in ("MARKET_PRICE_TOO_DEVIATED", "PRICE_TOO_DEVIATED")
+                and str(body.get("price", "0")) == "0"
+            ):
+                def _num(v):
+                    try:
+                        return float(v) if v is not None and v != "" else None
+                    except (TypeError, ValueError):
+                        return None
+
                 retry = dict(body)
                 contract = str(body.get("contract") or "")
                 side_buy = int(body.get("size") or 0) > 0
+                # prefer last/mark as fair value; clamp book top so we never chase a stale wide book
+                ref = None
+                try:
+                    t = self.get_ticker(contract) or {}
+                    ref = _num(t.get("last")) or _num(t.get("mark_price"))
+                except Exception:  # noqa: BLE001
+                    ref = None
                 ob = self.public_get(f"{FUTURES_API}/order_book", f"contract={contract}&limit=1")
-                # buy lifts the ask; sell hits the bid — never rest on the passive side
                 levels = (ob.get("asks") if side_buy else ob.get("bids")) or []
-                px = str((levels[0] if levels else {}).get("p") or "")
-                if not px:
+                book_px = _num((levels[0] if levels else {}).get("p"))
+                if book_px is None and ref is None:
                     raise
-                retry["price"] = px
+                slip = 0.002  # 0.2% taker allowance around fair
+                if ref and book_px:
+                    lo, hi = ref * (1 - slip), ref * (1 + slip)
+                    px_f = min(max(book_px, lo), hi)
+                elif ref:
+                    px_f = ref * (1 + slip if side_buy else 1 - slip)
+                else:
+                    px_f = book_px
+                retry["price"] = str(int(px_f)) if float(px_f).is_integer() else str(px_f)
                 retry["tif"] = "ioc"
+                try:
+                    meta = self.get_contract(contract)
+                    step = float(getattr(meta, "order_price_round", 0) or 0)
+                    if step > 0:
+                        px_f = round(px_f / step) * step
+                        retry["price"] = str(int(px_f)) if float(px_f).is_integer() else str(px_f)
+                except Exception:  # noqa: BLE001 — best-effort tick align
+                    pass
                 result = self.rest_signed_request("POST", f"{FUTURES_API}/orders", "", retry)
             else:
                 raise

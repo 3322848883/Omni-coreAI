@@ -554,6 +554,32 @@ class TestExecutor(unittest.TestCase):
         self.assertNotIn(("order", "3"), client.cancelled)
         self.assertNotIn(("order", "4"), client.cancelled)
 
+    def test_label_prefix_blocks_forged_cross_bot_cancel(self):
+        """A3: signal label cannot cancel another bot's book when label_prefix is set."""
+        client = FakeClient()
+        client.orders = [
+            {"contract": "BTC_USDT", "size": 1, "text": "t-alpha-1"},
+            {"contract": "BTC_USDT", "size": 1, "text": "t-beta-1"},
+        ]
+        client.cancelled = []
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], order_scope="own", label_prefix="alpha")
+        # forged label claiming beta
+        report = ex.execute_signal(
+            parse_signal({"action": "cancel_all", "symbol": "BTC_USDT", "label": "beta"})
+        )
+        self.assertTrue(report.ok)
+        self.assertEqual(client.cancelled, [("order", "1")])
+        self.assertNotIn(("order", "2"), client.cancelled)
+
+    def test_label_prefix_namespaces_new_orders(self):
+        client = FakeClient()
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], require_sl=False, label_prefix="alpha")
+        ex.execute_signal(parse_signal({
+            "action": "open_long", "symbol": "BTC_USDT", "size": 1, "type": "limit",
+            "price": 40000, "label": "beta",  # forged / foreign label
+        }))
+        self.assertEqual(client.orders[0]["text"], "t-alpha-beta")
+
     def test_cancel_price_all_own_scope_only_touches_label_prefix(self):
         client = FakeClient()
         client.price_orders = [
@@ -817,6 +843,27 @@ class TestGateClient(unittest.TestCase):
         client.place_order({"contract": "BTC_USDT", "size": -1, "price": "0", "tif": "ioc"})
         self.assertEqual(captured.get("price"), "100")
         self.assertEqual(captured.get("tif"), "ioc")
+
+    def test_market_fallback_accepts_price_too_deviated_label(self):
+        client = GateClient("k", "s", env="testnet")
+        captured = {}
+
+        def fake(method, path, qs="", body=None):
+            if body and str(body.get("price")) == "0":
+                raise GateApiError("slip", status=400, label="PRICE_TOO_DEVIATED")
+            captured.update(body or {})
+            return {"id": 9, **(body or {})}
+
+        client.rest_signed_request = fake
+        client.get_ticker = lambda s: {"last": "100", "mark_price": "100"}
+        client.get_contract = lambda s: type("M", (), {"order_price_round": 0.1})()
+        # stale wide book: ask 200 — must clamp near last*1.002
+        client.public_get = lambda path, qs="": {"bids": [{"p": "50", "s": 1}], "asks": [{"p": "200", "s": 1}]}
+        client.place_order({"contract": "BTC_USDT", "size": 1, "price": "0", "tif": "ioc"})
+        self.assertEqual(captured.get("tif"), "ioc")
+        px = float(captured.get("price"))
+        self.assertLess(px, 101.0)
+        self.assertGreater(px, 99.0)
 
     def test_official_paths_and_close(self):
         client = GateClient("k", "s", env="testnet")
