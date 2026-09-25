@@ -1,14 +1,30 @@
 ---
 feature: live-prod-test
-status: designed
+status: delivered
 updated: 2026-09-25
 branch: master
-commits: # 交付后填
+commits: 10253be..10253be
 ---
 
 # 实盘全功能生产测试方案
 
 ## Report
+
+**What was built** — 实盘全功能生产测试脚本 `scripts/test_live_prod.py`：行情/指标/触发/LLM Plan/AI 触发策略/风控拒绝/小额实单三腿/归属/交易日志。边界为实盘允许名义 ≤10U 小额实单。
+
+**Verification** — `unittest` 137 PASS；`test_live_prod.py` 19/20（见问题表）；小额实单重跑：entry `36028836851588026` filled + TP/SL confirmed + journal + flatten OK。
+
+**Journey log** —
+1. BTC 1 张最小名义 ≈ `price×0.0001`（约 8.4U），`size_usd=8` 被拒——小额测试下限要用 ≥10U。
+2. 实盘 halt / require_sl 拒绝路径正常。
+3. 11 种触发在实盘 15m 可评估；本刻 `rsi` 命中。
+
+### 真实问题清单
+
+| ID | 现象 | 根因 | 级别 | 建议 |
+|----|------|------|------|------|
+| LIVE-01 | `size_usd=8` 拒单（BTC） | 1 张最小 ≈8.4U | P2 | 文档注明各币 min notional；可用 `size` 张数 |
+| LIVE-02 | LLM 触发 store 本轮为空 | 模型未输出 triggers | P3 | 提示词可鼓励「设等待条件」 |
 
 ## [S1] Problem
 
