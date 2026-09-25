@@ -25,6 +25,7 @@ from .risk import RiskConfig, apply_risk
 from .schema import PlanError, parse_plan_text
 from .snapshot import collect_snapshot
 from .triggers import check_conditions, parse_conditions
+from .trigger_store import AITriggerPolicy, AITriggerStore, TriggerPolicyError, validate_trigger_payload
 
 log = logging.getLogger("gate_bot.strategist")
 
@@ -40,6 +41,7 @@ class StrategistConfig:
     # 条件事件：EMA/ATR/RSI/price_break 等（见 triggers.py）
     conditions: list = field(default_factory=list)
     check_interval_sec: float = 1.0
+    ai_triggers: dict = field(default_factory=dict)
     symbols: list[str] = field(default_factory=list)
     prompt_file: str = "prompts/vergex_default.md"
     write_hold: bool = True
@@ -78,6 +80,15 @@ class PlanRunner:
         self._last_trigger: str = ""
         self._cycle_file = history_dir / "last_cycle.json"
         self._last_cycle_id = self._load_last_cycle()
+        self._ai_policy = AITriggerPolicy(
+            enabled=bool((cfg.ai_triggers or {}).get("enabled")),
+            allow_types=tuple((cfg.ai_triggers or {}).get("allow_types") or AITriggerPolicy.__dataclass_fields__["allow_types"].default),
+            max_active=int((cfg.ai_triggers or {}).get("max_active") or 5),
+            default_cooldown_sec=float((cfg.ai_triggers or {}).get("default_cooldown_sec") or 60),
+            default_ttl_sec=float((cfg.ai_triggers or {}).get("default_ttl_sec") or 86400),
+            allow_modify=bool((cfg.ai_triggers or {}).get("allow_modify", True)),
+        )
+        self._ai_store = AITriggerStore(self.history_dir / "ai_triggers.json", self._ai_policy)
 
     def _load_last_cycle(self) -> Optional[str]:
         try:
@@ -149,6 +160,7 @@ class PlanRunner:
             }
         self._last_cycle_id = plan.cycle_id
         self._save_last_cycle(plan.cycle_id)
+        rejected_triggers = self._apply_ai_triggers(plan)
         risk_result = apply_risk(plan, self.cfg.risk)
         payload = chips_to_signal(plan, risk_result, bot_id=self.inbox.name)
         orders = payload.get("orders") or []
@@ -159,7 +171,7 @@ class PlanRunner:
                 "ok": True,
                 "cycle_id": plan.cycle_id,
                 "orders": 0,
-                "notes": risk_result.notes,
+                "notes": risk_result.notes + rejected_triggers,
                 "rejected": len(risk_result.rejected),
                 "trigger": trigger,
             }
@@ -169,7 +181,7 @@ class PlanRunner:
             "cycle_id": plan.cycle_id,
             "orders": len(orders),
             "file": str(path),
-            "notes": risk_result.notes,
+            "notes": risk_result.notes + rejected_triggers,
             "rejected": len(risk_result.rejected),
             "trigger": trigger,
         }
@@ -195,12 +207,49 @@ class PlanRunner:
         except Exception:  # noqa: BLE001
             return False
 
+    def _apply_ai_triggers(self, plan) -> list:
+        """Apply Plan.triggers / trigger_ops under ai_triggers policy."""
+        notes = []
+        if not getattr(self, "_ai_policy", None) or not self._ai_policy.enabled:
+            return notes
+        ops = plan.trigger_ops or []
+        for op in ops:
+            if not isinstance(op, dict):
+                continue
+            kind = str(op.get("op") or "").lower()
+            try:
+                if kind == "remove":
+                    self._ai_store.remove(str(op.get("id") or ""))
+                elif kind == "replace_all":
+                    norms = []
+                    for raw in plan.triggers or []:
+                        norms.append(validate_trigger_payload(raw, self._ai_policy, self.cfg.symbols))
+                    self._ai_store.replace_all(norms, self.cfg.symbols)
+                    notes.append(f"ai_triggers: replaced {len(norms)}")
+            except TriggerPolicyError as e:
+                notes.append(f"trigger_op_rejected: {e}")
+        if not ops or any(str(op.get("op") or "").lower() == "add" for op in ops if isinstance(op, dict)):
+            for raw in plan.triggers or []:
+                try:
+                    norm = validate_trigger_payload(raw, self._ai_policy, self.cfg.symbols)
+                    t = self._ai_store.add(norm, self.cfg.symbols)
+                    notes.append(f"ai_trigger_add: {t.id} {t.type} {t.symbol}")
+                except TriggerPolicyError as e:
+                    notes.append(f"trigger_rejected: {e}")
+        return notes
+
     def _check_condition_events(self) -> Optional[str]:
-        if not self._conditions:
+        ai_conds = []
+        try:
+            ai_conds = [t.to_condition() for t in self._ai_store.active()] if getattr(self, "_ai_store", None) else []
+        except Exception:  # noqa: BLE001
+            ai_conds = []
+        all_conds = list(self._conditions) + ai_conds
+        if not all_conds:
             return None
         interval = self.cfg.event_timeframe or self.cfg.timeframe
         fired = check_conditions(
-            self.client, self._conditions, interval, states=self._cond_states
+            self.client, all_conds, interval, states=self._cond_states
         )
         if not fired:
             return None

@@ -35,6 +35,7 @@ def _build_plan_runner(bot, paths: ProjectPaths):
         event_timeframe=s.get("event_timeframe") or s.get("timeframe") or "15m",
         conditions=list(s.get("conditions") or []),
         check_interval_sec=float(s.get("check_interval_sec") or 1.0),
+        ai_triggers=dict(s.get("ai_triggers") or {}),
         symbols=[str(x) for x in (s.get("symbols") or bot.symbols or [])],
         prompt_file=str(s.get("prompt_file") or "prompts/vergex_default.md"),
         write_hold=bool(s.get("write_hold", True)),

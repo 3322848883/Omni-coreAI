@@ -76,6 +76,9 @@ class Plan:
     cycle_id: str
     reasoning: str = ""
     chips: list[Chip] = field(default_factory=list)
+    triggers: list = field(default_factory=list)
+    trigger_ops: list = field(default_factory=list)
+    rejected_triggers: list = field(default_factory=list)
     raw: dict = field(default_factory=dict)
 
 
@@ -127,10 +130,18 @@ def parse_plan(data: Any) -> Plan:
                 reasoning=str(raw.get("reasoning") or ""),
             )
         )
+    triggers = data.get("triggers") or []
+    if not isinstance(triggers, list):
+        raise PlanError("triggers must be an array")
+    trigger_ops = data.get("trigger_ops") or []
+    if not isinstance(trigger_ops, list):
+        raise PlanError("trigger_ops must be an array")
     return Plan(
         cycle_id=str(data.get("cycle_id") or ""),
         reasoning=str(data.get("reasoning") or ""),
         chips=chips,
+        triggers=triggers,
+        trigger_ops=trigger_ops,
         raw=data,
     )
 
