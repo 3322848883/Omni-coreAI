@@ -58,9 +58,10 @@ strategist:
   llm:
     base_url_env: OPENAI_BASE_URL
     api_key_env: OPENAI_API_KEY
-    model: deepseek-chat        # DeepSeek 瀹樻柟锛歞eepseek-chat / deepseek-reasoner
+    model: deepseek-flash
     thinking: true
-    temperature: 0.1
+    reasoning_effort: max
+    user_id: brooks-btc
     timeout_sec: 120
-    max_tokens: 8192            # 瀹樻柟 chat 涓婇檺閫氬父 8k 閲忕骇
+    max_tokens: 8192
 

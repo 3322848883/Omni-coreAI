@@ -72,11 +72,13 @@ def _build_plan_runner(bot, paths: ProjectPaths):
         llm=LLMConfig(
             base_url_env=str(llm.get("base_url_env") or "OPENAI_BASE_URL"),
             api_key_env=str(llm.get("api_key_env") or "OPENAI_API_KEY"),
-            model=str(llm.get("model") or "deepseek-chat"),
+            model=str(llm.get("model") or "deepseek-flash"),
             temperature=float(llm.get("temperature") or 0.2),
-            timeout_sec=int(llm.get("timeout_sec") or 60),
-            max_tokens=int(llm.get("max_tokens") or 2048),
+            timeout_sec=int(llm.get("timeout_sec") or 120),
+            max_tokens=int(llm.get("max_tokens") or 8192),
             thinking=bool(llm.get("thinking", True)),
+            reasoning_effort=str(llm.get("reasoning_effort") or "max"),
+            user_id=str(llm.get("user_id") or ""),
         ),
     )
     client = bot.create_client()
