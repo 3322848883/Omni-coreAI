@@ -162,7 +162,7 @@ def _parse_stop_entry(data: dict, action: str, default_label: str) -> Intent:
         raise SchemaError(f"trigger_price_type invalid: {trigger_price_type!r}")
     return Intent(
         action=action,
-        symbol=resolve_symbol(symbol),
+        symbol=_check_symbol_token(symbol),
         size_usd=size_usd,
         size_pct=size_pct,
         margin_pct=margin_pct,
@@ -176,7 +176,7 @@ def _parse_stop_entry(data: dict, action: str, default_label: str) -> Intent:
         trigger_expiration=_i(data.get("trigger_expiration"), "trigger_expiration"),
         margin_mode=str(data["margin_mode"]).lower() if data.get("margin_mode") else None,
         side="long" if action == "stop_entry_long" else "short",
-        label=str(data.get("label") or default_label),
+        label=_safe_label(data.get("label") or default_label),
         meta=data.get("meta") or {},
     )
 
@@ -195,6 +195,23 @@ def _norm_replace(value) -> str:
     if s in ("0", "false", "no", "none", "off"):
         return "none"
     raise SchemaError(f"replace must be none|symbol|all, got {value!r}")
+
+
+def _safe_label(label: str) -> str:
+    """Order text tag: only [A-Za-z0-9_-], max 32 — blocks path/injection in text."""
+    import re
+
+    s = re.sub(r"[^A-Za-z0-9_-]", "", str(label or ""))[:32]
+    return s or "signal"
+
+
+def _check_symbol_token(symbol: str) -> str:
+    import re
+
+    s = resolve_symbol(symbol)
+    if not re.fullmatch(r"[A-Z0-9_]{2,20}", s or ""):
+        raise SchemaError(f"symbol invalid: {symbol!r}")
+    return s
 
 
 def parse_intent(data: dict, default_label: str = "signal") -> Intent:
@@ -218,9 +235,9 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
         symbol = data.get("symbol") or ""
         return Intent(
             action=action,
-            symbol=resolve_symbol(symbol) if symbol else "",
+            symbol=_check_symbol_token(symbol) if symbol else "",
             side=data.get("side"),
-            label=str(data.get("label") or default_label),
+            label=_safe_label(data.get("label") or default_label),
             meta=data.get("meta") or {},
         )
 
@@ -236,12 +253,12 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
             raise SchemaError("trail requires price_offset (e.g. 0.5 or 0.5%)")
         return Intent(
             action="trail",
-            symbol=resolve_symbol(symbol),
+            symbol=_check_symbol_token(symbol),
             size=abs(int(amount)),
             side="long" if amount > 0 else "short",
             price_offset=str(offset),
             activation_price=str(data.get("activation_price") or "0"),
-            label=str(data.get("label") or default_label),
+            label=_safe_label(data.get("label") or default_label),
             meta=data.get("meta") or {},
         )
 
@@ -264,10 +281,10 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
         size = _i(data.get("size"), "size")
         return Intent(
             action="close",
-            symbol=resolve_symbol(symbol),
+            symbol=_check_symbol_token(symbol),
             side=side,
             close_size=size,
-            label=str(data.get("label") or default_label),
+            label=_safe_label(data.get("label") or default_label),
             meta={**(data.get("meta") or {}), "requested_action": requested_action},
         )
 
@@ -343,7 +360,7 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
 
     return Intent(
         action=action,
-        symbol=resolve_symbol(symbol),
+        symbol=_check_symbol_token(symbol),
         size_usd=size_usd,
         size_pct=size_pct,
         margin_pct=margin_pct,
@@ -365,7 +382,7 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
         trigger_expiration=_i(data.get("trigger_expiration"), "trigger_expiration"),
         margin_mode=margin_mode,
         side="long" if action == "open_long" else "short",
-        label=str(data.get("label") or default_label),
+        label=_safe_label(data.get("label") or default_label),
         replace=replace,
         meta={**(data.get("meta") or {}), "requested_action": requested_action},
     )
@@ -414,7 +431,7 @@ def _parse_grid(data: dict, default_label: str) -> Intent:
     open_action = "open_long" if side == "long" else "open_short"
     return Intent(
         action="grid",
-        symbol=resolve_symbol(symbol),
+        symbol=_check_symbol_token(symbol),
         side=side,
         order_type=order_type,
         tp=tp,

@@ -28,6 +28,16 @@ class PlanError(Exception):
     pass
 
 
+def _safe_symbol(symbol: str) -> str:
+    import re
+    from ..gate_client import resolve_symbol
+    s = resolve_symbol(str(symbol or ''))
+    if not re.fullmatch(r'[A-Z0-9_]{2,20}', s or ''):
+        raise PlanError(f'symbol invalid: {symbol!r}')
+    return s
+    pass
+
+
 @dataclass
 class Chip:
     symbol: str
@@ -104,7 +114,7 @@ def parse_plan(data: Any) -> Plan:
             raise PlanError(f"chips[{i}].type unsupported: {order_type!r}")
         chips.append(
             Chip(
-                symbol=symbol,
+                symbol=_safe_symbol(symbol),
                 action=action,
                 confidence=conf,
                 size_usd=_f(raw.get("size_usd")),
