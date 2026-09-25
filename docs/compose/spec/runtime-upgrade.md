@@ -1,14 +1,26 @@
 ---
 feature: runtime-upgrade
-status: designed
+status: delivered
 updated: 2026-10-20
 branch: feat/runtime-upgrade
-commits: 
+commits: dccce59..HEAD
 ---
 
 # 长期运行升级：存储台账 · 按 bot 目录 · 统一 Supervisor
 
 ## Report
+
+**What was built** — `data/bots/<id>/{inbox,archive,logs,state}` 新布局 + `data/bots.db` SQLite 台账（trades/plans/signals/heartbeats）+ `python -m gate_bot supervisor` 多 bot 托管（PID 锁、限频重启）+ `migrate` 一键迁移。执行/Plan 路径已接到 v2 布局；CLI 与 supervisor 锁一致（`GATE_LOCK_HELD`）。
+
+**Verification** —
+- `unittest discover -s tests` → **161 OK**（含 migrate 幂等、v2 paths、锁互斥）
+- 两轮 review：4 critical 全关闭（布局接线 / 迁移重复导入 / 锁路径冲突 / supervisor 失败重试）
+
+**Journey log** —
+1. 首版只建了 paths/ledger/migrate，未改 `ProjectPaths` 运行时 → review 抓出「迁移后 run 不读新 inbox」。
+2. migrate 重复导入 jsonl → `.jsonl_imported` 标记一次。
+3. supervisor 与 CLI 抢同一 lock 文件导致子进程秒退 → `GATE_LOCK_HELD` + 统一 `lock_run` 路径。
+4. PidLock 改 `O_EXCL` 原子创建，防 TOCTOU 双开。
 
 ## [S1] Problem
 
@@ -137,10 +149,10 @@ runtime:
 
 ## Tasks
 
-- [ ] T1: `paths.py` 新布局解析 + 默认骨架创建 — acceptance: 单测覆盖 data/bots/&lt;id&gt;/* 解析 (covers: S2.3)
-- [ ] T2: `ledger.py` + bots.db schema（trades/plans/signals/heartbeats） — acceptance: 单测 CRUD + WAL (covers: S2.2)
-- [ ] T3: 执行器/plan-loop 写入 ledger（可配置 jsonl/sqlite/both） — acceptance: 执行一笔后 bots.db 有 trades/plans 行 (covers: S2.2)
-- [ ] T4: `migrate.py` 目录+jsonl 迁移（幂等、--dry-run） — acceptance: 旧树样例迁移后结构正确 (covers: S2.5)
-- [ ] T5: `supervisor.py` 多 bot 托管 + PID 锁 + 限频重启 + 心跳 — acceptance: 双 bot 假子进程被拉起/限停 (covers: S2.4)
-- [ ] T6: `status` 汇总进程/心跳/inbox；文档 OPERATIONS 更新 — acceptance: status 显示多 bot 运行态 (covers: S2.4; depends: T5)
-- [ ] T7: 回归 unittest + 双 bot testnet 冒烟 — acceptance: 全绿，无双开重复下单 (covers: S2.7; depends: T3,T5)
+- [x] T1: `paths.py` 新布局解析 + 默认骨架创建 — acceptance: 单测覆盖 data/bots/&lt;id&gt;/* 解析 (covers: S2.3)
+- [x] T2: `ledger.py` + bots.db schema（trades/plans/signals/heartbeats） — acceptance: 单测 CRUD + WAL (covers: S2.2)
+- [x] T3: 执行器/plan-loop 写入 ledger（可配置 jsonl/sqlite/both） — acceptance: 执行一笔后 bots.db 有 trades/plans 行 (covers: S2.2)
+- [x] T4: `migrate.py` 目录+jsonl 迁移（幂等、--dry-run） — acceptance: 旧树样例迁移后结构正确 (covers: S2.5)
+- [x] T5: `supervisor.py` 多 bot 托管 + PID 锁 + 限频重启 + 心跳 — acceptance: 双 bot 假子进程被拉起/限停 (covers: S2.4)
+- [x] T6: `status` 汇总进程/心跳/inbox；文档 OPERATIONS 更新 — acceptance: status 显示多 bot 运行态 (covers: S2.4; depends: T5)
+- [x] T7: 回归 unittest + 双 bot testnet 冒烟 — acceptance: 全绿，无双开重复下单 (covers: S2.7; depends: T3,T5)
