@@ -1,5 +1,7 @@
 # gate-io monorepo（gate-signal-bot + pa-data-source）
 
+> **新人 / AI 请先读 [`AGENTS.md`](AGENTS.md)**：系统心智模型、五分钟上手、关键规则、文档地图。
+
 一个仓库两个组件，**文件级接口**（只读 `kline.db`），进程分离、互不 import。
 
 | 目录 | 角色 |
@@ -17,6 +19,17 @@ gate_bot strategist：快照 → LLM Plan → 风控 → inbox → executor → 
 ```
 
 长期稳定约定见 **`contracts/KLINE_SCHEMA.md`**；bot 读不到合规库时自动 REST，不硬读。
+
+### 文档导航
+
+| 我要… | 打开 |
+|-------|------|
+| 快速上手 / AI 代理入口 | [`AGENTS.md`](AGENTS.md) |
+| 信号 JSON 字段与示例 | `templates/README.md` |
+| 策略人格怎么写 | `prompts/README.md` |
+| 可抄案例（12 信号 / 多 bot） | `examples/README.md` |
+| 上线前全量测试 | `docs/compose/spec/prelaunch-test.md` |
+| 各功能设计规格 | `docs/compose/spec/` |
 
 ### 跑数据管道（可选，独立进程）
 
@@ -440,98 +453,6 @@ python -m gate_bot run --bot <bot_id>
 | 同策略多账户 | 多份 bot 配置，**相同**策略、**不同**密钥 |
 | 隔离风控 | 每 bot 独立 `symbols` / `max_notional_usd` |
 | 日志区分 | 每 bot 不同 `label_prefix`；JSON 里 `meta.strategy` |
-
-## 多机器人模型（账户 × 信号源，可自由组合）
-
-**一个 bot = 一份 `config/bots/<bot_id>.yaml` + 一个 `inbox/<bot_id>/`。**  
-两个维度正交，可任意组合：
-
-| 维度 | 怎么区分 | 配置字段 |
-|------|----------|----------|
-| **账户** | 不同 API Key / 资金 | `env`、`api_key_env`、`api_secret_env` |
-| **信号源** | 谁往哪个 inbox 写 JSON | 目录名 `inbox/<bot_id>/`、`symbols`、`label_prefix` |
-
-### 模式 1：一个账户 = 一个机器人（可共用信号源）
-
-同一账户一个 bot；多个信号源都写进**同一个** `inbox/<bot_id>/`。
-
-```yaml
-# config/bots/acct-a.yaml   # 账户 A 的机器人
-bot_id: acct-a
-env: live
-api_key_env: GATE_KEY_A
-api_secret_env: GATE_SECRET_A
-symbols: [BTC_USDT, ETH_USDT]
-label_prefix: A
-```
-
-```text
-信号源1 ─┐
-信号源2 ─┼─► inbox/acct-a/*.json ─► bot acct-a ─► 账户 A
-信号源3 ─┘
-```
-
-### 模式 2：一个信号源 = 一个机器人（可共用账户）
-
-同一密钥多个 bot；不同策略写各自 inbox，风控/标签分开。
-
-```yaml
-# config/bots/trend.yaml
-bot_id: trend
-env: live
-api_key_env: GATE_API_KEY      # 与 grid 相同 = 共用账户
-api_secret_env: GATE_API_SECRET
-symbols: [BTC_USDT]
-label_prefix: trend
-max_notional_usd: 50
-```
-
-```yaml
-# config/bots/grid.yaml
-bot_id: grid
-env: live
-api_key_env: GATE_API_KEY      # 共用账户
-api_secret_env: GATE_API_SECRET
-symbols: [ETH_USDT]
-label_prefix: grid
-max_notional_usd: 50
-```
-
-```text
-趋势信号 ─► inbox/trend/ ─► bot trend ─┬─► 同一账户
-网格信号 ─► inbox/grid/  ─► bot grid  ─┘
-```
-
-### 添加步骤（两种通用）
-
-```bash
-# 1) 建配置（账户=改 api_key_env；信号源=改 bot_id/目录）
-cp config/bots/_example.yaml config/bots/<bot_id>.yaml
-
-# 2)（多账户）准备不同环境变量
-setx GATE_KEY_A "..."
-setx GATE_SECRET_A "..."
-setx GATE_KEY_B "..."
-setx GATE_SECRET_B "..."
-
-# 3) 信号源往对应目录丢 JSON
-#    inbox/<bot_id>/20260302-100000-xxx.json
-
-# 4) 核对并启动
-python -m gate_bot status
-python -m gate_bot once --bot <bot_id>
-python -m gate_bot run          # 全部 enabled；或 --bot 只跑一个
-```
-
-### 组合一览
-
-| 场景 | 做法 |
-|------|------|
-| 一账户一 bot | 1 份配置，1 个 `api_key_env` |
-| 一信号源一 bot | 1 份配置 + 独立 `inbox/<id>/` |
-| 同账户多策略 | 多份配置，**相同** `api_key_env` |
-| 多账户同策略 | 多份配置，**不同** `api_key_env`，信号写多个 inbox |
-| 混合矩阵 | 账户 × 策略 矩阵，一格一份配置 |
 
 已测：同账户双 bot（alpha/beta）目录、白名单、归档隔离 ✅；双账户待有第二套 Key 后补测。
 
