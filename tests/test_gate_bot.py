@@ -478,6 +478,53 @@ class TestExecutor(unittest.TestCase):
         self.assertNotIn(("order", "3"), client.cancelled)
         self.assertNotIn("BTC_USDT", client.cancelled)
 
+    def test_cancel_all_own_scope_reports_cancel_failure(self):
+        """A1: cancel_order failure must not report ok=True (silent residual)."""
+        client = FakeClient()
+        client.orders = [
+            {"contract": "BTC_USDT", "size": 1, "text": "t-bota-1"},
+            {"contract": "BTC_USDT", "size": 1, "text": "t-bota-2"},
+        ]
+        client.cancelled = []
+
+        def cancel_order(oid):
+            if str(oid) == "1":
+                raise GateApiError("cancel rejected")
+            client.cancelled.append(("order", oid))
+            return {"cancelled": oid}
+
+        client.cancel_order = cancel_order
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], order_scope="own")
+        report = ex.execute_signal(
+            parse_signal({"action": "cancel_all", "symbol": "BTC_USDT", "label": "bota"})
+        )
+        self.assertFalse(report.ok)
+        detail = report.results[0].detail or {}
+        self.assertEqual(detail.get("cancelled"), ["2"])
+        self.assertTrue(detail.get("errors"))
+
+    def test_cancel_price_all_own_scope_reports_cancel_failure(self):
+        client = FakeClient()
+        client.price_orders = [
+            {"initial": {"text": "t-bota-1", "contract": "BTC_USDT"}},
+            {"initial": {"text": "t-bota-2", "contract": "BTC_USDT"}},
+        ]
+        client.cancelled = []
+
+        def cancel_price_order(pid):
+            if str(pid) == "101":
+                raise GateApiError("price cancel rejected")
+            client.cancelled.append(("price", pid))
+            return {"cancelled": pid}
+
+        client.cancel_price_order = cancel_price_order
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], order_scope="own")
+        report = ex.execute_signal(
+            parse_signal({"action": "cancel_price_all", "symbol": "BTC_USDT", "label": "bota"})
+        )
+        self.assertFalse(report.ok)
+        self.assertEqual((report.results[0].detail or {}).get("cancelled"), ["102"])
+
     def test_cancel_all_default_label_still_wipes(self):
         """Default label 'signal' keeps legacy wipe so cleanup paths work."""
         client = FakeClient()
@@ -746,12 +793,30 @@ class TestGateClient(unittest.TestCase):
         def fake(method, path, qs="", body=None):
             if body and body.get("price") == "0":
                 raise GateApiError("slip", status=400, label="MARKET_PRICE_TOO_DEVIATED")
-            return {"id": 9, "price": body.get("price")}
+            return {"id": 9, "price": body.get("price"), "tif": body.get("tif")}
 
         client.rest_signed_request = fake
         client.public_get = lambda path, qs="": {"bids": [{"p": "100", "s": 1}], "asks": [{"p": "101", "s": 1}]}
         result = client.place_order({"contract": "BTC_USDT", "size": 1, "price": "0", "tif": "ioc"})
-        self.assertEqual(result["price"], "100")
+        # market buy must lift the ASK (taker), not rest on the bid
+        self.assertEqual(result["price"], "101")
+        self.assertEqual(result["tif"], "ioc")
+
+    def test_market_slippage_fallback_sell_hits_bid(self):
+        client = GateClient("k", "s", env="testnet")
+        captured = {}
+
+        def fake(method, path, qs="", body=None):
+            if body and body.get("price") == "0":
+                raise GateApiError("slip", status=400, label="MARKET_PRICE_TOO_DEVIATED")
+            captured.update(body or {})
+            return {"id": 9, **(body or {})}
+
+        client.rest_signed_request = fake
+        client.public_get = lambda path, qs="": {"bids": [{"p": "100", "s": 1}], "asks": [{"p": "101", "s": 1}]}
+        client.place_order({"contract": "BTC_USDT", "size": -1, "price": "0", "tif": "ioc"})
+        self.assertEqual(captured.get("price"), "100")
+        self.assertEqual(captured.get("tif"), "ioc")
 
     def test_official_paths_and_close(self):
         client = GateClient("k", "s", env="testnet")
@@ -802,7 +867,8 @@ class TestGateClient(unittest.TestCase):
         client.rest_signed_request = fake
         client.public_get = lambda path, qs="": {"bids": [{"p": "100", "s": 1}], "asks": [{"p": "101", "s": 1}]}
         r = client.place_order({"contract": "BTC_USDT", "size": 1, "price": "0", "tif": "ioc"})
-        self.assertEqual(r["price"], "100")
+        self.assertEqual(r["price"], "101")
+        self.assertEqual(attempts[-1].get("tif"), "ioc")
 
     def test_official_paths_and_close(self):
         client = GateClient("k", "s", env="testnet")
@@ -845,12 +911,13 @@ class TestGateClient(unittest.TestCase):
         def fake(method, path, qs="", body=None):
             if body and str(body.get("price")) == "0":
                 raise GateApiError("slip", status=400, label="MARKET_PRICE_TOO_DEVIATED")
-            return {"id": 9, "price": (body or {}).get("price")}
+            return {"id": 9, "price": (body or {}).get("price"), "tif": (body or {}).get("tif")}
 
         client.rest_signed_request = fake
         client.public_get = lambda path, qs="": {"bids": [{"p": "100", "s": 1}], "asks": [{"p": "101", "s": 1}]}
         r = client.place_order({"contract": "BTC_USDT", "size": 1, "price": "0", "tif": "ioc"})
-        self.assertEqual(r["price"], "100")
+        self.assertEqual(r["price"], "101")
+        self.assertEqual(r["tif"], "ioc")
 
     def test_official_accounts_and_leverage(self):
         client = GateClient("k", "s", env="testnet")
@@ -894,12 +961,13 @@ class TestGateClient(unittest.TestCase):
         def fake(method, path, qs="", body=None):
             if body and str(body.get("price")) == "0":
                 raise GateApiError("slip", status=400, label="MARKET_PRICE_TOO_DEVIATED")
-            return {"id": 9, "price": (body or {}).get("price")}
+            return {"id": 9, "price": (body or {}).get("price"), "tif": (body or {}).get("tif")}
 
         client.rest_signed_request = fake
         client.public_get = lambda path, qs="": {"bids": [{"p": "100", "s": 1}], "asks": [{"p": "101", "s": 1}]}
         r = client.place_order({"contract": "BTC_USDT", "size": 1, "price": "0", "tif": "ioc"})
-        self.assertEqual(r["price"], "100")
+        self.assertEqual(r["price"], "101")
+        self.assertEqual(r["tif"], "ioc")
 
     def test_official_paths_and_close(self):
         client = GateClient("k", "s", env="testnet")
@@ -949,7 +1017,8 @@ class TestGateClient(unittest.TestCase):
         client.rest_signed_request = fake
         client.public_get = lambda path, qs="": {"bids": [{"p": "100", "s": 1}], "asks": [{"p": "101", "s": 1}]}
         r = client.place_order({"contract": "BTC_USDT", "size": 1, "price": "0", "tif": "ioc"})
-        self.assertEqual(r["price"], "100")
+        self.assertEqual(r["price"], "101")
+        self.assertEqual(attempts[-1].get("tif"), "ioc")
 
     def test_official_paths_and_close_and_trail(self):
         client = GateClient("k", "s", env="testnet")
@@ -996,7 +1065,7 @@ class TestGateClient(unittest.TestCase):
         client2.rest_signed_request = fake2
         client2.public_get = lambda path, qs="": {"bids": [{"p": "100", "s": 1}], "asks": [{"p": "101", "s": 1}]}
         r = client2.place_order({"contract": "BTC_USDT", "size": 1, "price": "0", "tif": "ioc"})
-        self.assertEqual(r["price"], "100")
+        self.assertEqual(r["price"], "101")
 
     def test_load_credentials(self):
         keys = ("GATE_API_KEY", "GATE_API_SECRET", "GATE_TESTNET_API_KEY", "GATE_TESTNET_API_SECRET")

@@ -223,18 +223,19 @@ class GateClient:
         try:
             result = self.rest_signed_request("POST", f"{FUTURES_API}/orders", "", body)
         except GateApiError as e:
-            # market slippage: fall back once to near-touch limit
+            # market slippage: fall back once to a taker limit (cross the book, IOC)
             if e.label == "MARKET_PRICE_TOO_DEVIATED" and str(body.get("price", "0")) == "0":
                 retry = dict(body)
                 contract = str(body.get("contract") or "")
                 side_buy = int(body.get("size") or 0) > 0
                 ob = self.public_get(f"{FUTURES_API}/order_book", f"contract={contract}&limit=1")
-                levels = (ob.get("bids") if side_buy else ob.get("asks")) or []
+                # buy lifts the ask; sell hits the bid — never rest on the passive side
+                levels = (ob.get("asks") if side_buy else ob.get("bids")) or []
                 px = str((levels[0] if levels else {}).get("p") or "")
                 if not px:
                     raise
                 retry["price"] = px
-                retry["tif"] = "gtc"
+                retry["tif"] = "ioc"
                 result = self.rest_signed_request("POST", f"{FUTURES_API}/orders", "", retry)
             else:
                 raise

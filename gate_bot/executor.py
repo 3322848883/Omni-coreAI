@@ -895,6 +895,7 @@ class Executor:
                 rows = self.client.list_orders() or []
                 symbols = sorted({o.get("contract") for o in rows if o.get("contract")})
             cancelled = []
+            errors = []
             for sym in symbols:
                 for o in self._owned_open_orders(sym, prefix):
                     oid = str(o.get("id") or "")
@@ -903,11 +904,13 @@ class Executor:
                     try:
                         self.client.cancel_order(oid)
                         cancelled.append(oid)
-                    except GateApiError:
-                        pass
-            return StepResult("cancel_all", symbol, True, detail={
-                "cancelled": cancelled, "order_scope": "own", "prefix": prefix,
-            })
+                    except GateApiError as e:
+                        errors.append(f"{oid}: {e}")
+            ok = not errors
+            return StepResult("cancel_all", symbol, ok, detail={
+                "cancelled": cancelled, "errors": errors,
+                "order_scope": "own", "prefix": prefix,
+            }, error="; ".join(errors) if errors else None)
         if symbol:
             self._check_symbol(symbol)
             result = self.client.cancel_all_orders(symbol)
@@ -932,12 +935,8 @@ class Executor:
                 (p.get("contract") or (p.get("initial") or {}).get("contract") or "")
                 for p in (self.client.list_price_orders(symbol) or [])
             } - {""})
-            if not symbol:
-                symbols = sorted({
-                    (p.get("contract") or (p.get("initial") or {}).get("contract") or "")
-                    for p in (self.client.list_price_orders(None) or [])
-                } - {""})
             cancelled = []
+            errors = []
             for sym in symbols or ([symbol] if symbol else []):
                 for p in self._owned_price_orders(sym, prefix):
                     pid = str(p.get("id") or "")
@@ -946,11 +945,13 @@ class Executor:
                     try:
                         self.client.cancel_price_order(pid)
                         cancelled.append(pid)
-                    except GateApiError:
-                        pass
-            return StepResult("cancel_price_all", symbol, True, detail={
-                "cancelled": cancelled, "order_scope": "own", "prefix": prefix,
-            })
+                    except GateApiError as e:
+                        errors.append(f"{pid}: {e}")
+            ok = not errors
+            return StepResult("cancel_price_all", symbol, ok, detail={
+                "cancelled": cancelled, "errors": errors,
+                "order_scope": "own", "prefix": prefix,
+            }, error="; ".join(errors) if errors else None)
         result = self.client.cancel_all_price_orders(symbol or None)
         return StepResult("cancel_price_all", symbol, True, detail={"result": result})
 
