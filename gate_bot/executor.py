@@ -135,9 +135,18 @@ class Executor:
     def _text_prefix(self, label: str) -> str:
         return f"t-{label}" if label else ""
 
+    def _text_owned(self, text: str, label: str) -> bool:
+        """Segment-safe ownership: t-{label} or t-{label}-*, never t-{label}XX."""
+        if not label:
+            return False
+        text = str(text or "")
+        tag = f"t-{label}"
+        return text == tag or text.startswith(tag + "-")
+
     def _owned_price_orders(self, symbol: str, prefix: str) -> list[dict]:
         if not prefix:
             return []
+        label = prefix[2:] if prefix.startswith("t-") else prefix
         try:
             rows = self.client.list_price_orders(symbol) or []
         except GateApiError:
@@ -145,18 +154,19 @@ class Executor:
         out = []
         for p in rows:
             text = str((p.get("initial") or {}).get("text") or p.get("text") or "")
-            if text.startswith(prefix):
+            if self._text_owned(text, label):
                 out.append(p)
         return out
 
     def _owned_open_orders(self, symbol: str, prefix: str) -> list[dict]:
         if not prefix:
             return []
+        label = prefix[2:] if prefix.startswith("t-") else prefix
         try:
             rows = self.client.list_orders(symbol) or []
         except GateApiError:
             return []
-        return [o for o in rows if str(o.get("text") or "").startswith(prefix)]
+        return [o for o in rows if self._text_owned(str(o.get("text") or ""), label)]
 
     def _snapshot_owned(self, intents: list) -> dict:
         """{symbol: {"prefix": set(price_ids), "orders": set(order_ids)}}"""

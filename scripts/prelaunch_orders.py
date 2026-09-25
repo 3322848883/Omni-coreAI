@@ -214,15 +214,15 @@ def run_orders(REP, gate_client, env: str = "testnet") -> None:
         inbox = root / "inbox"
         p1 = write_signal_file(inbox, json.loads(json.dumps(payload)), plan.cycle_id)
         p2 = write_signal_file(inbox, json.loads(json.dumps(payload)), plan.cycle_id)
-        # execute both — should not create two entries for same cycle if replace=symbol
-        r1 = ex.execute_signal(parse_signal(json.loads(p1.read_text(encoding="utf-8"))))
-        r2 = ex.execute_signal(parse_signal(json.loads(p2.read_text(encoding="utf-8"))))
+        # execute both — replace=symbol should leave at most one resting entry
+        # chips carry no label; force default_label so order text is t-m14*
+        r1 = ex.execute_signal(parse_signal(json.loads(p1.read_text(encoding="utf-8")), default_label="m14"))
+        r2 = ex.execute_signal(parse_signal(json.loads(p2.read_text(encoding="utf-8")), default_label="m14"))
         po = client.list_orders(symbol) or []
-        n_entry = [o for o in po if str(o.get("text") or "").startswith("t-prelaunch")]
-        # place-before-cancel with replace=symbol should leave 1 resting
+        n_entry = [o for o in po if ex._text_owned(str(o.get("text") or ""), "m14")]
         ok = r1.ok and r2.ok and len(n_entry) <= 1
         REP.rec("M14", "dup_cycle_single_order", ok,
-                f"r1={r1.ok} r2={r2.ok} resting={len(n_entry)}")
+                f"r1={r1.ok} r2={r2.ok} owned={len(n_entry)} texts={[o.get('text') for o in n_entry]}")
         _cleanup(ex, symbol)
     except Exception as e:  # noqa: BLE001
         REP.rec("M14", "dup_cycle_single_order", False, str(e)[:100])

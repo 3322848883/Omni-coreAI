@@ -491,6 +491,22 @@ class TestExecutor(unittest.TestCase):
         self.assertTrue(report.ok)
         self.assertIn("BTC_USDT", client.cancelled)
 
+    def test_cancel_label_prefix_is_segment_safe(self):
+        """label 'bot' must not match t-bota* / t-botb* (prelaunch review)."""
+        client = FakeClient()
+        client.orders = [
+            {"contract": "BTC_USDT", "size": 1, "text": "t-bot"},
+            {"contract": "BTC_USDT", "size": 1, "text": "t-bot-sl"},
+            {"contract": "BTC_USDT", "size": 1, "text": "t-bota-1"},
+            {"contract": "BTC_USDT", "size": 1, "text": "t-botb-1"},
+        ]
+        client.cancelled = []
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], order_scope="own")
+        ex.execute_signal(parse_signal({"action": "cancel_all", "symbol": "BTC_USDT", "label": "bot"}))
+        self.assertEqual(sorted(client.cancelled), [("order", "1"), ("order", "2")])
+        self.assertNotIn(("order", "3"), client.cancelled)
+        self.assertNotIn(("order", "4"), client.cancelled)
+
     def test_cancel_price_all_own_scope_only_touches_label_prefix(self):
         client = FakeClient()
         client.price_orders = [

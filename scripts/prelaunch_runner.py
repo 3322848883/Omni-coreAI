@@ -235,6 +235,64 @@ def m6_llm(client) -> None:
         REP.problem("M6", str(e), level="P2")
 
 
+# ── M4 conditions / M5 AI triggers ──────────────────────────────────────────
+
+
+def m4_conditions(client) -> None:
+    from gate_bot.strategist.triggers import evaluate_condition
+
+    conds = [
+        {"type": "price_vs_ema", "symbol": "BTC_USDT", "period": 20, "side": "above"},
+        {"type": "rsi", "symbol": "BTC_USDT", "period": 14, "op": "lt", "level": 80},
+        {"type": "macd_cross", "symbol": "BTC_USDT", "dir": "any"},
+        {"type": "atr_spike", "symbol": "BTC_USDT", "period": 14, "mult": 1.1},
+        {"type": "boll_break", "symbol": "BTC_USDT", "side": "upper"},
+    ]
+    ok_n = 0
+    fired = 0
+    for cond in conds:
+        try:
+            ok, reason = evaluate_condition(client, cond, "15m")
+            ok_n += 1
+            if ok:
+                fired += 1
+            REP.rec("M4", cond["type"], True, ("FIRED " if ok else "idle ") + reason[:60])
+        except Exception as e:  # noqa: BLE001
+            REP.rec("M4", cond["type"], False, str(e)[:80])
+    REP.rec("M4", "conditions_evaluated", ok_n >= 4, f"ok={ok_n}/{len(conds)} fired={fired}")
+
+
+def m5_ai_triggers() -> None:
+    from gate_bot.strategist.trigger_store import (
+        AITriggerPolicy,
+        TriggerPolicyError,
+        validate_trigger_payload,
+    )
+
+    policy = AITriggerPolicy(enabled=True, max_active=3)
+    # reject unknown type
+    try:
+        validate_trigger_payload({"type": "evil", "symbol": "BTC_USDT"}, policy, ["BTC_USDT"])
+        REP.rec("M5", "reject_bad_type", False, "should reject")
+    except TriggerPolicyError as e:
+        REP.rec("M5", "reject_bad_type", True, str(e)[:60])
+    # reject symbol outside universe
+    try:
+        validate_trigger_payload({"type": "price_break", "symbol": "ETH_USDT", "side": "above"}, policy, ["BTC_USDT"])
+        REP.rec("M5", "reject_bad_symbol", False, "should reject")
+    except TriggerPolicyError as e:
+        REP.rec("M5", "reject_bad_symbol", True, str(e)[:60])
+    # accept valid + TTL fields
+    try:
+        norm = validate_trigger_payload(
+            {"type": "price_break", "symbol": "BTC_USDT", "side": "above", "ttl_sec": 600},
+            policy, ["BTC_USDT"],
+        )
+        REP.rec("M5", "accept_valid", bool(norm), str(norm)[:70])
+    except Exception as e:  # noqa: BLE001
+        REP.rec("M5", "accept_valid", False, str(e)[:80])
+
+
 # ── M11 risk rejects ────────────────────────────────────────────────────────
 
 
@@ -302,6 +360,8 @@ def phase_readonly(env: str = "live") -> None:
     m1_market(client, env)
     m2_indicators(client)
     m3_contract(client)
+    m4_conditions(client)
+    m5_ai_triggers()
     m6_llm(client)
     m11_risk()
     m13_journal()
@@ -392,7 +452,7 @@ def main() -> int:
     try:
         if args.phase in ("readonly", "all"):
             env = args.env or "testnet"
-            if want("M1") or want("M2") or want("M3") or want("M6") or want("M11") or want("M13") or not only:
+            if want("M1") or want("M2") or want("M3") or want("M4") or want("M5") or want("M6") or want("M11") or want("M13") or not only:
                 phase_readonly(env)
                 if args.phase == "all" and (os.environ.get("GATE_API_KEY")):
                     phase_readonly("live")
