@@ -964,7 +964,7 @@ class Executor:
             "trigger": {
                 "strategy_type": 0,
                 "price_type": PRICE_TYPE_MAP.get(intent.trigger_price_type, 0),
-                "price": str(trigger_price),
+                "price": str(round_price(float(trigger_price), meta)),
                 "rule": int(rule),
             },
         }
