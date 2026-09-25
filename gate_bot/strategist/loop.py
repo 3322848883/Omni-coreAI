@@ -24,7 +24,7 @@ from .prompt import build_system_prompt, build_user_prompt, load_strategy_prompt
 from .risk import RiskConfig, apply_risk
 from .schema import PlanError, parse_plan_text
 from .snapshot import collect_snapshot
-from .tools import TOOL_GUIDE, extract_tool_calls, run_tool
+from .tools import NATIVE_TOOLS, TOOL_GUIDE, extract_tool_calls, run_tool
 from .triggers import check_conditions, parse_conditions
 from .trigger_store import AITriggerPolicy, AITriggerStore, TriggerPolicyError, validate_trigger_payload
 
@@ -222,16 +222,19 @@ class PlanRunner:
         return self.llm.chat(system, user)
 
     def _chat_with_tools(self, system: str, user: str) -> str:
-        """Multi-round: model may request market tools; final reply is Plan JSON."""
+        """Official function-calling loop; falls back to text tool_calls JSON."""
         tools_on = bool(self.cfg.tools.get("enabled"))
         max_rounds = int(self.cfg.tools.get("max_rounds") or 3)
+        native = bool(self.cfg.tools.get("native", True))
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
-        text = self._llm_send(messages)
         if not tools_on:
-            return text
+            return self._llm_send(messages)
+        if native and hasattr(self.llm, "chat_message_full"):
+            return self._chat_native_tools(messages, max_rounds)
+        text = self._llm_send(messages)
         for _round in range(max(1, max_rounds)):
             calls = extract_tool_calls(text)
             if not calls:
@@ -240,41 +243,52 @@ class PlanRunner:
             for c in calls[:8]:
                 name = c.get("tool") or c.get("name") or ""
                 args = c.get("args") or c.get("arguments") or {}
-                results.append(
-                    {
-                        "tool": name,
-                        "ok": True,
-                        "result": run_tool(
-                            self.client,
-                            name,
-                            args,
-                            env=self.cfg.env,
-                            bot_root=self.cfg.bot_root,
-                            market_cfg=self.cfg.market,
-                        ),
-                    }
-                )
+                results.append({"tool": name, "result": run_tool(
+                    self.client, name, args,
+                    env=self.cfg.env, bot_root=self.cfg.bot_root, market_cfg=self.cfg.market,
+                )})
             messages.append({"role": "assistant", "content": text})
-            messages.append(
-                {
-                    "role": "user",
-                    "content": "【工具结果】\n"
-                    + json.dumps(results, ensure_ascii=False)
-                    + "\n\n若信息足够，请只输出最终 Plan JSON；仍需数据则继续 tool_calls。",
-                }
-            )
-            text = self._llm_send(messages)
-        # last round: if still tool_calls, force plan once
-        if extract_tool_calls(text):
-            messages.append({"role": "assistant", "content": text})
-            messages.append(
-                {
-                    "role": "user",
-                    "content": "工具轮数已用尽。请不要再调用工具，根据已有信息直接输出 Plan JSON（可 hold）。",
-                }
-            )
+            messages.append({
+                "role": "user",
+                "content": "【工具结果】\n" + json.dumps(results, ensure_ascii=False)
+                + "\n\n若信息足够，请只输出最终 Plan JSON；仍需数据则继续 tool_calls。",
+            })
             text = self._llm_send(messages)
         return text
+
+    def _chat_native_tools(self, messages: list, max_rounds: int) -> str:
+        """DeepSeek function calling + thinking: must echo reasoning_content on tool turns."""
+        for _round in range(max(1, max_rounds) + 1):
+            msg = self.llm.chat_message_full(messages, tools=NATIVE_TOOLS, tool_choice="auto")
+            calls = msg.get("tool_calls") or []
+            if not calls:
+                return msg.get("content") or ""
+            # official: append full assistant message incl. reasoning_content
+            messages.append({
+                "role": "assistant",
+                "content": msg.get("content") or "",
+                "reasoning_content": msg.get("reasoning_content") or "",
+                "tool_calls": calls,
+            })
+            for tc in calls[:8]:
+                fn = tc.get("function") or {}
+                name = fn.get("name") or ""
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except Exception:  # noqa: BLE001
+                    args = {}
+                result = run_tool(
+                    self.client, name, args,
+                    env=self.cfg.env, bot_root=self.cfg.bot_root, market_cfg=self.cfg.market,
+                )
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.get("id") or "",
+                    "content": json.dumps(result, ensure_ascii=False),
+                })
+        # force final without tools
+        msg = self.llm.chat_message_full(messages)
+        return msg.get("content") or ""
 
     def _kline_closed(self) -> bool:
         """True when latest candle timestamp for first symbol advances."""

@@ -35,6 +35,102 @@ TOOL_GUIDE = """【行情工具 · 按需调用】
 
 TOOL_NAMES = ("klines", "indicators", "ticker", "orderbook", "contract", "stats", "account")
 
+# Official Chat Completions tools (function calling)
+NATIVE_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "klines",
+            "description": "Fetch OHLCV candles for a symbol and timeframe.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "e.g. BTC_USDT"},
+                    "tf": {"type": "string", "enum": ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                },
+                "required": ["symbol", "tf"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "indicators",
+            "description": "Latest indicator values and series for symbol/tf.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string"},
+                    "tf": {"type": "string"},
+                    "names": {"type": "array", "items": {"type": "string"}},
+                    "limit": {"type": "integer", "minimum": 5, "maximum": 200},
+                },
+                "required": ["symbol", "tf"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ticker",
+            "description": "Last/mark/funding/24h stats for a symbol.",
+            "parameters": {
+                "type": "object",
+                "properties": {"symbol": {"type": "string"}},
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "orderbook",
+            "description": "Top of book depth.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "contract",
+            "description": "Contract metadata (quanto, min notional, rounds, max leverage).",
+            "parameters": {
+                "type": "object",
+                "properties": {"symbol": {"type": "string"}},
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "stats",
+            "description": "Open interest and related stats.",
+            "parameters": {
+                "type": "object",
+                "properties": {"symbol": {"type": "string"}},
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "account",
+            "description": "Account balances and open positions.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+]
+
 
 def _f(v: Any) -> Optional[float]:
     try:
