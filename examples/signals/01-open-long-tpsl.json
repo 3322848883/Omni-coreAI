@@ -1,0 +1,16 @@
+{
+  "comment": "L1 基础：市价开多 + 触价市价止盈止损（最常见一笔）",
+  "action": "open_long",
+  "symbol": "BTC_USDT",
+  "size_usd": 25,
+  "type": "market",
+  "tp": 87000,
+  "sl": 83500,
+  "tp_mode": "trigger",
+  "sl_mode": "trigger",
+  "tp_type": "market",
+  "sl_type": "market",
+  "trigger_price_type": "mark",
+  "label": "basic-long",
+  "meta": {"signal_id": "ex-01", "kind": "single_entry"}
+}

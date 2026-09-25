@@ -1,0 +1,12 @@
+{
+  "comment": "L2：按可用余额比例开仓 + 管理减仓",
+  "action": "open_long",
+  "symbol": "SOL_USDT",
+  "size_pct": 0.05,
+  "type": "market",
+  "sl": 108,
+  "tp": 125,
+  "leverage": 5,
+  "label": "pct-open",
+  "meta": {"signal_id": "ex-09"}
+}

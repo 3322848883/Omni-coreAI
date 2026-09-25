@@ -1,0 +1,5 @@
+{
+  "comment": "L1：观望 / 空 action 不下单",
+  "action": "hold",
+  "meta": {"signal_id": "ex-03", "reasoning": "震荡无信号"}
+}

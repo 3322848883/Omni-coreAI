@@ -1,0 +1,13 @@
+{
+  "comment": "L3：突破进场（不是止损！）+ 保护 SL",
+  "action": "stop_entry_long",
+  "symbol": "BTC_USDT",
+  "size_usd": 20,
+  "trigger_price": 87000,
+  "type": "market",
+  "sl": 85500,
+  "tp": 89500,
+  "trigger_price_type": "mark",
+  "label": "breakout-long",
+  "meta": {"signal_id": "ex-05", "kind": "breakout_entry"}
+}

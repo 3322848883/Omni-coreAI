@@ -1,0 +1,9 @@
+{
+  "comment": "L4：orders[] 多腿 — 同文件多动作（加仓+减仓）",
+  "replace": "symbol",
+  "orders": [
+    {"action": "add_long", "symbol": "BTC_USDT", "size_usd": 15, "type": "limit", "price": 83000, "sl": 81500, "label": "multi-a"},
+    {"action": "reduce_long", "symbol": "ETH_USDT", "size": 1, "label": "multi-r"}
+  ],
+  "meta": {"signal_id": "ex-07", "kind": "multi_leg"}
+}

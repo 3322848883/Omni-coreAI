@@ -1,0 +1,9 @@
+{
+  "comment": "L2：全平 / 撤单 / flatten（管理单，无 SL 要求）",
+  "orders": [
+    {"action": "cancel_price_all", "symbol": "BTC_USDT"},
+    {"action": "flatten", "symbol": "BTC_USDT"},
+    {"action": "close_all", "symbol": "ETH_USDT"}
+  ],
+  "meta": {"signal_id": "ex-08", "kind": "manage"}
+}

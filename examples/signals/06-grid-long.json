@@ -1,0 +1,15 @@
+{
+  "comment": "L4：单向网格 — 多价位挂买单（每档独立）",
+  "action": "grid",
+  "symbol": "BTC_USDT",
+  "side": "long",
+  "type": "limit",
+  "sl": 82000,
+  "levels": [
+    {"price": 83500, "size": 1},
+    {"price": 83000, "size": 1},
+    {"price": 82500, "size": 1}
+  ],
+  "label": "grid-long",
+  "meta": {"signal_id": "ex-06", "kind": "grid"}
+}

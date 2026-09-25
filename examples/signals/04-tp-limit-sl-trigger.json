@@ -1,0 +1,14 @@
+{
+  "comment": "L2：止盈用限价挂单（maker），止损用条件单市价（保证出场）",
+  "action": "open_long",
+  "symbol": "BTC_USDT",
+  "size_usd": 25,
+  "type": "market",
+  "tp": 87500,
+  "sl": 83800,
+  "tp_mode": "limit_order",
+  "sl_mode": "trigger",
+  "sl_type": "market",
+  "label": "tp-limit-sl-trigger",
+  "meta": {"signal_id": "ex-04"}
+}
