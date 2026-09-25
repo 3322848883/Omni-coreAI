@@ -166,8 +166,13 @@ NATIVE_TOOLS = [
         "type": "function",
         "function": {
             "name": "account",
-            "description": "Account balances and open positions.",
-            "parameters": {"type": "object", "properties": {}},
+            "description": "REST account: balances, positions, open orders, TP/SL protections (authoritative, not DB).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "optional; default uses positions/open orders symbols"}
+                },
+            },
         },
     },
     {
@@ -362,23 +367,79 @@ def run_tool(
             return rows[-1] if rows else {"symbol": sym, "note": "no stats"}
 
         if name == "account":
+            # Always REST (authoritative); local account.db may lag (no keys / stalled push)
             acc = client.get_account() or {}
-            pos = [
-                {
+            pos = []
+            for p in (client.get_positions() or []):
+                if int(p.get("size") or 0) == 0:
+                    continue
+                pos.append({
                     "contract": p.get("contract"),
                     "size": p.get("size"),
                     "mode": p.get("mode"),
                     "entry_price": p.get("entry_price"),
                     "leverage": p.get("leverage"),
-                }
-                for p in (client.get_positions() or [])
-                if int(p.get("size") or 0) != 0
-            ]
+                    "unrealised_pnl": p.get("unrealised_pnl"),
+                    "liq_price": p.get("liq_price"),
+                    "margin": p.get("margin"),
+                })
+            open_orders = []
+            price_orders = []
+            syms = args.get("symbols") or ([args.get("symbol")] if args.get("symbol") else [])
+            if not syms:
+                try:
+                    rows = client.list_orders() or []
+                    syms = sorted({o.get("contract") for o in rows if o.get("contract")})
+                except Exception:  # noqa: BLE001
+                    syms = []
+                if not syms:
+                    # price-only leftovers (TP/SL without entry)
+                    try:
+                        ps = client.list_price_orders(None) or []
+                        syms = sorted({
+                            (p.get("contract") or (p.get("initial") or {}).get("contract") or "")
+                            for p in ps
+                        } - {""})
+                    except Exception:  # noqa: BLE001
+                        pass
+            for s in set(x for x in syms if x) or ({args["symbol"]} if args.get("symbol") else set()):
+                try:
+                    for o in (client.list_orders(s) or []):
+                        open_orders.append({
+                            "id": o.get("id"),
+                            "contract": s,
+                            "size": o.get("size"),
+                            "price": o.get("price"),
+                            "left": o.get("left"),
+                            "status": o.get("status"),
+                            "text": o.get("text"),
+                            "tif": o.get("tif"),
+                        })
+                except Exception as e:  # noqa: BLE001
+                    open_orders.append({"error": str(e)[:80], "contract": s})
+                try:
+                    for p in (client.list_price_orders(s) or []):
+                        ini = p.get("initial") or {}
+                        trg = p.get("trigger") or {}
+                        price_orders.append({
+                            "id": p.get("id"),
+                            "contract": s,
+                            "size": ini.get("size"),
+                            "trigger_price": trg.get("price"),
+                            "rule": trg.get("rule"),
+                            "text": ini.get("text") or p.get("text"),
+                            "status": p.get("status"),
+                        })
+                except Exception as e:  # noqa: BLE001
+                    price_orders.append({"error": str(e)[:80], "contract": s})
             return {
+                "source": "rest",
                 "available": acc.get("available"),
                 "total": acc.get("total"),
                 "position_mode": acc.get("position_mode"),
                 "positions": pos,
+                "open_orders": open_orders,
+                "protections": price_orders,
             }
 
         # ── aux_cache.db (existing pa-data-source data) ──

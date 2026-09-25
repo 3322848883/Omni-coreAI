@@ -220,6 +220,43 @@ def collect_snapshot(
             account["error"] = f"positions: {e}"
             account.setdefault("positions", [])
             meta["degraded"].append("positions")
+        # REST open orders + TP/SL (authoritative for position management)
+        try:
+            oos = []
+            for o in (client.list_orders() or []):
+                oos.append({
+                    "contract": o.get("contract"),
+                    "id": o.get("id"),
+                    "size": o.get("size"),
+                    "price": o.get("price"),
+                    "left": o.get("left"),
+                    "status": o.get("status"),
+                    "text": o.get("text"),
+                })
+            account["open_orders"] = oos
+        except Exception as e:  # noqa: BLE001
+            account["open_orders"] = []
+            meta["degraded"].append("open_orders")
+        try:
+            prot = []
+            syms = set(symbols) | {p.get("contract") for p in account.get("positions") or []}
+            for s in sorted(x for x in syms if x):
+                for p in (client.list_price_orders(s) or []):
+                    ini = p.get("initial") or {}
+                    trg = p.get("trigger") or {}
+                    prot.append({
+                        "contract": s,
+                        "id": p.get("id"),
+                        "size": ini.get("size"),
+                        "trigger_price": trg.get("price"),
+                        "rule": trg.get("rule"),
+                        "text": ini.get("text") or p.get("text"),
+                        "status": p.get("status"),
+                    })
+            account["protections"] = prot
+        except Exception as e:  # noqa: BLE001
+            account["protections"] = []
+            meta["degraded"].append("protections")
 
     return {
         "interval": interval,
