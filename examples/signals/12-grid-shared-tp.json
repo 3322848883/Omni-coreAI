@@ -1,0 +1,18 @@
+{
+  "comment": "L4 网格模式2：梯度多级开仓，共用一个止盈（tp_scope=shared），每档仍可有独立止损",
+  "action": "grid",
+  "symbol": "BTC_USDT",
+  "side": "long",
+  "type": "limit",
+  "tp_scope": "shared",
+  "sl_scope": "per_level",
+  "tp": 86500,
+  "sl": 81800,
+  "levels": [
+    {"price": 83800, "size": 1},
+    {"price": 83300, "size": 1},
+    {"price": 82800, "size": 1}
+  ],
+  "label": "g-shared-tp",
+  "meta": {"signal_id": "ex-12", "kind": "grid_shared_tp"}
+}

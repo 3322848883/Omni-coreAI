@@ -522,6 +522,9 @@ class Executor:
             filled = abs(int(entry_order.get("size") or 0))
         # simultaneous hang: exit legs use the SAME size as entry plan
         exit_size = int(contracts)
+        # grid shared TP/SL: one exit leg sized to total planned contracts
+        if intent.tp_size_override and intent.tp is not None:
+            exit_size = int(intent.tp_size_override)
         detail["exit_size"] = exit_size
         detail["filled_size"] = filled
         detail["hang_mode"] = "simultaneous"

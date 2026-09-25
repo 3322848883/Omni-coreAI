@@ -1,0 +1,18 @@
+{
+  "comment": "L4 网格模式1：多级开仓，每档一一对应止盈止损（tp_scope/sl_scope=per_level）",
+  "action": "grid",
+  "symbol": "BTC_USDT",
+  "side": "long",
+  "type": "limit",
+  "tp_scope": "per_level",
+  "sl_scope": "per_level",
+  "tp": 86000,
+  "sl": 82000,
+  "levels": [
+    {"price": 83800, "size": 1},
+    {"price": 83300, "size": 1},
+    {"price": 82800, "size": 1}
+  ],
+  "label": "g-perlevel",
+  "meta": {"signal_id": "ex-11", "kind": "grid_per_level_tp"}
+}

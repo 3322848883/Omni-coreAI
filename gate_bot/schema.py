@@ -72,6 +72,10 @@ class Intent:
     tp_type: str = "limit"
     sl_type: str = "limit"
     # trigger = price_order (conditional); limit_order = resting reduce_only limit
+    tp_scope: str = "per_level"  # per_level | shared (grid)
+    sl_scope: str = "per_level"
+    tp_size_override: Optional[int] = None
+    sl_size_override: Optional[int] = None
     tp_mode: str = "trigger"
     sl_mode: str = "trigger"
     tp_limit_price: Optional[float] = None
@@ -410,6 +414,11 @@ def _parse_grid(data: dict, default_label: str) -> Intent:
 
     label = str(data.get("label") or default_label)
     tp = _f(data.get("tp"), "tp")
+    tp_scope = str(data.get("tp_scope") or "per_level").lower()
+    sl_scope = str(data.get("sl_scope") or "per_level").lower()
+    for nm, sc in (("tp_scope", tp_scope), ("sl_scope", sl_scope)):
+        if sc not in ("per_level", "shared"):
+            raise SchemaError(f"{nm} must be per_level|shared")
     sl = _f(data.get("sl"), "sl")
     meta = data.get("meta") or {}
 
@@ -449,6 +458,8 @@ def _parse_grid(data: dict, default_label: str) -> Intent:
         leverage=_i(data.get("leverage"), "leverage"),
         margin_mode=str(data["margin_mode"]).lower() if data.get("margin_mode") else None,
         label=label,
+        tp_scope=tp_scope,
+        sl_scope=sl_scope,
         meta={**(meta or {}), "levels": norm_levels},
     )
 
@@ -499,7 +510,7 @@ def expand_signal(signal: SignalFile) -> list[Intent]:
             continue
         levels = intent.meta.get("levels") or []
         open_action = "open_long" if intent.side == "long" else "open_short"
-        # only attach tp/sl to the last level to avoid duplicate close-triggers
+        total_size = sum(int(lv.get("size") or 0) for lv in levels)
         for i, lv in enumerate(levels):
             last = i == len(levels) - 1
             out.append(
@@ -511,8 +522,10 @@ def expand_signal(signal: SignalFile) -> list[Intent]:
                     order_type=intent.order_type,
                     price=lv.get("price"),
                     leverage=intent.leverage,
-                    tp=intent.tp,
-                    sl=intent.sl,
+                    tp=intent.tp if (intent.tp_scope != 'shared' or last) else None,
+                    sl=intent.sl if (intent.sl_scope != 'shared' or last) else None,
+                    tp_size_override=total_size if (intent.tp and intent.tp_scope == 'shared' and last) else None,
+                    sl_size_override=total_size if (intent.sl and intent.sl_scope == 'shared' and last) else None,
                     tp_type=intent.tp_type,
                     sl_type=intent.sl_type,
                     tp_mode=intent.tp_mode,
