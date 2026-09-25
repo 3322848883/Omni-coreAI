@@ -3,7 +3,7 @@
   "replace": "symbol",
   "orders": [
     {"action": "add_long", "symbol": "BTC_USDT", "size_usd": 15, "type": "limit", "price": 83000, "sl": 81500, "label": "multi-a"},
-    {"action": "reduce_long", "symbol": "ETH_USDT", "size": 1, "label": "multi-r"}
+    {"action": "add_long", "symbol": "BTC_USDT", "size_usd": 15, "type": "limit", "price": 82500, "sl": 81000, "label": "multi-b"}
   ],
   "meta": {"signal_id": "ex-07", "kind": "multi_leg"}
 }

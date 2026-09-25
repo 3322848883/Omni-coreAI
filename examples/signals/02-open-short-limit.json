@@ -2,7 +2,7 @@
   "comment": "L1：限价开空 + 止盈止损（未成交也同时挂保护）",
   "action": "open_short",
   "symbol": "ETH_USDT",
-  "size_usd": 20,
+  "size_usd": 40,
   "type": "limit",
   "price": 2700,
   "tp": 2580,

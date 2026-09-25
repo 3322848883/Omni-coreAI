@@ -236,8 +236,11 @@ class TestSchema(unittest.TestCase):
         self.assertEqual(len(intents), 2)
         self.assertEqual(intents[0].action, "open_long")
         self.assertEqual(intents[0].price, 70000)
-        self.assertIsNone(intents[0].tp)
+        # every grid level carries protection (require_sl)
+        self.assertEqual(intents[0].tp, 72000)
+        self.assertEqual(intents[0].sl, 68000)
         self.assertEqual(intents[1].tp, 72000)
+        self.assertEqual(intents[1].sl, 68000)
 
     def test_reject_action_plus_orders(self):
         with self.assertRaises(SchemaError):
