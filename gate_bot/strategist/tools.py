@@ -37,6 +37,7 @@ TOOL_NAMES = (
     # aux-cache (pa-data-source) — existing data only
     "trades_flow", "liquidations", "market_stats", "tech_analysis", "coin_info", "onchain", "social",
     "overview", "sentiment", "macro",
+    "smc",
 )
 
 
@@ -598,6 +599,17 @@ def run_tool(
                 (lim,),
             )
             return {"macro_series": series, "macro_events": events}
+
+        if name == "smc":
+            from .smc import compute_smc, smc_summary
+
+            sym = str(args.get("symbol") or args.get("sym") or "BTC_USDT")
+            tf = str(args.get("tf") or args.get("interval") or "15m").lower()
+            lim = max(30, min(int(args.get("limit") or 150), 300))
+            res = resolve_candles(client, sym, tf, lim, market_cfg=market_cfg, env=env, bot_root=bot_root)
+            out = smc_summary(compute_smc(list(res.rows)))
+            out.update({"symbol": sym, "tf": tf, "source": res.source, "n": len(res.rows)})
+            return out
     except GateApiError as e:
         return {"error": str(e)[:160], "tool": name}
     except Exception as e:  # noqa: BLE001
