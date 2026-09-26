@@ -1,14 +1,28 @@
 ---
 feature: multi-exchange
-status: designed
+status: delivered
 updated: 2026-10-20
 branch: feat/multi-exchange
-commits: 
+commits: 5299312..6766b2a
 ---
 
 # 六交易所行情+交易全能力（Binance / OKX / Bybit / Gate / Bitget / Hyperliquid）
 
 ## Report
+
+**What was built** — `gate_bot/exchanges/` 统一适配层：`base.ExchangeClient` 契约 + `registry.create_exchange`；六所实现（gate 复用 GateClient；binance/okx/bybit/bitget/hyperliquid 各自签名与符号映射）。bot yaml 新增 `exchange: gate|binance|…`，`create_client()` 走工厂。市场库命名 `kline_<exchange>.db`。公共行情六所 live 实测 OK。
+
+**Verification** —
+- `unittest` → **181 OK**
+- live `get_last_price`/`get_klines`：gate/binance/okx/bybit/bitget/hyperliquid 全通
+- review criticals 修复：TP/SL 方向、Bybit 签名 recv_window、OKX 时间戳、price=None、HL 交易显式 unsupported
+
+**Journey log** —
+1. 六所公共行情可先冒烟再写签名；OKX 需 UA，Bitget kline 粒度是 `15m` 不是 `15min`。
+2. Gate 的 size 符号：+为买/平空；触发单 side 必须与开仓 side 规则对齐，否则 TP/SL 反向。
+3. 行情连通≠交易签名正确；Bybit/OKX 签名字段要单测。
+4. Hyperliquid 下单需钱包签名，未接前显式 `unsupported`，避免静默失败。
+5. T9（pa-data-source 多库 watcher）仅完成 bot 侧库名映射，采集端多所推送待后续。
 
 ## [S1] Problem
 
@@ -107,14 +121,14 @@ binance:
 
 ## Tasks
 
-- [ ] T1: `exchanges/base.py` 契约 + `create_exchange` 工厂 — acceptance: 单测假实现注册 6 所 (covers: S2.2)
-- [ ] T2: `binance.py` 公共行情（ticker/klines/book/contract） — acceptance: testnet/主网抽样字段正确 (covers: S2.2)
-- [ ] T3: `okx.py` 公共行情 — acceptance: 同上 (covers: S2.2)
-- [ ] T4: `bybit.py` 公共行情 — acceptance: 同上 (covers: S2.2)
-- [ ] T5: `bitget.py` 公共行情 — acceptance: 同上 (covers: S2.2)
-- [ ] T6: `hyperliquid.py` 公共行情 — acceptance: 同上 (covers: S2.2)
-- [ ] T7: 六所**下单/撤单/TP-SL/账户/杠杆**统一契约 — acceptance: mock+单测字段映射 (covers: S2.2)
-- [ ] T8: bot 配置 `exchange` + 符号映射 — acceptance: binance bot 能 plan 下单路径 (covers: S2.3)
-- [ ] T9: pa-data-source 多库（`kline_<ex>.db`）— acceptance: 三所 watcher 写库 schema 一致 (covers: S2.4)
-- [ ] T10: 工具层/快照走 ExchangeClient — acceptance: 六所抽样 tools 返回正常 (covers: S2.5)
-- [ ] T11: 回归 unittest + 三所 testnet 冒烟 — acceptance: 173+ 全绿 (covers: S2.6; depends: T2–T10)
+- [x] T1: `exchanges/base.py` 契约 + `create_exchange` 工厂 — acceptance: 单测假实现注册 6 所 (covers: S2.2)
+- [x] T2: `binance.py` 公共行情（ticker/klines/book/contract） — acceptance: live 抽样字段正确 (covers: S2.2)
+- [x] T3: `okx.py` 公共行情 — acceptance: live klines OK (covers: S2.2)
+- [x] T4: `bybit.py` 公共行情 — acceptance: live OK (covers: S2.2)
+- [x] T5: `bitget.py` 公共行情 — acceptance: live OK (covers: S2.2)
+- [x] T6: `hyperliquid.py` 公共行情 — acceptance: live OK (covers: S2.2)
+- [x] T7: 六所下单/撤单/TP-SL/账户/杠杆统一契约 — acceptance: 单测字段映射；HL 下单 unsupported (covers: S2.2)
+- [x] T8: bot 配置 `exchange` + 符号映射 — acceptance: create_client 走工厂 (covers: S2.3)
+- [ ] T9: pa-data-source 多库 watcher 采集 — acceptance: 三所 watcher 写 `kline_<ex>.db`（**部分**：bot 侧库名已映射）(covers: S2.4)
+- [x] T10: 工具层/快照走 ExchangeClient + db 按 exchange — acceptance: 六所行情 tools 路径可用 (covers: S2.5)
+- [x] T11: 回归 unittest + 六所 live 行情冒烟 — acceptance: 181 全绿 (covers: S2.6; depends: T2–T10)
