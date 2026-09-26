@@ -107,7 +107,8 @@ class Supervisor:
         env["GATE_LOCK_HELD"] = "1"
         flags = 0
         if os.name == "nt":
-            flags = 0x00000008 | 0x00000200  # DETACHED | NEW_PROCESS_GROUP
+            # windowless: DETACHED | NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+            flags = 0x00000008 | 0x00000200 | 0x08000000
         else:
             env.setdefault("PYTHONUNBUFFERED", "1")
         ch.popen = subprocess.Popen(
