@@ -457,13 +457,15 @@ def parse_indicator_name(name: str) -> dict[str, Any]:
         if n.startswith(kind) and n[len(kind) :].isdigit():
             return {"kind": kind, "period": int(n[len(kind) :]), "name": n}
 
-    # EMA + smoothing + BB (Pine Moving Average Exponential)
+    # EMA + smoothing + BB (Pine Moving Average Exponential) — 升级版默认套件
     if n.startswith("ema_smooth"):
-        rest = n[len("ema_smooth") :]
         return {"kind": "ema_smooth", "ema_len": 20, "ma_len": 14, "ma_type": "ema", "name": n}
     if n.startswith("ema_boll"):
         return {"kind": "ema_boll", "ema_len": 20, "ma_len": 14, "k": 2.0, "field": "upper",
                 "ma_type": "ema", "name": n}
+    # pine_ema: 一次产出 ema20 + smooth + bands（替代旧单线 EMA 默认用法）
+    if n in ("pine_ema", "ema_study", "pine_ema20"):
+        return {"kind": "pine_ema", "ema_len": 20, "ma_len": 14, "k": 2.0, "ma_type": "ema", "name": n}
 
     m = _MACD_PARAM_RE.match(n)
     if m:
@@ -538,6 +540,20 @@ def attach_indicators(rows: list[dict[str, Any]], wanted: list[str] | None = Non
             series = ema_smooth(closes, spec["ema_len"], spec["ma_len"], spec.get("ma_type", "ema"), vols)
             for i, r in enumerate(rows):
                 r[spec["name"]] = series[i]
+        elif kind == "pine_ema":
+            # upgraded EMA study: ema + smooth + boll-on-ema (replaces single-line default)
+            closes = [float(r.get("c") or 0) for r in rows]
+            vols = [float(r.get("v") or 0) for r in rows]
+            base = ema(closes, spec["ema_len"])
+            sm = ema_smooth(closes, spec["ema_len"], spec["ma_len"], spec.get("ma_type", "ema"), vols)
+            bands = ema_boll(closes, spec["ema_len"], spec["ma_len"], spec.get("k", 2.0),
+                             spec.get("ma_type", "ema"), vols)
+            for i, r in enumerate(rows):
+                r["ema20"] = base[i]
+                r["ema_smooth"] = sm[i]
+                r["ema_boll_middle"] = bands["middle"][i]
+                r["ema_boll_upper"] = bands["upper"][i]
+                r["ema_boll_lower"] = bands["lower"][i]
         elif kind == "ema_boll":
             key = ("emb", spec["ema_len"], spec["ma_len"], spec.get("k"), spec.get("ma_type"))
             if key not in done_boll:

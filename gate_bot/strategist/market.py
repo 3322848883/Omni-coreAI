@@ -45,7 +45,7 @@ class MarketConfig:
     exchange: str = "gate"
     stale_factor: float = 2.0
     health_url: Optional[str] = None
-    indicators: list[str] = field(default_factory=lambda: ["ema20", "ema50", "atr14", "rsi14"])
+    indicators: list[str] = field(default_factory=lambda: ["pine_ema", "atr14"])
     # additional candle timeframes for multi-TF analysis (primary stays `interval`/timeframe)
     extra_timeframes: list[str] = field(default_factory=list)
     extra_candles: int = 20
