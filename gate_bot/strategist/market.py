@@ -41,6 +41,8 @@ class MarketConfig:
     mode: str = "rest_only"  # hybrid | rest_only | local_only
     pa_data_root: Optional[str] = None
     db: str = "kline.db"
+    # exchange id for multi-venue: gate|binance|okx|bybit|bitget|hyperliquid
+    exchange: str = "gate"
     stale_factor: float = 2.0
     health_url: Optional[str] = None
     indicators: list[str] = field(default_factory=lambda: ["ema20", "ema50", "atr14", "rsi14"])
@@ -120,6 +122,9 @@ def resolve_db_path(
     if root is None:
         return None
     name = (market_cfg.db if market_cfg else "kline.db") or "kline.db"
+    ex = (getattr(market_cfg, "exchange", "gate") or "gate").lower() if market_cfg else "gate"
+    if name == "kline.db" and ex and ex != "gate":
+        name = f"kline_{ex}.db"
     if str(env).lower() == "testnet":
         if name == "kline.db":
             name = "kline_testnet.db"

@@ -39,10 +39,19 @@ class BotConfig:
     account_risk: dict = field(default_factory=dict)
     # LLM strategist (per-bot strategy + risk)
     strategist: dict = field(default_factory=dict)
+    # exchange adapter: gate | binance | okx | bybit | bitget | hyperliquid
+    exchange: str = "gate"
 
-    def create_client(self) -> GateClient:
+    def create_client(self):
         key, secret = load_credentials(self.env, self.api_key_env, self.api_secret_env)
-        return GateClient(api_key=key, api_secret=secret, env=self.env)
+        from .exchanges import create_exchange
+
+        extra = {}
+        ps = os.environ.get(self.api_secret_env.replace("SECRET", "PASSPHRASE") or "") or os.environ.get("EXCHANGE_PASSPHRASE")
+        if ps:
+            extra["passphrase"] = ps
+        return create_exchange(self.exchange or "gate", env=self.env,
+                               api_key=key, api_secret=secret, **extra)
 
 
 def load_bot_config(path: Path) -> BotConfig:
@@ -65,6 +74,7 @@ def load_bot_config(path: Path) -> BotConfig:
         max_files_per_run=int(data.get("max_files_per_run") or 50),
         poll_interval_sec=float(data.get("poll_interval_sec") or 2.0),
         label_prefix=str(data.get("label_prefix") or ""),
+        exchange=str(data.get("exchange") or "gate").strip().lower(),
         position_policy=str(data.get("position_policy") or "strict").strip().lower(),
         default_replace=str(data.get("default_replace") or "none").strip().lower(),
         order_scope=str(data.get("order_scope") or "own").strip().lower(),
