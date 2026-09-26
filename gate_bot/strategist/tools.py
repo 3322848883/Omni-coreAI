@@ -606,9 +606,16 @@ def run_tool(
             sym = str(args.get("symbol") or args.get("sym") or "BTC_USDT")
             tf = str(args.get("tf") or args.get("interval") or "15m").lower()
             lim = max(30, min(int(args.get("limit") or 150), 300))
-            res = resolve_candles(client, sym, tf, lim, market_cfg=market_cfg, env=env, bot_root=bot_root)
-            out = smc_summary(compute_smc(list(res.rows)))
-            out.update({"symbol": sym, "tf": tf, "source": res.source, "n": len(res.rows)})
+            rows = None
+            source = "rest"
+            if hasattr(client, "get_klines"):
+                rows = client.get_klines(sym, tf, lim)
+            if not rows:
+                res = resolve_candles(client, sym, tf, lim, market_cfg=market_cfg, env=env, bot_root=bot_root)
+                rows = list(res.rows)
+                source = res.source
+            out = smc_summary(compute_smc(list(rows or [])))
+            out.update({"symbol": sym, "tf": tf, "source": source, "n": len(rows or [])})
             return out
     except GateApiError as e:
         return {"error": str(e)[:160], "tool": name}
