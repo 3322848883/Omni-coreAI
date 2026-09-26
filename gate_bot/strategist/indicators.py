@@ -549,7 +549,9 @@ def attach_indicators(rows: list[dict[str, Any]], wanted: list[str] | None = Non
             bands = ema_boll(closes, spec["ema_len"], spec["ma_len"], spec.get("k", 2.0),
                              spec.get("ma_type", "ema"), vols)
             for i, r in enumerate(rows):
-                r["ema20"] = base[i]
+                # keep DB ema20 if present (same contract as _fill_ema_from)
+                if r.get("ema20") is None:
+                    r["ema20"] = base[i]
                 r["ema_smooth"] = sm[i]
                 r["ema_boll_middle"] = bands["middle"][i]
                 r["ema_boll_upper"] = bands["upper"][i]
