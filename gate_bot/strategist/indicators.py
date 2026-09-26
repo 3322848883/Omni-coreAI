@@ -18,10 +18,16 @@ from typing import Any, Optional
 __all__ = [
     "ema",
     "sma",
+    "rma",
+    "wma",
+    "vwma",
+    "stdev",
     "rsi",
     "atr",
     "macd",
     "boll",
+    "ema_smooth",
+    "ema_boll",
     "parse_indicator_name",
     "attach_indicators",
     "latest_indicators",
@@ -61,6 +67,113 @@ def sma(values: list[float], period: int) -> list[Optional[float]]:
         run += values[i] - values[i - period]
         out[i] = run / period
     return out
+
+
+def rma(values: list[float], period: int) -> list[Optional[float]]:
+    """Wilder RMA / SMMA: seed=mean(first period), then prev*(n-1)/n + x/n."""
+    n = len(values)
+    out: list[Optional[float]] = [None] * n
+    if period <= 0 or n < period:
+        return out
+    prev = sum(values[:period]) / period
+    out[period - 1] = prev
+    for i in range(period, n):
+        prev = (prev * (period - 1) + values[i]) / period
+        out[i] = prev
+    return out
+
+
+def wma(values: list[float], period: int) -> list[Optional[float]]:
+    """Weighted MA: weights 1..period (Pine ta.wma)."""
+    n = len(values)
+    out: list[Optional[float]] = [None] * n
+    if period <= 0 or n < period:
+        return out
+    denom = period * (period + 1) / 2
+    for i in range(period - 1, n):
+        window = values[i - period + 1 : i + 1]
+        out[i] = sum((j + 1) * v for j, v in enumerate(window)) / denom
+    return out
+
+
+def vwma(values: list[float], volumes: list[float], period: int) -> list[Optional[float]]:
+    """Volume-weighted MA: sum(price*vol)/sum(vol)."""
+    n = len(values)
+    out: list[Optional[float]] = [None] * n
+    if period <= 0 or n < period:
+        return out
+    for i in range(period - 1, n):
+        pv = values[i - period + 1 : i + 1]
+        vv = volumes[i - period + 1 : i + 1]
+        sv = sum(vv)
+        out[i] = (sum(p * v for p, v in zip(pv, vv)) / sv) if sv else None
+    return out
+
+
+def stdev(values: list[float], period: int) -> list[Optional[float]]:
+    """Population standard deviation over rolling window (Pine ta.stdev default)."""
+    n = len(values)
+    out: list[Optional[float]] = [None] * n
+    if period <= 0 or n < period:
+        return out
+    for i in range(period - 1, n):
+        window = values[i - period + 1 : i + 1]
+        m = sum(window) / period
+        var = sum((x - m) ** 2 for x in window) / period
+        out[i] = var ** 0.5
+    return out
+
+
+def ema_smooth(
+    values: list[float],
+    ema_len: int,
+    ma_len: int = 14,
+    ma_type: str = "ema",
+    volumes: Optional[list[float]] = None,
+) -> list[Optional[float]]:
+    """Pine: EMA(src, len) then smooth with SMA/EMA/RMA/WMA/VWMA."""
+    base = ema(values, ema_len)
+    t = (ma_type or "ema").lower()
+    # smooth only the EMA tail; pass through Nones
+    xs = [v for v in base]
+    filled = [x if x is not None else 0.0 for x in xs]
+    if t == "sma":
+        s = sma(filled, ma_len)
+    elif t in ("smma", "rma"):
+        s = rma(filled, ma_len)
+    elif t == "wma":
+        s = wma(filled, ma_len)
+    elif t == "vwma" and volumes:
+        s = vwma(filled, list(volumes), ma_len)
+    else:
+        s = ema(filled, ma_len)
+    # mask where base EMA is None
+    return [None if base[i] is None else s[i] for i in range(len(base))]
+
+
+def ema_boll(
+    values: list[float],
+    ema_len: int = 20,
+    ma_len: int = 14,
+    k: float = 2.0,
+    ma_type: str = "ema",
+    volumes: Optional[list[float]] = None,
+) -> dict[str, list[Optional[float]]]:
+    """Pine EMA + smoothing + BB on the (smoothed) EMA series."""
+    src = ema_smooth(values, ema_len, ma_len, ma_type, volumes)
+    base = ema(values, ema_len)
+    middle = src
+    filled = [x if x is not None else 0.0 for x in base]
+    sd = stdev(filled, ma_len)
+    n = len(values)
+    upper: list[Optional[float]] = [None] * n
+    lower: list[Optional[float]] = [None] * n
+    for i in range(n):
+        if middle[i] is None or sd[i] is None:
+            continue
+        upper[i] = middle[i] + k * sd[i]
+        lower[i] = middle[i] - k * sd[i]
+    return {"middle": middle, "upper": upper, "lower": lower, "ema": base}
 
 
 def rsi(closes: list[float], period: int = 14) -> list[Optional[float]]:
@@ -340,9 +453,17 @@ _BOLL_PART_RE = re.compile(r"^boll_(upper|middle|lower)(?:_band)?$")
 def parse_indicator_name(name: str) -> dict[str, Any]:
     """Parse indicator name → spec dict; raise IndicatorNameError if unknown."""
     n = (name or "").strip().lower()
-    for kind in ("ema", "rsi", "atr", "ma", "sma"):
+    for kind in ("ema", "rsi", "atr", "ma", "sma", "rma", "wma", "vwma"):
         if n.startswith(kind) and n[len(kind) :].isdigit():
             return {"kind": kind, "period": int(n[len(kind) :]), "name": n}
+
+    # EMA + smoothing + BB (Pine Moving Average Exponential)
+    if n.startswith("ema_smooth"):
+        rest = n[len("ema_smooth") :]
+        return {"kind": "ema_smooth", "ema_len": 20, "ma_len": 14, "ma_type": "ema", "name": n}
+    if n.startswith("ema_boll"):
+        return {"kind": "ema_boll", "ema_len": 20, "ma_len": 14, "k": 2.0, "field": "upper",
+                "ma_type": "ema", "name": n}
 
     m = _MACD_PARAM_RE.match(n)
     if m:
@@ -400,6 +521,40 @@ def attach_indicators(rows: list[dict[str, Any]], wanted: list[str] | None = Non
             _fill_ema_from(rows, spec["name"], spec["period"])
         elif kind in ("ma", "sma"):
             _fill_sma_from(rows, spec["name"], spec["period"])
+        elif kind in ("rma", "wma", "vwma"):
+            closes = [float(r.get("c") or 0) for r in rows]
+            vols = [float(r.get("v") or 0) for r in rows]
+            if kind == "rma":
+                series = rma(closes, spec["period"])
+            elif kind == "wma":
+                series = wma(closes, spec["period"])
+            else:
+                series = vwma(closes, vols, spec["period"])
+            for i, r in enumerate(rows):
+                r[spec["name"]] = series[i]
+        elif kind == "ema_smooth":
+            closes = [float(r.get("c") or 0) for r in rows]
+            vols = [float(r.get("v") or 0) for r in rows]
+            series = ema_smooth(closes, spec["ema_len"], spec["ma_len"], spec.get("ma_type", "ema"), vols)
+            for i, r in enumerate(rows):
+                r[spec["name"]] = series[i]
+        elif kind == "ema_boll":
+            key = ("emb", spec["ema_len"], spec["ma_len"], spec.get("k"), spec.get("ma_type"))
+            if key not in done_boll:
+                closes = [float(r.get("c") or 0) for r in rows]
+                vols = [float(r.get("v") or 0) for r in rows]
+                bands = ema_boll(closes, spec["ema_len"], spec["ma_len"], spec.get("k", 2.0),
+                                 spec.get("ma_type", "ema"), vols)
+                for i, r in enumerate(rows):
+                    r["ema_boll_middle"] = bands["middle"][i]
+                    r["ema_boll_upper"] = bands["upper"][i]
+                    r["ema_boll_lower"] = bands["lower"][i]
+                done_boll.add(key)
+            field = spec.get("field") or "upper"
+            src = {"upper": "ema_boll_upper", "lower": "ema_boll_lower",
+                   "middle": "ema_boll_middle"}[field]
+            for i, r in enumerate(rows):
+                r[spec["name"]] = r.get(src)
         elif kind == "atr":
             _fill_atr_from(rows, spec["name"], spec["period"])
         elif kind == "rsi":
