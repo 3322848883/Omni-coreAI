@@ -123,6 +123,9 @@ class LLMClient:
             msg = choice["message"] or {}
             content = msg.get("content")
             self.last_reasoning = msg.get("reasoning_content") or ""
+            self.last_reasoning_chain = list(getattr(self, "last_reasoning_chain", []) or [])
+            if self.last_reasoning:
+                self.last_reasoning_chain.append(self.last_reasoning)
             self.last_finish_reason = choice.get("finish_reason")
             self.last_usage = data.get("usage") or {}
             self.last_model = data.get("model") or self.cfg.effective_model()

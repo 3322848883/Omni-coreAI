@@ -153,6 +153,15 @@ class PlanRunner:
         )
         text = self._chat_with_tools(system, user)
         try:
+            self._save_thinking(
+                cycle_id=cycle_id,
+                trigger=trigger,
+                content=text,
+                reasoning=list(getattr(self.llm, "last_reasoning_chain", []) or []),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        try:
             plan = parse_plan_text(text)
         except PlanError as e:
             log.error("plan parse failed: %s", e)
@@ -200,6 +209,44 @@ class PlanRunner:
             "trigger": trigger,
         }
 
+    def _save_thinking(self, **kw: Any) -> None:
+        """Persist LLM reasoning_content (CoT) for audit/replay."""
+        from datetime import datetime
+
+        out = self.history_dir
+        out.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        cid = str(kw.get("cycle_id") or "cycle").replace(":", "").replace("/", "-")[:40]
+        path = out / f"{ts}-{cid}.thinking.json"
+        payload = {
+            "ts": time.time(),
+            "cycle_id": kw.get("cycle_id"),
+            "trigger": kw.get("trigger"),
+            "reasoning_chain": kw.get("reasoning") or [],
+            "content_head": (kw.get("content") or "")[:500],
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        # also into sqlite ledger
+        try:
+            from ..ledger import Ledger, default_ledger_path
+
+            root = self.cfg.bot_root or Path.cwd()
+            led = Ledger(default_ledger_path(root))
+            led.insert_plan(
+                self.inbox.name,
+                cycle_id=kw.get("cycle_id"),
+                trigger=kw.get("trigger"),
+                orders=None,
+                notes=["thinking_saved:" + path.name],
+                reasoning=" | ".join((kw.get("reasoning") or [""])[:1])[:200],
+                raw={"thinking_file": path.name,
+                     "reasoning_chain": kw.get("reasoning") or [],
+                     "content_head": (kw.get("content") or "")[:200]},
+            )
+            led.close()
+        except Exception:  # noqa: BLE001
+            pass
+
     def _record_plan(self, **kw: Any) -> None:
         try:
             from ..ledger import Ledger, default_ledger_path
@@ -223,6 +270,8 @@ class PlanRunner:
 
     def _chat_with_tools(self, system: str, user: str) -> str:
         """Official function-calling loop; falls back to text tool_calls JSON."""
+        if hasattr(self.llm, "last_reasoning_chain"):
+            self.llm.last_reasoning_chain = []
         tools_on = bool(self.cfg.tools.get("enabled"))
         max_rounds = int(self.cfg.tools.get("max_rounds") or 3)
         native = bool(self.cfg.tools.get("native", True))
