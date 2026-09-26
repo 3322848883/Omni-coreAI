@@ -38,7 +38,8 @@ class BybitExchange(ExchangeClient):
             ts = str(int(time.time() * 1000))
             body = json.dumps(params) if method != "GET" else ""
             qs = "&".join(f"{k}={params[k]}" for k in sorted(params)) if method == "GET" else ""
-            sign_s = ts + self.api_key + qs + body
+            recv = headers.get("X-BAPI-RECV-WINDOW", "5000")
+            sign_s = ts + self.api_key + recv + qs + body
             sign = hmac.new(self.api_secret.encode(), sign_s.encode(), hashlib.sha256).hexdigest()
             headers = {
                 "X-BAPI-API-KEY": self.api_key,
@@ -156,7 +157,7 @@ class BybitExchange(ExchangeClient):
         native = self.mapper.native(body.get("contract") or body.get("symbol") or "")
         size = int(body.get("size") or 0)
         tif = (body.get("tif") or "GTC").upper()
-        order_type = "Market" if str(body.get("price")) in ("0", "0.0", "") else "Limit"
+        order_type = "Market" if str(body.get("price")) in ("0", "0.0", "", "None") else "Limit"
         params = {
             "category": "linear",
             "symbol": native,
@@ -179,7 +180,7 @@ class BybitExchange(ExchangeClient):
         size = int(ini.get("size") or 0)
         params = {
             "category": "linear", "symbol": native,
-            "side": "Sell" if size > 0 else "Buy",
+            "side": "Buy" if size > 0 else "Sell",
             "qty": str(abs(size)), "orderType": "Market",
             "triggerPrice": str(trig.get("price")), "reduceOnly": "true",
         }

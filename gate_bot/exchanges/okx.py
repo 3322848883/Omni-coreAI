@@ -46,7 +46,7 @@ class OkxExchange(ExchangeClient):
         headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 gate-signal-bot"}
         url = path if path.startswith("http") else f"{self.base}{path}"
         if signed:
-            ts = str(time.time())
+            ts = str(int(time.time() * 1000))  # ms
             if method == "GET" and params:
                 from urllib.parse import urlencode
 
@@ -56,7 +56,7 @@ class OkxExchange(ExchangeClient):
             headers.update({
                 "OK-ACCESS-KEY": self.api_key,
                 "OK-ACCESS-SIGN": self._sign(ts, method, path, body_s),
-                "OK-ACCESS-TIMESTAMP": ts + "000" if len(ts) < 13 else ts,
+                "OK-ACCESS-TIMESTAMP": ts,
                 "OK-ACCESS-PASSPHRASE": self.passphrase,
             })
             if self.env == "testnet":
@@ -161,7 +161,8 @@ class OkxExchange(ExchangeClient):
         }, signed=True)
 
     def set_margin_mode(self, symbol: str, mode: str):
-        return self._req("POST", "/api/v5/account/set-position-mode", {"posMode": "long_short_mode"}, signed=True)
+        # OKX: margin mode is per-position tdMode; expose no-op for unified API
+        return {"ok": True, "note": "okx tdMode set per order (cross/isolated)"}
 
     def is_dual_position_mode(self) -> bool:
         return True
@@ -175,10 +176,10 @@ class OkxExchange(ExchangeClient):
             "instId": native,
             "tdMode": "cross",
             "side": "buy" if size > 0 else "sell",
-            "ordType": tif_map.get(tif, "gtc") if str(body.get("price")) not in ("0", "0.0", "") else "market",
+            "ordType": tif_map.get(tif, "gtc") if str(body.get("price")) not in ("0", "0.0", "", "None") else "market",
             "sz": str(abs(size)),
         }
-        if str(body.get("price")) not in ("0", "0.0", ""):
+        if str(body.get("price")) not in ("0", "0.0", "", "None"):
             params["px"] = str(body.get("price"))
         if body.get("reduce_only"):
             params["reduceOnly"] = "true"
@@ -191,7 +192,7 @@ class OkxExchange(ExchangeClient):
         trig = body.get("trigger") or {}
         ini = body.get("initial") or {}
         size = int(ini.get("size") or 0)
-        side = "sell" if size > 0 else "buy"
+        side = "buy" if size > 0 else "sell"
         params = {
             "instId": native, "tdMode": "cross", "side": side,
             "ordType": "conditional", "sz": str(abs(size)),

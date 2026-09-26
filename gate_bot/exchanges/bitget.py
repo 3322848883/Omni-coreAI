@@ -158,7 +158,7 @@ class BitgetExchange(ExchangeClient):
             "tradeSide": "open", "orderType": "market" if str(body.get("price")) in ("0", "0.0", "") else "limit",
             "size": str(abs(size)),
         }
-        if str(body.get("price")) not in ("0", "0.0", ""):
+        if str(body.get("price")) not in ("0", "0.0", "", "None"):
             params["price"] = str(body.get("price"))
         if body.get("reduce_only"):
             params["tradeSide"] = "close"
@@ -173,7 +173,7 @@ class BitgetExchange(ExchangeClient):
         size = int(ini.get("size") or 0)
         params = {
             "productType": "USDT-FUTURES", "symbol": native,
-            "side": "sell" if size > 0 else "buy", "tradeSide": "close",
+            "side": "buy" if size > 0 else "sell", "tradeSide": "close",
             "orderType": "market", "size": str(abs(size)),
             "presetTakeProfitPrice": str(trig.get("price") if (trig.get("rule") == 1) else ""),
             "presetStopLossPrice": str(trig.get("price") if (trig.get("rule") == 2) else ""),

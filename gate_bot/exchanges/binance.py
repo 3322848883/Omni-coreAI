@@ -246,7 +246,7 @@ class BinanceExchange(ExchangeClient):
         trigger_price = trig.get("price") or body.get("trigger_price")
         rule = int(trig.get("rule") or 0)
         # rule 1 = price above (TP short / SL long), rule 2 = price below
-        side = "SELL" if size > 0 else "BUY"
+        side = "BUY" if size > 0 else "SELL"
         params = {
             "symbol": sym,
             "side": side,

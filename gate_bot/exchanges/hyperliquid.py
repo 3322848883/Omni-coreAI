@@ -138,39 +138,12 @@ class HyperliquidExchange(ExchangeClient):
         return {"ok": True, "note": "HL isolated/cross via updateLeverage"}
 
     def place_order(self, body: dict) -> dict:
-        # Requires wallet signature; use pre-signed hook if configured
-        native = self.mapper.native(body.get("contract") or body.get("symbol") or "")
-        size = int(body.get("size") or 0)
-        px = body.get("price")
-        order = {
-            "coin": native,
-            "is_buy": size > 0,
-            "sz": str(abs(size)),
-            "limit_px": str(px) if str(px) not in ("0", "0.0", "") else "0",
-            "order_type": {"limit": {"tif": "Gtc"}} if str(px) not in ("0", "0.0", "") else {"market": {}},
-            "reduce_only": bool(body.get("reduce_only")),
-        }
-        return self._post("order", {"action": {"type": "order", "orders": [order], "grouping": "na"},
-                                    "nonce": int(time.time() * 1000), "signature": self._sig_or_empty()},
-                          signed=True)
+        raise ExchangeError("hyperliquid trading requires wallet signature hook (_sign_hook)",
+                            exchange="hyperliquid", label="unsupported")
 
     def place_price_order(self, body: dict) -> dict:
-        native = self.mapper.native(body.get("contract") or body.get("symbol") or "")
-        trig = body.get("trigger") or {}
-        ini = body.get("initial") or {}
-        size = int(ini.get("size") or 0)
-        order = {
-            "coin": native,
-            "is_buy": size < 0,
-            "sz": str(abs(size)),
-            "limit_px": "0",
-            "order_type": {"trigger": {"triggerPx": str(trig.get("price")), "isMarket": True,
-                                        "tpsl": "sl" if trig.get("rule") == 2 else "tp"}},
-            "reduce_only": True,
-        }
-        return self._post("order", {"action": {"type": "order", "orders": [order], "grouping": "na"},
-                                    "nonce": int(time.time() * 1000), "signature": self._sig_or_empty()},
-                          signed=True)
+        raise ExchangeError("hyperliquid trigger order requires signature hook",
+                            exchange="hyperliquid", label="unsupported")
 
     def _sig_or_empty(self) -> str:
         hook = getattr(self, "_sign_hook", None)
