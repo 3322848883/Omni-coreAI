@@ -74,5 +74,22 @@ class TestGateWrap(unittest.TestCase):
         self.assertTrue(BitgetExchange.supports_price_orders)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestLocalDbPerExchange(unittest.TestCase):
+    def test_db_path_per_exchange(self):
+        from pathlib import Path
+        from gate_bot.strategist.market import MarketConfig, resolve_db_path
+
+        for ex, needle in [
+            ("gate", "kline_testnet.db"),
+            ("binance", "kline_binance_testnet.db"),
+            ("okx", "kline_okx_testnet.db"),
+        ]:
+            p = resolve_db_path("testnet", MarketConfig(mode="hybrid", exchange=ex), Path("/tmp"))
+            self.assertTrue(p.name.endswith(needle), p.name)
+
+    def test_tools_use_market_cfg_exchange(self):
+        from gate_bot.strategist.market import MarketConfig
+
+        cfg = MarketConfig(mode="rest_only", exchange="binance", indicators=["ema20", "atr14"])
+        self.assertEqual(cfg.exchange, "binance")
+        self.assertEqual(cfg.indicators, ["ema20", "atr14"])
