@@ -53,5 +53,5 @@ strategist:
     max_chips: 1
     max_notional_usd: 10000
   llm:
-    provider: deepseek-official
+    provider: gw-flash
     reasoning_effort: high
