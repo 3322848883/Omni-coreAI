@@ -89,6 +89,7 @@ LLM 策略另需 `OPENAI_BASE_URL` / `OPENAI_API_KEY`，然后：
 | **10 分钟图文教程（推荐先做）** | `docs/TUTORIAL-10min.md` |
 | **如何添加新机器人（照抄清单）** | `docs/HOWTO-add-bot.md` |
 | **持续运行 / 7×24 运维** | `docs/OPERATIONS.md` |
+| LLM 供应商配置 | `config/providers.yaml` + `docs/compose/spec/llm-provider-registry.md` |
 | 总览 / 配置 / 运行 | **`README.md`** |
 | 信号字段全集、示例 | `templates/README.md` |
 | 止损 vs 突破 | `templates/STOP-ENTRY-vs-STOP-LOSS.md` |
@@ -122,33 +123,49 @@ LLM 策略另需 `OPENAI_BASE_URL` / `OPENAI_API_KEY`，然后：
 
 ---
 
-## 5b. LLM 与工具（DeepSeek 官方）
+## 5b. LLM 与工具
+
+**供应商**：`config/providers.yaml` 配一次；bot 只写 `llm.provider`。
+
+```yaml
+llm:
+  provider: gw-flash          # 或 deepseek-official
+  reasoning_effort: high      # 可选覆盖
+```
 
 | 项 | 默认 |
 |----|------|
-| 模型 | **`deepseek-flash`**（可 `deepseek-v4-pro`） |
-| 思考 | `thinking: true`，**`reasoning_effort: max`** |
-| JSON | `response_format: json_object`（最终 Plan） |
-| 隔离 | `user_id`（KVCache / 限流） |
+| 模型 | `deepseek-flash` / 网关 `global:deepseek-v4.1-flash` |
+| 思考 | 可开；`reasoning_effort: high/max` |
+| 落盘 | 每轮 **`state/*.thinking.json`**（思维链 reasoning_content） |
+| 账户 | **REST**：余额+持仓+open_orders+TP/SL（全 bot） |
 
-**AI 可按需调用 14 个工具**（原生 function calling）：
+**17 个工具**（原生 function calling）：
 
 - 行情：`klines` `indicators` `ticker` `orderbook` `contract` `stats` `account`
-- aux 库：`trades_flow` `liquidations` `market_stats` `tech_analysis` `coin_info` `onchain` `social`
+- aux：`trades_flow` `liquidations` `market_stats` `tech_analysis` `coin_info` `onchain` `social` `overview` `sentiment` `macro`
 
-**账户信息一律 REST**（全 bot 通用，不限某策略）：`account()` / 快照 `account` = 余额 + `positions` + `open_orders` + `protections`(TP/SL)，`source: "rest"`。**不用** `account.db` 做持仓判断（库同步不可靠）；库仅历史审计。K 线可 hybrid（本地 kline 优先）。
+**账户信息一律 REST**（全 bot 通用）；`account.db` 仅历史。K 线可 hybrid。
 
-快照只给主周期精简数据，其余用工具拉。设计：`docs/compose/spec/runtime-upgrade.md`、`gate_bot/strategist/tools.py`。
+---
+
+## 5c. 无窗口运行（Windows）
+
+| 做法 | 说明 |
+|------|------|
+| **默认终端** | 设置为「Windows 控制台主机」（防 Windows Terminal 套壳弹窗） |
+| **启动** | `scripts\start_brooks_bg.cmd` / `run_brooks_bg.vbs` |
+| 子进程 | `pythonw` + `CREATE_NO_WINDOW` |
+| Linux | systemd，无窗口问题 |
 
 ---
 
 ## 6. 验证习惯
 
-- 改代码：先跑 `unittest`（约 169 项）。
-- 改下单 / 风控：跑 `scripts/prelaunch_runner.py --phase orders --env testnet`。
-- 改提示词：`plan --bot` 看 reasoning 是否符合人格。
-- 改 LLM/工具：`scripts/_verify_effect.py` / `scripts/_verify_json.py`。
-- 上线：`prelaunch --phase live` 小额闭环后才加大额度。
+- 改代码：`unittest`（约 173 项）。
+- 改下单 / 风控：`prelaunch_runner --phase orders --env testnet`。
+- 改 LLM/工具：`scripts/_verify_effect.py`；看 thinking：`data/bots/<id>/state/*.thinking.json`。
+- 上线：`prelaunch --phase live` 小额闭环后再加大额度。
 
 ---
 

@@ -40,7 +40,26 @@ python -m gate_bot status           # 含 heartbeats / PID
 
 ## 2. Windows：开机自启 + 崩溃拉起
 
-### 2.1 推荐：任务计划程序（Task Scheduler）
+### 2.0 必做：关掉 Windows Terminal 套壳
+
+Win11 默认终端若是 Windows Terminal，启动会弹黑框。改注册表为「控制台主机」：
+
+```powershell
+$p = "HKCU:\Console\%%Startup"
+New-Item $p -Force | Out-Null
+Set-ItemProperty $p DelegationConsole "{00000000-0000-0000-0000-000000000000}"
+Set-ItemProperty $p DelegationTerminal "{00000000-0000-0000-0000-000000000000}"
+```
+
+### 2.1 推荐启动
+
+```powershell
+.\scripts\start_brooks_bg.cmd   # 带密钥、pythonw、无窗口
+# 或
+cscript scripts\run_brooks_bg.vbs
+```
+
+### 2.2 任务计划程序（崩溃拉起）
 
 ```powershell
 $wd = "C:\Users\w6485\Desktop\测试\gate-signal-bot"
