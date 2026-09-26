@@ -124,10 +124,14 @@ class BinanceExchange(ExchangeClient):
         return out
 
     def get_orderbook_top(self, symbol: str, limit: int = 5) -> dict:
-        d = self._pub("/fapi/v1/depth", {"symbol": self.mapper.native(symbol), "limit": limit}) or {}
+        # Binance depth limit must be one of 5/10/20/50/100/500/1000
+        allowed = (5, 10, 20, 50, 100, 500, 1000)
+        lim = next((x for x in allowed if x >= max(1, int(limit))), 5)
+        d = self._pub("/fapi/v1/depth", {"symbol": self.mapper.native(symbol), "limit": lim}) or {}
+        n = max(1, int(limit))
         return {
-            "bids": [{"p": _f(x[0]), "s": _f(x[1])} for x in (d.get("bids") or [])],
-            "asks": [{"p": _f(x[0]), "s": _f(x[1])} for x in (d.get("asks") or [])],
+            "bids": [{"p": _f(x[0]), "s": _f(x[1])} for x in (d.get("bids") or [])][:n],
+            "asks": [{"p": _f(x[0]), "s": _f(x[1])} for x in (d.get("asks") or [])][:n],
         }
 
     def get_contract(self, symbol: str):

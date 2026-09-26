@@ -7,7 +7,7 @@ import time
 from typing import Any, Optional
 
 from ..gate_client import ContractMeta
-from .base import ExchangeClient, SymbolMapper
+from .base import ExchangeClient, ExchangeError, SymbolMapper
 from .http_util import http_json
 
 
