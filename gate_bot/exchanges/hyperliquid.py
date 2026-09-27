@@ -73,12 +73,21 @@ class HyperliquidExchange(ExchangeClient):
         }
 
     def get_klines(self, symbol: str, interval: str, limit: int = 100) -> list[dict]:
-        # Hyperliquid snapshot has limited kline; use candleSnapshot if available
+        # Hyperliquid candleSnapshot: startTime/endTime in ms; lookback must match bar size
+        iv = str(interval or "15m").lower()
+        iv_sec = {
+            "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
+            "1h": 3600, "4h": 14400, "1d": 86400,
+        }.get(iv, 900)
+        lookback_ms = int(max(30, int(limit)) * iv_sec * 1.2 * 1000)
         try:
             rows = self._info("candleSnapshot", {
-                "req": {"coin": self.mapper.native(symbol), "interval": interval.replace("m", "m").replace("1h", "1h"),
-                        "startTime": int((time.time() - limit * 60) * 1000),
-                        "endTime": int(time.time() * 1000)},
+                "req": {
+                    "coin": self.mapper.native(symbol),
+                    "interval": iv,
+                    "startTime": int(time.time() * 1000) - lookback_ms,
+                    "endTime": int(time.time() * 1000),
+                },
             }) or []
         except Exception:  # noqa: BLE001
             rows = []
@@ -89,8 +98,10 @@ class HyperliquidExchange(ExchangeClient):
                 "o": _f(r.get("o")) or 0.0, "h": _f(r.get("h")) or 0.0,
                 "l": _f(r.get("l")) or 0.0, "c": _f(r.get("c")) or 0.0,
                 "v": _f(r.get("v")) or 0.0, "sum": 0.0,
+                "ema20": None, "atr14": None,
             })
-        return out
+        out.sort(key=lambda x: x["t"])
+        return out[-int(limit):]
 
     def get_orderbook_top(self, symbol: str, limit: int = 5) -> dict:
         d = self._info("l2Book", {"coin": self.mapper.native(symbol)}) or {}

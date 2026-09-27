@@ -105,6 +105,7 @@ class OkxExchange(ExchangeClient):
                 "t": int(r[0]) // 1000,
                 "o": float(r[1]), "h": float(r[2]), "l": float(r[3]), "c": float(r[4]),
                 "v": float(r[5]), "sum": float(r[7]) if r[7] else 0.0,
+                "ema20": None, "atr14": None,
             })
         return list(reversed(out))
 

@@ -93,3 +93,46 @@ class TestLocalDbPerExchange(unittest.TestCase):
         cfg = MarketConfig(mode="rest_only", exchange="binance", indicators=["ema20", "atr14"])
         self.assertEqual(cfg.exchange, "binance")
         self.assertEqual(cfg.indicators, ["ema20", "atr14"])
+
+
+# Gate REST candlesticks 字段形状 — 全所 get_klines 必须对齐（对标 Gate）
+GATE_KLINE_FIELDS = frozenset({"t", "o", "h", "l", "c", "v", "sum", "ema20", "atr14"})
+
+
+class TestKlineFieldParityWithGate(unittest.TestCase):
+    """各所 get_klines 出参必须与 Gate 基线同构（ema20/atr14 可为 None）。"""
+
+    def test_gate_rest_candle_fields(self):
+        from gate_bot.strategist.market import fetch_rest_candles
+
+        class FakeGate:
+            def public_get(self, path, qs=""):
+                # Gate candlesticks: [t, v, c, h, l, o, sum]
+                return [[1700000000, "1", "100", "101", "99", "100", "1000"]]
+
+        rows = fetch_rest_candles(FakeGate(), "BTC_USDT", "15m", 5)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(set(rows[0].keys()), GATE_KLINE_FIELDS)
+        self.assertIsNone(rows[0]["ema20"])
+        self.assertIsNone(rows[0]["atr14"])
+
+    def test_all_adapters_emit_gate_shaped_rows(self):
+        """拦截各所底层 HTTP，校验 get_klines 出参字段与 Gate 一致。"""
+        cases = [
+            ("binance", BinanceExchange, "_pub", lambda *a, **k: [[1700000000000, "1", "2", "3", "0.5", "1", "10", "100"]]),
+            ("okx", OkxExchange, "_req", lambda *a, **k: {"data": [["1700000000000", "1", "2", "0.5", "1.5", "1", "10", "100"]]}),
+            ("bybit", BybitExchange, "_req", lambda *a, **k: {"result": {"list": [["1700000000000", "1", "2", "0.5", "1.5", "10", "100"]]}}),
+            ("bitget", BitgetExchange, "_req", lambda *a, **k: {"data": [["1700000000000", "1", "2", "0.5", "1.5", "10"]]}),
+            ("hyperliquid", HyperliquidExchange, "_info", lambda *a, **k: [{"t": 1700000000000, "o": "1", "h": "2", "l": "0.5", "c": "1.5", "v": "10"}]),
+        ]
+        for name, cls, patch_attr, payload in cases:
+            with self.subTest(exchange=name):
+                ex = cls(env="live")
+                setattr(ex, patch_attr, payload)
+                rows = ex.get_klines("BTC_USDT", "15m", 5)
+                self.assertTrue(rows, name)
+                self.assertEqual(set(rows[-1].keys()), GATE_KLINE_FIELDS, name)
+                self.assertIsNone(rows[-1]["ema20"], name)
+                self.assertIsNone(rows[-1]["atr14"], name)
+                self.assertIn("t", rows[-1])
+                self.assertIn("c", rows[-1])

@@ -81,7 +81,11 @@ class BitgetExchange(ExchangeClient):
         }
 
     def get_klines(self, symbol: str, interval: str, limit: int = 100) -> list[dict]:
-        iv = {"1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m", "1h": "1h", "4h": "4h", "1d": "1d"}.get(interval, "15m")
+        # Bitget mix candles: minute bars lowercase; hour/day uppercase (1H/4H/1D)
+        iv = {
+            "1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m",
+            "1h": "1H", "4h": "4H", "1d": "1D",
+        }.get(interval, "15m")
         end = int(time.time() * 1000)
         rows = []
         for _ in range(3):
@@ -96,7 +100,8 @@ class BitgetExchange(ExchangeClient):
         out = []
         for r in rows:
             out.append({"t": int(r[0]) // 1000, "o": float(r[1]), "h": float(r[2]),
-                        "l": float(r[3]), "c": float(r[4]), "v": float(r[5]), "sum": 0.0})
+                        "l": float(r[3]), "c": float(r[4]), "v": float(r[5]), "sum": 0.0,
+                        "ema20": None, "atr14": None})
         return out
 
     def get_orderbook_top(self, symbol: str, limit: int = 5) -> dict:

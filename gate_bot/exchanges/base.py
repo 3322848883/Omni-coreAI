@@ -77,7 +77,12 @@ class ExchangeClient:
         raise NotImplementedError
 
     def get_klines(self, symbol: str, interval: str, limit: int = 100) -> list[dict]:
-        """Return [{t,o,h,l,c,v,sum}] — t unix seconds."""
+        """Return [{t,o,h,l,c,v,sum,ema20,atr14}] — t unix seconds.
+
+        Field shape is pinned to Gate's candlesticks REST (Gate baseline):
+        ema20/atr14 are None at fetch time; indicators are filled by the
+        consumer (market.attach_indicators / pa kline writer).
+        """
         raise NotImplementedError
 
     def get_orderbook_top(self, symbol: str, limit: int = 5) -> dict:
