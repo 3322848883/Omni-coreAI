@@ -140,10 +140,48 @@ llm:
 | 落盘 | 每轮 **`state/*.thinking.json`**（思维链 reasoning_content） |
 | 账户 | **REST**：余额+持仓+open_orders+TP/SL（全 bot） |
 
-**17 个工具**（原生 function calling）：
+**20 个工具**（原生 function calling）：
 
-- 行情：`klines` `indicators` `ticker` `orderbook` `contract` `stats` `account`
+- 行情：`klines` `indicators` `ticker` `orderbook` `contract` `stats` `account` `smc_map` `smc_events` `sqzmom`
 - aux：`trades_flow` `liquidations` `market_stats` `tech_analysis` `coin_info` `onchain` `social` `overview` `sentiment` `macro`
+
+**两套 SMC 并存（按作用命名）**：
+- `smc_map`（市场地图 → 在哪/往哪）：swing/internal 双周期趋势、Premium/Discount 估值区、EQH/EQL 关键位、OB/FVG 区域
+- `smc_events`（结构事件 → 发生了什么/何时动手）：枢轴 BOS/CHoCH 事件流、流动性扫荡(x)、OB+Breaker+活动、FVG+突袭
+- `sqzmom`（Squeeze Momentum）：BB/KC 挤压状态 + linreg 动量
+
+**指标 23 族**（`indicators` 工具，周期任意）：EMA/SMA/RMA/WMA/VWMA、ATR（Pine 平滑 rma/sma/ema/wma）、RSI（含平滑+BB）、MACD（EMA/SMA）、BOLL（SMA/EMA/RMA/WMA/VWMA 基线）、Stoch、CCI、Williams %R、MFI、ADX、VWAP、OBV、SuperTrend、SQZMOM、pine_ema 套件。
+
+取数与 `klines` 同源：hybrid 时优先本所 `kline_<ex>.db`，否则走**该所** REST（`exchange:` 决定数据源）。
+
+**多所采集**：`pa-data-source/kline_watcher_multi.py` 写 `kline_<ex>.db`（schema 与 Gate 一致）；WS 实时（`ws_venues.py`）+ REST 兜底/补全。本机网络下 **Gate + Hyperliquid** WS 可用，binance/bybit 被墙、okx/bitget TLS 重置 → 自动降级 REST 轮询（日志标明 `ws`/`rest`）。
+
+**品种（对标 Gate，每所 5 个）**：
+| | Gate | 其余五所 |
+|---|---|---|
+| 主流 | BTC / ETH / SOL | BTC / ETH / SOL |
+| 补位 | XAU / XAG（金银，Gate 独有） | **DOGE / XRP**（六所都有） |
+
+**周期**：六所统一 `1m / 5m / 15m / 1h / 4h / 1d`（与 Gate `watchlist.yaml` 一致）。
+
+**任意币 REST**：六所均可取任意已上线合约（不限 watchlist）——AI 工具 `klines/indicators/smc_*` 直接传 symbol 即可。个别币缺是**上币差异**（如 binance 无 PEPE 合约、bitget 无 TON），非 REST 限制。
+
+**本地加币（随时，对标 Gate）**：
+- 五所：`kline_watcher_multi.py --symbols "新币_USDT" --intervals "1m,5m,15m,1h,4h,1d" --once` 即时入库；长期监控改 watchdog args
+- Gate：改 `watchlist.yaml` → 重启 `kline_watcher`（30–60s 回填）
+- 加库后 hybrid 立即 `source=local`；不加则自动 REST（`degraded=['local_db']`）
+
+**注意**：命令行周期参数必须引号包裹（`--intervals "1m,...,1d"`），否则 PowerShell 逗号解析会把 `1d` 截成 `1`；采集器已加周期白名单校验兜底。
+
+
+**本地模拟盘（paper）**：复刻交易所语义的本地模拟交易。env: paper 即启用，行情/费率/合约元数据委托绑定的真实所，订单/持仓/资金/强平/费率结算全在本地 data/bots/<id>/paper/account.db。
+
+- 命令：python -m gate_bot paper-run --bot <id>（独立进程 + 撮合 tick 线程）
+- 配置（bot yaml paper: 段）：eed_exchange（绑定行情所）、initial_capital（默认 10000）、leverage（默认 20）、ee_rate、unding_enabled、position_mode、margin_mode、price_band_pct
+- 成交价：**盘口价**（买→ask 卖→bid）；订单全类型（limit/market/stop_entry/TP-SL 触发/GTC/IOC/FOK/PO）
+- 强平：按初始/维持保证金反推强平价，触及即强制平仓
+- 资金费率：每 8h 取真实费率对持仓结算
+- 精度校验：tick/lot/最小名义/价格带/杠杆上限，拒绝原因对齐交易所
 
 **账户信息一律 REST**（全 bot 通用）；`account.db` 仅历史。K 线可 hybrid。
 
