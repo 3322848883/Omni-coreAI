@@ -1,26 +1,11 @@
 # 信号广播配置 —— 一信号 → 多 bot（目标只在此处配置，AI 碰不到）
-#
-# 用法：
-#   python -m gate_bot broadcast           # 常驻自动分发
-#   python -m gate_bot broadcast --once    # 单轮退出
-#
-# 信号投到 <from> 的 inbox（data/bots/<from>/inbox/*.json）
-# 广播进程自动复制到每个 <to> 的 inbox，各自独立执行
-#
-# routes:
-#   name     路由名（可选，用于日志）
-#   from     源 bot_id（信号入口）
-#   to       目标 bot_id 列表 —— 可 1 个 / 2 个 / N 个任意子集
-#   enabled  可单独停用某路由
+# python -m gate_bot broadcast [--once]
 
 routes:
-  # 示例：一信号同时投 gate 和 okx 两个账户
   - name: dual-gate-okx
     from: signal-feed
     to: [gate-btc, okx-btc]
     enabled: false
-
-  # 示例：只投一个所
   - name: single-gate
     from: signal-feed
     to: [gate-btc]
