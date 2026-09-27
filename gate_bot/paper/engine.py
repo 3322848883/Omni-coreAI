@@ -1,0 +1,464 @@
+"""撮合与订单状态机（复刻交易所生命周期 + 盘口价成交）。
+
+对齐 Gate/Executor 契约：
+  - place_price_order 收嵌套 {initial:{contract,size,price,tif,text}, trigger:{rule,price_type,price}}
+  - 订单 dict 带 id / text / status（对齐 Gate 字段）
+  - price=0/None + tif=ioc 表示市价
+  - 成交价：买→ask（卖一）、卖→bid（买一）
+  - quanto_multiplier 贯穿 PnL/margin/funding
+"""
+from __future__ import annotations
+
+import time
+from typing import Any, Optional
+
+from .store import (
+    ORDER_CANCELLED,
+    ORDER_FILLED,
+    ORDER_OPEN,
+    ORDER_PARTIALLY_FILLED,
+    ORDER_REJECTED,
+    TRIGGER_CANCELLED,
+    TRIGGER_FILLED,
+    TRIGGER_TRIGGERED,
+    TRIGGER_UNTRIGGERED,
+    PaperStore,
+    new_order_id,
+)
+from .validate import PaperReject, validate_and_round_order
+
+
+def _now() -> int:
+    return int(time.time())
+
+
+def _order_view(order: dict) -> dict:
+    """对齐 Gate 订单字段：id / text / status / size / price / tif。"""
+    out = dict(order)
+    out["id"] = order.get("order_id")
+    return out
+
+
+def _price_order_view(po: dict) -> dict:
+    out = dict(po)
+    out["id"] = po.get("order_id")
+    return out
+
+
+class PaperEngine:
+    def __init__(self, store: PaperStore, feed: Any):
+        self.store = store
+        self.feed = feed
+
+    # ── 行情便捷 ─────────────────────────────────────────
+    def _book(self, symbol: str) -> tuple[float, float]:
+        ob = self.feed.get_orderbook_top(symbol, limit=5) or {}
+        bids = ob.get("bids") or []
+        asks = ob.get("asks") or []
+        bid = float(bids[0].get("p") or 0) if bids else 0.0
+        ask = float(asks[0].get("p") or 0) if asks else 0.0
+        if bid <= 0 or ask <= 0:
+            last = float(self.feed.get_last_price(symbol) or 0)
+            bid = bid or last
+            ask = ask or last
+        return bid, ask
+
+    def _last(self, symbol: str) -> float:
+        return float(self.feed.get_last_price(symbol) or 0)
+
+    def _quanto(self, symbol: str) -> float:
+        try:
+            return float(getattr(self.feed.get_contract(symbol), "quanto_multiplier", 1) or 1)
+        except Exception:  # noqa: BLE001
+            return 1.0
+
+    def _recompute_available(self) -> None:
+        """available = balance - position_margin - order_margin（+ 未实现盈亏不占用）。"""
+        acct = self.store.get_account()
+        balance = float(acct.get("balance") or 0)
+        pos_margin = float(acct.get("position_margin") or 0)
+        order_margin = float(acct.get("order_margin") or 0)
+        self.store.update_account(available=balance - pos_margin - order_margin)
+
+    # ── 下单 ───────────────────────────────────────────
+    def place_order(self, body: dict) -> dict:
+        symbol = str(body.get("contract") or body.get("symbol") or "")
+        if not symbol:
+            raise PaperReject("contract required")
+        meta = self.feed.get_contract(symbol)
+        last = self._last(symbol)
+        acct = self.store.get_account()
+        lev = float(body.get("leverage") or acct.get("leverage") or 20)
+        normalized = validate_and_round_order(
+            body, meta, last,
+            price_band_pct=self.store.cfg_f("price_band_pct", 5.0),
+            leverage=lev,
+            available=float(acct.get("available") or 0),
+        )
+        order_id = body.get("id") or body.get("client_order_id") or body.get("order_id") or new_order_id()
+
+        tif = normalized["tif"]
+        otype = normalized["type"]
+        size = float(normalized["size"])
+        price = normalized.get("price")
+
+        order = {
+            "order_id": order_id,
+            "contract": symbol,
+            "size": size,
+            "price": price,
+            "tif": tif,
+            "type": otype,
+            "status": ORDER_OPEN,
+            "text": str(body.get("text") or ""),
+            "filled_size": 0.0,
+            "avg_price": None,
+            "reduce_only": normalized["reduce_only"],
+            "create_time": _now(),
+            "finish_time": None,
+            "error": None,
+        }
+
+        if tif == "PO" and self._is_taker(symbol, size, price, otype):
+            order["status"] = ORDER_REJECTED
+            order["error"] = "post only would take"
+            order["finish_time"] = _now()
+            self.store.insert_order(order)
+            raise PaperReject("post only would take")
+
+        self.store.insert_order(order)
+        result = self.match_order(order_id)
+
+        # IOC/FOK：未立即成交则撤销
+        if tif in ("IOC", "FOK") and result.get("status") in (ORDER_OPEN, ORDER_PARTIALLY_FILLED):
+            if tif == "FOK" and float(result.get("filled_size") or 0) < abs(size):
+                # FOK 全成或撤销：回滚成交
+                self._rollback_fills(order_id, symbol)
+            self.store.update_order(order_id, status=ORDER_CANCELLED, finish_time=_now())
+            result = self.store.get_order(order_id) or result
+        return _order_view(result)
+
+    def place_price_order(self, body: dict) -> dict:
+        """触发单。支持 Gate 嵌套 {initial,trigger} 与扁平 body。"""
+        initial = body.get("initial") or body
+        trigger = body.get("trigger") or body
+
+        symbol = str(initial.get("contract") or initial.get("symbol") or body.get("contract") or body.get("symbol") or "")
+        if not symbol:
+            raise PaperReject("contract required")
+
+        size_raw = initial.get("size") or body.get("size")
+        try:
+            size = float(size_raw)
+        except (TypeError, ValueError):
+            raise PaperReject("invalid size")
+        if size == 0:
+            raise PaperReject("size required")
+
+        trigger_price = trigger.get("price") or body.get("trigger_price")
+        try:
+            trigger_price = float(trigger_price)
+        except (TypeError, ValueError):
+            raise PaperReject("invalid trigger_price")
+        if trigger_price <= 0:
+            raise PaperReject("trigger_price must be positive")
+
+        # rule: 1=price above（触发买/TP 空），2=price below（触发卖/SL 多）
+        rule = int(trigger.get("rule") or 0)
+        # Gate: size>0 为买单；触发后转 initial 方向
+        side = "buy" if size > 0 else "sell"
+        price_type = str(trigger.get("price_type") or "latest")
+        # price_type 0/1/2 -> latest/mark/index（PRICE_TYPE_MAP）
+        if price_type in ("0", "1", "2"):
+            price_type = {"0": "latest", "1": "mark", "2": "index"}.get(price_type, "latest")
+
+        from .store import new_order_id as _nid
+        po = {
+            "order_id": body.get("id") or body.get("order_id") or _nid(),
+            "contract": symbol,
+            "trigger_price": trigger_price,
+            "trigger_price_type": price_type,
+            "order_type": str(initial.get("type") or ("market" if str(initial.get("price") or "0") in ("", "0") else "limit")).lower(),
+            "price": initial.get("price") if str(initial.get("price") or "0") not in ("", "0") else None,
+            "size": size,
+            "side": side,
+            "rule": rule,
+            "reduce_only": 1 if body.get("reduce_only") or initial.get("reduce_only") else 0,
+            "status": TRIGGER_UNTRIGGERED,
+            "text": str(initial.get("text") or body.get("text") or ""),
+            "create_time": _now(),
+            "trigger_time": None,
+            "finish_time": None,
+            "error": None,
+        }
+        self.store.insert_price_order(po)
+        return _price_order_view(po)
+
+    # ── 撮合 ───────────────────────────────────────────
+    def _is_taker(self, symbol: str, size: float, price: Optional[float], otype: str) -> bool:
+        if otype == "market":
+            return True
+        if price is None:
+            return True
+        bid, ask = self._book(symbol)
+        return (ask <= price) if size > 0 else (bid >= price)
+
+    def _fill_price(self, symbol: str, size: float) -> float:
+        bid, ask = self._book(symbol)
+        return ask if size > 0 else bid
+
+    def match_order(self, order_id: str) -> dict:
+        order = self.store.get_order(order_id)
+        if not order:
+            raise PaperReject("order not found", status=404)
+        if order["status"] not in (ORDER_OPEN, ORDER_PARTIALLY_FILLED):
+            return order
+
+        symbol = order["contract"]
+        size = float(order["size"])
+        price = order.get("price")
+        otype = order.get("type") or "limit"
+        bid, ask = self._book(symbol)
+
+        hit = False
+        if otype == "market":
+            hit = True
+        elif price is not None:
+            if size > 0:
+                hit = ask <= float(price)
+            else:
+                hit = bid >= float(price)
+        if not hit:
+            return order
+
+        fill_px = self._fill_price(symbol, size)
+        self._apply_fill(order, fill_px, size, role="taker")
+        return self.store.get_order(order_id) or order
+
+    def _rollback_fills(self, order_id: str, symbol: str) -> None:
+        """FOK 失败回滚成交与仓位（简化：按 fills 反向冲销）。"""
+        fills = [f for f in self.store.list_fills(symbol, limit=200) if f.get("order_id") == order_id]
+        for f in fills:
+            self._update_position(symbol, -float(f["size"]) * (1 if f["side"] == "buy" else -1),
+                                  float(f["price"]), reduce_only=False)
+            acct = self.store.get_account()
+            self.store.update_account(balance=float(acct.get("balance") or 0) + float(f.get("fee") or 0))
+
+    def _apply_fill(self, order: dict, price: float, size: float, role: str = "taker") -> None:
+        symbol = order["contract"]
+        filled = float(order.get("filled_size") or 0)
+        total = float(order["size"])
+        avg = order.get("avg_price")
+        new_filled = filled + abs(size)
+        new_avg = price if not avg else (float(avg) * filled + price * abs(size)) / new_filled
+
+        status = ORDER_FILLED if new_filled >= abs(total) - 1e-12 else ORDER_PARTIALLY_FILLED
+        self.store.update_order(
+            order["order_id"],
+            status=status,
+            filled_size=new_filled,
+            avg_price=new_avg,
+            finish_time=_now() if status == ORDER_FILLED else None,
+        )
+
+        quanto = self._quanto(symbol)
+        fee_rate = self.store.cfg_f("maker_fee_rate" if role == "maker" else "fee_rate", 0.0005)
+        notional = abs(size) * quanto * price
+        fee = notional * fee_rate
+
+        realised = self._update_position(symbol, size, price, quanto=quanto,
+                                         reduce_only=bool(order.get("reduce_only")))
+
+        self.store.insert_fill({
+            "fill_time": _now(),
+            "contract": symbol,
+            "side": "buy" if size > 0 else "sell",
+            "price": price,
+            "size": abs(size),
+            "fee": fee,
+            "realised_pnl": realised,
+            "role": role,
+            "order_id": order["order_id"],
+            "kind": "trade",
+        })
+        acct = self.store.get_account()
+        bal = float(acct.get("balance") or 0) - fee + realised
+        self.store.update_account(balance=bal)
+        self._recompute_available()
+        self.recalc_equity()
+
+    def _update_position(self, symbol: str, size: float, price: float,
+                         quanto: float = 1.0, reduce_only: bool = False) -> float:
+        mode = self.store.cfg_s("position_mode", "single")
+        pos = {p["mode"]: p for p in self.store.get_positions(symbol)}
+        cur = pos.get(mode) or {"size": 0.0, "entry_price": 0.0, "margin": 0.0, "realised_pnl": 0.0}
+        cur_size = float(cur.get("size") or 0)
+        cur_entry = float(cur.get("entry_price") or 0)
+        realised = 0.0
+
+        lev = float(cur.get("leverage") or self.store.cfg_f("leverage", 20) or 20)
+        margin_mode = cur.get("margin_mode") or self.store.cfg_s("margin_mode", "isolated")
+
+        if cur_size == 0 or (cur_size > 0 and size > 0) or (cur_size < 0 and size < 0):
+            if reduce_only:
+                return 0.0
+            new_size = cur_size + size
+            new_entry = (abs(cur_size) * cur_entry + abs(size) * price) / abs(new_size) if new_size else 0.0
+            margin = abs(new_size) * quanto * price / max(lev, 1.0)
+            from .risk import liquidation_price as _liq_px
+            mmr = self.store.cfg_f("maintenance_margin_rate", 0.005)
+            liq = _liq_px(new_entry, new_size, lev, mmr)
+            self.store.upsert_position(
+                symbol, mode,
+                size=new_size, entry_price=new_entry, leverage=lev,
+                margin=margin, margin_mode=margin_mode,
+                liquidation_price=liq,
+                realised_pnl=float(cur.get("realised_pnl") or 0),
+            )
+        else:
+            close_size = min(abs(size), abs(cur_size))
+            direction = 1.0 if cur_size > 0 else -1.0
+            realised = (price - cur_entry) * close_size * quanto * direction
+            remaining = abs(cur_size) - close_size
+            if remaining <= 1e-12:
+                self.store.upsert_position(
+                    symbol, mode,
+                    size=0.0, entry_price=0.0, leverage=lev,
+                    margin=0.0, margin_mode=margin_mode,
+                    realised_pnl=float(cur.get("realised_pnl") or 0) + realised,
+                )
+            else:
+                self.store.upsert_position(
+                    symbol, mode,
+                    size=direction * remaining, entry_price=cur_entry, leverage=lev,
+                    margin=remaining * quanto * price / max(lev, 1.0), margin_mode=margin_mode,
+                    realised_pnl=float(cur.get("realised_pnl") or 0) + realised,
+                )
+        self._recompute_available()
+        return realised
+
+    # ── 触发单扫描 ─────────────────────────────────────
+    def scan_price_orders(self) -> list[dict]:
+        triggered: list[dict] = []
+        for po in self.store.list_price_orders(status=TRIGGER_UNTRIGGERED):
+            symbol = po["contract"]
+            bid, ask = self._book(symbol)
+            last = self._last(symbol)
+            tp = float(po["trigger_price"])
+            side = po["side"]
+            rule = po.get("rule") or 0
+            ttype = po.get("trigger_price_type") or "latest"
+            if ttype == "mark":
+                try:
+                    ref = float(self.feed.get_ticker(symbol).get("mark_price") or last)
+                except Exception:  # noqa: BLE001
+                    ref = last
+            elif ttype == "index":
+                ref = last
+            else:
+                ref = last
+            # rule: 1=价格上穿触发，2=价格下穿触发；0 时按触发价相对现价推断方向
+            if rule == 1:
+                hit = ref >= tp
+            elif rule == 2:
+                hit = ref <= tp
+            else:
+                # TP（高于现价）等上穿；SL（低于现价）等下穿
+                hit = (ref >= tp) if tp > ref else (ref <= tp)
+            if not hit:
+                continue
+            self.store.update_price_order(
+                po["order_id"], status=TRIGGER_TRIGGERED, trigger_time=_now(),
+            )
+            # po.size 已是带符号数量（负=卖平多）；side 仅用于触发方向
+            body = {
+                "contract": symbol,
+                "size": po["size"],
+                "type": po.get("order_type") or "market",
+                "price": po.get("price"),
+                "tif": "GTC",
+                "reduce_only": bool(po.get("reduce_only")),
+                "text": po.get("text") or "",
+            }
+            try:
+                order = self.place_order(body)
+                self.store.update_price_order(
+                    po["order_id"], status=TRIGGER_FILLED, finish_time=_now(),
+                )
+                triggered.append(order)
+            except PaperReject as e:
+                self.store.update_price_order(
+                    po["order_id"], status=TRIGGER_CANCELLED, finish_time=_now(),
+                    error=str(e),
+                )
+        return triggered
+
+    # ── 盈亏估值 ───────────────────────────────────────
+    def recalc_equity(self) -> dict:
+        acct = self.store.get_account()
+        balance = float(acct.get("balance") or 0)
+        unrealised = 0.0
+        pos_margin = 0.0
+        for p in self.store.get_positions():
+            symbol = p["contract"]
+            last = self._last(symbol)
+            size = float(p["size"] or 0)
+            entry = float(p["entry_price"] or 0)
+            quanto = self._quanto(symbol)
+            if size and last:
+                unrealised += (last - entry) * size * quanto
+            pos_margin += abs(float(p.get("margin") or 0))
+        equity = balance + unrealised
+        self.store.update_account(unrealised_pnl=unrealised, position_margin=pos_margin)
+        self._recompute_available()
+        snap = {
+            "snap_time": _now(),
+            "equity": equity,
+            "unrealised": unrealised,
+            "realised": self.store.total_realised(),
+            "drawdown": 0.0,
+        }
+        self.store.insert_pnl(snap)
+        return snap
+
+    def get_account_view(self) -> dict:
+        acct = self.store.get_account()
+        snap = self.recalc_equity()
+        return {
+            "id": "paper",
+            "available": acct.get("available"),
+            "total": snap.get("equity"),
+            "position_mode": acct.get("position_mode") or "single",
+            "unrealised_pnl": snap.get("unrealised"),
+            "position_margin": acct.get("position_margin"),
+            "order_margin": acct.get("order_margin"),
+            "balance": acct.get("balance"),
+            "leverage": acct.get("leverage"),
+            "margin_mode": acct.get("margin_mode"),
+            "equity": snap.get("equity"),
+            "realised_pnl": snap.get("realised"),
+            "total_fee": self.store.total_fees(),
+            "total_funding": self.store.total_funding(),
+        }
+
+    def get_positions_view(self) -> list[dict]:
+        out = []
+        for p in self.store.get_positions():
+            last = self._last(p["contract"])
+            size = float(p["size"] or 0)
+            entry = float(p["entry_price"] or 0)
+            quanto = self._quanto(p["contract"])
+            upnl = (last - entry) * size * quanto if last else 0.0
+            out.append({
+                "contract": p["contract"],
+                "size": size,
+                "entry_price": entry,
+                "mark_price": last,
+                "leverage": p.get("leverage"),
+                "margin": p.get("margin"),
+                "liquidation_price": p.get("liquidation_price"),
+                "unrealised_pnl": upnl,
+                "mode": p.get("mode"),
+                "margin_mode": p.get("margin_mode"),
+            })
+        return out

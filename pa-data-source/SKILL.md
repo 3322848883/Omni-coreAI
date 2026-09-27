@@ -1,17 +1,17 @@
 ---
 name: pa-data-source
-version: v2.11
-tags: [gate-io, data-source, kline, websocket, real-time, futures, account, watchdog, aux-info, monitoring, node1, testnet]
-description: "Gate.io 数据源技能（节点1）：行情/账户/辅助信息采集 + 监控健康检查。实盘+测试网双实例隔离。Invoke when 拉取K线、行情、账户、辅助信息、数据状态或健康检查。Do NOT invoke for 价格行为分析、交易方案、执行下单。"
+version: v2.12
+tags: [data-source, kline, websocket, real-time, futures, account, watchdog, multi-exchange, binance, okx, bybit, bitget, hyperliquid, monitoring, node1, testnet]
+description: "多交易所数据源技能（节点1）：Gate/Binance/OKX/Bybit/Bitget/Hyperliquid 行情采集 + Gate 账户/辅助信息 + 监控健康检查。实盘+测试网隔离，每所一库。Invoke when 拉取K线、行情、账户、辅助信息、数据状态或健康检查。Do NOT invoke for 价格行为分析、交易方案、执行下单。"
 ---
 
-# pa-data-source — 数据源技能（节点1）
+# pa-data-source — 多交易所数据源技能（节点1）
 
 ## 节点定位
 节点1=数据保障，只做采集/存储/监控，不做分析判断。节点2（pa-analysis）出方案，节点3（pa-executor）执行。辅助信息流仅旁路展示，不回流分析/执行链。
 
 ## 职责
-1. 行情：Gate 合约 K 线（WebSocket 实时 + REST 回填），含 EMA20/ATR14；**实盘+测试网双实例同时常驻**，数据完全隔离
+1. 行情：六所合约 K 线（WS 实时 + REST 兜底/补全），含 EMA20/ATR14；**每所一库**（kline.db=Gate / kline_binance.db / kline_okx.db / kline_bybit.db / kline_bitget.db / kline_hyperliquid.db），实盘+测试网隔离
 2. 账户：余额/持仓/挂单/计划委托/成交（WebSocket + REST 双通道）；实盘/测试网独立密钥、独立库
 3. 辅助信息（旁路，仅展示）：新闻事件 / 市场总览 / 宏观日历 / 市场情绪 / 交易所储备 / 合约市场结构（盘口·成交·爆仓·持仓量）/ 情报数据（热度榜·公告）/ 社区舆情 / 币种基本面·技术面 / 链上数据·事件信号
 
@@ -24,7 +24,7 @@ description: "Gate.io 数据源技能（节点1）：行情/账户/辅助信息�
 ## 强制原则
 1. 先查后用：先 `python status.py --json` 再动作，已启动直接用，绝不重复启动
 2. 单实例锁：实盘/测试网各自独立锁文件，绝不双实例写同一库
-3. 数据隔离：实盘 `kline.db/account.db` 与测试网 `kline_testnet.db/account_testnet.db` 完全独立，绝不共用；aux_cache.db 独立，不碰 kline.db/account.db
+3. 数据隔离：每所一库（kline_<ex>.db / kline_<ex>_testnet.db），schema 与 Gate kline.db 完全一致；实盘/测试网独立；aux_cache.db 独立，不碰 kline 库
 4. 零脚本：采集只做拉取+去重+落盘+清理，零判断
 5. 缓存不长期保存：事件按级别清理（重大24h/市场12h/单币6h），时序表14~90天
 6. EMA20/ATR14 同源维护，供节点2 直接读，不重算
@@ -33,7 +33,9 @@ description: "Gate.io 数据源技能（节点1）：行情/账户/辅助信息�
 ## 架构
 ```
 watchdog.py          统一守护 kline-live + kline-testnet + fetch_aux --loop（整体重启）
-kline_watcher.py     K线采集 + 账户监控（同一份代码，--env 区分实盘/测试网）
+kline_watcher.py     Gate K线 + 账户监控（WS 实时 + REST 兜底，--env 区分实盘/测试网）
+kline_watcher_multi.py  多所 K 线采集（binance/okx/bybit/bitget/hyperliquid），写 kline_<ex>.db
+ws_venues.py         五所公开 WS candle 订阅/解析（WS 优先，断线退避重连）
 fetch_aux.py         辅助信息采集（--loop 常驻，频率调度）
 aux_monitor.py       辅助流一致性判定
 status.py            状态一键查询
@@ -46,7 +48,7 @@ install.bat/.sh      一键安装（Windows install.bat / Linux server_setup.sh�
 autostart.vbs        开机自启（Startup 快捷方式指向）
 watchlist.yaml       实盘配置
 watchlist_testnet.yaml  测试网配置（模拟盘）
-data/                kline.db + account.db（实盘）/ kline_testnet.db + account_testnet.db（测试网）
+data/                kline.db + account.db（Gate）/ kline_<ex>.db（其余五所）/ *_testnet.db（测试网）
 aux-data/            辅助信息运行时数据（详见 aux-data/DESIGN.md）
 ```
 
@@ -68,6 +70,14 @@ python status.py --json
 - `--source local|exchange` 强制来源；`--json` JSON 输出；`--list-symbols` 品种清单
 - 本地：仅 watchlist 品种、2000 根、含指标、实时、落库；交易所：任意合约、默认 50 根（上限 1000）、无指标、快照、不落库
 - 临时看非监控品种用 query_kline；长期监控才加 watchlist.yaml（重启回填 30~60s）
+
+### 多所品种/周期（对标 Gate）
+- **每所 5 品种**：Gate = BTC/ETH/SOL/**XAU/XAG**（金银独有）；其余五所 = BTC/ETH/SOL/**DOGE/XRP**（六所通用补位）
+- **周期六所统一**：`1m / 5m / 15m / 1h / 4h / 1d`
+- **任意币 REST**：六所均可取任意已上线合约（不限 watchlist），AI 工具直接传 symbol；缺币属上币差异（binance 无 PEPE 合约、bitget 无 TON 等）
+- **随时加币**：`python kline_watcher_multi.py --once --symbols "AVAX_USDT" --intervals "15m"` 即时入库；长期监控改 watchdog 的 `--symbols` args
+- **hybrid 优先级**（与 Gate 一致）：本地 `kline_<ex>.db` 新鲜 → 本地；库空/不在 watchlist/过期 → 该所 REST（`degraded=['local_db'|'candles_stale']`）
+- **命令行注意**：周期参数引号包裹 `--intervals "1m,5m,15m,1h,4h,1d"`，PowerShell 逗号解析会把未引号的 `1d` 截成 `1`；采集器有周期白名单校验兜底
 
 ## 配置（watchlist.yaml / watchlist_testnet.yaml）
 - `market_type: futures`；`env: live|testnet`（或 `PA_DATA_SOURCE_ENV=testnet` 覆盖）

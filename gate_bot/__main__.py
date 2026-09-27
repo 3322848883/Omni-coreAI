@@ -52,6 +52,7 @@ def _build_plan_runner(bot, paths: ProjectPaths):
             mode=str(mk.get("mode") or "rest_only"),
             pa_data_root=mk.get("pa_data_root"),
             db=str(mk.get("db") or "kline.db"),
+            exchange=str(mk.get("exchange") or bot.exchange or "gate").strip().lower(),
             stale_factor=2.0 if mk.get("stale_factor") is None else float(mk.get("stale_factor")),
             health_url=mk.get("health_url"),
             indicators=[str(x) for x in (mk.get("indicators") or ["ema20", "ema50", "atr14", "rsi14"])],
@@ -200,6 +201,65 @@ def cmd_process(args) -> int:
     return 0 if ok else 2
 
 
+
+def cmd_paper_run(args) -> int:
+    """独立 paper bot 进程：复用 run_forever 信号链 + 撮合/强平/费率 tick 线程。"""
+    import threading
+    import time as _time
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    paths = ProjectPaths(_root_from_args(args))
+    paths.ensure()
+    from .pidlock import PidLock
+
+    lock_path = paths.bot_paths(args.bot).lock_run
+    lock = None
+    if os.environ.get("GATE_LOCK_HELD") != "1":
+        lock = PidLock(lock_path).acquire()
+        if lock is None:
+            print(f"paper-run already running ({args.bot})", flush=True)
+            return 3
+    bots = load_all_bots(paths.config_dir)
+    bot = bots.get(args.bot)
+    if bot is None:
+        print(f"bot not found: {args.bot}")
+        return 2
+    if (bot.env or "").lower() != "paper":
+        print(f"bot {args.bot} env={bot.env} 不是 paper，用 run 命令")
+        return 2
+
+    client = bot.create_client()
+    tick_stop = threading.Event()
+
+    def _tick_loop():
+        interval = float((bot.paper or {}).get("tick_interval_sec") or 2.0)
+        while not tick_stop.is_set():
+            try:
+                info = client.tick()
+                if info.get("liquidations"):
+                    logging.warning("paper liquidation: %s", info["liquidations"])
+            except Exception as e:  # noqa: BLE001
+                logging.error("paper tick error: %s", e)
+            tick_stop.wait(interval)
+
+    th = threading.Thread(target=_tick_loop, daemon=True, name="paper-tick")
+    th.start()
+    logging.info("paper-run started bot=%s feed=%s", args.bot,
+                 (bot.paper or {}).get("feed_exchange") or bot.exchange)
+    try:
+        run_forever(bots, paths, only=args.bot)
+    except KeyboardInterrupt:
+        print("bye")
+    finally:
+        tick_stop.set()
+        if lock is not None:
+            lock.release()
+    return 0
+
+
 def cmd_run(args) -> int:
     logging.basicConfig(
         level=logging.INFO,
@@ -273,6 +333,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_run = sub.add_parser("run", help="watch inbox forever")
     p_run.add_argument("--bot", default=None)
     p_run.set_defaults(func=cmd_run)
+    p_prun = sub.add_parser("paper-run", help="run one paper bot (local simulated exchange)")
+    p_prun.add_argument("--bot", required=True)
+    p_prun.add_argument("--root", default="")
+    p_prun.set_defaults(func=cmd_paper_run)
 
     p_once = sub.add_parser("once", help="one scan pass then exit")
     p_once.add_argument("--bot", default=None)

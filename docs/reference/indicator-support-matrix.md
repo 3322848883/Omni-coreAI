@@ -1,13 +1,14 @@
-# 指标 / 触发 / 快照 — 深度支持矩阵与缺口（2026-09-24）
+# 指标 / 触发 / 快照 — 深度支持矩阵与缺口（2026-09-27）
 
-实测代码行为（`_parse_indicator_name` / `attach_indicators` / `evaluate_condition`）+ Gate CLI `mcp-spec`。
+实测代码行为（`parse_indicator_name` / `attach_indicators` / `evaluate_condition`）。
 
 ## 1. 总览
 
 | 层 | 已实现 | 静默忽略/缺失 | 与 Gate CLI 对齐 |
 |----|--------|---------------|------------------|
-| **指标计算** | EMA/RSI/ATR（**任意周期**） | MACD、BOLL、MA/SMA、Stoch、CCI、VWAP、OBV… | CLI 有 MACD/BOLL/MA；CLI **无 ATR** |
-| **快照** `market.indicators` | `emaN`/`rsiN`/`atrN` | 未知名写 `null` **不报错** | — |
+| **指标计算** | EMA/SMA/RMA/WMA/VWMA/RSI/ATR（**任意周期**）+ MACD/BOLL + **Stoch/CCI/WR/MFI/ADX/VWAP/OBV/SuperTrend** | — | 超集 |
+| **ATR** | Pine `ta.tr(true)` + `rma\|sma\|ema\|wma` 平滑（`atr14`/`atr14_ema`…） | — | CLI 无 ATR |
+| **快照** `market.indicators` | 全部上述名 | 未知名报错（不再静默 null） | — |
 | **触发** `conditions` | 5 种（EMA 单边/交叉、RSI、ATR spike、价格突破） | 无 macd_cross / boll_break / ma_cross / 量能 | Skills 只出报告，无触发引擎 |
 | **P1 行情** | funding/mark/index、OI、多空比、盘口5档 | premium、basis、买卖比成交流 | marketanalysis 13 场景更全 |
 | **测试** | 107 单测（EMA/RSI/ATR/5条件） | MACD/BOLL/MA **0 测试** | — |

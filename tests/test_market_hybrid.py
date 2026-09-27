@@ -61,18 +61,30 @@ class TestIndicators(unittest.TestCase):
         self.assertIsNotNone(val)
         self.assertTrue(0.0 < val < 100.0)
 
-    def test_atr_wilder(self):
+    def test_atr_pine_tr_true(self):
+        """Pine ATR: ma(ta.tr(true), length); default RMA. tr[0]=h-l."""
         highs = [10.0, 12.0, 11.0, 13.0, 12.5, 14.0]
         lows = [8.0, 9.0, 9.5, 10.0, 11.0, 11.5]
         closes = [9.0, 11.0, 10.0, 12.0, 12.0, 13.0]
-        out = atr(highs, lows, closes, 3)
+        out = atr(highs, lows, closes, 3)  # RMA default
         self.assertIsNone(out[0])
         self.assertIsNone(out[1])
-        self.assertIsNone(out[2])
-        # i=3 first ATR = mean of TR[1..3]
-        # TR1=max(3,|12-9|,|9-9|)=3; TR2=max(1.5,|11-11|,|9.5-11|)=1.5; TR3=max(3,|13-10|,|10-10|)=3
-        self.assertAlmostEqual(out[3], (3 + 1.5 + 3) / 3)
+        # TR = [2, 3, 1.5, 3, 1.5, 2.5]; RMA seed idx2 = mean(2,3,1.5)
+        self.assertAlmostEqual(out[2], (2 + 3 + 1.5) / 3)
+        self.assertAlmostEqual(out[3], (out[2] * 2 + 3) / 3)
         self.assertIsNotNone(out[4])
+
+    def test_atr_smoothing_variants(self):
+        highs = [10.0, 12.0, 11.0, 13.0, 12.5, 14.0]
+        lows = [8.0, 9.0, 9.5, 10.0, 11.0, 11.5]
+        closes = [9.0, 11.0, 10.0, 12.0, 12.0, 13.0]
+        # SMA of TR[0:3] at index 2
+        sma_atr = atr(highs, lows, closes, 3, smoothing="sma")
+        self.assertAlmostEqual(sma_atr[2], (2 + 3 + 1.5) / 3)
+        # EMA / WMA 也应产出数值
+        for sm in ("ema", "wma"):
+            v = atr(highs, lows, closes, 3, smoothing=sm)
+            self.assertIsNotNone(v[2], sm)
 
     def test_attach_keeps_db_ema20(self):
         rows = []
@@ -637,6 +649,106 @@ class TestPlanRunnerAccountAbort(unittest.TestCase):
         snap = collect_snapshot(PosFailClient(), ["BTC_USDT"], candles=5, interval="15m")
         self.assertIn("error", snap["account"])
         self.assertEqual(snap["account"].get("available"), "100")
+
+
+class VenueClient:
+    """Minimal per-exchange adapter: get_klines is the venue REST source."""
+
+    def __init__(self, name: str, rows):
+        self.name = name
+        self._rows = rows
+        self.kline_calls = 0
+        self.public_calls = 0
+
+    def get_klines(self, symbol, interval, limit=100):
+        self.kline_calls += 1
+        return list(self._rows)[-int(limit) :]
+
+    def public_get(self, path, qs=""):
+        self.public_calls += 1
+        raise AssertionError(f"{self.name} must not fall back to Gate public_get: {path}")
+
+
+class TestPerExchangeRestSource(unittest.TestCase):
+    def test_rest_fallback_uses_adapter_get_klines(self):
+        now = int(time.time())
+        rows = [
+            {"t": now - (10 - i) * 900, "o": 1.0, "h": 2.0, "l": 0.5, "c": 1.5, "v": 1.0}
+            for i in range(10)
+        ]
+        for venue in ("binance", "okx", "bybit", "bitget", "hyperliquid", "gate"):
+            client = VenueClient(venue, rows)
+            res = resolve_candles(
+                client, "BTC_USDT", "15m", 5,
+                MarketConfig(mode="rest_only", exchange=venue),
+                env="live",
+            )
+            self.assertEqual(res.source, "exchange", venue)
+            self.assertEqual(client.kline_calls, 1, venue)
+            self.assertEqual(client.public_calls, 0, venue)
+            self.assertEqual(len(res.rows), 5, venue)
+            self.assertEqual(res.rows[-1]["c"], 1.5)
+
+    def test_hybrid_prefers_matching_local_db_then_venue_rest(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            now = int(time.time())
+            data = tmp / "data"
+            data.mkdir()
+            # binance-only local db
+            db = data / "kline_binance.db"
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "CREATE TABLE kline (t INTEGER, symbol TEXT, interval TEXT, o REAL,"
+                " h REAL, l REAL, c REAL, v REAL, sum REAL, ema20 REAL, atr14 REAL)"
+            )
+            for i in range(20):
+                conn.execute(
+                    "INSERT INTO kline VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (now - (20 - i) * 900, "BTC_USDT", "15m", 1, 2, 0.5, 1.5, 1, 0, 1.4, 0.2),
+                )
+            conn.commit()
+            conn.close()
+
+            # gate venue must NOT see binance local db; falls to its own REST
+            gate_rows = [
+                {"t": now - (5 - i) * 900, "o": 9.0, "h": 9.5, "l": 8.5, "c": 9.1, "v": 1.0}
+                for i in range(5)
+            ]
+            gate_c = VenueClient("gate", gate_rows)
+            res_gate = resolve_candles(
+                gate_c, "BTC_USDT", "15m", 5,
+                MarketConfig(mode="hybrid", exchange="gate", pa_data_root=str(data)),
+                env="live",
+            )
+            self.assertEqual(res_gate.source, "exchange")
+            self.assertEqual(gate_c.kline_calls, 1)
+            self.assertEqual(res_gate.rows[-1]["c"], 9.1)
+
+            # binance venue uses its own local db
+            bin_c = VenueClient("binance", gate_rows)
+            res_bin = resolve_candles(
+                bin_c, "BTC_USDT", "15m", 5,
+                MarketConfig(mode="hybrid", exchange="binance", pa_data_root=str(data)),
+                env="live",
+            )
+            self.assertEqual(res_bin.source, "local")
+            self.assertEqual(bin_c.kline_calls, 0)
+            self.assertEqual(res_bin.rows[-1]["c"], 1.5)
+
+    def test_db_name_follows_market_exchange(self):
+        root = Path("/tmp/pa")
+        cases = {
+            "gate": "kline.db",
+            "binance": "kline_binance.db",
+            "okx": "kline_okx.db",
+            "bybit": "kline_bybit.db",
+            "bitget": "kline_bitget.db",
+            "hyperliquid": "kline_hyperliquid.db",
+        }
+        for ex, name in cases.items():
+            p = resolve_db_path("live", MarketConfig(mode="hybrid", exchange=ex), root)
+            self.assertEqual(p.name, name, ex)
 
 
 if __name__ == "__main__":

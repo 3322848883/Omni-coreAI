@@ -6,7 +6,22 @@
 ## 原则
 
 - bot **只读**，不写、不迁移、不清理 pa 的库
-- 文件路径：`pa-data-source/data/kline.db`（live） / `kline_testnet.db`（testnet）
+- 文件路径：**每所一库**，schema 全部相同：
+
+| 交易所 | live | testnet |
+|--------|------|---------|
+| gate | `pa-data-source/data/kline.db` | `kline_testnet.db` |
+| binance | `kline_binance.db` | `kline_binance_testnet.db` |
+| okx | `kline_okx.db` | `kline_okx_testnet.db` |
+| bybit | `kline_bybit.db` | `kline_bybit_testnet.db` |
+| bitget | `kline_bitget.db` | `kline_bitget_testnet.db` |
+| hyperliquid | `kline_hyperliquid.db` | `kline_hyperliquid_testnet.db` |
+
+  采集方：Gate → `kline_watcher.py`；其余所 → `kline_watcher_multi.py`（同一 schema / 同一 ema20·atr14 算法）
+
+- **品种**（每所 5 个）：Gate = BTC/ETH/SOL/XAU/XAG；其余五所 = BTC/ETH/SOL/DOGE/XRP（XAU/XAG 为 Gate 独有金银合约，用 DOGE/XRP 补位）
+- **周期**：六所统一 `1m / 5m / 15m / 1h / 4h / 1d`
+- **任意币**：库仅存监控品种；任意已上线合约可随时经 REST/工具取（不限库），库空时 bot 自动降级 REST
 - 列缺失或库不可读 → bot 自动降级 REST，**不硬读**
 - 升级 schema 必须提升本文件的 `schema_version`，并同步 `validate_kline_schema()`
 

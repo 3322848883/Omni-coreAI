@@ -39,10 +39,55 @@ class BotConfig:
     account_risk: dict = field(default_factory=dict)
     # LLM strategist (per-bot strategy + risk)
     strategist: dict = field(default_factory=dict)
+    # exchange adapter: gate | binance | okx | bybit | bitget | hyperliquid
+    exchange: str = "gate"
+    # paper trading: {feed_exchange, initial_capital, leverage, fee_rate, ...}
+    paper: dict = field(default_factory=dict)
 
-    def create_client(self) -> GateClient:
+    def create_client(self):
+        from .exchanges import create_exchange
+
+        # paper 不需要交易所密钥（脱离交易所账户）
+        if (self.env or "").lower() == "paper":
+            return self._create_paper_client("", "")
         key, secret = load_credentials(self.env, self.api_key_env, self.api_secret_env)
-        return GateClient(api_key=key, api_secret=secret, env=self.env)
+
+        extra = {}
+        ps = os.environ.get(self.api_secret_env.replace("SECRET", "PASSPHRASE") or "") or os.environ.get("EXCHANGE_PASSPHRASE")
+        if ps:
+            extra["passphrase"] = ps
+        return create_exchange(self.exchange or "gate", env=self.env,
+                               api_key=key, api_secret=secret, **extra)
+
+    def _create_paper_client(self, key: str = "", secret: str = ""):
+        """env=paper：行情委托 feed 所，交易走本地 paper_account.db。"""
+        from pathlib import Path as _P
+        from .exchanges import create_exchange
+        from .paper.exchange import PaperExchange
+
+        pc = dict(self.paper or {})
+        feed_name = str(pc.get("feed_exchange") or self.exchange or "gate")
+        feed_env = str(pc.get("feed_env") or "live")
+        feed = create_exchange(feed_name, env=feed_env, api_key=key, api_secret=secret)
+        store_path = pc.get("store_path")
+        if not store_path:
+            root = _P(os.environ.get("GATE_BOT_ROOT") or _P.cwd())
+            store_path = root / "data" / "bots" / self.bot_id / "paper" / "account.db"
+        cfg = {
+            "initial_capital": pc.get("initial_capital", 10000),
+            "leverage": pc.get("leverage", 20),
+            "fee_rate": pc.get("fee_rate", 0.0005),
+            "maker_fee_rate": pc.get("maker_fee_rate", 0.0),
+            "funding_enabled": pc.get("funding_enabled", True),
+            "position_mode": pc.get("position_mode", "single"),
+            "margin_mode": pc.get("margin_mode", "isolated"),
+            "price_band_pct": pc.get("price_band_pct", 5.0),
+            "maintenance_margin_rate": pc.get("maintenance_margin_rate", 0.005),
+            "trigger_price_type": pc.get("trigger_price_type", "latest"),
+            "feed_exchange": feed_name,
+        }
+        return PaperExchange(env="paper", api_key=key, api_secret=secret,
+                             store_path=_P(store_path), feed=feed, config=cfg)
 
 
 def load_bot_config(path: Path) -> BotConfig:
@@ -50,7 +95,7 @@ def load_bot_config(path: Path) -> BotConfig:
     if not isinstance(data, dict):
         raise GateApiError(f"bot config must be a mapping: {path}")
     env = str(data.get("env") or "live").lower()
-    if env not in ("live", "testnet"):
+    if env not in ("live", "testnet", "paper"):
         raise GateApiError(f"env must be live|testnet in {path}")
     bot_id = data.get("bot_id") or path.stem
     return BotConfig(
@@ -65,12 +110,14 @@ def load_bot_config(path: Path) -> BotConfig:
         max_files_per_run=int(data.get("max_files_per_run") or 50),
         poll_interval_sec=float(data.get("poll_interval_sec") or 2.0),
         label_prefix=str(data.get("label_prefix") or ""),
+        exchange=str(data.get("exchange") or "gate").strip().lower(),
         position_policy=str(data.get("position_policy") or "strict").strip().lower(),
         default_replace=str(data.get("default_replace") or "none").strip().lower(),
         order_scope=str(data.get("order_scope") or "own").strip().lower(),
         require_sl=bool(data.get("require_sl", True)),
         account_risk=dict(data.get("account_risk") or {}),
         strategist=dict(data.get("strategist") or {}),
+        paper=dict(data.get("paper") or {}),
     )
 
 
