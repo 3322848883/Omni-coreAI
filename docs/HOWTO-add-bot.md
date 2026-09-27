@@ -142,3 +142,14 @@ python -m gate_bot run
 ---
 
 **相关**：`AGENTS.md`（总览）· `README.md`「多机器人怎么加」· `templates/README.md`（信号字段）
+
+
+## 一信号多所（信号广播）
+
+一个 bot 只绑一个交易所；要一条信号同时在多所执行，用**广播**：
+
+1. 建 N 个 bot 配置（各写自己的 `exchange:` + 密钥）
+2. `config/broadcast.yaml` 定路由：`from: 源` → `to: [目标1, 目标2, ...]`（任意子集）
+3. 信号投源 inbox，`python -m gate_bot broadcast` 自动分发到各目标
+
+目标列表只在配置里写（AI 信号碰不到），详见 README「信号广播」。

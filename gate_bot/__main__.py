@@ -260,6 +260,43 @@ def cmd_paper_run(args) -> int:
     return 0
 
 
+
+def cmd_broadcast(args) -> int:
+    """广播：一信号 → 多 bot inbox（目标来自 config/broadcast.yaml）。"""
+    import logging
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    paths = ProjectPaths(_root_from_args(args))
+    paths.ensure()
+    from .broadcast import BroadcastError, load_broadcast_config, validate_routes, Broadcaster
+    from .config import load_all_bots
+
+    cfg_path = Path(args.config) if args.config else (paths.root / "config" / "broadcast.yaml")
+    try:
+        cfg = load_broadcast_config(cfg_path)
+    except BroadcastError as e:
+        print(f"broadcast config error: {e}")
+        return 2
+    known = set(load_all_bots(paths.config_dir).keys())
+    try:
+        validate_routes(cfg, known)
+    except BroadcastError as e:
+        print(f"broadcast route error: {e}")
+        return 2
+    bc = Broadcaster(paths.root, cfg, known)
+    if args.once:
+        s = bc.run_once()
+        print(json.dumps({k: v for k, v in s.items() if k != "records"}, ensure_ascii=False))
+        for rec in s.get("records") or []:
+            if rec.get("failed"):
+                print(f"  FAILED {rec.get('route')}/{rec.get('file')}: {rec.get('failed')}")
+        # partial 也算失败（部分目标没收到，不可静默成功）
+        return 0 if (s.get("failed", 0) == 0 and s.get("partial", 0) == 0) else 1
+    try:
+        bc.run_forever()
+    except KeyboardInterrupt:
+        print("bye")
+    return 0
+
 def cmd_run(args) -> int:
     logging.basicConfig(
         level=logging.INFO,
@@ -373,6 +410,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_mig.add_argument("--bot", default=None)
     p_mig.add_argument("--dry-run", action="store_true")
     p_mig.set_defaults(func=cmd_migrate)
+    p_bc = sub.add_parser("broadcast", help="fan out signals to multiple bot inboxes (config-driven)")
+    p_bc.add_argument("--config", default="", help="broadcast.yaml path (default config/broadcast.yaml)")
+    p_bc.add_argument("--once", action="store_true", help="one scan pass then exit")
+    p_bc.add_argument("--root", default="")
+    p_bc.set_defaults(func=cmd_broadcast)
     return parser
 
 

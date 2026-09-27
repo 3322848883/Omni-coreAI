@@ -534,6 +534,31 @@ python -m gate_bot once --bot my-paper        # 手工信号单次执行
 
 配套 LLM 策略（`strategist:` 段）即可让 AI 自动分析→Plan→paper 执行。详见 `docs/compose/spec/local-paper-trading.md`。
 
+## 信号广播（一信号 → 多所）
+
+一条信号同时在**多个交易所账户**执行，目标由**系统配置**决定（AI 写的信号碰不到目标列表，防乱输入）。
+
+```yaml
+# config/broadcast.yaml
+routes:
+  - name: dual-gate-okx
+    from: signal-feed          # 源 bot_id（信号投这里的 inbox）
+    to: [gate-btc, okx-btc]    # 目标 bot 列表：可 1 个 / 2 个 / N 个任意子集
+    enabled: true
+```
+
+```bash
+python -m gate_bot broadcast           # 常驻自动分发
+python -m gate_bot broadcast --once    # 单轮退出
+```
+
+**特性**：
+- **可选目标**：`to` 列表任意写 1 个、2 个或 N 个 bot
+- **可靠**：逐个校验写入，任一失败报错；原子落盘防半读；同名幂等跳过
+- **隔离**：目标 bot 各自独立执行（密钥/风控/持仓/盈亏互不影响）
+- **安全**：信号里 `targets`/`exchanges` 字段一律忽略；目标 bot 不存在拒绝启动
+- **审计**：`data/broadcast/log.jsonl` 留痕；源信号归档 `archive/broadcast-done/`
+
 ## LLM 工具（20 个）与指标（23 族）
 
 AI 策略层按需调用：`klines` `indicators` `ticker` `orderbook` `contract` `stats` `account` `smc_map` `smc_events` `sqzmom` + 10 个 aux。
