@@ -13,14 +13,19 @@ from collections import deque
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR = os.path.join(SCRIPT_DIR, "logs")
 LOG_FILE = os.path.join(LOG_DIR, "watchdog.log")
-# 多目标守护：kline_watcher（实盘+测试网双实例，数据隔离）+ fetch_aux（辅助信息旁路，--loop 常驻）
+# 多目标守护：kline_watcher（实盘+测试网双实例，数据隔离）+ 多所采集 + fetch_aux（辅助信息旁路，--loop 常驻）
 # name 为唯一标识（进程字典/子进程日志按 name 区分），script 为脚本文件名
+# 多所采集：写 kline_<ex>.db，schema 与 Gate kline.db 一致（contracts/KLINE_SCHEMA.md）；
+# Gate 本体仍由 kline_watcher.py 负责，这里只采非 Gate 所，避免与 kline.db 双写。
 TARGETS = [
     {"name": "kline-live",    "script": "kline_watcher.py", "args": []},
     {"name": "kline-testnet", "script": "kline_watcher.py",
      "args": ["--env", "testnet", "--config", "watchlist_testnet.yaml",
               "--db", "data/kline_testnet.db", "--health-port", "18081",
               "--lock", "kline_watcher_testnet.lock"]},
+    {"name": "kline-multi",   "script": "kline_watcher_multi.py",
+     "args": ["--poll", "30", "--symbols", "BTC_USDT,ETH_USDT,SOL_USDT,DOGE_USDT,XRP_USDT",
+              "--intervals", "1m,5m,15m,1h,4h,1d"]},
     {"name": "fetch-aux",     "script": "fetch_aux.py", "args": ["--loop"]},
 ]
 LOCK_FILE = os.path.join(SCRIPT_DIR, "watchdog.lock")
