@@ -195,7 +195,38 @@ def load_local_candles(db_path: Optional[Path], symbol: str, interval: str, limi
     return out
 
 
-def fetch_rest_candles(client: GateClient, symbol: str, interval: str, limit: int) -> list[dict[str, Any]]:
+def _normalize_candle_rows(rows: Any, limit: int) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        out.append(
+            {
+                "t": int(r.get("t") or 0),
+                "o": _to_float(r.get("o")),
+                "h": _to_float(r.get("h")),
+                "l": _to_float(r.get("l")),
+                "c": _to_float(r.get("c")),
+                "v": _to_float(r.get("v")),
+                "sum": _to_float(r.get("sum")),
+                "ema20": _to_float(r.get("ema20")),
+                "atr14": _to_float(r.get("atr14")),
+            }
+        )
+    out.sort(key=lambda x: x["t"])
+    return out[-int(limit) :]
+
+
+def fetch_rest_candles(client: Any, symbol: str, interval: str, limit: int) -> list[dict[str, Any]]:
+    """REST candles from whatever exchange `client` is bound to.
+
+    - ExchangeClient (gate/binance/okx/bybit/bitget/hyperliquid): adapter `get_klines`
+      hits that venue's own market API (symbol mapping included).
+    - GateClient / legacy fakes: Gate futures candlesticks endpoint via `public_get`.
+    """
+    get_klines = getattr(client, "get_klines", None)
+    if callable(get_klines):
+        return _normalize_candle_rows(get_klines(symbol, interval, limit), limit)
     raw = client.public_get(
         "/api/v4/futures/usdt/candlesticks",
         f"contract={urllib.parse.quote(symbol)}&interval={interval}&limit={int(limit)}",
