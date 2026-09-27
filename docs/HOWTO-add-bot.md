@@ -20,7 +20,7 @@ Copy-Item config\bots\_example.yaml config\bots\<bot_id>.yaml
 | 字段 | 必填 | 改成什么 | 注意 |
 |------|------|----------|------|
 | `bot_id` | ✅ | 与文件名一致，如 `alpha2` | 全局唯一 |
-| `env` | ✅ | `testnet` 或 `live` | 先 testnet |
+| `env` | ✅ | `testnet` 或 `live` | 先 testnet \| paper |
 | `api_key_env` / `api_secret_env` | ✅ | 环境变量**名字**（不是密钥） | 多账户时各 bot 不同名 |
 | `symbols` | ✅ | 该 bot 允许交易的币 | 白名单 |
 | `max_notional_usd` | ✅ | 单笔名义上限 | 首日建议 ≤10（live） |
@@ -40,6 +40,8 @@ Copy-Item config\bots\_example.yaml config\bots\<bot_id>.yaml
 $env:GATE_TESTNET_API_KEY    = "..."
 $env:GATE_TESTNET_API_SECRET = "..."
 ```
+
+**本地模拟盘（`env: paper`）不需要交易所密钥**——只需 `paper.feed_exchange`（行情来源）与 `paper.initial_capital` / `leverage` 等虚拟账户参数。启动用 `python -m gate_bot paper-run --bot <id>`（自带撮合/强平/费率 tick）。详见 README「本地模拟盘」。
 
 ### 4) 确认 inbox 目录
 

@@ -485,9 +485,11 @@ pip install -r requirements.txt   # pyyaml
 # 实盘
 setx GATE_API_KEY "..."
 setx GATE_API_SECRET "..."
-# 模拟盘
+# 交易所测试网
 setx GATE_TESTNET_API_KEY "..."
 setx GATE_TESTNET_API_SECRET "..."
+# 本地模拟盘（env: paper）不需要交易所密钥
+# LLM 策略另需 OPENAI_API_KEY
 ```
 
 复制 `config/bots/_example.yaml` → `config/bots/alpha.yaml`，改 `bot_id` / `env` / 白名单。
@@ -503,6 +505,41 @@ python -m gate_bot process path\to\sig.json --bot alpha
 ```
 
 工作目录请在项目根（或加 `--root`）。
+
+## 本地模拟盘（paper）— 复刻交易所，只虚拟资金
+
+除资金外一切真实：**真实行情/精度/费率触发，本地订单/持仓/盈亏**。订单挂本地，价格到了自动触发；实时计算盈亏；触及强平价自动强平；每 8h 按真实资金费率结算。
+
+```yaml
+# config/bots/my-paper.yaml
+bot_id: my-paper
+env: paper                     # 不需要交易所密钥
+symbols: [BTC_USDT]
+label_prefix: mp
+paper:
+  feed_exchange: gate          # 行情/费率/合约元数据来源（六所任选）
+  initial_capital: 10000       # 虚拟资金（可任意配）
+  leverage: 20
+  fee_rate: 0.0005
+  funding_enabled: true
+  tick_interval_sec: 2
+```
+
+```bash
+python -m gate_bot paper-run --bot my-paper   # 独立进程 + 撮合/强平/费率 tick
+python -m gate_bot once --bot my-paper        # 手工信号单次执行
+```
+
+**能力**：盘口价成交（买→ask 卖→bid）｜全订单类型（limit/market/stop_entry/TP-SL 触发/GTC/IOC/FOK/PO）｜精度校验（tick/lot/最小名义/价格带/杠杆）｜保证金与强平引擎｜实时盈亏（`account` 工具直接可读）｜资金费率 8h 结算。账户库 `data/bots/<id>/paper/account.db`（八表）。
+
+配套 LLM 策略（`strategist:` 段）即可让 AI 自动分析→Plan→paper 执行。详见 `docs/compose/spec/local-paper-trading.md`。
+
+## LLM 工具（20 个）与指标（23 族）
+
+AI 策略层按需调用：`klines` `indicators` `ticker` `orderbook` `contract` `stats` `account` `smc_map` `smc_events` `sqzmom` + 10 个 aux。
+
+- **两套 SMC**：`smc_map`（市场地图：趋势/估值区/关键位）与 `smc_events`（结构事件：BOS/CHoCH/扫荡/Breaker）互补
+- **指标 23 族**（任意周期）：EMA/SMA/RMA/WMA/VWMA、ATR（Pine 平滑）、RSI、MACD、BOLL、Stoch、CCI、WR、MFI、ADX、VWAP、OBV、SuperTrend、SQZMOM
 
 ## 信号 JSON
 
