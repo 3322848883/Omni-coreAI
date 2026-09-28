@@ -8,6 +8,27 @@ from typing import Optional
 from .gate_client import ContractMeta, GateApiError
 
 
+def vol_adjust_size(base_size_usd: float, atr_pct: float,
+                    target_pct: float = 2.0,
+                    clamp_lo: float = 0.5, clamp_hi: float = 2.0) -> float:
+    """ATR 目标波动缩放仓位。波动大时减仓，波动小时加仓。
+
+    base_size_usd: 基准仓位
+    atr_pct: 当前 ATR 百分比（如 2.0 = 2%）
+    target_pct: 目标波动百分比（0=禁用）
+    clamp_lo/hi: 缩放倍数上下限，防极端值
+    """
+    if not base_size_usd or base_size_usd <= 0:
+        return base_size_usd or 0
+    if not target_pct or target_pct <= 0:
+        return base_size_usd
+    if not atr_pct or atr_pct <= 0:
+        return base_size_usd
+    ratio = target_pct / atr_pct
+    ratio = max(clamp_lo, min(clamp_hi, ratio))
+    return round(base_size_usd * ratio, 2)
+
+
 def pct_to_size_usd(pct: float, base_usdt: float) -> float:
     """Convert asset ratio to notional size_usd. pct is 0..1 (0.1 = 10%)."""
     if pct is None or pct <= 0 or pct > 1:

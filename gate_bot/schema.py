@@ -54,6 +54,13 @@ ALIAS_MAP = {
 }
 
 ORDER_TYPES = {"market", "limit", "post_only", "ioc", "fok"}
+
+# 订单终态（OKX v5 规范 + Gate 对齐）
+ORDER_FINAL_STATES = {"filled", "canceled", "mmp_canceled", "cancelled"}
+# 部分成交状态
+PARTIAL_FILL_STATUSES = {"partially_filled"}
+# mmp_canceled = Market Maker Protection 自动撤单（终态）
+MMP_CANCELED = "mmp_canceled"
 PRICE_TYPES = {"latest", "mark", "index"}
 
 
