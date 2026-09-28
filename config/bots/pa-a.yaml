@@ -1,0 +1,22 @@
+bot_id: pa-a
+enabled: true
+env: paper
+exchange: gate
+symbols: [BTC_USDT]
+max_notional_usd: 3000
+label_prefix: paa
+position_policy: free
+require_sl: true
+paper:
+  feed_exchange: gate
+  initial_capital: 5000
+  leverage: 20
+strategist:
+  enabled: true
+  prompt_file: prompts/vergex_default.md
+  timeframe: 15m
+  candles: 30
+  write_hold: false
+  tools: {enabled: true, native: true, max_rounds: 1}
+  risk: {min_confidence: 0.3, max_chips: 1, max_notional_usd: 3000}
+  llm: {provider: gw-flash, reasoning_effort: low}

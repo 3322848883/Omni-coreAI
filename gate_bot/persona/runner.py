@@ -126,8 +126,11 @@ class PersonaRunner:
         return "BTC_USDT"
 
     def _resolve_order_id(self, decision: str, fusion: dict) -> Optional[str]:
-        """订单生命周期：开仓建新单；持仓期（hold/管理动作）复用现有 open 单。"""
-        opens = self.orders.list_open()
+        """订单生命周期：开仓建新单；持仓期（hold/管理动作）复用现有 open 单。
+
+        按 group 过滤，多组隔离互不干扰。
+        """
+        opens = self.orders.list_open(group=self.group.name)
         # 管理动作 / hold：沿用现有 open 单（共同记忆贯穿持仓期）
         if decision in ("hold", "close", "reduce", "modify") or opens:
             return opens[0]["order_id"] if opens else None
@@ -163,6 +166,9 @@ class PersonaRunner:
             else:
                 action = decision or "hold"
 
+        # 归一化为 schema 合法 action（close_long/close_short/modify_tp_sl 不在 ACTIONS）
+        action, side_override = self._normalize_action(action)
+
         payload = {
             "action": action,
             "symbol": chip.get("symbol") or "BTC_USDT",
@@ -179,12 +185,32 @@ class PersonaRunner:
                 "confidence": fusion.get("confidence") or 0.0,
             },
         }
+        if side_override:
+            payload["side"] = side_override
         # 风控：用 source_bot 的 strategist 风险配置（不能绕过）
         payload = self._apply_risk(source_bot, payload)
 
         if self.group.topology == "single_account":
             return self._exec_single(payload, order_id)
         return self._exec_mirror(payload, order_id)
+
+    @staticmethod
+    def _normalize_action(action: str) -> tuple[str, Optional[str]]:
+        """将 persona 决策动作归一化为 schema 合法 action。
+
+        close_long  → close + side=long
+        close_short → close + side=short
+        modify_tp_sl → hold（schema 暂不支持改单，降级为不动作）
+        返回 (schema_action, side_override|None)。
+        """
+        a = (action or "").lower()
+        if a == "close_long":
+            return "close", "long"
+        if a == "close_short":
+            return "close", "short"
+        if a == "modify_tp_sl":
+            return "hold", None
+        return action, None
 
     @staticmethod
     def _order_status_after(action: str) -> str:
@@ -234,9 +260,9 @@ class PersonaRunner:
         from ..paths import BotPaths
         inbox = BotPaths(self.root, target).inbox
         inbox.mkdir(parents=True, exist_ok=True)
-        fname = f"{int(time.time())}-{payload['meta'].get('order_id') or 'po'}.json"
+        fname = f"{int(time.time())}-{payload['meta'].get('order_id') or 'po'}-{os.getpid()}-{time.time_ns()}.json"
         path = inbox / fname
-        tmp = path.with_name(f".{fname}.{os.getpid()}.{time.time_ns()}.writing")
+        tmp = path.with_name(f".{fname}.writing")
         tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, path)
         if order_id:
@@ -256,12 +282,12 @@ class PersonaRunner:
             try:
                 inbox = BotPaths(self.root, bot).inbox
                 inbox.mkdir(parents=True, exist_ok=True)
-                fname = f"{int(time.time())}-{payload['meta'].get('order_id') or 'po'}.json"
+                fname = f"{int(time.time())}-{payload['meta'].get('order_id') or 'po'}-{os.getpid()}-{time.time_ns()}.json"
                 dst = inbox / fname
                 if dst.exists():
                     delivered.append({"bot": bot, "status": "exists"})
                     continue
-                tmp = dst.with_name(f".{fname}.{os.getpid()}.{time.time_ns()}.writing")
+                tmp = dst.with_name(f".{fname}.writing")
                 tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
                 os.replace(tmp, dst)
                 json.loads(dst.read_text(encoding="utf-8"))

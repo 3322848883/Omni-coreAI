@@ -53,7 +53,7 @@ class TestCriticalFixes(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             store = SharedOrderStore(root)
-            rec = store.create({"symbol": "BTC_USDT", "side": "long", "members": ["a", "b"]})
+            rec = store.create({"symbol": "BTC_USDT", "side": "long", "members": ["a", "b"], "group": "g"})
             oid = rec["order_id"]
 
             class R:
@@ -75,7 +75,7 @@ class TestCriticalFixes(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             store = SharedOrderStore(root)
-            rec = store.create({"symbol": "BTC_USDT", "side": "long", "members": ["a", "b"]})
+            rec = store.create({"symbol": "BTC_USDT", "side": "long", "members": ["a", "b"], "group": "g"})
             oid = rec["order_id"]
 
             class R:
@@ -158,7 +158,7 @@ class TestCriticalFixes(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             store = SharedOrderStore(root)
-            rec = store.create({"symbol": "BTC_USDT", "side": "long", "members": ["a", "b"]})
+            rec = store.create({"symbol": "BTC_USDT", "side": "long", "members": ["a", "b"], "group": "g"})
             oid = rec["order_id"]
 
             class BotCfg:
