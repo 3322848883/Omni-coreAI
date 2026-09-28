@@ -116,7 +116,79 @@ class PersonaRunner:
             result.update({"ok": False, "error": f"exec: {e}"})
         self._log({"event": "decision", "decision": decision, "fusion": fusion,
                    "order_id": order_id, "exec": result.get("executed")})
+        # agent-memory 挂钩：lifecycle + journal
+        self._post_exec_hooks(order_id, fusion, flat, result, cycle_id)
         return result
+
+    def _post_exec_hooks(self, order_id: Optional[str], fusion: dict,
+                         plans: dict, result: dict, cycle_id: str) -> None:
+        """执行后更新订单上下文（lifecycle/recent_events）+ 追加 journal。"""
+        if not order_id:
+            return
+        action = result.get("action") or fusion.get("action") or "hold"
+        decision = result.get("decision") or fusion.get("decision") or ""
+        executed = bool(result.get("executed"))
+        source_bot = fusion.get("master") or ""
+        if not source_bot:
+            votes = fusion.get("votes") or {}
+            source_bot = next(iter(votes), "")
+
+        # lifecycle 管理事件
+        if executed:
+            act_key = self._lifecycle_act(action)
+            self.orders.add_lifecycle(
+                order_id, act_key,
+                detail=f"{action} {decision}",
+                by=f"fusion:{fusion.get('mode', '')}",
+            )
+            self.orders.refresh_recent_events(order_id)
+            # 平仓：更新 profile
+            if self._order_status_after(action) == "closed":
+                self._update_profile_on_close(order_id)
+
+        # journal 追加（每轮，含 hold）
+        try:
+            from ..memory import MemoryJournal
+            journal = MemoryJournal(self.root, source_bot or self.group.members[0])
+            plan = plans.get(source_bot) or {}
+            journal.append(
+                cycle_id=cycle_id or f"c-{int(time.time())}",
+                decision=decision,
+                reasoning=str(plan.get("reasoning") or fusion.get("reason") or "")[:200],
+                memory_refs=[f"order:{order_id}"],
+                executed=executed,
+                exec_result={"action": action, "order_id": order_id},
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    @staticmethod
+    def _lifecycle_act(action: str) -> str:
+        """映射执行动作到 lifecycle 事件类型。"""
+        a = (action or "").lower()
+        if a in ("open_long", "open_short", "add_long", "add_short"):
+            return "open"
+        if a in ("close", "close_all", "flatten", "close_long", "close_short"):
+            return "close"
+        if a in ("reduce_long", "reduce_short", "reduce"):
+            return "reduce"
+        if a == "modify_tp_sl":
+            return "modify_tp"
+        return "hold"
+
+    def _update_profile_on_close(self, order_id: str) -> None:
+        """平仓后更新策略画像（确定性统计）。"""
+        try:
+            from ..memory import MemoryProfile
+            rec = self.orders.get(order_id)
+            if rec is None:
+                return
+            profile = MemoryProfile(self.root, self.group.members[0])
+            lifecycle = rec.get("lifecycle") or []
+            hold_rounds = len([e for e in lifecycle if e.get("act") != "close"])
+            profile.record_trade(pnl_usd=0.0, hold_rounds=hold_rounds)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _symbol_of(self, plans: dict) -> str:
         for p in plans.values():

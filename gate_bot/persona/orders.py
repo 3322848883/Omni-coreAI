@@ -1,4 +1,7 @@
-"""共享订单库：data/shared/orders/<order_id>.json（共同记忆，跨 bot 读写）。"""
+"""共享订单库：data/shared/orders/<order_id>.json（共同记忆，跨 bot 读写）。
+
+扩展记忆字段（agent-memory）：reason/memory_refs/lifecycle/recent_events/invalidation。
+"""
 from __future__ import annotations
 
 import json
@@ -9,9 +12,30 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
+# lifecycle 管理动作权重（recent_events 选取用，FinMem top-K 模式）
+ACT_WEIGHTS = {
+    "open": 10,
+    "modify_sl": 8,
+    "reduce_major": 7,
+    "modify_tp": 5,
+    "reduce": 4,
+    "hold": 1,
+}
+RECENT_EVENTS_MAX = 5
+EVENT_DECAY_HALF_LIFE = 10  # 轮
+
 
 def new_order_id() -> str:
     return "o-" + uuid.uuid4().hex[:12]
+
+
+def _event_weight(act: str, t_now: int, t_event: int) -> float:
+    """weight × 时间衰减（半衰期 EVENT_DECAY_HALF_LIFE）。"""
+    base = ACT_WEIGHTS.get(act, 2)
+    age = max(0, t_now - t_event) / 3600  # 小时
+    rounds = age / 0.25  # 15min = 0.25h
+    decay = 0.5 ** (rounds / EVENT_DECAY_HALF_LIFE)
+    return base * decay
 
 
 class SharedOrderStore:
@@ -47,6 +71,12 @@ class SharedOrderStore:
         rec.setdefault("votes", {})
         rec.setdefault("reason", {})
         rec.setdefault("log", [])
+        # agent-memory 字段
+        rec.setdefault("reason_text", "")
+        rec.setdefault("memory_refs", [])
+        rec.setdefault("lifecycle", [])
+        rec.setdefault("recent_events", [])
+        rec.setdefault("invalidation", [])
         rec["status"] = rec.get("status") or "open"
         rec["created_at"] = int(time.time())
         rec["updated_at"] = rec["created_at"]
@@ -118,6 +148,96 @@ class SharedOrderStore:
                 continue
             out.append(rec)
         return out
+
+    # ── agent-memory: 订单上下文扩展 ──────────────────────
+
+    def set_reason(self, order_id: str, reason_text: str) -> dict:
+        """设置开仓理由（prompt 常驻）。"""
+        return self.update(order_id, reason_text=str(reason_text or "")[:500])
+
+    def add_lifecycle(self, order_id: str, act: str, detail: str = "",
+                      by: str = "") -> dict:
+        """追加管理事件（不可变 append-only 语义，但文件内是列表）。"""
+        with self._lock_for(order_id):
+            rec = self.get(order_id)
+            if rec is None:
+                raise KeyError(f"order not found: {order_id}")
+            rec.setdefault("lifecycle", []).append({
+                "t": int(time.time()), "act": act,
+                "detail": str(detail or "")[:100], "by": str(by or ""),
+            })
+            rec["updated_at"] = int(time.time())
+            self._write(self._path(order_id), rec)
+            return rec
+
+    def add_memory_ref(self, order_id: str, ref: str) -> dict:
+        """记录决策引用的 journal 索引（FinPos 模式）。"""
+        with self._lock_for(order_id):
+            rec = self.get(order_id)
+            if rec is None:
+                raise KeyError(f"order not found: {order_id}")
+            rec.setdefault("memory_refs", [])
+            if ref and ref not in rec["memory_refs"]:
+                rec["memory_refs"].append(ref)
+            rec["updated_at"] = int(time.time())
+            self._write(self._path(order_id), rec)
+            return rec
+
+    def add_invalidation(self, order_id: str, field: str,
+                         old: Any, new: Any) -> dict:
+        """标记旧假设失效（Memora FAMA 模式）。"""
+        with self._lock_for(order_id):
+            rec = self.get(order_id)
+            if rec is None:
+                raise KeyError(f"order not found: {order_id}")
+            rec.setdefault("invalidation", []).append({
+                "t": int(time.time()), "field": str(field),
+                "old": str(old), "new": str(new),
+            })
+            rec["updated_at"] = int(time.time())
+            self._write(self._path(order_id), rec)
+            return rec
+
+    def refresh_recent_events(self, order_id: str) -> dict:
+        """从 lifecycle 选 top-5 关键决策事件（FinMem top-K + 衰减）。"""
+        with self._lock_for(order_id):
+            rec = self.get(order_id)
+            if rec is None:
+                raise KeyError(f"order not found: {order_id}")
+            t_now = int(time.time())
+            events = rec.get("lifecycle") or []
+            scored = []
+            for e in events:
+                act = str(e.get("act") or "")
+                t = int(e.get("t") or 0)
+                w = _event_weight(act, t_now, t)
+                scored.append((w, e))
+            scored.sort(key=lambda x: -x[0])
+            rec["recent_events"] = [
+                {**e, "weight": round(w, 2)}
+                for w, e in scored[:RECENT_EVENTS_MAX]
+            ]
+            rec["updated_at"] = t_now
+            self._write(self._path(order_id), rec)
+            return rec
+
+    def get_order_context(self, order_id: str) -> Optional[dict]:
+        """返回 prompt 可用的订单上下文摘要。"""
+        rec = self.get(order_id)
+        if rec is None or rec.get("status") != "open":
+            return None
+        return {
+            "order_id": rec["order_id"],
+            "symbol": rec.get("symbol", ""),
+            "side": rec.get("side", ""),
+            "entry_price": rec.get("entry_price"),
+            "tp": rec.get("tp"),
+            "sl": rec.get("sl"),
+            "reason": rec.get("reason_text", ""),
+            "recent_events": rec.get("recent_events", []),
+            "memory_refs": rec.get("memory_refs", []),
+            "invalidation": rec.get("invalidation", []),
+        }
 
     def _write(self, path: Path, rec: dict) -> None:
         data = json.dumps(rec, ensure_ascii=False, indent=2)
