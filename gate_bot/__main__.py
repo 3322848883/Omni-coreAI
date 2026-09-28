@@ -115,6 +115,20 @@ def cmd_plan_loop(args) -> int:
     return 0
 
 
+def cmd_paper_score(args) -> int:
+    from .metrics.scoreboard import build_scoreboard, format_table, write_scoreboard
+
+    root = _root_from_args(args)
+    board = build_scoreboard(root, run_trial_scan=not getattr(args, "no_scan", False))
+    path = write_scoreboard(root, board)
+    if getattr(args, "json", False):
+        print(json.dumps(board, ensure_ascii=False, indent=2))
+    else:
+        print(format_table(board))
+        print(f"\nwritten: {path}")
+    return 0
+
+
 def cmd_trades(args) -> int:
     from .tradelog import TradeLogger, trade_log_path
 
@@ -476,6 +490,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_tr.add_argument("--bot", required=True)
     p_tr.add_argument("--tail", type=int, default=50)
     p_tr.set_defaults(func=cmd_trades)
+
+    p_sc = sub.add_parser("paper-score", help="strategy scoreboard (metrics + trials)")
+    p_sc.add_argument("--json", action="store_true", help="print full JSON")
+    p_sc.add_argument("--no-scan", action="store_true", help="skip trial file scan")
+    p_sc.set_defaults(func=cmd_paper_score)
 
     p_st = sub.add_parser("status", help="show bots and backlog")
     p_st.set_defaults(func=cmd_status)
