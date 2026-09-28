@@ -183,7 +183,9 @@ llm:
 - 资金费率：每 8h 取真实费率对持仓结算
 - 精度校验：tick/lot/最小名义/价格带/杠杆上限，拒绝原因对齐交易所
 
-**多人格共管**：N 人格（brooks/smc/scalper…）共管订单。各人格独立分析 → 融合（`weighted_vote`/`master_arbiter`/`consensus`）→ 按拓扑执行（`single_account` 去重 / `mirror_accounts` 同步）。共同记忆 `data/shared/orders/<order_id>.json`。`python -m gate_bot persona-run --group <name>`。
+**多人格共管**：N 人格（brooks/smc/scalper…）共管订单。各人格独立分析 → 融合（`weighted_vote`/`master_arbiter`/`consensus`）→ 按拓扑执行（`single_account` 去重 / `mirror_accounts` 同步）。可选讨论模式（互看 reasoning 后修正，`discussion.enabled: true`，硬上限 4 轮）。共同记忆 `data/shared/orders/<order_id>.json`。`python -m gate_bot persona-run --group <name>`。
+
+**记忆系统**（agent-memory）：四层记忆（Order/Journal/Profile/Working），恒定 ~4k token/轮。订单上下文含 reason/lifecycle/recent_events(top-5)/memory_refs/invalidation。决策日志 append-only 事件溯源（`state/memory_journal.jsonl`）。策略画像确定性统计（`state/memory_profile.json`）。缓存优化（稳定前缀+变化值殿后）。`gate_bot.memory` 模块。
 
 **信号广播**：一信号 → 多所，目标在 `config/broadcast.yaml`（AI 碰不到）。`python -m gate_bot broadcast` 常驻分发；可选 1/2/N 个目标；逐个校验写入、失败报错；目标 bot 各自独立执行。信号内 `targets` 字段忽略（防 AI 注入）。
 

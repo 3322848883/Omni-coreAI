@@ -594,7 +594,39 @@ python -m gate_bot persona-run --once             # 单轮
 | `master_arbiter` | master 人格裁决，其他作参考 |
 | `consensus` | 共识分 ≥ threshold 才执行 |
 
-**共同记忆**：`data/shared/orders/<order_id>.json`——订单状态/各人格理由/投票史/管理记录，跨 bot 读写（为多人格共管与后续记忆功能预留）。
+**共同记忆**：`data/shared/orders/<order_id>.json`——订单状态/各人格理由/投票史/管理记录，跨 bot 读写。
+
+### 讨论模式（可选）
+
+各人格**互看 reasoning 后修正决策**，再融合执行：
+
+```yaml
+# config/persona_groups.yaml — 加 discussion 段即可
+    discussion:
+      enabled: true
+      rounds: 2            # 讨论轮次（1-4，硬上限防无限讨论）
+      timeout_sec: 120     # 单轮超时
+      early_exit_on_agreement: true   # 首轮一致则跳过讨论
+```
+
+**流程**：独立分析 → 互看对方 decision+reasoning → 修正 → 融合。基于 Du et al. 2023（2-4 轮最优）+ 硬预算防死讨论。
+
+### 记忆系统（agent-memory）
+
+四层记忆架构，恒定 ~4k token/轮：
+
+| 层 | 载体 | 生命周期 | 进 prompt |
+|---|---|---|---|
+| Working | 当前快照 + 近 3 轮 | 每轮重建 | ✅ |
+| Order | `data/shared/orders/` | 开仓→平仓 | ✅ 持仓期 |
+| Journal | `state/memory_journal.jsonl` | 永久 append-only | ❌ 摘要 |
+| Profile | `state/memory_profile.json` | 跨订单持久 | ✅ 精简 |
+
+- **订单上下文**：reason / lifecycle / recent_events（top-5 关键事件）/ memory_refs / invalidation
+- **决策日志**：每轮 append-only 事件溯源（合规级审计）
+- **策略画像**：平仓后确定性统计更新
+- **缓存优化**：稳定前缀 ~1850t 缓存命中，变化值殿后
+- **遗忘机制**：TTL 归档（90 天）+ 已平仓清理（365 天）
 
 ## LLM 工具（20 个）与指标（23 族）
 
