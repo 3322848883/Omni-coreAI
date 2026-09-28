@@ -50,11 +50,15 @@ def generate_candlestick_chart(
     output_path: Optional[Path] = None,
     indicators: Optional[dict] = None,
     bar_count: bool = True,
+    warmup_klines: Optional[list[dict]] = None,
 ) -> bytes:
     """从 K 线数据生成 TradingView 风格蜡烛图 PNG。
 
-    indicators: {"ema20": [float, ...], "ema50": [...], ...} 叠加曲线。
+    indicators: {"ema20": [float, ...], ...} 叠加曲线（已计算好，与 klines 对齐）。
     bar_count: 在蜡烛下方标注日内 bar 序号（辅助 AI 计数）。
+    warmup_klines: 额外的预热 K 线（只用于指标计算，不显示）。
+                   如果提供了 warmup_klines + indicators 已算好，则 indicators
+                   长度 = len(warmup_klines) + len(klines)，只画后半段。
     """
     from PIL import Image, ImageDraw
 
@@ -182,12 +186,14 @@ def generate_candlestick_chart(
             "sma50": (255, 120, 0),
             "sma200": (156, 39, 176),
         }
+        # 预热偏移：indicators 可能比 klines 长（含 warmup）
+        warmup_len = len(warmup_klines) if warmup_klines else 0
         for name, values in indicators.items():
             if not values or len(values) < 2:
                 continue
-            # 前向填充 None（TV 风格：从 bar 0 就有线）
-            seed = next((float(v) for v in values if v is not None), 0.0)
-            values = _forward_fill_ema(list(values), seed)
+            # 只取显示区域的指标值（跳过 warmup）
+            if warmup_len > 0 and len(values) > n:
+                values = values[warmup_len:]
             color = ind_colors.get(name.lower(), (100, 100, 100))
             pts = []
             for i, v in enumerate(values):
