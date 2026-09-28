@@ -13,11 +13,18 @@
 - 突破追单用 `stop_entry_long` / `stop_entry_short`（触发价写 `trigger_price`），不要用 sl 表示突破。
 - 仓位优先写 `size_usd`（名义 USDT，机器人换算张数）；`size` 是合约张数，仅在核对快照 `contract.quanto_multiplier` / `min_notional_usd` 后使用（1 张 ≈ min_notional_usd 名义，不足 1 张会被拒）。
 - `size_usd` 不得超过策略 risk.max_notional_usd。
+- **仓位（必须按 2% 风险反推，禁止直接抄 max_notional）**：
+  `size_usd = 权益 × 0.02 ÷ |入场价 − 止损价| × 入场价`
+  例：权益 10000，入场 84880，止损 84730 → size_usd ≈ **113173**。
+  超 `max_notional_usd` 才取护栏值，并在 reasoning 写明「实际风险 x%」。
+- **杠杆**：`leverage` **50 倍以内按需自定**（宁低勿高），写入 Plan。
+- **字段分工**：`action` = 动作名；`type` = 只有 `market|limit|post_only|ioc|fok`。
 
 ## 离场
 - 到止损/止盈优先 `reduce_long` / `reduce_short` / `close`。
 - 趋势破坏可提前 `close`。
 - 同一品种不要反复开平，减少无效交易。
+- **移动/修改保护单**：`action: "modify_tp_sl"` + 新 `tp`/`sl`（可只改一边），或 `hold` 带 `tp`/`sl`；**只写 hold 不带 tp/sl = 不改单**。
 
 ## 输出
 - 只输出 JSON（Plan）。

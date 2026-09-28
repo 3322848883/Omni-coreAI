@@ -32,6 +32,7 @@ ACTIONS = {
     "reduce_short",
     "reduce",
     "flatten",
+    "modify_tp_sl",
 }
 
 # alias → canonical action; logs keep requested_action for clarity
@@ -46,6 +47,10 @@ ALIAS_MAP = {
     "reduce_short": "close",
     "reduce": "close",
     "flatten": "close_all",
+    "move_tp_sl": "modify_tp_sl",
+    "update_tp_sl": "modify_tp_sl",
+    "adjust_tp_sl": "modify_tp_sl",
+    "modify_protection": "modify_tp_sl",
 }
 
 ORDER_TYPES = {"market", "limit", "post_only", "ioc", "fok"}
@@ -139,6 +144,46 @@ def infer_trigger_rules(action: str, is_tp: bool) -> int:
     return 1 if is_tp else 2
 
 
+def _parse_modify_tp_sl(data: dict, default_label: str, requested_action: str = "modify_tp_sl") -> Intent:
+    """Move TP/SL on an existing position. Requires symbol and at least one of tp/sl."""
+    symbol = data.get("symbol")
+    if not symbol:
+        raise SchemaError("modify_tp_sl requires symbol")
+    tp = _f(data.get("tp"), "tp")
+    sl = _f(data.get("sl"), "sl")
+    if tp is None and sl is None:
+        raise SchemaError("modify_tp_sl requires tp and/or sl")
+    side = data.get("side")
+    if side is not None:
+        side = str(side).lower()
+        if side not in ("long", "short"):
+            raise SchemaError("modify_tp_sl.side must be long|short")
+    tp_mode = str(data.get("tp_mode") or "trigger").lower()
+    sl_mode = str(data.get("sl_mode") or "trigger").lower()
+    for name, m in (("tp_mode", tp_mode), ("sl_mode", sl_mode)):
+        if m not in ("trigger", "limit_order", "limit"):
+            raise SchemaError(f"{name} must be trigger|limit_order")
+    return Intent(
+        action="modify_tp_sl",
+        symbol=_check_symbol_token(symbol),
+        tp=tp,
+        sl=sl,
+        side=side,
+        tp_mode="limit_order" if tp_mode == "limit" else tp_mode,
+        sl_mode="limit_order" if sl_mode == "limit" else sl_mode,
+        tp_type=str(data.get("tp_type") or "market").lower(),
+        sl_type=str(data.get("sl_type") or "market").lower(),
+        tp_limit_price=_f(data.get("tp_limit_price"), "tp_limit_price"),
+        sl_limit_price=_f(data.get("sl_limit_price"), "sl_limit_price"),
+        trigger_price_type=str(data.get("trigger_price_type") or "mark").lower(),
+        trigger_rule_tp=_i(data.get("trigger_rule_tp"), "trigger_rule_tp"),
+        trigger_rule_sl=_i(data.get("trigger_rule_sl"), "trigger_rule_sl"),
+        trigger_expiration=_i(data.get("trigger_expiration"), "trigger_expiration"),
+        label=_safe_label(data.get("label") or default_label),
+        meta={**(data.get("meta") or {}), "requested_action": requested_action},
+    )
+
+
 def _parse_stop_entry(data: dict, action: str, default_label: str) -> Intent:
     """Breakout ENTRY (buy_stop / sell_stop). This is NOT stop-loss."""
     symbol = data.get("symbol")
@@ -225,11 +270,20 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
         raise SchemaError("intent must be an object")
     action = str(data.get("action") or "").strip().lower()
     if action in ("", "hold", "watch", "skip"):
-        return Intent(action="hold", meta=data.get("meta") or {}, label=default_label)
+        # hold + tp/sl = move existing protections (do not silently drop)
+        tp = _f(data.get("tp"), "tp")
+        sl = _f(data.get("sl"), "sl")
+        if tp is None and sl is None:
+            return Intent(action="hold", meta=data.get("meta") or {}, label=default_label)
+        intent = _parse_modify_tp_sl(data, default_label, requested_action="modify_tp_sl")
+        intent.meta["from_action"] = "hold"
+        return intent
     requested_action = action
     action = ALIAS_MAP.get(action, action)
     if action not in ACTIONS:
         raise SchemaError(f"unsupported action: {requested_action!r}")
+    if action == "modify_tp_sl":
+        return _parse_modify_tp_sl(data, default_label, requested_action=requested_action)
     if action in ("stop_entry_long", "stop_entry_short"):
         intent = _parse_stop_entry(data, action, default_label)
         intent.meta.setdefault("requested_action", requested_action)

@@ -129,6 +129,7 @@ CREATE TABLE IF NOT EXISTS pnl_snapshot (
 CREATE INDEX IF NOT EXISTS idx_orders_contract ON orders (contract, status);
 CREATE INDEX IF NOT EXISTS idx_price_orders_contract ON price_orders (contract, status);
 CREATE INDEX IF NOT EXISTS idx_fills_time ON fills (fill_time);
+CREATE INDEX IF NOT EXISTS idx_fills_order ON fills (order_id);
 CREATE INDEX IF NOT EXISTS idx_funding_time ON funding_log (settle_time);
 """
 
@@ -151,6 +152,55 @@ def new_order_id() -> str:
     return uuid.uuid4().hex[:16]
 
 
+class _FileLock:
+    """跨进程文件锁：防止两个进程同时写 account.db。"""
+
+    def __init__(self, path: Path):
+        self.path = Path(str(path) + ".lock")
+        self._fh = None
+
+    def acquire(self) -> None:
+        import os
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self.path, "a+")
+        try:
+            if os.name == "nt":
+                import msvcrt
+                self._fh.seek(0)
+                msvcrt.locking(self._fh.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+        except Exception:  # noqa: BLE001
+            # 锁失败不阻塞（单机开发可容忍），但尽量释放
+            pass
+
+    def release(self) -> None:
+        try:
+            if self._fh is not None:
+                import os
+                if os.name == "nt":
+                    import msvcrt
+                    self._fh.seek(0)
+                    msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+                self._fh.close()
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            self._fh = None
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *a):
+        self.release()
+        return False
+
+
 class PaperStore:
     """paper_account.db 的线程安全读写层。"""
 
@@ -158,7 +208,20 @@ class PaperStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._flock = _FileLock(self.path)
         self._conn: Optional[sqlite3.Connection] = None
+
+    def _write_guard(self):
+        """线程锁 + 跨进程文件锁（写路径）。"""
+        self._lock.acquire()
+        self._flock.acquire()
+        return self
+
+    def _write_release(self) -> None:
+        try:
+            self._flock.release()
+        finally:
+            self._lock.release()
 
     def _db(self) -> sqlite3.Connection:
         with self._lock:
@@ -233,8 +296,9 @@ class PaperStore:
         sets = ", ".join(f"{k}=?" for k in fields)
         conn = self._db()
         with self._lock:
-            conn.execute(f"UPDATE account SET {sets} WHERE id=1", tuple(fields.values()))
-            conn.commit()
+            with self._flock:
+                conn.execute(f"UPDATE account SET {sets} WHERE id=1", tuple(fields.values()))
+                conn.commit()
 
     # ── positions ───────────────────────────────────────
     def get_positions(self, contract: Optional[str] = None) -> list[dict]:
@@ -251,11 +315,12 @@ class PaperStore:
         keys = ["contract", "mode"] + list(fields)
         conn = self._db()
         with self._lock:
-            conn.execute(
-                f"INSERT OR REPLACE INTO positions ({','.join(keys)}) VALUES ({','.join('?' * len(keys))})",
-                (contract, mode) + tuple(fields.values()),
-            )
-            conn.commit()
+            with self._flock:
+                conn.execute(
+                    f"INSERT OR REPLACE INTO positions ({','.join(keys)}) VALUES ({','.join('?' * len(keys))})",
+                    (contract, mode) + tuple(fields.values()),
+                )
+                conn.commit()
 
     def delete_position(self, contract: str, mode: str = "single") -> None:
         conn = self._db()
@@ -289,8 +354,9 @@ class PaperStore:
         sets = ", ".join(f"{k}=?" for k in fields)
         conn = self._db()
         with self._lock:
-            conn.execute(f"UPDATE orders SET {sets} WHERE order_id=?", tuple(fields.values()) + (order_id,))
-            conn.commit()
+            with self._flock:
+                conn.execute(f"UPDATE orders SET {sets} WHERE order_id=?", tuple(fields.values()) + (order_id,))
+                conn.commit()
 
     def get_order(self, order_id: str) -> Optional[dict]:
         conn = self._db()
@@ -338,9 +404,48 @@ class PaperStore:
         sets = ", ".join(f"{k}=?" for k in fields)
         conn = self._db()
         with self._lock:
-            conn.execute(f"UPDATE price_orders SET {sets} WHERE order_id=?",
-                         tuple(fields.values()) + (order_id,))
-            conn.commit()
+            with self._flock:
+                conn.execute(f"UPDATE price_orders SET {sets} WHERE order_id=?",
+                             tuple(fields.values()) + (order_id,))
+                conn.commit()
+
+    def claim_price_order(self, order_id: str) -> bool:
+        """原子占用触发单：仅当 status=untriggered 时改为 triggered，防双触发。"""
+        conn = self._db()
+        with self._lock:
+            with self._flock:
+                cur = conn.execute(
+                    "UPDATE price_orders SET status=?, trigger_time=? "
+                    "WHERE order_id=? AND status='untriggered'",
+                    (TRIGGER_TRIGGERED, int(time.time()), order_id),
+                )
+                conn.commit()
+                return cur.rowcount == 1
+
+    def cancel_reduce_only_price_orders(self, contract: str, keep_ids: Optional[set] = None) -> list[str]:
+        """仓位归零后回收孤儿保护单（仅 reduce_only 且未触发）。"""
+        keep = {str(x) for x in (keep_ids or set())}
+        conn = self._db()
+        cancelled: list[str] = []
+        with self._lock:
+            with self._flock:
+                rows = conn.execute(
+                    "SELECT order_id FROM price_orders WHERE contract=? AND reduce_only=1 "
+                    "AND status IN ('untriggered','open','triggered')",
+                    (contract,),
+                ).fetchall()
+                for r in rows:
+                    oid = str(r["order_id"])
+                    if oid in keep:
+                        continue
+                    conn.execute(
+                        "UPDATE price_orders SET status=?, finish_time=?, error='orphan_cleanup' "
+                        "WHERE order_id=? AND status IN ('untriggered','open','triggered')",
+                        (TRIGGER_CANCELLED, int(time.time()), oid),
+                    )
+                    cancelled.append(oid)
+                conn.commit()
+        return cancelled
 
     def get_price_order(self, order_id: str) -> Optional[dict]:
         conn = self._db()
@@ -363,23 +468,33 @@ class PaperStore:
         return [dict(r) for r in rows]
 
     # ── fills ───────────────────────────────────────────
-    def insert_fill(self, fill: dict) -> int:
+    def insert_fill(self, fill: dict) -> tuple[int, bool]:
+        """写入成交；返回 (id, created)。created=False 表示重复入账已忽略。"""
         conn = self._db()
         with self._lock:
-            cur = conn.execute(
-                "INSERT INTO fills (fill_time, contract, side, price, size, fee,"
-                " realised_pnl, role, order_id, kind) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (
-                    int(fill.get("fill_time") or time.time()),
-                    fill["contract"], fill["side"],
-                    float(fill["price"]), float(fill["size"]),
-                    float(fill.get("fee") or 0), float(fill.get("realised_pnl") or 0),
-                    fill.get("role") or "taker", fill.get("order_id"),
-                    fill.get("kind") or "trade",
-                ),
-            )
-            conn.commit()
-            return int(cur.lastrowid or 0)
+            with self._flock:
+                # 幂等：同 order 同价同量同秒 只入账一次（防并发双花）
+                if fill.get("order_id"):
+                    row = conn.execute(
+                        "SELECT id FROM fills WHERE order_id=? AND fill_time=? AND price=? AND size=? LIMIT 1",
+                        (fill.get("order_id"), fill.get("fill_time"), fill.get("price"), fill.get("size")),
+                    ).fetchone()
+                    if row:
+                        return int(row["id"]), False
+                cur = conn.execute(
+                    "INSERT INTO fills (fill_time, contract, side, price, size, fee,"
+                    " realised_pnl, role, order_id, kind) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        int(fill.get("fill_time") or time.time()),
+                        fill["contract"], fill["side"],
+                        float(fill["price"]), float(fill["size"]),
+                        float(fill.get("fee") or 0), float(fill.get("realised_pnl") or 0),
+                        fill.get("role") or "taker", fill.get("order_id"),
+                        fill.get("kind") or "trade",
+                    ),
+                )
+                conn.commit()
+                return int(cur.lastrowid or 0), True
 
     def list_fills(self, contract: Optional[str] = None, limit: int = 100) -> list[dict]:
         conn = self._db()

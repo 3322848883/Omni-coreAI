@@ -22,7 +22,8 @@ AI/策略把信号写成 **一个 JSON 文件**，放入 `inbox/<bot_id>/`。
 | `close` | 平仓 | `reduce` / `reduce_long` / `reduce_short` |
 | `close_all` | 全平 | `flatten` |
 | `cancel_all` / `cancel_price_all` / `cancel_trail_all` | 撤单 | |
-| `hold` | 不下单 | `watch` / `skip` / 空 `action` |
+| `modify_tp_sl` | **移动/修改持仓止盈止损**（需 `tp`/`sl` 至少一个） | `move_tp_sl` / `update_tp_sl` / `adjust_tp_sl` |
+| `hold` | 不下单；**若带 `tp`/`sl` = modify_tp_sl** | `watch` / `skip` / 空 `action` |
 | `grid` | 单向网格 | |
 | `trail` | 追踪单（**需资金密码，当前搁置**） | |
 
@@ -67,7 +68,7 @@ AI/策略把信号写成 **一个 JSON 文件**，放入 `inbox/<bot_id>/`。
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
-| `action` | ✅ | 见总表；空/`hold`/`watch`/`skip` = 不下单 |
+| `action` | ✅ | 见总表；空/`hold`/`watch`/`skip` = 不下单（**hold 若带 `tp`/`sl` 则改保护单**） |
 | `symbol` | 开平仓必填 | `BTC_USDT` 或 `BTC` |
 | `size` / `size_usd` / `size_pct` / `margin_pct` | 四选一 | 张 / 名义 U / 可用余额比例 / 保证金比例×杠杆 |
 | `type` | 可省 | `market`(默认)/`limit`/`post_only`/`ioc`/`fok` |

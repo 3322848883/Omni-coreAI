@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .gate_client import GateApiError, GateClient, resolve_symbol
-from .schema import Intent, SignalFile, expand_signal
+from .schema import Intent, SignalFile, expand_signal, infer_trigger_rules
 from .sizing import default_trigger_limit_price, pct_to_size_usd, round_price, usd_to_contracts
 
 log = logging.getLogger("gate_bot.executor")
@@ -283,7 +283,7 @@ class Executor:
             return ""
         action = intent.action
         manage = {
-            "hold", "close", "close_all", "flatten",
+            "hold", "modify_tp_sl", "close", "close_all", "flatten",
             "cancel_all", "cancel_price_all", "cancel_trail_all",
             "reduce", "reduce_long", "reduce_short", "trail",
         }
@@ -373,6 +373,8 @@ class Executor:
         action = intent.action
         if action == "hold":
             return StepResult("hold", "", True, detail={"skipped": True})
+        if action == "modify_tp_sl":
+            return self._modify_tp_sl(intent)
         if action == "close_all":
             return self._close_all(intent.symbol)
         if action == "cancel_all":
@@ -414,7 +416,7 @@ class Executor:
         """Account-level halt / exposure / daily-loss limits (pre-trade, all configurable)."""
         ar = self.account_risk or {}
         action = (intent.meta or {}).get("requested_action") or intent.action
-        manage = {"hold", "close", "close_all", "flatten", "cancel_all", "cancel_price_all",
+        manage = {"hold", "modify_tp_sl", "close", "close_all", "flatten", "cancel_all", "cancel_price_all",
                   "cancel_trail_all", "reduce", "reduce_long", "reduce_short"}
         if ar.get("halt") and action not in manage:
             raise GateApiError("HALTED: account_risk.halt=true; only close/cancel allowed")
@@ -492,11 +494,69 @@ class Executor:
         return current_total
 
     def _check_notional(self, size_usd: Optional[float]) -> None:
-        if self.max_notional_usd is not None and size_usd is not None:
-            if size_usd > self.max_notional_usd:
-                raise GateApiError(
-                    f"size_usd={size_usd} exceeds max_notional_usd={self.max_notional_usd}"
-                )
+        if size_usd is None:
+            return
+        # 权益比例硬顶：默认单笔名义 ≤ 50% 权益（可配 account_risk.max_notional_pct）
+        pct = self.account_risk.get("max_notional_pct")
+        if pct is None:
+            pct = 0.5
+        try:
+            pct = float(pct)
+            if pct > 0:
+                acct = self.client.get_account() or {}
+                equity = float(acct.get("total") or acct.get("balance") or 0)
+                if equity > 0:
+                    cap_pct = equity * pct
+                    if size_usd > cap_pct:
+                        raise GateApiError(
+                            f"MAX_NOTIONAL_PCT: size_usd={size_usd:.0f} > equity×{pct:.0%}={cap_pct:.0f}"
+                        )
+        except GateApiError:
+            raise
+        except Exception:  # noqa: BLE001
+            pass
+        if self.max_notional_usd is not None and size_usd > self.max_notional_usd:
+            raise GateApiError(
+                f"size_usd={size_usd} exceeds max_notional_usd={self.max_notional_usd}"
+            )
+
+    def _align_size_to_risk(self, intent: Intent, entry: float) -> tuple[float, str]:
+        """按风险公式钳制 size_usd：应有 = 权益×risk% ÷ SL距离% × 入场。
+
+        返回 (adjusted_size_usd, note)。无 sl/权益时原样返回。
+        """
+        size_usd = intent.size_usd
+        if size_usd is None or intent.sl is None or entry <= 0:
+            return size_usd, ""
+        sl = float(intent.sl)
+        dist = abs(entry - sl) / entry
+        if dist <= 0:
+            return size_usd, ""
+        risk_pct = self.account_risk.get("risk_pct")
+        if risk_pct is None:
+            risk_pct = self.account_risk.get("risk_per_trade_pct", 0.01)
+        try:
+            risk_pct = float(risk_pct)
+        except (TypeError, ValueError):
+            risk_pct = 0.01
+        if risk_pct <= 0:
+            return size_usd, ""
+        try:
+            acct = self.client.get_account() or {}
+            equity = float(acct.get("total") or acct.get("balance") or 0)
+        except Exception:  # noqa: BLE001
+            return size_usd, ""
+        if equity <= 0:
+            return size_usd, ""
+        # dist = |entry-sl|/entry（比例）；应有名义 = 权益×risk% ÷ dist
+        expected = equity * risk_pct / dist
+        if expected <= 0:
+            return size_usd, ""
+        # 偏差超过 30% 过大 → 钳到应有值；过小（<50%）保留（可主动降风险）
+        if float(size_usd) > expected * 1.3:
+            note = f"size_clamped {float(size_usd):.0f}->{expected:.0f} (risk {risk_pct:.1%} expected)"
+            return expected, note
+        return float(size_usd), ""
 
     # ── actions ──────────────────────────────────────────
     def _open(self, intent: Intent) -> StepResult:
@@ -504,6 +564,10 @@ class Executor:
         self._check_open_sl(intent)
         self._check_account_risk(intent)
         meta = self.client.get_contract(intent.symbol)
+        entry_for_risk = intent.price if intent.price is not None else self.client.get_last_price(intent.symbol)
+        size_note = ""
+        if intent.size_usd is not None:
+            intent.size_usd, size_note = self._align_size_to_risk(intent, float(entry_for_risk))
         self._check_notional(intent.size_usd)
 
         if intent.leverage:
@@ -540,6 +604,8 @@ class Executor:
             "quanto_multiplier": meta.quanto_multiplier,
             "leg_entry_ok": entry_rec is not None,
         }
+        if size_note:
+            detail["size_align_note"] = size_note
         if entry_rec is None:
             return StepResult(
                 intent.action, intent.symbol, False, detail=detail,
@@ -597,6 +663,133 @@ class Executor:
                 error="exit_not_placed: " + "; ".join(str(x) for x in exit_errors or ["tp/sl missing"]),
             )
         return StepResult(intent.action, intent.symbol, True, detail=detail)
+
+    def _modify_tp_sl(self, intent: Intent) -> StepResult:
+        """Move TP/SL on an existing position (place new first, then drop old owned).
+
+        Only replaces the kind(s) provided: tp only → keep SL; sl only → keep TP.
+        """
+        self._check_symbol(intent.symbol)
+        if intent.tp is None and intent.sl is None:
+            return StepResult(
+                "modify_tp_sl", intent.symbol, False,
+                error="modify_tp_sl requires tp and/or sl",
+            )
+        positions = self._symbol_positions(intent.symbol)
+        if not positions:
+            return StepResult(
+                "modify_tp_sl", intent.symbol, False,
+                error=f"NO_POSITION: no open position on {intent.symbol}",
+            )
+        side = intent.side
+        if side in ("long", "short"):
+            pos = next((p for p in positions if p["side"] == side), None)
+            if not pos:
+                return StepResult(
+                    "modify_tp_sl", intent.symbol, False,
+                    error=f"NO_POSITION: no {side} on {intent.symbol}",
+                )
+        elif len(positions) == 1:
+            pos = positions[0]
+            side = pos["side"]
+        else:
+            return StepResult(
+                "modify_tp_sl", intent.symbol, False,
+                error="AMBIGUOUS_SIDE: dual position requires side=long|short",
+            )
+        size = abs(int(pos["size"]))
+        meta = self.client.get_contract(intent.symbol)
+        pos_side = side
+        trigger_side = "short" if pos_side == "long" else "long"
+        open_action = "open_long" if pos_side == "long" else "open_short"
+        # rule direction depends on position side
+        if intent.trigger_rule_tp is None:
+            intent.trigger_rule_tp = infer_trigger_rules(open_action, True)
+        if intent.trigger_rule_sl is None:
+            intent.trigger_rule_sl = infer_trigger_rules(open_action, False)
+        # _place_trigger signs by intent.side
+        intent.side = pos_side
+
+        prefix = self._own_prefix(intent.label)
+        owned = self._owned_price_orders(intent.symbol, prefix) if prefix else []
+
+        def _kind_of(po: dict) -> str:
+            text = str((po.get("initial") or {}).get("text") or po.get("text") or "")
+            if text.endswith("-tp") or text.endswith("-lp"):
+                return "tp"
+            if text.endswith("-sl") or text.endswith("-ls"):
+                return "sl"
+            return ""
+
+        new_ids: set[str] = set()
+        detail: dict[str, Any] = {
+            "position_side": pos_side,
+            "position_size": size,
+            "prefix": prefix,
+        }
+        errors: list[str] = []
+
+        for kind, price, mode in (
+            ("tp", intent.tp, intent.tp_mode),
+            ("sl", intent.sl, intent.sl_mode),
+        ):
+            if price is None:
+                detail[f"{kind}_skipped"] = True
+                continue
+            try:
+                rec_, err_ = self._place_exit_leg(
+                    lambda p=price, m=mode, k=kind: (
+                        self._place_limit_exit(intent, pos_side, p, is_tp=(k == "tp"), meta=meta, size=size)
+                        if m == "limit_order"
+                        else self._place_trigger(
+                            intent, trigger_side, p, is_tp=(k == "tp"), meta=meta, size=size
+                        )
+                    ),
+                    kind=kind,
+                    price_order=(mode != "limit_order"),
+                )
+            except Exception as e:  # noqa: BLE001 — boundary
+                rec_, err_ = None, str(e)
+            if rec_:
+                order = rec_.get("order") or {}
+                oid = str(order.get("id") or "")
+                if oid:
+                    new_ids.add(oid)
+                detail[f"{kind}_placed"] = {"id": oid, "price": price, "check": rec_.get("check")}
+            else:
+                errors.append(f"{kind}: {err_}")
+                detail[f"{kind}_error"] = str(err_)
+
+        # cancel old owned TP/SL of the kinds we just replaced (never stop_entry)
+        cancelled = []
+        for po in owned:
+            kind = _kind_of(po)
+            if not kind or kind not in ("tp", "sl"):
+                continue
+            # only replace kinds the caller asked to move
+            if (kind == "tp" and intent.tp is None) or (kind == "sl" and intent.sl is None):
+                continue
+            status = str(po.get("status") or "").lower()
+            if status in ("cancelled", "finished", "filled", "triggered", "failed", "closed"):
+                continue  # already terminal — do not re-cancel
+            pid = str(po.get("id") or "")
+            if not pid or pid in new_ids:
+                continue
+            try:
+                self.client.cancel_price_order(pid)
+                cancelled.append(pid)
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"cancel {pid}: {e}")
+        detail["cancelled_old"] = cancelled
+
+        ok = not errors
+        return StepResult(
+            "modify_tp_sl",
+            intent.symbol,
+            ok,
+            detail=detail,
+            error="; ".join(errors) if errors else "",
+        )
 
     def _find_open_order_by_text(self, symbol: str, text: str) -> Optional[dict]:
         if not text:

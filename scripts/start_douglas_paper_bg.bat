@@ -1,0 +1,8 @@
+@echo off
+rem windowless douglas-paper: psychology/discipline layer (hold-only)
+cd /d "%~dp0.."
+set GATE_BOT_ROOT=%CD%
+set OPENAI_BASE_URL=http://69.12.85.185:7863/v1
+set OPENAI_API_KEY=sk-wb-Sm2NXyLm2rylSEQ7I_8HzNu_4pxmNfpoVtjcfyc9chM
+start "" /b ".venv\Scripts\pythonw.exe" -m gate_bot --root "%CD%" plan-loop --bot douglas-paper
+echo started douglas-paper plan-loop (hold-only, no paper-run needed)

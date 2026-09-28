@@ -45,3 +45,9 @@ data/bots.db
 data/bots.db-shm
 data/bots.db-wal
 *.egg-info/
+
+data/
+.worktrees/
+research/**/deflated-sharpe.pdf
+research/**/backtest-pseudo.pdf
+research/**/sharpe-frontier.pdf

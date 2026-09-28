@@ -14,13 +14,20 @@ def chips_to_signal(plan: Plan, risk_result: RiskResult, bot_id: str = "") -> di
     """Map accepted chips to one SignalFile payload (orders[] + replace)."""
     orders = []
     for chip in risk_result.accepted:
-        if chip.action == "hold":
-            continue
+        action = chip.action
+        # hold + tp/sl = move existing protections (was silently dropped)
+        if action == "hold":
+            if chip.tp is None and chip.sl is None:
+                continue
+            action = "modify_tp_sl"
         item = chip.to_signal_dict()
+        item["action"] = action
         item.setdefault("meta", {})
         item["meta"]["plan_cycle"] = plan.cycle_id
         item["meta"]["confidence"] = chip.confidence
         item["meta"]["chips_reasoning"] = chip.reasoning
+        if chip.action == "hold" and action == "modify_tp_sl":
+            item["meta"]["from_action"] = "hold"
         orders.append(item)
 
     payload: dict[str, Any] = {

@@ -341,6 +341,7 @@ class FakeClient:
         self.dual = False
         self.meta = ContractMeta("BTC_USDT", 0.0001, 1, 0.1, 100)
         self.cancelled = []
+        self.positions = []
 
     def banner(self):
         return "[TEST]"
@@ -413,7 +414,7 @@ class FakeClient:
         return {"cancelled": contract or "ALL"}
 
     def get_positions(self):
-        return []
+        return list(self.positions)
 
     def get_available_usdt(self):
         return 1000.0
@@ -425,6 +426,98 @@ class FakeClient:
     def stop_trailing_orders(self, contract=None):
         self.cancelled.append(("trail", contract))
         return {"cancelled": contract or "ALL"}
+
+
+class TestModifyTpSl(unittest.TestCase):
+    def _client_with_pos(self):
+        client = FakeClient()
+        client.positions = [{"contract": "BTC_USDT", "size": 87, "mode": "dual_long"}]
+        # pre-existing owned TP/SL
+        client.price_orders = [
+            {
+                "initial": {"text": "t-brk-sl", "contract": "BTC_USDT", "size": -87},
+                "trigger": {"price": "84230", "rule": 2},
+            },
+            {
+                "initial": {"text": "t-brk-tp", "contract": "BTC_USDT", "size": -87},
+                "trigger": {"price": "84840", "rule": 1},
+            },
+        ]
+        return client
+
+    def test_hold_with_tpsl_modifies(self):
+        client = self._client_with_pos()
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], order_scope="own", label_prefix="brk")
+        rep = ex.execute_signal(
+            parse_signal({"action": "hold", "symbol": "BTC_USDT", "tp": 85150, "sl": 84400})
+        )
+        self.assertTrue(rep.ok, rep.to_dict())
+        step = rep.results[0]
+        self.assertEqual(step.action, "modify_tp_sl")
+        # placed new tp+sl
+        self.assertEqual(len(client.price_orders), 4)
+        kinds = {(p["initial"]["text"].rsplit("-", 1)[-1]) for p in client.price_orders}
+        self.assertIn("tp", kinds)
+        self.assertIn("sl", kinds)
+        # cancelled old owned tp/sl
+        self.assertEqual(len(client.cancelled), 2)
+
+    def test_modify_sl_only_keeps_tp(self):
+        client = self._client_with_pos()
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], order_scope="own", label_prefix="brk")
+        rep = ex.execute_signal(
+            parse_signal({"action": "modify_tp_sl", "symbol": "BTC_USDT", "sl": 84400})
+        )
+        self.assertTrue(rep.ok, rep.to_dict())
+        # only one new price order (sl)
+        self.assertEqual(len(client.price_orders), 3)
+        self.assertEqual(client.price_orders[-1]["initial"]["text"], "t-brk-signal-sl")
+        # cancelled only old sl, kept old tp
+        self.assertEqual(len(client.cancelled), 1)
+
+    def test_modify_requires_position(self):
+        client = FakeClient()  # flat
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], label_prefix="brk")
+        rep = ex.execute_signal(
+            parse_signal({"action": "modify_tp_sl", "symbol": "BTC_USDT", "tp": 85000})
+        )
+        self.assertFalse(rep.ok)
+        self.assertIn("NO_POSITION", rep.results[0].error or "")
+
+    def test_modify_requires_level(self):
+        client = self._client_with_pos()
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], label_prefix="brk")
+        with self.assertRaises(Exception):
+            parse_signal({"action": "modify_tp_sl", "symbol": "BTC_USDT"})
+
+    def test_hold_without_tpsl_still_noop(self):
+        client = self._client_with_pos()
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], label_prefix="brk")
+        rep = ex.execute_signal(parse_signal({"action": "hold", "symbol": "BTC_USDT"}))
+        self.assertTrue(rep.ok)
+        self.assertEqual(rep.results[0].action, "hold")
+        self.assertEqual(len(client.price_orders), 2)
+        self.assertEqual(client.cancelled, [])
+
+    def test_modify_dual_ambiguous_side(self):
+        client = self._client_with_pos()
+        client.positions = [
+            {"contract": "BTC_USDT", "size": 87, "mode": "dual_long"},
+            {"contract": "BTC_USDT", "size": -10, "mode": "dual_short"},
+        ]
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], label_prefix="brk")
+        rep = ex.execute_signal(
+            parse_signal({"action": "modify_tp_sl", "symbol": "BTC_USDT", "sl": 84400})
+        )
+        self.assertFalse(rep.ok)
+        self.assertIn("AMBIGUOUS_SIDE", rep.results[0].error or "")
+        # with side it works
+        rep2 = ex.execute_signal(
+            parse_signal(
+                {"action": "modify_tp_sl", "symbol": "BTC_USDT", "side": "long", "sl": 84400}
+            )
+        )
+        self.assertTrue(rep2.ok, rep2.to_dict())
 
 
 class TestExecutor(unittest.TestCase):
@@ -458,6 +551,44 @@ class TestExecutor(unittest.TestCase):
         report = ex.execute_signal(parse_signal({"action": "open_long", "symbol": "BTC_USDT", "size_usd": 100}))
         self.assertFalse(report.ok)
         self.assertEqual(len(client.orders), 0)
+
+    def test_notional_pct_guard(self):
+        """权益比例硬顶：size_usd > equity×50% 须拒。"""
+        client = FakeClient()
+        client.get_account = lambda: {"total": 1000.0, "available": 1000.0}
+        # sl 很近 → 公式期望大，触发的是 pct 硬顶
+        ex = Executor(client, max_notional_usd=100000,
+                      account_risk={"max_notional_pct": 0.5, "risk_pct": 0.01}, require_sl=False)
+        rep = ex.execute_signal(parse_signal({
+            "action": "open_long", "symbol": "BTC_USDT", "size_usd": 8000, "sl": 49900,
+        }))
+        self.assertFalse(rep.ok)
+        self.assertIn("MAX_NOTIONAL_PCT", rep.results[0].error or "")
+        ex2 = Executor(client, max_notional_usd=100000,
+                       account_risk={"max_notional_pct": 0.5, "risk_pct": 0.01}, require_sl=False)
+        rep2 = ex2.execute_signal(parse_signal({
+            "action": "open_long", "symbol": "BTC_USDT", "size_usd": 400, "sl": 49900,
+        }))
+        self.assertTrue(rep2.ok, rep2.to_dict())
+
+    def test_size_clamped_to_risk_formula(self):
+        """仓位验算：名义超过风险公式 1.3 倍时钳制。"""
+        client = FakeClient()
+        client.get_account = lambda: {"total": 1000.0, "available": 1000.0}
+        client.get_last_price = lambda s: 50000.0
+        ex = Executor(client, max_notional_usd=1e12,
+                      account_risk={"max_notional_pct": 10, "risk_pct": 0.01},
+                      require_sl=True)
+        # equity=1000, risk=1%, entry=50000, sl=25000 → dist=50%
+        # expected = 1000*0.01/0.5 = 20 USDT 名义
+        rep = ex.execute_signal(parse_signal({
+            "action": "open_long", "symbol": "BTC_USDT",
+            "size_usd": 100, "price": 50000, "sl": 25000,
+        }))
+        self.assertTrue(rep.ok, rep.to_dict())
+        note = rep.results[0].detail.get("size_align_note") or ""
+        self.assertIn("size_clamped", note)
+        self.assertLessEqual(float(rep.results[0].detail.get("size_usd") or 0), 30)
 
     def test_cancel_all_own_scope_only_touches_label_prefix(self):
         """order_scope=own + explicit bot label must not wipe another bot's book (prelaunch M12)."""

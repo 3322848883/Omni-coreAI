@@ -25,7 +25,7 @@ DEFAULT_ALLOW = (
 )
 
 DEFAULT_LIMITS = {
-    "lookback": (5, 100),
+    "lookback": (5, 300),
     "period": (2, 200),
     "fast": (2, 200),
     "slow": (2, 200),
@@ -99,8 +99,10 @@ def validate_trigger_payload(
                 "side", "dir", "op", "k", "ma", "candles"):
         if key in raw and raw[key] is not None:
             params[key] = raw[key]
-    # numeric limits
-    for key, (lo, hi) in DEFAULT_LIMITS.items():
+    # numeric limits: policy.limits overrides DEFAULT_LIMITS
+    limits = dict(DEFAULT_LIMITS)
+    limits.update(dict(policy.limits or {}))
+    for key, (lo, hi) in limits.items():
         if key in params and isinstance(params[key], (int, float)):
             v = float(params[key])
             if v < lo or v > hi:

@@ -104,6 +104,65 @@ class TestValidate(unittest.TestCase):
                 available=1e9)
 
 
+class TestHardening(unittest.TestCase):
+    def test_duplicate_fill_ignored(self):
+        with self.paper_tmp() as (store, feed, eng):
+            body = {"contract": "BTC_USDT", "size": 10, "type": "market", "tif": "IOC",
+                    "price": 0, "text": "t1"}
+            o = eng.place_order(body)
+            oid = o.get("id") or o.get("order_id")
+            n1 = len(store.list_fills(limit=100))
+            bal1 = float(store.get_account().get("balance") or 0)
+            # 模拟同一 fill 重复插入
+            ok_id, created = store.insert_fill({
+                "fill_time": 1, "contract": "BTC_USDT", "side": "buy",
+                "price": 100.0, "size": 2.0, "fee": 0.1, "order_id": oid, "kind": "trade",
+            })
+            _, created2 = store.insert_fill({
+                "fill_time": 1, "contract": "BTC_USDT", "side": "buy",
+                "price": 100.0, "size": 2.0, "fee": 0.1, "order_id": oid, "kind": "trade",
+            })
+            self.assertTrue(created)
+            self.assertFalse(created2)
+            self.assertEqual(len(store.list_fills(limit=100)), n1 + 1)
+            self.assertEqual(float(store.get_account().get("balance") or 0), bal1)
+
+    def test_orphan_cleanup_on_flatten(self):
+        with self.paper_tmp() as (store, feed, eng):
+            eng.place_order({"contract": "BTC_USDT", "size": 20, "type": "market",
+                             "tif": "IOC", "price": 0, "text": "t1"})
+            eng.place_price_order({
+                "initial": {"contract": "BTC_USDT", "size": -20, "price": "0", "tif": "ioc",
+                            "text": "t-x-sl", "reduce_only": True},
+                "trigger": {"rule": 2, "price_type": 0, "price": "90"},
+            })
+            eng.place_price_order({
+                "initial": {"contract": "BTC_USDT", "size": -20, "price": "0", "tif": "ioc",
+                            "text": "t-x-tp", "reduce_only": True},
+                "trigger": {"rule": 1, "price_type": 0, "price": "110"},
+            })
+            open_po = [p for p in store.list_price_orders("BTC_USDT")
+                       if p.get("status") in ("untriggered", "open")]
+            self.assertEqual(len(open_po), 2)
+            # 平仓
+            eng.place_order({"contract": "BTC_USDT", "size": -20, "type": "market",
+                             "tif": "IOC", "price": 0, "text": "t-close",
+                             "reduce_only": True})
+            after = [p for p in store.list_price_orders("BTC_USDT")
+                     if p.get("status") in ("untriggered", "open", "triggered")]
+            self.assertEqual(len(after), 0)
+            # 有 orphan_cleanup 标记
+            all_po = store.list_price_orders("BTC_USDT")
+            self.assertTrue(any("orphan" in str(p.get("error") or "") for p in all_po))
+
+    @contextmanager
+    def paper_tmp(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with paper_env(td) as env:
+                yield env
+
+
 class TestMatching(unittest.TestCase):
     def test_market_buy_fills_at_ask(self):
         with tempfile.TemporaryDirectory() as tmp:

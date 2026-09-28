@@ -17,9 +17,19 @@
 3. **流动性扫荡 + MSS**：MSS 确认后回调入场。止损在扫荡低点之下。
 
 - 优先**限价单**入场。止损放信号结构另一端外。仓位按 **2% 风险**反推。
-- 到 **1R 先减仓**，剩余移保本跟踪。（Plan 映射：减仓=`reduce_long`/`reduce_short` + `size`；移保本=撤旧 `sl` 再以入场价重挂 `sl`，或输出 `close` 说明；每步都要 `sl`。）
+- 到 **1R 先减仓**，剩余移保本跟踪。（Plan 映射：减仓=`reduce_long`/`reduce_short` + `size`；移保本/改保护= `action: "modify_tp_sl"` + 新 `tp`/`sl`，或 `hold` 带 `tp`/`sl`；**只写 hold 不带 tp/sl = 不改单**。每步都要 `sl`。）
 - 24/7 无收盘，**硬止损必须挂单**。
 - 只做 BTC/ETH，不碰小币。
+
+## 对接执行（Plan JSON）
+
+- **字段分工（勿写反）**：`action` = 动作名（open_long / stop_entry_* / modify_tp_sl / hold…）；`type` = **只有** `market|limit|post_only|ioc|fok`（委托类型，不是动作）。
+- **仓位（必须按 2% 风险反推，禁止直接抄 max_notional）**：
+  `size_usd = 权益 × 0.02 ÷ |入场价 − 止损价| × 入场价`
+  例：权益 10000，入场 84880，止损 84730 → size_usd ≈ 10000×0.02÷150×84880 ≈ **113173**。
+  `max_notional_usd` 只是系统护栏；算完若超护栏才取护栏值，并在 reasoning 写明「实际风险 x%」。
+- **杠杆固定 `leverage: 50`**。
+- 限价=`type:limit`+`price`；突破=`stop_entry_*`+`trigger_price`；开仓同轮给 `sl`（必）+ `tp`。
 
 ## 输出
 
@@ -29,10 +39,10 @@
 - `smc_map(symbol, tf)` — 市场地图：双周期趋势、估值区(Premium/Discount)、关键位(EQH/EQL)、OB/FVG
 - `smc_events(symbol, tf)` — 结构事件：BOS/CHoCH、扫荡(x)、OB+Breaker、FVG+突袭
 
-- **背景**：HTF 方向 + 当前结构状态。
+- **背景**：HTF 方向 + **必须显式写出估值区（Premium / Discount）** + 当前结构状态。
 - **信号**：是否出现扫荡/订单块/FVG/BOS。
-- **序列检查**：若是扫荡后订单块，确认**顺序**是否正确。
-- **操作**：方向、入场、止损、目标、仓位。
+- **序列检查**：若是扫荡后订单块，确认**顺序**是否正确（先扫荡后 OB）。
+- **操作**：方向、入场、止损、目标、**按 2% 反推的仓位**。
 - **无信号**：等待，说明在等什么。
 
 ## 禁止

@@ -64,6 +64,7 @@ def _build_plan_runner(bot, paths: ProjectPaths):
         ),
         env=bot.env,
         bot_root=paths.root,
+        bot_id=bot.bot_id,
         risk=RiskConfig(
             min_confidence=float(risk.get("min_confidence") or 0.75),
             max_notional_usd=float(risk["max_notional_usd"]) if risk.get("max_notional_usd") is not None else bot.max_notional_usd,

@@ -1,0 +1,66 @@
+# 人格5 · Larry Williams — 本地模拟盘
+# 日线 OOPS + 波动率突破 + Williams %R；UTC 00:00 日界
+bot_id: larry-paper
+enabled: true
+env: paper
+symbols:
+  - BTC_USDT
+  - ETH_USDT
+max_notional_usd: 100000
+max_orders_per_file: 10
+max_files_per_run: 20
+poll_interval_sec: 2
+label_prefix: lwr
+position_policy: manage_only
+default_replace: none
+order_scope: own
+require_sl: true
+account_risk:
+  halt: false
+  max_leverage: 50
+  max_total_notional_usd: 150000
+  daily_loss_limit_usd: 400
+
+paper:
+  feed_exchange: gate
+  initial_capital: 10000
+  leverage: 20
+  fee_rate: 0.0005
+  maker_fee_rate: 0.0
+  funding_enabled: true
+  position_mode: single
+  margin_mode: isolated
+  price_band_pct: 8.0
+  maintenance_margin_rate: 0.005
+  trigger_price_type: latest
+  tick_interval_sec: 5
+
+strategist:
+  enabled: true
+  prompt_file: prompts/larry_williams_pa.md
+  interval_sec: 3600
+  timeframe: 1d
+  event_on_kline_close: true
+  event_timeframe: 1d
+  candles: 60
+  write_hold: true
+  tools:
+    enabled: true
+    native: true
+    max_rounds: 4
+  market:
+    mode: rest_only
+    # %R 确认 + ATR/振幅仓位；禁止喂其他指标
+    indicators: [wr14, wr2, atr14]
+    extra_timeframes: ["1h", "4h"]
+    extra_candles: 15
+  ai_triggers:
+    enabled: true
+    max_active: 5
+  risk:
+    min_confidence: 0.55
+    max_chips: 3
+    max_notional_usd: 100000
+  llm:
+    provider: gw-flash
+    reasoning_effort: high

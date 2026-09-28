@@ -1,0 +1,48 @@
+# 陈默 · 生存式小账户 · 实盘行情（只分析）
+bot_id: chenmo-live
+enabled: true
+env: live
+api_key_env: GATE_API_KEY
+api_secret_env: GATE_API_SECRET
+
+symbols:
+  - BTC_USDT
+  - ETH_USDT
+
+max_notional_usd: 20
+label_prefix: cm
+position_policy: strict
+order_scope: own
+require_sl: true
+
+account_risk:
+  max_leverage: 25
+  max_total_notional_usd: 20
+
+strategist:
+  enabled: true
+  prompt_file: prompts/chenmo_survival.md
+  interval_sec: 300
+  timeframe: 5m
+  event_on_kline_close: true
+  event_timeframe: 5m
+  candles: 80
+  write_hold: true
+  tools:
+    enabled: true
+    native: true
+    max_rounds: 3
+  market:
+    mode: rest_only
+    indicators: [ema20, atr14, rsi14, macd, boll20]
+    timeframes: []
+    extra_candles: 20
+  risk:
+    min_confidence: 0.55
+    max_chips: 2
+    max_notional_usd: 20
+  llm:
+    provider: gw-flash
+    thinking: true
+    reasoning_effort: high
+    max_tokens: 8192

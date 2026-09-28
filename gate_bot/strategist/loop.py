@@ -54,6 +54,7 @@ class StrategistConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     # on-demand market tools for the LLM (not a full dump)
     tools: dict = field(default_factory=dict)
+    bot_id: str = ""
 
     def __post_init__(self) -> None:
         if not self.event_timeframe:
@@ -180,7 +181,7 @@ class PlanRunner:
         self._save_last_cycle(plan.cycle_id)
         rejected_triggers = self._apply_ai_triggers(plan)
         risk_result = apply_risk(plan, self.cfg.risk)
-        payload = chips_to_signal(plan, risk_result, bot_id=self.inbox.name)
+        payload = chips_to_signal(plan, risk_result, bot_id=self.cfg.bot_id or self.inbox.name)
         orders = payload.get("orders") or []
         if not orders:
             if self.cfg.write_hold:

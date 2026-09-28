@@ -45,6 +45,27 @@ class TestPlanSchema(unittest.TestCase):
         plan = parse_plan({"chips": [{"symbol": "BTC_USDT", "action": "hold", "confidence": 85}]})
         self.assertAlmostEqual(plan.chips[0].confidence, 0.85)
 
+    def test_type_field_action_name_recovered(self):
+        """Model sometimes writes type=stop_entry_long; recover as action."""
+        plan = parse_plan(
+            {
+                "chips": [
+                    {
+                        "symbol": "BTC_USDT",
+                        "type": "stop_entry_long",
+                        "confidence": 0.8,
+                        "size_usd": 100,
+                        "sl": 1,
+                        "trigger_price": 2,
+                    }
+                ]
+            }
+        )
+        c = plan.chips[0]
+        self.assertEqual(c.action, "stop_entry_long")
+        self.assertEqual(c.order_type, "market")
+        self.assertEqual(c.trigger_price, 2)
+
 
 class TestRisk(unittest.TestCase):
     def _plan(self):
@@ -111,6 +132,95 @@ class TestBridge(unittest.TestCase):
             p = write_signal_file(Path(td), payload, cycle_id="c0")
             data = json.loads(p.read_text(encoding="utf-8"))
             self.assertEqual(data.get("action"), "hold")
+
+    def test_hold_with_tpsl_becomes_modify(self):
+        """hold + tp/sl must become modify_tp_sl (was silently dropped)."""
+        plan = parse_plan(
+            {
+                "cycle_id": "m1",
+                "chips": [
+                    {
+                        "symbol": "BTC_USDT",
+                        "action": "hold",
+                        "confidence": 0.66,
+                        "tp": 85150,
+                        "sl": 84400,
+                    }
+                ],
+            }
+        )
+        risk = apply_risk(plan, RiskConfig(min_confidence=0.7))
+        payload = chips_to_signal(plan, risk, bot_id="brk")
+        self.assertEqual(len(payload.get("orders") or []), 1)
+        item = payload["orders"][0]
+        self.assertEqual(item["action"], "modify_tp_sl")
+        self.assertEqual(item["tp"], 85150)
+        self.assertEqual(item["sl"], 84400)
+        sig = parse_signal(payload)
+        self.assertEqual(sig.intents[0].action, "modify_tp_sl")
+        self.assertEqual(sig.intents[0].tp, 85150)
+        self.assertEqual(sig.intents[0].sl, 84400)
+
+    def test_hold_tpsl_only_moves_given_leg(self):
+        plan = parse_plan(
+            {"chips": [{"symbol": "BTC_USDT", "action": "hold", "confidence": 0.5, "sl": 84400}]}
+        )
+        risk = apply_risk(plan, RiskConfig(min_confidence=0.9))
+        payload = chips_to_signal(plan, risk)
+        item = payload["orders"][0]
+        self.assertEqual(item["action"], "modify_tp_sl")
+        self.assertEqual(item["sl"], 84400)
+        self.assertNotIn("tp", item)
+
+    def test_modify_tp_sl_chip_accepted_low_conf(self):
+        plan = parse_plan(
+            {
+                "chips": [
+                    {"symbol": "BTC_USDT", "action": "modify_tp_sl", "confidence": 0.4, "tp": 85000}
+                ]
+            }
+        )
+        risk = apply_risk(plan, RiskConfig(min_confidence=0.7))
+        self.assertEqual(risk.accepted[0].action, "modify_tp_sl")
+        payload = chips_to_signal(plan, risk)
+        self.assertEqual(payload["orders"][0]["action"], "modify_tp_sl")
+
+    def test_modify_tp_sl_requires_level(self):
+        plan = parse_plan({"chips": [{"symbol": "BTC_USDT", "action": "modify_tp_sl", "confidence": 0.9}]})
+        risk = apply_risk(plan, RiskConfig(min_confidence=0.5))
+        self.assertTrue(all(c.action != "modify_tp_sl" for c in risk.accepted))
+        self.assertTrue(risk.rejected)
+
+    def test_chip_side_and_tpsl_mode_roundtrip(self):
+        plan = parse_plan(
+            {
+                "chips": [
+                    {
+                        "symbol": "BTC_USDT",
+                        "action": "modify_tp_sl",
+                        "confidence": 0.9,
+                        "sl": 84400,
+                        "side": "long",
+                        "tp_mode": "limit_order",
+                    }
+                ]
+            }
+        )
+        chip = plan.chips[0]
+        self.assertEqual(chip.side, "long")
+        self.assertEqual(chip.tp_mode, "limit_order")
+        d = chip.to_signal_dict()
+        self.assertEqual(d["side"], "long")
+        self.assertEqual(d["tp_mode"], "limit_order")
+        sig = parse_signal({"orders": [d]})
+        self.assertEqual(sig.intents[0].side, "long")
+        self.assertEqual(sig.intents[0].tp_mode, "limit_order")
+
+    def test_chip_side_invalid(self):
+        with self.assertRaises(PlanError):
+            parse_plan(
+                {"chips": [{"symbol": "BTC_USDT", "action": "close", "confidence": 0.9, "side": "up"}]}
+            )
 
 
 class TestLLMClient(unittest.TestCase):

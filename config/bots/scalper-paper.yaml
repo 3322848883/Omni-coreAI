@@ -1,0 +1,64 @@
+# 既有策略5 · 综合剥头皮 — 本地模拟盘（试跑）
+# prompt: prompts/scalper_btc_eth.md（1% 仓位 / 杠杆≤50 / modify_tp_sl / 每轮微调）
+bot_id: scalper-paper
+enabled: true
+env: paper
+symbols:
+  - BTC_USDT
+  - ETH_USDT
+max_notional_usd: 25000
+max_orders_per_file: 15
+max_files_per_run: 30
+poll_interval_sec: 2
+label_prefix: scp
+position_policy: manage_only
+default_replace: none
+order_scope: own
+require_sl: true
+account_risk:
+  halt: false
+  max_leverage: 50
+  max_total_notional_usd: 150000
+
+paper:
+  feed_exchange: gate
+  initial_capital: 10000
+  leverage: 20
+  fee_rate: 0.0005
+  maker_fee_rate: 0.0
+  funding_enabled: true
+  position_mode: single
+  margin_mode: isolated
+  price_band_pct: 5.0
+  maintenance_margin_rate: 0.01
+  trigger_price_type: latest
+  tick_interval_sec: 2
+
+strategist:
+  enabled: true
+  prompt_file: prompts/scalper_btc_eth.md
+  interval_sec: 120
+  timeframe: 5m
+  event_on_kline_close: true
+  event_timeframe: 5m
+  candles: 60
+  write_hold: true
+  tools:
+    enabled: true
+    native: true
+    max_rounds: 5
+  market:
+    mode: rest_only
+    indicators: ["all"]
+    extra_timeframes: ["1m", "15m"]
+    extra_candles: 20
+  ai_triggers:
+    enabled: true
+    max_active: 8
+  risk:
+    min_confidence: 0.55
+    max_chips: 3
+    max_notional_usd: 25000
+  llm:
+    provider: gw-flash
+    reasoning_effort: high

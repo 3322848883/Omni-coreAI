@@ -1,0 +1,48 @@
+# SMC · BTC/ETH · 实盘行情（只分析）
+bot_id: smc-live
+enabled: true
+env: live
+api_key_env: GATE_API_KEY
+api_secret_env: GATE_API_SECRET
+
+symbols:
+  - BTC_USDT
+  - ETH_USDT
+
+max_notional_usd: 20
+label_prefix: smc
+position_policy: strict
+order_scope: own
+require_sl: true
+
+account_risk:
+  max_leverage: 10
+  max_total_notional_usd: 20
+
+strategist:
+  enabled: true
+  prompt_file: prompts/smc_trader.md
+  interval_sec: 300
+  timeframe: 15m
+  event_on_kline_close: true
+  event_timeframe: 15m
+  candles: 100
+  write_hold: true
+  tools:
+    enabled: true
+    native: true
+    max_rounds: 3
+  market:
+    mode: rest_only
+    indicators: [atr14]
+    timeframes: []
+    extra_candles: 30
+  risk:
+    min_confidence: 0.55
+    max_chips: 2
+    max_notional_usd: 20
+  llm:
+    provider: gw-flash
+    thinking: true
+    reasoning_effort: high
+    max_tokens: 8192

@@ -25,14 +25,28 @@ class RiskResult:
 
 def apply_risk(plan: Plan, risk: RiskConfig) -> RiskResult:
     out = RiskResult()
-    action_chips = [c for c in plan.chips if c.action != "hold"]
+    # hold / modify_tp_sl are manage-only (no new exposure) — not counted in max_chips
+    manage_actions = {"hold", "modify_tp_sl"}
+    action_chips = [c for c in plan.chips if c.action not in manage_actions]
     action_chips.sort(key=lambda c: c.confidence, reverse=True)
     if risk.max_chips and len(action_chips) > risk.max_chips:
         out.notes.append(f"max_chips: keep top {risk.max_chips}/{len(action_chips)}")
         out.rejected.extend(action_chips[risk.max_chips :])
         action_chips = action_chips[: risk.max_chips]
 
-    for chip in action_chips + [c for c in plan.chips if c.action == "hold"]:
+    rest = [c for c in plan.chips if c.action in manage_actions]
+    for chip in action_chips + rest:
+        if chip.action == "modify_tp_sl":
+            if risk.allow_actions is not None and chip.action not in risk.allow_actions:
+                out.notes.append(f"reject {chip.symbol} {chip.action}: not in allow_actions")
+                out.rejected.append(chip)
+                continue
+            if chip.tp is None and chip.sl is None:
+                out.notes.append(f"reject {chip.symbol} modify_tp_sl: missing tp/sl")
+                out.rejected.append(chip)
+                continue
+            out.accepted.append(chip)
+            continue
         if chip.action != "hold":
             if risk.allow_actions is not None and chip.action not in risk.allow_actions:
                 out.notes.append(f"reject {chip.symbol} {chip.action}: not in allow_actions")

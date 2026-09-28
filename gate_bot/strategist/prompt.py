@@ -12,10 +12,12 @@ _SYSTEM_HEAD = (
     "只输出一个 JSON 对象，不要 Markdown 前后缀。\n"
     '格式: {"cycle_id":"...","reasoning":"...","chips":[{"symbol":"BTC_USDT",'
     '"action":"open_long|open_short|add_long|add_short|reduce_long|reduce_short|close|close_all|hold|'
-    'stop_entry_long|stop_entry_short|flatten|cancel_all|cancel_price_all",'
+    'stop_entry_long|stop_entry_short|flatten|cancel_all|cancel_price_all|modify_tp_sl",'
     '"confidence":0.0,"size_usd":50,"tp":null,"sl":null,"type":"market|limit|post_only|ioc|fok",'
-    '"price":null,"trigger_price":null,"leverage":null,"reasoning":"..."}]}\n'
-    "规则: 1) action 英文枚举; 突破进场用 stop_entry_*，止损止盈用 tp/sl。\n"
+    '"price":null,"trigger_price":null,"leverage":null,"side":"long|short|null",'
+    '"tp_mode":"trigger|limit_order","sl_mode":"trigger|limit_order","reasoning":"..."}],'
+    '"triggers":[]}\n'
+    "规则: 1) action 英文枚举; 突破进场用 stop_entry_*+trigger_price，止损止盈用 tp/sl。\n"
     "2) confidence 0~1，低于 min_confidence 应 hold。\n"
     "3) 仓位优先写 size_usd（名义 USDT）；size 是合约张数。用 size 前必须查该 symbol 的 "
     "contract.min_notional_usd / quanto_multiplier（1张≈min_notional_usd 名义，不足1张会被拒）。\n"
@@ -23,6 +25,12 @@ _SYSTEM_HEAD = (
     "5) 同 symbol 优先管理已有仓。\n"
     "6) 不确定就 hold。\n"
     "7) reasoning 必须 ≤30 字，禁止长篇分析。\n"
+    "8) 移动/修改持仓的止盈止损：action=modify_tp_sl 并给 tp/sl（可只改一边）；"
+    "或 action=hold 且带 tp/sl。只写 hold 不带 tp/sl = 不改任何保护单。\n"
+    "9) side=long|short 用于双仓持仓管理（close/modify_tp_sl）；单仓可省略。\n"
+    "10) tp_mode/sl_mode 默认 trigger（条件计划委托）；limit_order=盘口 reduce_only 限价。\n"
+    "11) triggers[] 可选：自设唤醒条件（如 {type:price_break,symbol,lookback,side:high|low}），"
+    "命中后重新分析，不直接下单。\n"
 )
 
 PLAN_SCHEMA_HINT = (
@@ -91,14 +99,6 @@ def load_strategy_prompt(
         if _under_root(cand) and cand.is_file():
             return cand.read_text(encoding="utf-8")
     raise PermissionError(f"prompt_file must exist under {root}: {path}")
-
-
-def build_system_prompt(strategy_prompt: str, tools_guide: str = "") -> str:
-    """Fixed contract + optional tool guide (system layer) + strategy persona."""
-    head = SYSTEM_PROMPT
-    if tools_guide:
-        head = head + "\n\n" + tools_guide
-    return head + "\n\n【策略人格】\n" + strategy_prompt
 
 
 def build_user_prompt(snapshot: dict[str, Any], risk: dict[str, Any], symbols: list[str]) -> str:

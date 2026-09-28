@@ -1,0 +1,55 @@
+# 综合剥头皮 · BTC/ETH · 模拟盘
+bot_id: scalper-btc-eth
+enabled: true
+env: testnet
+api_key_env: GATE_TESTNET_API_KEY
+api_secret_env: GATE_TESTNET_API_SECRET
+
+symbols:
+  - BTC_USDT
+  - ETH_USDT
+
+max_notional_usd: 30
+max_orders_per_file: 3
+max_files_per_run: 10
+poll_interval_sec: 2
+label_prefix: sc
+position_policy: strict
+default_replace: symbol
+order_scope: own
+require_sl: true
+
+account_risk:
+  max_leverage: 5
+  max_total_notional_usd: 60
+
+strategist:
+  enabled: true
+  prompt_file: prompts/scalper_btc_eth.md
+  interval_sec: 60
+  timeframe: 5m
+  event_on_kline_close: true
+  event_timeframe: 1m
+  candles: 80
+  write_hold: true
+  tools:
+    enabled: true
+    native: true
+    max_rounds: 3
+  market:
+    mode: rest_only
+    indicators: [ema20, ema50, atr14, rsi14, macd, boll20]
+    timeframes: []
+    extra_candles: 20
+  ai_triggers:
+    enabled: true
+    max_active: 3
+  risk:
+    min_confidence: 0.55
+    max_chips: 2
+    max_notional_usd: 30
+  llm:
+    provider: gw-flash
+    thinking: true
+    reasoning_effort: high
+    max_tokens: 8192

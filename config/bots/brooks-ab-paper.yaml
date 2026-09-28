@@ -1,0 +1,67 @@
+# 人格1 · Al Brooks 价格行为 — 本地模拟盘
+# 风格：贴近实盘常驻；1% 风险真算仓位；多币由 AI 自主风控
+bot_id: brooks-ab-paper
+enabled: true
+env: paper
+symbols:
+  - BTC_USDT
+  - ETH_USDT
+# 上限只作护栏，不代替 1% 风险公式（紧止损时名义可能到数万）
+max_notional_usd: 100000
+max_orders_per_file: 20
+max_files_per_run: 50
+poll_interval_sec: 2
+label_prefix: bab
+# 有仓只管理（改保护/加减/平），无仓可开；多币各管各的
+position_policy: manage_only
+default_replace: none
+order_scope: own
+require_sl: true
+account_risk:
+  halt: false
+  max_leverage: 50
+  max_total_notional_usd: 150000
+  daily_loss_limit_usd: 400
+
+# 本地模拟盘：行情走 gate，资金虚拟
+paper:
+  feed_exchange: gate
+  initial_capital: 10000
+  leverage: 20
+  fee_rate: 0.0005
+  maker_fee_rate: 0.0
+  funding_enabled: true
+  position_mode: single
+  margin_mode: isolated
+  price_band_pct: 5.0
+  maintenance_margin_rate: 0.005
+  trigger_price_type: latest
+  tick_interval_sec: 2
+
+strategist:
+  enabled: true
+  prompt_file: prompts/brooks_ab.md
+  interval_sec: 300
+  timeframe: 15m
+  event_on_kline_close: true
+  event_timeframe: 15m
+  candles: 120
+  write_hold: true
+  tools:
+    enabled: true
+    native: true
+    max_rounds: 4
+  market:
+    mode: rest_only
+    indicators: [ema20, atr14]
+    extra_candles: 15
+  ai_triggers:
+    enabled: true
+    max_active: 8
+  risk:
+    min_confidence: 0.55
+    max_chips: 5
+    max_notional_usd: 100000
+  llm:
+    provider: gw-flash
+    reasoning_effort: high

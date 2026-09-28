@@ -1,0 +1,67 @@
+# 人格8 · Mark Douglas — 心理/纪律层（只核查，不下单）
+bot_id: douglas-paper
+enabled: true
+env: paper
+symbols:
+  - BTC_USDT
+  - ETH_USDT
+max_notional_usd: 0
+max_orders_per_file: 5
+max_files_per_run: 10
+poll_interval_sec: 2
+label_prefix: mdg
+position_policy: manage_only
+default_replace: none
+order_scope: own
+require_sl: true
+account_risk:
+  halt: true
+  max_leverage: 1
+  max_total_notional_usd: 0
+  daily_loss_limit_usd: 0
+
+paper:
+  feed_exchange: gate
+  initial_capital: 10000
+  leverage: 1
+  fee_rate: 0.0005
+  maker_fee_rate: 0.0
+  funding_enabled: true
+  position_mode: single
+  margin_mode: isolated
+  price_band_pct: 5.0
+  maintenance_margin_rate: 0.005
+  trigger_price_type: latest
+  tick_interval_sec: 30
+
+strategist:
+  enabled: true
+  prompt_file: prompts/mark_douglas_pa.md
+  interval_sec: 3600
+  timeframe: 4h
+  event_on_kline_close: true
+  event_timeframe: 4h
+  candles: 40
+  write_hold: true
+  tools:
+    enabled: true
+    native: true
+    max_rounds: 3
+  market:
+    mode: rest_only
+    indicators: [atr14]
+    extra_timeframes: ["1d"]
+    extra_candles: 10
+    refresh: [ticker]
+  ai_triggers:
+    enabled: true
+    max_active: 3
+  risk:
+    # 心理层：只允许 hold，硬拦截任何下单动作
+    min_confidence: 0.0
+    max_chips: 0
+    max_notional_usd: 0
+    allow_actions: [hold]
+  llm:
+    provider: gw-flash
+    reasoning_effort: medium

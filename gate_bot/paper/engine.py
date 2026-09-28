@@ -213,6 +213,10 @@ class PaperEngine:
             raise PaperReject("order not found", status=404)
         if order["status"] not in (ORDER_OPEN, ORDER_PARTIALLY_FILLED):
             return order
+        # 已全部成交则禁止再次入账（防并发双花）
+        if float(order.get("filled_size") or 0) >= abs(float(order["size"])) - 1e-12:
+            self.store.update_order(order_id, status=ORDER_FILLED, finish_time=_now())
+            return self.store.get_order(order_id) or order
 
         symbol = order["contract"]
         size = float(order["size"])
@@ -248,6 +252,14 @@ class PaperEngine:
         symbol = order["contract"]
         filled = float(order.get("filled_size") or 0)
         total = float(order["size"])
+        # 幂等：已成满则不再入账；本次成交量不超过剩余
+        remaining = abs(total) - filled
+        if remaining <= 1e-12:
+            self.store.update_order(order["order_id"], status=ORDER_FILLED, finish_time=_now())
+            return
+        size = float(size)
+        if abs(size) > remaining + 1e-12:
+            size = remaining if size > 0 else -remaining
         avg = order.get("avg_price")
         new_filled = filled + abs(size)
         new_avg = price if not avg else (float(avg) * filled + price * abs(size)) / new_filled
@@ -266,21 +278,32 @@ class PaperEngine:
         notional = abs(size) * quanto * price
         fee = notional * fee_rate
 
-        realised = self._update_position(symbol, size, price, quanto=quanto,
-                                         reduce_only=bool(order.get("reduce_only")))
-
-        self.store.insert_fill({
+        # 先幂等入账，重复则完全不动仓位/资金
+        fid, created = self.store.insert_fill({
             "fill_time": _now(),
             "contract": symbol,
             "side": "buy" if size > 0 else "sell",
             "price": price,
             "size": abs(size),
             "fee": fee,
-            "realised_pnl": realised,
+            "realised_pnl": 0.0,
             "role": role,
             "order_id": order["order_id"],
             "kind": "trade",
         })
+        if not created:
+            return
+
+        realised = self._update_position(symbol, size, price, quanto=quanto,
+                                         reduce_only=bool(order.get("reduce_only")))
+        # 回写 realised 到该笔 fill
+        try:
+            conn = self.store._db()
+            with self.store._lock:
+                conn.execute("UPDATE fills SET realised_pnl=? WHERE id=?", (realised, fid))
+                conn.commit()
+        except Exception:  # noqa: BLE001
+            pass
         acct = self.store.get_account()
         bal = float(acct.get("balance") or 0) - fee + realised
         self.store.update_account(balance=bal)
@@ -327,6 +350,8 @@ class PaperEngine:
                     margin=0.0, margin_mode=margin_mode,
                     realised_pnl=float(cur.get("realised_pnl") or 0) + realised,
                 )
+                # 仓位归零：回收孤儿保护单（reduce-only TP/SL）
+                self.store.cancel_reduce_only_price_orders(symbol)
             else:
                 self.store.upsert_position(
                     symbol, mode,
@@ -367,9 +392,9 @@ class PaperEngine:
                 hit = (ref >= tp) if tp > ref else (ref <= tp)
             if not hit:
                 continue
-            self.store.update_price_order(
-                po["order_id"], status=TRIGGER_TRIGGERED, trigger_time=_now(),
-            )
+            # 原子占用，防止双进程/双线程同时触发同一单
+            if not self.store.claim_price_order(po["order_id"]):
+                continue
             # po.size 已是带符号数量（负=卖平多）；side 仅用于触发方向
             body = {
                 "contract": symbol,

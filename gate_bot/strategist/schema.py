@@ -19,6 +19,7 @@ CHIP_ACTIONS = {
     "flatten",
     "cancel_all",
     "cancel_price_all",
+    "modify_tp_sl",
 }
 
 CHIP_ORDER_TYPES = {"market", "limit", "post_only", "ioc", "fok"}
@@ -51,6 +52,9 @@ class Chip:
     price: Optional[float] = None
     trigger_price: Optional[float] = None
     leverage: Optional[int] = None
+    side: Optional[str] = None  # long|short — dual-position manage (close/modify_tp_sl)
+    tp_mode: str = "trigger"  # trigger | limit_order
+    sl_mode: str = "trigger"
     reasoning: str = ""
 
     def to_signal_dict(self) -> dict:
@@ -69,6 +73,12 @@ class Chip:
             d["trigger_price"] = self.trigger_price
         if self.leverage is not None:
             d["leverage"] = self.leverage
+        if self.side:
+            d["side"] = self.side
+        if self.tp_mode and self.tp_mode != "trigger":
+            d["tp_mode"] = self.tp_mode
+        if self.sl_mode and self.sl_mode != "trigger":
+            d["sl_mode"] = self.sl_mode
         if self.reasoning:
             d.setdefault("meta", {})["reasoning"] = self.reasoning
         return d
@@ -104,6 +114,12 @@ def parse_plan(data: Any) -> Plan:
         if not isinstance(raw, dict):
             raise PlanError(f"chips[{i}] must be object")
         action = str(raw.get("action") or "").strip().lower()
+        order_type_raw = str(raw.get("type") or "market").strip().lower()
+        # recovery: model sometimes puts action name in `type` (e.g. type=stop_entry_long)
+        if order_type_raw not in CHIP_ORDER_TYPES and order_type_raw in CHIP_ACTIONS:
+            if not action or action == "hold":
+                action = order_type_raw
+            order_type_raw = "market"
         if action not in CHIP_ACTIONS:
             raise PlanError(f"chips[{i}].action unsupported: {action!r}")
         symbol = str(raw.get("symbol") or "").strip()
@@ -115,9 +131,19 @@ def parse_plan(data: Any) -> Plan:
                 conf = conf / 100.0
             else:
                 raise PlanError(f"chips[{i}].confidence out of range")
-        order_type = str(raw.get("type") or "market").lower()
+        order_type = order_type_raw
         if order_type not in CHIP_ORDER_TYPES:
             raise PlanError(f"chips[{i}].type unsupported: {order_type!r}")
+        side = raw.get("side")
+        if side is not None:
+            side = str(side).strip().lower()
+            if side not in ("long", "short"):
+                raise PlanError(f"chips[{i}].side must be long|short, got {raw.get('side')!r}")
+        tp_mode = str(raw.get("tp_mode") or "trigger").lower()
+        sl_mode = str(raw.get("sl_mode") or "trigger").lower()
+        for name, m in (("tp_mode", tp_mode), ("sl_mode", sl_mode)):
+            if m not in ("trigger", "limit_order", "limit"):
+                raise PlanError(f"chips[{i}].{name} unsupported: {m!r}")
         chips.append(
             Chip(
                 symbol=_safe_symbol(symbol),
@@ -131,6 +157,9 @@ def parse_plan(data: Any) -> Plan:
                 price=_f(raw.get("price")),
                 trigger_price=_f(raw.get("trigger_price")),
                 leverage=int(raw["leverage"]) if raw.get("leverage") is not None else None,
+                side=side,
+                tp_mode="limit_order" if tp_mode == "limit" else tp_mode,
+                sl_mode="limit_order" if sl_mode == "limit" else sl_mode,
                 reasoning=str(raw.get("reasoning") or ""),
             )
         )
