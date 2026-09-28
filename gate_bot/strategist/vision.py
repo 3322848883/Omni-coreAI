@@ -77,6 +77,30 @@ def generate_candlestick_chart(
     if not candles:
         return b""
 
+    # ── 默认叠加 EMA20（由真实 close 计算，与 TV 一致）──
+    def _ema(vals: list, n: int) -> list:
+        if not vals:
+            return []
+        k = 2.0 / (n + 1.0)
+        out = [vals[0]]
+        for v in vals[1:]:
+            out.append(v * k + out[-1] * (1 - k))
+        return out
+
+    if indicators is None:
+        indicators = {}
+    else:
+        indicators = dict(indicators)
+    closes = [cd["c"] for cd in candles]
+    # 若未提供 ema20，或提供的是全 None，则自算
+    provided = indicators.get("ema20")
+    if not provided or all(x is None for x in provided):
+        indicators["ema20"] = _ema(closes, 20)
+    # 若提供了带 warmup 的更长序列，仍按原逻辑对齐
+    if provided and any(x is not None for x in provided) and len(provided) != len(candles):
+        # 截取/对齐到可见 K 线末尾
+        indicators["ema20"] = provided[-len(candles):]
+
     # ── 布局（TradingView 风格）─────────────────────
     pad_right = 80    # 价格轴
     pad_left = 20

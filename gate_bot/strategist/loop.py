@@ -377,7 +377,7 @@ class PlanRunner:
         return self.llm.chat(system, user)
 
     def _generate_chart(self, snapshot: dict) -> Optional[str]:
-        """从 snapshot 的 klines 生成 K 线图 base64（vision 模式）。"""
+        """从 snapshot 的 candles/indicators 生成 K 线图 base64（vision 模式）。"""
         try:
             from .vision import generate_and_encode
             symbols = self.cfg.symbols or []
@@ -385,14 +385,32 @@ class PlanRunner:
                 return None
             sym = symbols[0]
             market = snapshot.get("market") or {}
-            # 从 snapshot 找 klines 数据
-            klines = market.get(sym) or market.get("klines") or []
+            # snapshot: market[sym] = {candles, indicators, ...}
+            m = market.get(sym) or {}
+            if not isinstance(m, dict):
+                m = {}
+            klines = (
+                m.get("candles")
+                or m.get("klines")
+                or m.get("kline")
+                or market.get("klines")
+                or []
+            )
             if isinstance(klines, dict):
-                klines = klines.get("klines") or []
+                klines = klines.get("candles") or klines.get("klines") or []
             if not klines or len(klines) < 10:
                 return None
+            # 指标：snapshot.indicators → 合并进 kline 字段（vision 自算兜底）
+            ind = m.get("indicators") or {}
+            merged = []
+            for i, k in enumerate(klines):
+                row = dict(k) if isinstance(k, dict) else {"c": k}
+                for name, series in (ind or {}).items():
+                    if isinstance(series, (list, tuple)) and i < len(series):
+                        row.setdefault(name, series[i])
+                merged.append(row)
             return generate_and_encode(
-                klines, symbol=sym, timeframe=self.cfg.timeframe,
+                merged, symbol=sym, timeframe=self.cfg.timeframe,
             )
         except Exception:  # noqa: BLE001
             return None
