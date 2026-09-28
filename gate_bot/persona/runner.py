@@ -59,7 +59,14 @@ class PersonaRunner:
             self._log(rec)
             return {"ok": False, "error": "all_analyze_failed", "plans": plans}
 
+        # 讨论模式：互相看 reasoning → 修正决策（可选，硬预算防无限讨论）
+        discussion_rounds_used = 0
+        if self.group.discussion.enabled:
+            flat, discussion_rounds_used = self._discuss(flat)
+
         fusion = fuse_plans(self.group, flat)
+        if discussion_rounds_used:
+            fusion["discussion_rounds"] = discussion_rounds_used
         decision = fusion.get("decision") or DIR_HOLD
         action = fusion.get("action") or "hold"
         cycle_id = next(iter(flat.values())).get("cycle_id") or ""
@@ -161,6 +168,93 @@ class PersonaRunner:
             )
         except Exception:  # noqa: BLE001
             pass
+
+    def _discuss(self, plans: dict[str, dict]) -> tuple[dict[str, dict], int]:
+        """讨论模式：互相看 reasoning → 修正决策。
+
+        基于 Du et al. 2023（2-4 轮最优）+ AutoGen 硬预算模式：
+        - 固定最大轮次（默认 2，上限 4），绝不无限讨论
+        - 首轮全体一致则提前终止（early_exit）
+        - 每轮只交换 decision + reasoning（≤50字），不暴露完整 Plan
+
+        返回 (修正后的 plans, 实际轮数)。
+        """
+        d = self.group.discussion
+        max_rounds = min(d.rounds, 4)
+        current = dict(plans)
+
+        for round_num in range(1, max_rounds + 1):
+            # 检查是否全体一致（提前终止）
+            decisions = {
+                b: str((p.get("decision") or "")).lower()
+                for b, p in current.items()
+            }
+            if d.early_exit_on_agreement and round_num > 1:
+                if len(set(decisions.values())) == 1:
+                    return current, round_num - 1
+
+            # 构建讨论消息：每人看到其他人的 decision + reasoning
+            discussions = {}
+            for bot_id in self.group.members:
+                plan = current.get(bot_id)
+                if not plan or not plan.get("ok", True):
+                    continue
+                # 收集其他人的观点
+                peers = []
+                for other_id, other_plan in current.items():
+                    if other_id == bot_id:
+                        continue
+                    peers.append({
+                        "bot": other_id,
+                        "decision": other_plan.get("decision", "hold"),
+                        "reasoning": str(other_plan.get("reasoning") or "")[:50],
+                    })
+                # 让该人格重新审视（修正决策）
+                try:
+                    revised = self._revise_with_discussion(bot_id, plan, peers, round_num)
+                    if revised:
+                        discussions[bot_id] = revised
+                except Exception:  # noqa: BLE001
+                    continue
+
+            # 应用修正
+            if discussions:
+                for bot_id, revised in discussions.items():
+                    current[bot_id] = {**current[bot_id], **revised}
+            else:
+                # 没有有效修正，退出
+                return current, round_num
+
+            # 最后一轮不再检查一致（直接融合）
+            if round_num == max_rounds:
+                return current, max_rounds
+
+        return current, max_rounds
+
+    def _revise_with_discussion(self, bot_id: str, plan: dict,
+                                 peers: list[dict], round_num: int) -> Optional[dict]:
+        """让一个 personality 基于讨论修正决策（可选，LLM 调用）。
+
+        通过 plan_runners 的 LLM 做修正。如果 runner 不支持则返回 None。
+        """
+        runner = self.plan_runners.get(bot_id)
+        if runner is None:
+            return None
+        # 构建讨论 prompt（简洁，只交换 decision+reasoning）
+        peer_lines = [
+            f"- {p['bot']}: {p['decision']} — {p['reasoning']}"
+            for p in peers
+        ]
+        discussion_text = "\n".join(peer_lines)
+
+        # 尝试用 runner 的 LLM 做修正（如果支持 discuss 方法）
+        if hasattr(runner, "discuss"):
+            return runner.discuss(
+                plan=plan, peers=peers, round_num=round_num,
+                discussion_text=discussion_text,
+            )
+        # fallback: 不支持讨论则保持原判
+        return None
 
     @staticmethod
     def _lifecycle_act(action: str) -> str:
