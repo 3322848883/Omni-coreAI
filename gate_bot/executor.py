@@ -1186,11 +1186,80 @@ class Executor:
                 pass
         return cancelled
 
-    def _position_is_flat(self, symbol: str) -> bool:
+    def _resync_protectors(self, symbol: str) -> list:
+        """减仓/调仓后把保护单张数同步到剩余持仓。
+
+        - flat：交给 _cleanup_orphan_protectors
+        - 有仓：|保护单size| != 持仓size → 撤旧、按现价重挂同 trigger 的等量保护单
+        返回动作摘要列表。
+        """
+        notes: list = []
+        if not symbol:
+            return notes
+        positions = self._symbol_positions(symbol)
+        if not positions:
+            return notes
+        total = sum(abs(float(p.get("size") or 0)) for p in positions)
+        if total <= 0:
+            return notes
         try:
-            return not self._symbol_positions(symbol)
+            rows = self.client.list_price_orders(symbol) or []
         except Exception:  # noqa: BLE001
-            return False
+            return notes
+        for p in rows:
+            init = p.get("initial") or {}
+            text = str(init.get("text") or p.get("text") or "")
+            tail = text.rsplit("-", 1)[-1].lower() if text else ""
+            if tail not in ("tp", "sl", "lp", "ls"):
+                continue
+            if not (init.get("reduce_only") or p.get("reduce_only")):
+                continue
+            status = str(p.get("status") or "").lower()
+            if status in ("cancelled", "finished", "filled", "triggered", "failed", "closed"):
+                continue
+            if self.label_prefix and not self._text_owned(text, self.label_prefix):
+                continue
+            try:
+                psz = float(init.get("size") or p.get("size") or 0)
+            except (TypeError, ValueError):
+                continue
+            if abs(psz) == total:
+                continue
+            pid = str(p.get("id") or "")
+            trig = p.get("trigger") or {}
+            trigger_price = trig.get("price") or init.get("trigger_price") or p.get("trigger_price")
+            if not trigger_price:
+                continue
+            # 同向：多单保护为负 size，空单为正
+            new_size = -abs(int(total)) if psz < 0 else abs(int(total))
+            try:
+                if pid:
+                    self.client.cancel_price_order(pid)
+            except Exception:  # noqa: BLE001
+                pass
+            # 按原 trigger 重挂
+            try:
+                side = "buy" if new_size > 0 else "sell"
+                body = {
+                    "initial": {
+                        "contract": symbol,
+                        "size": new_size,
+                        "price": "0",
+                        "tif": "ioc",
+                        "reduce_only": True,
+                        "text": text or (f"t-{self.label_prefix}-sl" if tail == "sl" else f"t-{self.label_prefix}-tp"),
+                    },
+                    "trigger": {
+                        "rule": int(trig.get("rule") or (2 if psz < 0 else 1)),
+                        "price_type": int(trig.get("price_type") or 0),
+                        "price": str(trigger_price),
+                    },
+                }
+                self.client.place_price_order(body)
+                notes.append({"resized": text or tail, "from": psz, "to": new_size, "trigger": trigger_price})
+            except Exception as e:  # noqa: BLE001
+                notes.append({"resized_error": str(e), "text": text})
+        return notes
 
     def _close(self, intent: Intent) -> StepResult:
         self._check_symbol(intent.symbol)
@@ -1213,8 +1282,9 @@ class Executor:
             side=side if dual else side,
             size=size or 0,
         )
-        # 平/减仓后回收孤儿保护单（有对应持仓的保留；无对应仓的撤）
+        # 平/减仓后：先撤孤儿，再把剩余保护单张数对齐持仓
         cleaned = self._cleanup_orphan_protectors(intent.symbol)
+        resized = self._resync_protectors(intent.symbol)
         return StepResult(
             requested,
             intent.symbol,
@@ -1225,6 +1295,7 @@ class Executor:
                 "position_mode": self.client.get_position_mode(),
                 "executed_as": "close",
                 "cleaned_protectors": cleaned,
+                "resized_protectors": resized,
                 "mode_note": (
                     "dual: close this side only" if dual else "single: one book, side is advisory"
                 ),

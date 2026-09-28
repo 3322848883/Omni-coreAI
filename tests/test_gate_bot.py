@@ -403,6 +403,7 @@ class FakeClient:
                     "text": text,
                     "reduce_only": ro,
                     "size": sz,
+                    "trigger": p.get("trigger") or {},
                     "status": p.get("status") or "untriggered",
                 })
         return out
@@ -669,6 +670,26 @@ class TestExecutor(unittest.TestCase):
         ex = Executor(client, symbols_whitelist=["BTC_USDT"], label_prefix="brk")
         cancelled = ex._cleanup_orphan_protectors("BTC_USDT", keep_ids={"101", "102"})
         self.assertEqual(cancelled, [])
+
+    def test_resync_protectors_after_reduce(self):
+        """减仓后保护单张数应同步到剩余持仓。"""
+        client = FakeClient()
+        client.price_orders = [
+            {"initial": {"text": "t-brk-tp", "reduce_only": 1, "size": -30}, "status": "untriggered", "id": "1",
+             "trigger": {"rule": 1, "price_type": 0, "price": "84000"}},
+            {"initial": {"text": "t-brk-sl", "reduce_only": 1, "size": -30}, "status": "untriggered", "id": "2",
+             "trigger": {"rule": 2, "price_type": 0, "price": "83000"}},
+        ]
+        # 剩余 13 张
+        client.get_positions = lambda: [{"contract": "BTC_USDT", "size": 13, "mode": "single"}]
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], label_prefix="brk")
+        notes = ex._resync_protectors("BTC_USDT")
+        self.assertEqual(len(notes), 2)
+        # 两张旧单被撤、两张新单挂出（size=-13）
+        self.assertEqual(len(client.cancelled), 2)
+        self.assertEqual(len(client.price_orders), 4)
+        for p in client.price_orders[2:]:
+            self.assertEqual((p.get("initial") or {}).get("size"), -13)
 
     def test_notional_pct_guard(self):
         """权益比例硬顶：size_usd > equity×50% 须拒。"""
