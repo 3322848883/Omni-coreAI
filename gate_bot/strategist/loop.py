@@ -154,6 +154,19 @@ class PlanRunner:
             },
             self.cfg.symbols,
         )
+        # agent-memory：画像 + 近况事件（失败不影响本轮）
+        try:
+            from ..memory import MemoryJournal, MemoryProfile
+            root = self.cfg.bot_root or Path.cwd()
+            bid = self.cfg.bot_id or self.inbox.name
+            prof = MemoryProfile(root, bid).prompt_summary()
+            if prof:
+                system = system + "\n[画像] " + prof
+            recent = MemoryJournal(root, bid).read_recent_summaries(3)
+            if recent:
+                user = user + "\n【近期决策】\n" + "\n".join(recent)
+        except Exception:  # noqa: BLE001
+            pass
         text = self._chat_with_tools(system, user)
         try:
             self._save_thinking(
@@ -185,6 +198,21 @@ class PlanRunner:
         risk_result = apply_risk(plan, self.cfg.risk)
         payload = chips_to_signal(plan, risk_result, bot_id=self.cfg.bot_id or self.inbox.name)
         orders = payload.get("orders") or []
+        # agent-memory：每轮决策入 journal
+        try:
+            from ..memory import MemoryJournal
+            root = self.cfg.bot_root or Path.cwd()
+            bid = self.cfg.bot_id or self.inbox.name
+            acts = [c.action for c in plan.chips]
+            MemoryJournal(root, bid).append(
+                cycle_id=plan.cycle_id,
+                decision=",".join(acts) or "hold",
+                reasoning=plan.reasoning[:500],
+                executed=bool(orders),
+                exec_result={"orders": len(orders), "trigger": trigger},
+            )
+        except Exception:  # noqa: BLE001
+            pass
         if not orders:
             if self.cfg.write_hold:
                 write_hold_audit(self.history_dir, plan, cycle_id=plan.cycle_id)
