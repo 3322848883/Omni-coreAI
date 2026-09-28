@@ -175,12 +175,12 @@ def generate_candlestick_chart(
                 y = pad_top + (y_max - float(v)) / y_range * price_h
                 pts.append((x, y))
             if len(pts) >= 2:
-                # 细白底衬（1px）保证线在蜡烛上可见
-                for j in range(len(pts) - 1):
-                    line([pts[j], pts[j + 1]], (255, 255, 255), 4)
-                # 主线（粗 3px，TV 风格）
-                for j in range(len(pts) - 1):
-                    line([pts[j], pts[j + 1]], color, 3)
+                # 白底衬（连续 polyline）
+                draw.line([(S(p[0]), S(p[1])) for p in pts],
+                          fill=(255, 255, 255), width=S(4), joint="curve")
+                # 主线（连续 polyline，TV 风格）
+                draw.line([(S(p[0]), S(p[1])) for p in pts],
+                          fill=color, width=S(3), joint="curve")
                 # 标签：线尾右侧，带白色圆角背景
                 label = name.upper()
                 lx, ly = pts[-1][0] + 6, pts[-1][1]
