@@ -260,7 +260,8 @@ class PersonaRunner:
     def _lifecycle_act(action: str) -> str:
         """映射执行动作到 lifecycle 事件类型。"""
         a = (action or "").lower()
-        if a in ("open_long", "open_short", "add_long", "add_short"):
+        if a in ("open_long", "open_short", "add_long", "add_short",
+                 "stop_entry_long", "stop_entry_short", "buy_stop", "sell_stop"):
             return "open"
         if a in ("close", "close_all", "flatten", "close_long", "close_short"):
             return "close"
