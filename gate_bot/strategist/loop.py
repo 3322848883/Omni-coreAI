@@ -46,7 +46,7 @@ class StrategistConfig:
     symbols: list[str] = field(default_factory=list)
     prompt_file: str = "prompts/vergex_default.md"
     write_hold: bool = True
-    candles: int = 60
+    candles: int = 100
     market: MarketConfig = field(default_factory=MarketConfig)
     env: str = "live"
     bot_root: Optional[Path] = None
