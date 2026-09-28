@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from .schema import CHIP_ACTIONS, CHIP_ORDER_TYPES
 
@@ -13,7 +13,7 @@ _SYSTEM_HEAD = (
     '格式: {"cycle_id":"...","reasoning":"...","chips":[{"symbol":"BTC_USDT",'
     '"action":"open_long|open_short|add_long|add_short|reduce_long|reduce_short|close|close_all|hold|'
     'stop_entry_long|stop_entry_short|flatten|cancel_all|cancel_price_all|modify_tp_sl",'
-    '"confidence":0.0,"size_usd":50,"tp":null,"sl":null,"type":"market|limit|post_only|ioc|fok",'
+    '"confidence":0.0,"size_usd":50,"tp":null,"tp2":null,"tp1_share":null,"sl":null,"type":"market|limit|post_only|ioc|fok",'
     '"price":null,"trigger_price":null,"leverage":null,"side":"long|short|null",'
     '"tp_mode":"trigger|limit_order","sl_mode":"trigger|limit_order","reasoning":"..."}],'
     '"triggers":[]}\n'
@@ -27,9 +27,11 @@ _SYSTEM_HEAD = (
     "7) reasoning 必须 ≤30 字，禁止长篇分析。\n"
     "8) 移动/修改持仓的止盈止损：action=modify_tp_sl 并给 tp/sl（可只改一边）；"
     "或 action=hold 且带 tp/sl。只写 hold 不带 tp/sl = 不改任何保护单。\n"
-    "9) side=long|short 用于双仓持仓管理（close/modify_tp_sl）；单仓可省略。\n"
-    "10) tp_mode/sl_mode 默认 trigger（条件计划委托）；limit_order=盘口 reduce_only 限价。\n"
-    "11) triggers[] 可选：自设唤醒条件（如 {type:price_break,symbol,lookback,side:high|low}），"
+    "9) 双止盈/分批/网格若写进计划，JSON 必须落实字段（swing 开仓给 tp+tp2+tp1_share；"
+    "缺字段=未完成，禁止只在 reasoning 里写 TP1/TP2）。\n"
+    "10) side=long|short 用于双仓持仓管理（close/modify_tp_sl）；单仓可省略。\n"
+    "11) tp_mode/sl_mode 默认 trigger（条件计划委托）；limit_order=盘口 reduce_only 限价。\n"
+    "12) triggers[] 可选：自设唤醒条件（如 {type:price_break,symbol,lookback,side:high|low}），"
     "命中后重新分析，不直接下单。\n"
 )
 
@@ -113,5 +115,27 @@ def build_user_prompt(snapshot: dict[str, Any], risk: dict[str, Any], symbols: l
     )
 
 
-def build_messages(strategy_prompt: str, snapshot: dict[str, Any], risk: dict[str, Any], symbols: list[str]):
-    return build_system_prompt(strategy_prompt), build_user_prompt(snapshot, risk, symbols)
+def build_messages(
+    strategy_prompt: str,
+    snapshot: dict[str, Any],
+    risk: dict[str, Any],
+    symbols: list[str],
+    chart_base64: Optional[str] = None,
+):
+    """构建消息列表。chart_base64 非空时附 K 线图（vision 模式）。"""
+    system = build_system_prompt(strategy_prompt)
+    text = build_user_prompt(snapshot, risk, symbols)
+
+    if chart_base64:
+        # OpenAI/DeepSeek vision 格式
+        user_content: Any = [
+            {"type": "text", "text": text},
+            {
+                "type": "image_url",
+                "image_url": {"url": chart_base64},
+            },
+        ]
+    else:
+        user_content = text
+
+    return system, user_content

@@ -55,6 +55,8 @@ class StrategistConfig:
     # on-demand market tools for the LLM (not a full dump)
     tools: dict = field(default_factory=dict)
     bot_id: str = ""
+    # K 线图视觉识别（需模型支持 vision/image input）
+    vision: bool = True
 
     def __post_init__(self) -> None:
         if not self.event_timeframe:
@@ -243,8 +245,12 @@ class PlanRunner:
             },
             self.cfg.symbols,
         )
+        # vision：从 snapshot klines 生成 K 线图（可配置）
+        chart_b64 = None
+        if self.cfg.vision:
+            chart_b64 = self._generate_chart(snapshot)
         try:
-            text = self._chat_with_tools(system, user)
+            text = self._chat_with_tools(system, user, chart_base64=chart_b64)
             self._save_thinking(
                 cycle_id=cycle_id, system=system, user=user, text=text, trigger=trigger
             )
@@ -342,16 +348,49 @@ class PlanRunner:
         )
         return self.llm.chat(system, user)
 
-    def _chat_with_tools(self, system: str, user: str) -> str:
-        """Official function-calling loop; falls back to text tool_calls JSON."""
+    def _generate_chart(self, snapshot: dict) -> Optional[str]:
+        """从 snapshot 的 klines 生成 K 线图 base64（vision 模式）。"""
+        try:
+            from .vision import generate_and_encode
+            symbols = self.cfg.symbols or []
+            if not symbols:
+                return None
+            sym = symbols[0]
+            market = snapshot.get("market") or {}
+            # 从 snapshot 找 klines 数据
+            klines = market.get(sym) or market.get("klines") or []
+            if isinstance(klines, dict):
+                klines = klines.get("klines") or []
+            if not klines or len(klines) < 10:
+                return None
+            return generate_and_encode(
+                klines, symbol=sym, timeframe=self.cfg.timeframe,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _chat_with_tools(self, system: str, user: str,
+                         chart_base64: Optional[str] = None) -> str:
+        """Official function-calling loop; falls back to text tool_calls JSON.
+
+        chart_base64 非空时附 K 线图（vision 模式，需模型支持 image input）。
+        """
         if hasattr(self.llm, "last_reasoning_chain"):
             self.llm.last_reasoning_chain = []
         tools_on = bool(self.cfg.tools.get("enabled"))
         max_rounds = int(self.cfg.tools.get("max_rounds") or 3)
         native = bool(self.cfg.tools.get("native", True))
+        # vision：content 用 list 格式（text + image_url）
+        if chart_base64:
+            user_content: Any = [
+                {"type": "text", "text": user},
+                {"type": "image_url", "image_url": {"url": chart_base64}},
+            ]
+        else:
+            user_content = user
         messages = [
             {"role": "system", "content": system},
-            {"role": "user", "content": user},
+            {"role": "user", "content": user_content},
         ]
         if not tools_on:
             return self._llm_send(messages)
