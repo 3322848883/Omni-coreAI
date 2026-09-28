@@ -26,8 +26,8 @@ def generate_candlestick_chart(
     *,
     symbol: str = "",
     timeframe: str = "",
-    width: int = 1200,
-    height: int = 700,
+    width: int = 1600,
+    height: int = 800,
     output_path: Optional[Path] = None,
     indicators: Optional[dict] = None,
     bar_count: bool = True,
@@ -156,11 +156,11 @@ def generate_candlestick_chart(
     if indicators:
         # 指标颜色配置（TradingView 风格，高对比度）
         ind_colors = {
-            "ema20": (255, 120, 0),     # 鲜橙
-            "ema50": (30, 100, 240),    # 鲜蓝
-            "ema200": (156, 39, 176),   # 紫色
-            "sma20": (255, 120, 0),
-            "sma50": (30, 100, 240),
+            "ema20": (41, 98, 255),     # TV 蓝
+            "ema50": (255, 120, 0),     # 橙
+            "ema200": (156, 39, 176),   # 紫
+            "sma20": (41, 98, 255),
+            "sma50": (255, 120, 0),
             "sma200": (156, 39, 176),
         }
         for name, values in indicators.items():
@@ -177,7 +177,7 @@ def generate_candlestick_chart(
             if len(pts) >= 2:
                 # 细白底衬（1px）保证线在蜡烛上可见
                 for j in range(len(pts) - 1):
-                    line([pts[j], pts[j + 1]], (255, 255, 255), 3)
+                    line([pts[j], pts[j + 1]], (255, 255, 255), 4)
                 # 主线（粗 3px，TV 风格）
                 for j in range(len(pts) - 1):
                     line([pts[j], pts[j + 1]], color, 3)
@@ -192,16 +192,14 @@ def generate_candlestick_chart(
                      (255, 255, 255))
                 text((lx, ly), label, color, font_indicator, anchor="lm")
 
-    # ── Bar Count（日内 bar 计数，辅助 AI，最上层）──
+    # ── Bar Count（日内 bar 计数，贴蜡烛低点，TV 风格）──
     if bar_count:
         import datetime
-        # 根据密度自适应字号
-        bar_font = _load_font(13 if n <= 30 else 11)
+        bar_font = _load_font(36 if n <= 40 else 26)
         bar_color = (255, 140, 0)
         day_counter = 0
         prev_day = None
-        # 密集时只标每隔 N 根
-        step = 1 if n <= 30 else (2 if n <= 60 else 3)
+        step = 5
         for i, cd in enumerate(candles):
             t = cd.get("t", 0)
             if t > 1e12:
@@ -216,13 +214,15 @@ def generate_candlestick_chart(
                 prev_day = cur_day
             else:
                 day_counter += 1
-            # 只标第 1 根 + 每 step 根 + 最后一根
-            if day_counter == 1 or day_counter % step == 0 or i == n - 1:
+            if day_counter % step == 0:
                 x = pad_left + i * (body_w + gap) + body_w // 2
-                y_bar = pad_top + price_h + 2
+                # 紧贴蜡烛最低点下方 18px（TV 风格：大数字贴低点）
+                y_low = pad_top + (y_max - cd["l"]) / y_range * price_h
+                y_bar = y_low + 20
                 bbox = draw.textbbox((0, 0), str(day_counter), font=bar_font)
-                tw = bbox[2] - bbox[0]
-                rect((x - tw // 2 - 2, y_bar - 2, x + tw // 2 + 2, y_bar + 16),
+                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                # 白底
+                rect((x - tw // 2 - 3, y_bar - 2, x + tw // 2 + 3, y_bar + th + 3),
                      (255, 255, 255))
                 text((x, y_bar), str(day_counter), bar_color, bar_font, anchor="ma")
 
