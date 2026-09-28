@@ -173,17 +173,21 @@ def generate_candlestick_chart(
                 y = pad_top + (y_max - float(v)) / y_range * price_h
                 pts.append((x, y))
             if len(pts) >= 2:
-                # 先画白色描边（提高可见度）
+                # 细白底衬（1px）保证线在蜡烛上可见
                 for j in range(len(pts) - 1):
-                    line([pts[j], pts[j + 1]], (255, 255, 255), 5)
-                # 再画指标线
+                    line([pts[j], pts[j + 1]], (255, 255, 255), 3)
+                # 主线（粗 3px，TV 风格）
                 for j in range(len(pts) - 1):
-                    line([pts[j], pts[j + 1]], color, 2)
-                # 标签（右端，带白色背景）
+                    line([pts[j], pts[j + 1]], color, 3)
+                # 标签：线尾右侧，带白色圆角背景
                 label = name.upper()
-                lx, ly = pts[-1][0] + 4, pts[-1][1]
-                # 背景
-                text((lx + 1, ly + 1), label, (255, 255, 255), font_indicator, anchor="lm")
+                lx, ly = pts[-1][0] + 6, pts[-1][1]
+                # 测量文字宽度做背景
+                bbox = draw.textbbox((0, 0), label, font=font_indicator)
+                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                # 白底
+                rect((lx - 2, ly - th // 2 - 3, lx + tw + 4, ly + th // 2 + 3),
+                     (255, 255, 255))
                 text((lx, ly), label, color, font_indicator, anchor="lm")
 
     # ── 成交量（半透明风格）─────────────────────────
