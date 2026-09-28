@@ -1,0 +1,10 @@
+groups:
+  - name: e2e-trio
+    topology: single_account
+    members: [pa-a, pa-b, pa-c]
+    target_account: pa-a
+    fusion: weighted_vote
+    fusion_config:
+      weights: {pa-a: 2, pa-b: 1, pa-c: 1}
+    on_conflict: hold
+    enabled: true

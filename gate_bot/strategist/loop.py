@@ -209,6 +209,79 @@ class PlanRunner:
             "trigger": trigger,
         }
 
+
+    def analyze_once(self, trigger: str = "manual") -> dict[str, Any]:
+        """各人格独立分析：LLM → Plan，不写 inbox、不执行（供多人格融合）。"""
+        cycle_id = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        snapshot = collect_snapshot(
+            self.client,
+            self.cfg.symbols,
+            candles=self.cfg.candles,
+            interval=self.cfg.timeframe,
+            market_cfg=self.cfg.market,
+            env=self.cfg.env,
+            bot_root=self.cfg.bot_root,
+        )
+        account = snapshot.get("account") or {}
+        if account.get("error"):
+            return {"ok": False, "cycle_id": cycle_id, "error": "account_unavailable",
+                    "detail": account.get("error"), "trigger": trigger}
+        system = build_system_prompt(
+            self.strategy_prompt,
+            tools_guide=TOOL_GUIDE if self.cfg.tools.get("enabled") else "",
+        )
+        user = build_user_prompt(
+            snapshot,
+            {
+                "min_confidence": self.cfg.risk.min_confidence,
+                "max_notional_usd": self.cfg.risk.max_notional_usd,
+                "max_chips": self.cfg.risk.max_chips,
+                "allow_actions": sorted(
+                    self.cfg.risk.allow_actions
+                ) if self.cfg.risk.allow_actions else None,
+            },
+            self.cfg.symbols,
+        )
+        try:
+            text = self._chat_with_tools(system, user)
+            self._save_thinking(
+                cycle_id=cycle_id, system=system, user=user, text=text, trigger=trigger
+            )
+        except Exception as e:  # noqa: BLE001
+            log.error("analyze llm failed: %s", e)
+            return {"ok": False, "cycle_id": cycle_id, "error": str(e), "trigger": trigger}
+        try:
+            plan = parse_plan_text(text)
+        except PlanError as e:
+            log.error("analyze plan parse failed: %s", e)
+            return {"ok": False, "cycle_id": cycle_id, "error": str(e), "trigger": trigger}
+        if not plan.cycle_id:
+            plan.cycle_id = cycle_id
+        # 给融合层的紧凑 Plan（不写 inbox）
+        chips_out = []
+        for c in getattr(plan, "chips", []) or []:
+            chips_out.append({
+                "symbol": getattr(c, "symbol", ""),
+                "action": getattr(c, "action", ""),
+                "confidence": getattr(c, "confidence", 0.0),
+                "size_usd": getattr(c, "size_usd", None),
+                "tp": getattr(c, "tp", None),
+                "sl": getattr(c, "sl", None),
+                "reasoning": getattr(c, "reasoning", ""),
+            })
+        return {
+            "ok": True,
+            "cycle_id": plan.cycle_id,
+            "trigger": trigger,
+            "plan": {
+                "cycle_id": plan.cycle_id,
+                "reasoning": plan.reasoning,
+                "chips": chips_out,
+                "decision": chips_out[0]["action"] if chips_out else "hold",
+                "confidence": chips_out[0]["confidence"] if chips_out else 0.0,
+            },
+        }
+
     def _save_thinking(self, **kw: Any) -> None:
         """Persist LLM reasoning_content (CoT) for audit/replay."""
         from datetime import datetime

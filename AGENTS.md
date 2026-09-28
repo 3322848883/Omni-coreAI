@@ -183,6 +183,8 @@ llm:
 - 资金费率：每 8h 取真实费率对持仓结算
 - 精度校验：tick/lot/最小名义/价格带/杠杆上限，拒绝原因对齐交易所
 
+**多人格共管**：N 人格（brooks/smc/scalper…）共管订单。各人格独立分析 → 融合（`weighted_vote`/`master_arbiter`/`consensus`）→ 按拓扑执行（`single_account` 去重 / `mirror_accounts` 同步）。共同记忆 `data/shared/orders/<order_id>.json`。`python -m gate_bot persona-run --group <name>`。
+
 **信号广播**：一信号 → 多所，目标在 `config/broadcast.yaml`（AI 碰不到）。`python -m gate_bot broadcast` 常驻分发；可选 1/2/N 个目标；逐个校验写入、失败报错；目标 bot 各自独立执行。信号内 `targets` 字段忽略（防 AI 注入）。
 
 **账户信息一律 REST**（全 bot 通用）；`account.db` 仅历史。K 线可 hybrid。

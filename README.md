@@ -559,6 +559,43 @@ python -m gate_bot broadcast --once    # 单轮退出
 - **安全**：信号里 `targets`/`exchanges` 字段一律忽略；目标 bot 不存在拒绝启动
 - **审计**：`data/broadcast/log.jsonl` 留痕；源信号归档 `archive/broadcast-done/`
 
+## 多人格共管订单（multi-persona）
+
+N 个策略人格（brooks / smc / scalper…）**共同管理订单**，各人格独立分析后**融合**成一个执行动作。
+
+```yaml
+# config/persona_groups.yaml
+groups:
+  - name: btc-trio
+    topology: single_account       # single_account | mirror_accounts
+    members: [brooks-btc, smc-paper, scalper-paper]
+    target_account: brooks-btc     # single_account：订单落谁的账户
+    fusion: weighted_vote          # weighted_vote | master_arbiter | consensus
+    fusion_config:
+      weights: {brooks-btc: 2, smc-paper: 1, scalper-paper: 1}
+    on_conflict: hold              # 方向分歧：hold | master | majority
+```
+
+```bash
+python -m gate_bot persona-run --group btc-trio   # 常驻
+python -m gate_bot persona-run --once             # 单轮
+```
+
+**流程**：触发 → 各人格独立分析（各自 prompt/工具）→ 融合层合并 → 按拓扑执行。
+
+| 拓扑 | 执行 |
+|---|---|
+| `single_account` | N 人格 → 1 账户一单（去重单执行） |
+| `mirror_accounts` | N 人格 → N 账户同步开平（原子分发+校验） |
+
+| 融合 | 规则 |
+|---|---|
+| `weighted_vote` | 方向权重过半才执行 |
+| `master_arbiter` | master 人格裁决，其他作参考 |
+| `consensus` | 共识分 ≥ threshold 才执行 |
+
+**共同记忆**：`data/shared/orders/<order_id>.json`——订单状态/各人格理由/投票史/管理记录，跨 bot 读写（为多人格共管与后续记忆功能预留）。
+
 ## LLM 工具（20 个）与指标（23 族）
 
 AI 策略层按需调用：`klines` `indicators` `ticker` `orderbook` `contract` `stats` `account` `smc_map` `smc_events` `sqzmom` + 10 个 aux。

@@ -297,6 +297,87 @@ def cmd_broadcast(args) -> int:
         print("bye")
     return 0
 
+
+def cmd_persona_run(args) -> int:
+    """多人格共管：触发 → 各人格独立分析 → 融合 → 执行。"""
+    import logging
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    paths = ProjectPaths(_root_from_args(args))
+    paths.ensure()
+    from .pidlock import PidLock
+    from .config import load_all_bots
+    from .persona import PersonaError, load_persona_groups, validate_group, PersonaRunner
+    from .strategist.loop import PlanRunner
+    from .strategist.loop import StrategistConfig  # noqa: F401
+    from . import __main__ as _m
+
+    cfg_path = Path(args.config) if args.config else (paths.root / "config" / "persona_groups.yaml")
+    try:
+        groups = load_persona_groups(cfg_path)
+    except PersonaError as e:
+        print(f"persona config error: {e}")
+        return 2
+    known = set(load_all_bots(paths.config_dir).keys())
+    target_groups = [g for g in groups if g.enabled and (not args.group or g.name == args.group)]
+    if not target_groups:
+        print(f"no enabled group matched: {args.group or '<all>'}")
+        return 2
+    for g in target_groups:
+        try:
+            validate_group(g, known)
+        except PersonaError as e:
+            print(f"persona group error: {e}")
+            return 2
+
+    # 组内每个成员建 PlanRunner（独立分析器）
+    bots = load_all_bots(paths.config_dir)
+    runners = {}
+    for g in target_groups:
+        for bot_id in g.members:
+            if bot_id in runners:
+                continue
+            bot = bots[bot_id]
+            try:
+                runners[bot_id] = _m._build_plan_runner(bot, paths)
+            except Exception as e:  # noqa: BLE001
+                print(f"build runner {bot_id} failed: {e}")
+                return 2
+
+    lock = None
+    if args.group and os.environ.get("GATE_LOCK_HELD") != "1":
+        lock = PidLock(paths.root / "data" / "shared" / f"persona-{args.group}.lock").acquire()
+        if lock is None:
+            print(f"persona-run already running ({args.group})")
+            return 3
+
+    try:
+        if args.once:
+            outs = []
+            for g in target_groups:
+                r = PersonaRunner(paths.root, g, bots, runners)
+                res = r.run_once(trigger="manual")
+                outs.append({k: v for k, v in res.items() if k != "plans"})
+            print(json.dumps(outs, ensure_ascii=False, default=str))
+            return 0 if all(o.get("ok") for o in outs) else 1
+        import time as _t
+        print(f"persona-run start: {[g.name for g in target_groups]}")
+        while True:
+            for g in target_groups:
+                try:
+                    r = PersonaRunner(paths.root, g, bots, runners)
+                    res = r.run_once(trigger="interval")
+                    print(f"{_t.strftime('%H:%M:%S')} {g.name}: {res.get('decision')} "
+                          f"executed={res.get('executed')} order={res.get('order_id')}")
+                except Exception as e:  # noqa: BLE001
+                    print(f"{_t.strftime('%H:%M:%S')} {g.name} error: {e}")
+            _t.sleep(int(args.interval) if args.interval else 300)
+    except KeyboardInterrupt:
+        print("bye")
+    finally:
+        if lock is not None:
+            lock.release()
+    return 0
+
 def cmd_run(args) -> int:
     logging.basicConfig(
         level=logging.INFO,
@@ -374,6 +455,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_prun.add_argument("--bot", required=True)
     p_prun.add_argument("--root", default="")
     p_prun.set_defaults(func=cmd_paper_run)
+    p_persona = sub.add_parser("persona-run", help="multi-persona co-managed orders (fuse then execute)")
+    p_persona.add_argument("--group", default="", help="persona group name (default: all enabled)")
+    p_persona.add_argument("--config", default="", help="persona_groups.yaml path")
+    p_persona.add_argument("--interval", default="", help="loop interval sec (default 300)")
+    p_persona.add_argument("--once", action="store_true", help="one cycle then exit")
+    p_persona.add_argument("--root", default="")
+    p_persona.set_defaults(func=cmd_persona_run)
 
     p_once = sub.add_parser("once", help="one scan pass then exit")
     p_once.add_argument("--bot", default=None)

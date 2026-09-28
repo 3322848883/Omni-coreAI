@@ -153,3 +153,15 @@ python -m gate_bot run
 3. 信号投源 inbox，`python -m gate_bot broadcast` 自动分发到各目标
 
 目标列表只在配置里写（AI 信号碰不到），详见 README「信号广播」。
+
+
+## 多人格共管一个订单
+
+N 个策略人格共同决策一笔订单（共识/投票/主人格裁决）：
+
+1. 各成员 bot 配置照常（各自 `strategist` prompt）
+2. `config/persona_groups.yaml` 定组：`members` + `topology` + `fusion`
+3. `python -m gate_bot persona-run --group <name>` 常驻
+
+拓扑：`single_account`（N 人格→1 账户一单）/ `mirror_accounts`（N 人格→N 账户同步）。
+详见 README「多人格共管订单」。
