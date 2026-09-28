@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -15,11 +16,19 @@ from typing import Any, Optional
 class MemoryJournal:
     """append-only 决策日志。不提供 update/delete（不可变）。"""
 
+    _locks: dict[str, threading.Lock] = {}
+    _locks_guard = threading.Lock()
+
     def __init__(self, root: Path, bot_id: str):
         self.root = Path(root)
         self.bot_id = bot_id
         self.path = self.root / "data" / "bots" / bot_id / "state" / "memory_journal.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        key = str(self.path)
+        with self._locks_guard:
+            if key not in self._locks:
+                self._locks[key] = threading.Lock()
+            self._lock = self._locks[key]
 
     def append(self, *, cycle_id: str, decision: str, reasoning: str = "",
                memory_refs: Optional[list[str]] = None,
@@ -44,8 +53,9 @@ class MemoryJournal:
         }
         if extra:
             rec.update(extra)
-        with self.path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        with self._lock:
+            with self.path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         return rec
 
     def read_recent(self, n: int = 3) -> list[dict]:
