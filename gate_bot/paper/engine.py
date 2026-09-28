@@ -312,7 +312,22 @@ class PaperEngine:
 
     def _update_position(self, symbol: str, size: float, price: float,
                          quanto: float = 1.0, reduce_only: bool = False) -> float:
-        mode = self.store.cfg_s("position_mode", "single")
+        base_mode = self.store.cfg_s("position_mode", "single") or "single"
+        # 双仓：按成交方向分 dual_long / dual_short，避免多空互相对冲
+        if "dual" in str(base_mode).lower():
+            # reduce_only 买单平空单 / 卖单平多单；非 reduce 则开对应方向仓
+            if reduce_only:
+                mode = "dual_short" if float(size) > 0 else "dual_long"
+            else:
+                mode = "dual_long" if float(size) > 0 else "dual_short"
+            pos = {p["mode"]: p for p in self.store.get_positions(symbol)}
+            if mode not in pos and base_mode in pos and float(pos.get(base_mode, {}).get("size") or 0) != 0:
+                hist = pos.get(base_mode) or {}
+                hs = float(hist.get("size") or 0)
+                if (hs > 0) == (float(size) > 0):
+                    mode = base_mode
+        else:
+            mode = "single"
         pos = {p["mode"]: p for p in self.store.get_positions(symbol)}
         cur = pos.get(mode) or {"size": 0.0, "entry_price": 0.0, "margin": 0.0, "realised_pnl": 0.0}
         cur_size = float(cur.get("size") or 0)
@@ -365,7 +380,10 @@ class PaperEngine:
     # ── 触发单扫描 ─────────────────────────────────────
     def scan_price_orders(self) -> list[dict]:
         triggered: list[dict] = []
-        for po in self.store.list_price_orders(status=TRIGGER_UNTRIGGERED):
+        rows = self.store.list_price_orders(status=TRIGGER_UNTRIGGERED)
+        # 先触发开仓/非 reduce_only，再触发保护单，避免无仓时保护单先被打掉
+        rows.sort(key=lambda po: 1 if po.get("reduce_only") else 0)
+        for po in rows:
             symbol = po["contract"]
             bid, ask = self._book(symbol)
             last = self._last(symbol)
@@ -406,6 +424,17 @@ class PaperEngine:
                 "text": po.get("text") or "",
             }
             try:
+                # 无仓时 reduce_only 保护单不得成交（只取消），防误开反向仓/空扣费
+                if po.get("reduce_only"):
+                    pos_sz = 0
+                    for p in self.store.get_positions(symbol):
+                        pos_sz += float(p.get("size") or 0)
+                    if abs(pos_sz) < 1e-12:
+                        self.store.update_price_order(
+                            po["order_id"], status=TRIGGER_CANCELLED, finish_time=_now(),
+                            error="reduce_only_no_position",
+                        )
+                        continue
                 order = self.place_order(body)
                 self.store.update_price_order(
                     po["order_id"], status=TRIGGER_FILLED, finish_time=_now(),

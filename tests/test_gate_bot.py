@@ -395,7 +395,16 @@ class FakeClient:
         for i, p in enumerate(self.price_orders):
             text = (p.get("initial") or {}).get("text") or p.get("text") or ""
             if text:
-                out.append({"id": 100 + i + 1, "initial": {"text": text}, "text": text})
+                ro = (p.get("initial") or {}).get("reduce_only") or p.get("reduce_only") or 0
+                sz = (p.get("initial") or {}).get("size") or p.get("size") or 0
+                out.append({
+                    "id": 100 + i + 1,
+                    "initial": {"text": text, "reduce_only": ro, "size": sz},
+                    "text": text,
+                    "reduce_only": ro,
+                    "size": sz,
+                    "status": p.get("status") or "untriggered",
+                })
         return out
 
     def cancel_price_order(self, order_id):
@@ -545,12 +554,121 @@ class TestExecutor(unittest.TestCase):
         self.assertEqual(tp["trigger"]["rule"], 1)
         self.assertEqual(sl["trigger"]["rule"], 2)
 
+    def test_open_dual_tp_split(self):
+        """tp+tp2 双止盈：两腿减仓 + 全仓 SL。"""
+        client = FakeClient()
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], max_notional_usd=500)
+        rep = ex.execute_signal(parse_signal({
+            "action": "open_long", "symbol": "BTC_USDT", "size_usd": 100,
+            "tp": 52000, "tp2": 55000, "tp1_share": 0.5, "sl": 48000,
+        }))
+        self.assertTrue(rep.ok, rep.to_dict())
+        self.assertEqual(len(client.price_orders), 3)
+        sizes = sorted(abs(p["initial"]["size"]) for p in client.price_orders)
+        self.assertEqual(sizes, [10, 10, 20])
+        for p in client.price_orders:
+            self.assertTrue(p["initial"].get("reduce_only"))
+
     def test_notional_guard(self):
         client = FakeClient()
         ex = Executor(client, max_notional_usd=50)
         report = ex.execute_signal(parse_signal({"action": "open_long", "symbol": "BTC_USDT", "size_usd": 100}))
         self.assertFalse(report.ok)
         self.assertEqual(len(client.orders), 0)
+
+    def test_orphan_cleanup_safety(self):
+        """孤儿保护单回收：只撤 flat+reduce_only+本bot的tp/sl。"""
+        client = FakeClient()
+        client.price_orders = [
+            {"initial": {"text": "t-brk-sl", "reduce_only": 1}, "status": "untriggered", "id": "1"},
+            {"initial": {"text": "t-brk-tp", "reduce_only": 1}, "status": "untriggered", "id": "2"},
+            {"initial": {"text": "t-brk", "reduce_only": 0}, "status": "untriggered", "id": "3"},
+            {"initial": {"text": "t-other-tp", "reduce_only": 1}, "status": "untriggered", "id": "4"},
+        ]
+        client.get_positions = lambda: []
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], label_prefix="brk")
+        cancelled = ex._cleanup_orphan_protectors("BTC_USDT")
+        self.assertEqual(len(cancelled), 2)
+        cancelled_ids = [c[1] for c in client.cancelled if c[0] == "price"]
+        self.assertEqual(len(cancelled_ids), 2)
+        self.assertNotIn("103", cancelled_ids)  # 入场单
+        self.assertNotIn("104", cancelled_ids)  # 外 bot
+
+    def test_orphan_cleanup_skipped_when_position(self):
+        """有仓且方向匹配时保留保护单。"""
+        client = FakeClient()
+        client.price_orders = [
+            {"initial": {"text": "t-brk-tp", "reduce_only": 1, "size": -10}, "status": "untriggered", "id": "1"},
+        ]
+        client.get_positions = lambda: [{"contract": "BTC_USDT", "size": 10, "mode": "single"}]
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], label_prefix="brk")
+        cancelled = ex._cleanup_orphan_protectors("BTC_USDT")
+        self.assertEqual(cancelled, [])
+        self.assertEqual(client.cancelled, [])
+
+    def test_multi_tp_kept_when_position_exists(self):
+        """多级止盈：TP1/TP2/TP3+SL 对应多单时全部保留。"""
+        client = FakeClient()
+        # 多单保护：sell = size 负
+        client.price_orders = [
+            {"initial": {"text": "t-brk-tp", "reduce_only": 1, "size": -10}, "status": "untriggered", "id": "1"},
+            {"initial": {"text": "t-brk-tp", "reduce_only": 1, "size": -10}, "status": "untriggered", "id": "2"},
+            {"initial": {"text": "t-brk-tp", "reduce_only": 1, "size": -10}, "status": "untriggered", "id": "3"},
+            {"initial": {"text": "t-brk-sl", "reduce_only": 1, "size": -30}, "status": "untriggered", "id": "4"},
+        ]
+        client.get_positions = lambda: [{"contract": "BTC_USDT", "size": 30, "mode": "single"}]
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], label_prefix="brk")
+        cancelled = ex._cleanup_orphan_protectors("BTC_USDT")
+        self.assertEqual(cancelled, [])
+        self.assertEqual(client.cancelled, [])
+
+    def test_multi_tp_orphans_after_close(self):
+        """多级止盈：平仓后 TP1/2/3+SL 全部变孤儿，应全撤。"""
+        client = FakeClient()
+        client.price_orders = [
+            {"initial": {"text": "t-brk-tp", "reduce_only": 1, "size": -10}, "status": "untriggered", "id": "1"},
+            {"initial": {"text": "t-brk-tp", "reduce_only": 1, "size": -10}, "status": "untriggered", "id": "2"},
+            {"initial": {"text": "t-brk-tp", "reduce_only": 1, "size": -10}, "status": "untriggered", "id": "3"},
+            {"initial": {"text": "t-brk-sl", "reduce_only": 1, "size": -30}, "status": "untriggered", "id": "4"},
+        ]
+        client.get_positions = lambda: []  # 已平
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], label_prefix="brk")
+        cancelled = ex._cleanup_orphan_protectors("BTC_USDT")
+        self.assertEqual(len(cancelled), 4)
+
+    def test_multi_tp_partial_only_orphans_wrong_side(self):
+        """双仓：多单在、空单已平 → 只撤空单侧保护，保留多单多级TP。"""
+        client = FakeClient()
+        client.price_orders = [
+            # 多单保护（sell，应保留）
+            {"initial": {"text": "t-brk-tp", "reduce_only": 1, "size": -10}, "status": "untriggered", "id": "1"},
+            {"initial": {"text": "t-brk-tp", "reduce_only": 1, "size": -10}, "status": "untriggered", "id": "2"},
+            # 空单残留保护（buy，应撤）
+            {"initial": {"text": "t-brk-tp", "reduce_only": 1, "size": 5}, "status": "untriggered", "id": "3"},
+            {"initial": {"text": "t-brk-sl", "reduce_only": 1, "size": 5}, "status": "untriggered", "id": "4"},
+        ]
+        client.get_positions = lambda: [{"contract": "BTC_USDT", "size": 20, "mode": "dual_long"}]
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], label_prefix="brk")
+        cancelled = ex._cleanup_orphan_protectors("BTC_USDT")
+        # 只撤空单侧（id 3,4 → FakeClient id 103,104）
+        self.assertEqual(len(cancelled), 2)
+        cancelled_ids = [c[1] for c in client.cancelled if c[0] == "price"]
+        self.assertNotIn("101", cancelled_ids)
+        self.assertNotIn("102", cancelled_ids)
+        self.assertIn("103", cancelled_ids)
+        self.assertIn("104", cancelled_ids)
+
+    def test_keep_ids_preserves_new_tps(self):
+        """keep_ids 保护本轮新挂的多级止盈。"""
+        client = FakeClient()
+        client.price_orders = [
+            {"initial": {"text": "t-brk-tp", "reduce_only": 1, "size": -10}, "status": "untriggered", "id": "1"},
+            {"initial": {"text": "t-brk-tp", "reduce_only": 1, "size": -10}, "status": "untriggered", "id": "2"},
+        ]
+        client.get_positions = lambda: []
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], label_prefix="brk")
+        cancelled = ex._cleanup_orphan_protectors("BTC_USDT", keep_ids={"101", "102"})
+        self.assertEqual(cancelled, [])
 
     def test_notional_pct_guard(self):
         """权益比例硬顶：size_usd > equity×50% 须拒。"""

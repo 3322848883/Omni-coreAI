@@ -496,10 +496,11 @@ class Executor:
     def _check_notional(self, size_usd: Optional[float]) -> None:
         if size_usd is None:
             return
-        # 权益比例硬顶：默认单笔名义 ≤ 50% 权益（可配 account_risk.max_notional_pct）
+        # 权益比例硬顶：默认单笔名义 ≤ 5×权益（可配 account_risk.max_notional_pct）
+        # 注意：紧止损 + 2% 风险会推高名义；0.5× 会误杀正常仓（永续带杠杆）
         pct = self.account_risk.get("max_notional_pct")
         if pct is None:
-            pct = 0.5
+            pct = 5.0
         try:
             pct = float(pct)
             if pct > 0:
@@ -630,14 +631,20 @@ class Executor:
         tp_orders = []
         sl_orders = []
         exit_errors = []
-        if intent.tp is not None:
-            rec_, err_ = self._place_exit_leg(
-                lambda: self._place_limit_exit(intent, pos_side, intent.tp, is_tp=True, meta=meta, size=exit_size)
-                if intent.tp_mode == "limit_order"
-                else self._place_trigger(intent, trigger_side, intent.tp, is_tp=True, meta=meta, size=exit_size),
-                kind="tp", price_order=(intent.tp_mode != "limit_order"),
-            )
-            (tp_orders if rec_ else exit_errors).append(rec_ or err_)
+        # 多级止盈：tp/tp2/tp3（缺省均分或 tp1_share/tp2_share）
+        legs = self._tp_legs(intent, exit_size)
+        if legs:
+            for tp_px, tp_sz, idx in [(p, s, i) for i, (p, s) in enumerate(legs)]:
+                rec_, err_ = self._place_exit_leg(
+                    lambda p=tp_px, s=tp_sz: (
+                        self._place_limit_exit(intent, pos_side, p, is_tp=True, meta=meta, size=s)
+                        if intent.tp_mode == "limit_order"
+                        else self._place_trigger(intent, trigger_side, p, is_tp=True, meta=meta, size=s)
+                    ),
+                    kind=f"tp{idx+1}" if len(legs) > 1 else "tp",
+                    price_order=(intent.tp_mode != "limit_order"),
+                )
+                (tp_orders if rec_ else exit_errors).append(rec_ or err_)
         if intent.sl is not None:
             rec_, err_ = self._place_exit_leg(
                 lambda: self._place_limit_exit(intent, pos_side, intent.sl, is_tp=False, meta=meta, size=exit_size)
@@ -663,6 +670,39 @@ class Executor:
                 error="exit_not_placed: " + "; ".join(str(x) for x in exit_errors or ["tp/sl missing"]),
             )
         return StepResult(intent.action, intent.symbol, True, detail=detail)
+
+    def _tp_legs(self, intent: Intent, exit_size: int) -> list[tuple[float, int]]:
+        """多级止盈腿：tp/tp2/tp3 → [(price, size)]。份额缺省 1/N。"""
+        prices = [p for p in (intent.tp, intent.tp2, intent.tp3) if p is not None]
+        if not prices or exit_size <= 0:
+            return []
+        if len(prices) == 1:
+            return [(prices[0], int(exit_size))]
+        s1 = intent.tp1_share
+        s2 = intent.tp2_share
+        if s1 is None and s2 is None:
+            share = [1.0 / len(prices)] * len(prices)
+        else:
+            s1 = float(s1 if s1 is not None else (1.0 / 3.0))
+            s2 = float(s2 if s2 is not None else (1.0 / 3.0))
+            s1 = min(1.0, max(0.0, s1))
+            s2 = min(1.0 - s1, max(0.0, s2))
+            rest = max(0.0, 1.0 - s1 - s2)
+            share = [s1, s2] + ([rest] if len(prices) > 2 else [])
+            if len(share) < len(prices):
+                share.append(0.0)
+            if abs(sum(share) - 1.0) > 1e-6 and len(prices) == 2:
+                share = [s1, 1.0 - s1]
+        legs = []
+        acc = 0
+        for i, px in enumerate(prices):
+            if i < len(prices) - 1:
+                sz = max(1, int(round(exit_size * share[i])))
+                acc += sz
+            else:
+                sz = max(1, exit_size - acc)
+            legs.append((float(px), int(sz)))
+        return legs
 
     def _modify_tp_sl(self, intent: Intent) -> StepResult:
         """Move TP/SL on an existing position (place new first, then drop old owned).
@@ -1029,7 +1069,128 @@ class Executor:
         if not ok:
             return StepResult(intent.action, intent.symbol, False, detail=detail,
                               error=f"stop_entry not confirmed id={order.get('id')}")
+        # 突破入场也要预挂保护（含双止盈），成交即生效
+        if intent.sl is not None or intent.tp is not None:
+            contracts_abs = abs(int(contracts))
+            pos_side = "long" if intent.action == "stop_entry_long" else "short"
+            trigger_side = "short" if pos_side == "long" else "long"
+            # stop_entry 用 trigger_price 作入场参考算 SL 规则方向
+            saved_side = intent.side
+            intent.side = pos_side
+            if intent.trigger_rule_sl is None:
+                intent.trigger_rule_sl = infer_trigger_rules(
+                    "open_long" if pos_side == "long" else "open_short", False
+                )
+            if intent.trigger_rule_tp is None:
+                intent.trigger_rule_tp = infer_trigger_rules(
+                    "open_long" if pos_side == "long" else "open_short", True
+                )
+            tp1_share = float(intent.tp1_share if intent.tp1_share is not None else 0.5)
+            tp1_share = min(1.0, max(0.0, tp1_share))
+            tps = []
+            sls = []
+            errs = []
+            legs = self._tp_legs(intent, contracts_abs)
+            for tp_px, tp_sz, idx in [(p, s, i) for i, (p, s) in enumerate(legs)]:
+                rec_, err_ = self._place_exit_leg(
+                    lambda p=tp_px, s=tp_sz: self._place_trigger(
+                        intent, trigger_side, p, is_tp=True, meta=meta, size=s
+                    ),
+                    kind=f"tp{idx+1}" if len(legs) > 1 else "tp", price_order=True,
+                )
+                (tps if rec_ else errs).append(rec_ or err_)
+            if intent.sl is not None:
+                rec_, err_ = self._place_exit_leg(
+                    lambda: self._place_trigger(
+                        intent, trigger_side, intent.sl, is_tp=False, meta=meta, size=contracts_abs
+                    ),
+                    kind="sl", price_order=True,
+                )
+                (sls if rec_ else errs).append(rec_ or err_)
+            intent.side = saved_side
+            detail["tp_orders"] = tps
+            detail["sl_orders"] = sls
+            detail["exit_errors"] = errs
+            detail["hang_mode"] = "with_stop_entry"
+            if errs:
+                return StepResult(intent.action, intent.symbol, False, detail=detail,
+                                  error="exit_not_placed: " + "; ".join(str(x) for x in errs))
         return StepResult(intent.action, intent.symbol, True, detail=detail)
+
+    def _is_orphan_protector(self, po: dict, positions: list) -> bool:
+        """判断保护单是否孤儿（无对应持仓）。
+
+        保护单方向：sell(-size) 平多单，buy(+size) 平空单。
+        有对应持仓 → 当前计划保护单，保留；无 → 孤儿。
+        """
+        init = po.get("initial") or {}
+        text = str(init.get("text") or po.get("text") or "")
+        tail = text.rsplit("-", 1)[-1].lower() if text else ""
+        if tail not in ("tp", "sl", "lp", "ls"):
+            return False
+        if not (init.get("reduce_only") or po.get("reduce_only")):
+            return False
+        sz = float(init.get("size") or po.get("size") or 0)
+        # 保护单方向：负=卖平多，正=买平空
+        want = "long" if sz < 0 else "short" if sz > 0 else None
+        if want is None:
+            return True  # 无方向无法匹配 → 保守当孤儿
+        for p in positions:
+            psz = float(p.get("size") or 0)
+            if psz == 0:
+                continue
+            side = "long" if psz > 0 else "short"
+            if side == want:
+                return False  # 有对应持仓 → 不是孤儿
+        return True
+
+    def _cleanup_orphan_protectors(self, symbol: str, keep_ids: Optional[set] = None) -> list:
+        """回收孤儿保护单（有对应持仓的保留）。
+
+        安全闸：reduce_only + tp/sl 后缀 + 本 bot 命名空间 + 非 keep + **无对应持仓**。
+        """
+        if not symbol:
+            return []
+        keep = {str(x) for x in (keep_ids or set())}
+        try:
+            positions = self._symbol_positions(symbol)
+            rows = self.client.list_price_orders(symbol) or []
+        except Exception:  # noqa: BLE001
+            return []
+        cancelled = []
+        for p in rows:
+            init = p.get("initial") or {}
+            text = str(init.get("text") or p.get("text") or "")
+            tail = text.rsplit("-", 1)[-1].lower() if text else ""
+            if tail not in ("tp", "sl", "lp", "ls"):
+                continue
+            if not (init.get("reduce_only") or p.get("reduce_only")):
+                continue
+            status = str(p.get("status") or "").lower()
+            if status in ("cancelled", "finished", "filled", "triggered", "failed", "closed"):
+                continue
+            pid = str(p.get("id") or "")
+            if not pid or pid in keep:
+                continue
+            if self.label_prefix:
+                if not self._text_owned(text, self.label_prefix):
+                    continue
+            else:
+                continue
+            if not self._is_orphan_protector(p, positions):
+                continue  # 当前计划保护单，保留
+            try:
+                self.client.cancel_price_order(pid)
+                cancelled.append(pid)
+            except Exception:  # noqa: BLE001
+                pass
+        return cancelled
+
+    def _position_is_flat(self, symbol: str) -> bool:
+        try:
+            return not self._symbol_positions(symbol)
+        except Exception:  # noqa: BLE001
+            return False
 
     def _close(self, intent: Intent) -> StepResult:
         self._check_symbol(intent.symbol)
@@ -1052,6 +1213,8 @@ class Executor:
             side=side if dual else side,
             size=size or 0,
         )
+        # 平/减仓后回收孤儿保护单（有对应持仓的保留；无对应仓的撤）
+        cleaned = self._cleanup_orphan_protectors(intent.symbol)
         return StepResult(
             requested,
             intent.symbol,
@@ -1061,6 +1224,7 @@ class Executor:
                 "side": side,
                 "position_mode": self.client.get_position_mode(),
                 "executed_as": "close",
+                "cleaned_protectors": cleaned,
                 "mode_note": (
                     "dual: close this side only" if dual else "single: one book, side is advisory"
                 ),

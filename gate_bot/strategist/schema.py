@@ -48,6 +48,10 @@ class Chip:
     size: Optional[int] = None
     tp: Optional[float] = None
     sl: Optional[float] = None
+    tp2: Optional[float] = None  # 多级止盈
+    tp3: Optional[float] = None
+    tp1_share: Optional[float] = None
+    tp2_share: Optional[float] = None
     order_type: str = "market"
     price: Optional[float] = None
     trigger_price: Optional[float] = None
@@ -69,6 +73,14 @@ class Chip:
             d["tp"] = self.tp
         if self.sl is not None:
             d["sl"] = self.sl
+        if self.tp2 is not None:
+            d["tp2"] = self.tp2
+        if self.tp3 is not None:
+            d["tp3"] = self.tp3
+        if self.tp1_share is not None:
+            d["tp1_share"] = self.tp1_share
+        if self.tp2_share is not None:
+            d["tp2_share"] = self.tp2_share
         if self.trigger_price is not None:
             d["trigger_price"] = self.trigger_price
         if self.leverage is not None:
@@ -153,6 +165,10 @@ def parse_plan(data: Any) -> Plan:
                 size=int(raw["size"]) if raw.get("size") is not None else None,
                 tp=_f(raw.get("tp")),
                 sl=_f(raw.get("sl")),
+                tp2=_f(raw.get("tp2")),
+                tp3=_f(raw.get("tp3")),
+                tp1_share=_f(raw.get("tp1_share")),
+                tp2_share=_f(raw.get("tp2_share")),
                 order_type=order_type,
                 price=_f(raw.get("price")),
                 trigger_price=_f(raw.get("trigger_price")),

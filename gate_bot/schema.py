@@ -74,6 +74,10 @@ class Intent:
     leverage: Optional[int] = None
     tp: Optional[float] = None
     sl: Optional[float] = None
+    tp2: Optional[float] = None
+    tp3: Optional[float] = None
+    tp1_share: Optional[float] = None
+    tp2_share: Optional[float] = None
     tp_type: str = "limit"
     sl_type: str = "limit"
     # trigger = price_order (conditional); limit_order = resting reduce_only limit
@@ -219,6 +223,12 @@ def _parse_stop_entry(data: dict, action: str, default_label: str) -> Intent:
         order_type=order_type,
         price=price,
         leverage=_i(data.get("leverage"), "leverage"),
+        tp=_f(data.get("tp"), "tp"),
+        sl=_f(data.get("sl"), "sl"),
+        tp2=_f(data.get("tp2"), "tp2"),
+        tp3=_f(data.get("tp3"), "tp3"),
+        tp1_share=_f(data.get("tp1_share"), "tp1_share"),
+        tp2_share=_f(data.get("tp2_share"), "tp2_share"),
         trigger_price_tp=trigger_price,
         trigger_rule_tp=rule,
         trigger_price_type=trigger_price_type,
@@ -377,6 +387,10 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
     sl_type = str(data.get("sl_type") or "market").lower()
     tp_mode = str(data.get("tp_mode") or "trigger").lower()
     sl_mode = str(data.get("sl_mode") or "trigger").lower()
+    tp2 = _f(data.get("tp2"), "tp2")
+    tp3 = _f(data.get("tp3"), "tp3")
+    tp1_share = _f(data.get("tp1_share"), "tp1_share")
+    tp2_share = _f(data.get("tp2_share"), "tp2_share")
     for name, m in (("tp_mode", tp_mode), ("sl_mode", sl_mode)):
         if m not in ("trigger", "limit_order", "limit"):
             raise SchemaError(f"{name} must be trigger|limit_order")
@@ -428,6 +442,10 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
         leverage=leverage,
         tp=tp,
         sl=sl,
+        tp2=tp2,
+        tp3=tp3,
+        tp1_share=tp1_share,
+        tp2_share=tp2_share,
         tp_type=tp_type,
         sl_type=sl_type,
         tp_mode="limit_order" if tp_mode in ("limit_order", "limit") else "trigger",
@@ -468,6 +486,10 @@ def _parse_grid(data: dict, default_label: str) -> Intent:
 
     label = str(data.get("label") or default_label)
     tp = _f(data.get("tp"), "tp")
+    tp2 = _f(data.get("tp2"), "tp2")
+    tp3 = _f(data.get("tp3"), "tp3")
+    tp1_share = _f(data.get("tp1_share"), "tp1_share")
+    tp2_share = _f(data.get("tp2_share"), "tp2_share")
     tp_scope = str(data.get("tp_scope") or "per_level").lower()
     sl_scope = str(data.get("sl_scope") or "per_level").lower()
     for nm, sc in (("tp_scope", tp_scope), ("sl_scope", sl_scope)):
@@ -498,6 +520,10 @@ def _parse_grid(data: dict, default_label: str) -> Intent:
         side=side,
         order_type=order_type,
         tp=tp,
+        tp2=tp2,
+        tp3=tp3,
+        tp1_share=tp1_share,
+        tp2_share=tp2_share,
         sl=sl,
         tp_type=str(data.get("tp_type") or "limit").lower(),
         sl_type=str(data.get("sl_type") or "limit").lower(),
@@ -577,7 +603,12 @@ def expand_signal(signal: SignalFile) -> list[Intent]:
                     price=lv.get("price"),
                     leverage=intent.leverage,
                     tp=intent.tp if (intent.tp_scope != 'shared' or last) else None,
-                    sl=intent.sl if (intent.sl_scope != 'shared' or last) else None,
+                    tp2=intent.tp2 if (intent.tp_scope != 'shared' or last) else None,
+                    tp3=intent.tp3 if (intent.tp_scope != 'shared' or last) else None,
+                    tp1_share=intent.tp1_share,
+                    tp2_share=intent.tp2_share,
+                    # 每层都带 sl（require_sl + 各层自保护）；shared 时末层再挂全量 SL
+                    sl=intent.sl,
                     tp_size_override=total_size if (intent.tp and intent.tp_scope == 'shared' and last) else None,
                     sl_size_override=total_size if (intent.sl and intent.sl_scope == 'shared' and last) else None,
                     tp_type=intent.tp_type,
