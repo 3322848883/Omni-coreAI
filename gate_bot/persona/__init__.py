@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from .config import (
+    DiscussionConfig,
     PersonaGroup,
     PersonaError,
     load_persona_groups,
@@ -20,6 +21,7 @@ from .orders import SharedOrderStore
 from .runner import PersonaRunner
 
 __all__ = [
+    "DiscussionConfig",
     "PersonaGroup",
     "PersonaError",
     "PersonaRunner",

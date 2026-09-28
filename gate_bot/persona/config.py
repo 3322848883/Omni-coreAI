@@ -11,9 +11,26 @@ FUSION_MODES = ("weighted_vote", "master_arbiter", "consensus")
 TOPOLOGIES = ("single_account", "mirror_accounts")
 CONFLICT_MODES = ("hold", "master", "majority")
 
+# 讨论模式默认参数（Du et al. 2023: 2-4 轮最优，>4 平台化）
+DISCUSSION_MAX_ROUNDS = 4
+DISCUSSION_DEFAULT_ROUNDS = 2
+
 
 class PersonaError(Exception):
     pass
+
+
+@dataclass
+class DiscussionConfig:
+    """讨论模式配置（可选）。硬预算防无限讨论。"""
+    enabled: bool = False
+    rounds: int = DISCUSSION_DEFAULT_ROUNDS       # 最大讨论轮次（1-4）
+    timeout_sec: int = 120                        # 单轮超时
+    early_exit_on_agreement: bool = True          # 首轮全体一致则提前终止
+
+    def __post_init__(self):
+        self.rounds = max(1, min(DISCUSSION_MAX_ROUNDS, int(self.rounds)))
+        self.timeout_sec = max(10, int(self.timeout_sec))
 
 
 @dataclass
@@ -27,6 +44,7 @@ class PersonaGroup:
     on_conflict: str = "hold"
     trigger: dict = field(default_factory=dict)   # 可选组级触发覆盖
     enabled: bool = True
+    discussion: DiscussionConfig = field(default_factory=DiscussionConfig)
 
 
 def _check_bot_id(bot_id: str, role: str) -> str:
@@ -68,6 +86,14 @@ def load_persona_groups(path: Path) -> list[PersonaGroup]:
             target = target or members[0]
             if target not in members:
                 raise PersonaError(f"group {name!r}: target_account {target!r} not in members")
+        # 讨论模式配置（可选）
+        disc_raw = dict(g.get("discussion") or {})
+        discussion = DiscussionConfig(
+            enabled=bool(disc_raw.get("enabled", False)),
+            rounds=max(1, min(DISCUSSION_MAX_ROUNDS, int(disc_raw.get("rounds", DISCUSSION_DEFAULT_ROUNDS)))),
+            timeout_sec=max(10, int(disc_raw.get("timeout_sec", 120))),
+            early_exit_on_agreement=bool(disc_raw.get("early_exit_on_agreement", True)),
+        )
         groups.append(PersonaGroup(
             name=name,
             members=members,
@@ -78,6 +104,7 @@ def load_persona_groups(path: Path) -> list[PersonaGroup]:
             on_conflict=on_conflict,
             trigger=dict(g.get("trigger") or {}),
             enabled=bool(g.get("enabled", True)),
+            discussion=discussion,
         ))
     return groups
 

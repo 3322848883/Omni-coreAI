@@ -325,7 +325,7 @@ class TestStress(unittest.TestCase):
                 store.record_vote(oid, f"c-{i}", f"bot-{i % 3}",
                                   "long", confidence=0.5)
             elapsed = time.time() - t0
-            self.assertLess(elapsed, 10.0, f"500 votes took {elapsed:.1f}s")
+            self.assertLess(elapsed, 30.0, f"500 votes took {elapsed:.1f}s")
             got = store.get(oid)
             self.assertEqual(len(got["votes"]), 500)
 

@@ -59,7 +59,14 @@ class PersonaRunner:
             self._log(rec)
             return {"ok": False, "error": "all_analyze_failed", "plans": plans}
 
+        # 讨论模式：互相看 reasoning → 修正决策（可选，硬预算防无限讨论）
+        discussion_rounds_used = 0
+        if self.group.discussion.enabled:
+            flat, discussion_rounds_used = self._discuss(flat)
+
         fusion = fuse_plans(self.group, flat)
+        if discussion_rounds_used:
+            fusion["discussion_rounds"] = discussion_rounds_used
         decision = fusion.get("decision") or DIR_HOLD
         action = fusion.get("action") or "hold"
         cycle_id = next(iter(flat.values())).get("cycle_id") or ""
@@ -116,7 +123,167 @@ class PersonaRunner:
             result.update({"ok": False, "error": f"exec: {e}"})
         self._log({"event": "decision", "decision": decision, "fusion": fusion,
                    "order_id": order_id, "exec": result.get("executed")})
+        # agent-memory 挂钩：lifecycle + journal
+        self._post_exec_hooks(order_id, fusion, flat, result, cycle_id)
         return result
+
+    def _post_exec_hooks(self, order_id: Optional[str], fusion: dict,
+                         plans: dict, result: dict, cycle_id: str) -> None:
+        """执行后更新订单上下文（lifecycle/recent_events）+ 追加 journal。"""
+        if not order_id:
+            return
+        action = result.get("action") or fusion.get("action") or "hold"
+        decision = result.get("decision") or fusion.get("decision") or ""
+        executed = bool(result.get("executed"))
+        source_bot = fusion.get("master") or ""
+        if not source_bot:
+            votes = fusion.get("votes") or {}
+            source_bot = next(iter(votes), "")
+
+        # lifecycle 管理事件
+        if executed:
+            act_key = self._lifecycle_act(action)
+            self.orders.add_lifecycle(
+                order_id, act_key,
+                detail=f"{action} {decision}",
+                by=f"fusion:{fusion.get('mode', '')}",
+            )
+            self.orders.refresh_recent_events(order_id)
+            # 平仓：更新 profile
+            if self._order_status_after(action) == "closed":
+                self._update_profile_on_close(order_id)
+
+        # journal 追加（每轮，含 hold）
+        try:
+            from ..memory import MemoryJournal
+            journal = MemoryJournal(self.root, source_bot or self.group.members[0])
+            plan = plans.get(source_bot) or {}
+            journal.append(
+                cycle_id=cycle_id or f"c-{int(time.time())}",
+                decision=decision,
+                reasoning=str(plan.get("reasoning") or fusion.get("reason") or "")[:200],
+                memory_refs=[f"order:{order_id}"],
+                executed=executed,
+                exec_result={"action": action, "order_id": order_id},
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _discuss(self, plans: dict[str, dict]) -> tuple[dict[str, dict], int]:
+        """讨论模式：互相看 reasoning → 修正决策。
+
+        基于 Du et al. 2023（2-4 轮最优）+ AutoGen 硬预算模式：
+        - 固定最大轮次（默认 2，上限 4），绝不无限讨论
+        - 首轮全体一致则提前终止（early_exit）
+        - 每轮只交换 decision + reasoning（≤50字），不暴露完整 Plan
+
+        返回 (修正后的 plans, 实际轮数)。
+        """
+        d = self.group.discussion
+        max_rounds = min(d.rounds, 4)
+        current = dict(plans)
+
+        for round_num in range(1, max_rounds + 1):
+            # 检查是否全体一致（提前终止）
+            decisions = {
+                b: str((p.get("decision") or "")).lower()
+                for b, p in current.items()
+            }
+            if d.early_exit_on_agreement and round_num > 1:
+                if len(set(decisions.values())) == 1:
+                    return current, round_num - 1
+
+            # 构建讨论消息：每人看到其他人的 decision + reasoning
+            discussions = {}
+            for bot_id in self.group.members:
+                plan = current.get(bot_id)
+                if not plan or not plan.get("ok", True):
+                    continue
+                # 收集其他人的观点
+                peers = []
+                for other_id, other_plan in current.items():
+                    if other_id == bot_id:
+                        continue
+                    peers.append({
+                        "bot": other_id,
+                        "decision": other_plan.get("decision", "hold"),
+                        "reasoning": str(other_plan.get("reasoning") or "")[:50],
+                    })
+                # 让该人格重新审视（修正决策）
+                try:
+                    revised = self._revise_with_discussion(bot_id, plan, peers, round_num)
+                    if revised:
+                        discussions[bot_id] = revised
+                except Exception:  # noqa: BLE001
+                    continue
+
+            # 应用修正
+            if discussions:
+                for bot_id, revised in discussions.items():
+                    current[bot_id] = {**current[bot_id], **revised}
+            else:
+                # 没有有效修正，退出
+                return current, round_num
+
+            # 最后一轮不再检查一致（直接融合）
+            if round_num == max_rounds:
+                return current, max_rounds
+
+        return current, max_rounds
+
+    def _revise_with_discussion(self, bot_id: str, plan: dict,
+                                 peers: list[dict], round_num: int) -> Optional[dict]:
+        """让一个 personality 基于讨论修正决策（可选，LLM 调用）。
+
+        通过 plan_runners 的 LLM 做修正。如果 runner 不支持则返回 None。
+        """
+        runner = self.plan_runners.get(bot_id)
+        if runner is None:
+            return None
+        # 构建讨论 prompt（简洁，只交换 decision+reasoning）
+        peer_lines = [
+            f"- {p['bot']}: {p['decision']} — {p['reasoning']}"
+            for p in peers
+        ]
+        discussion_text = "\n".join(peer_lines)
+
+        # 尝试用 runner 的 LLM 做修正（如果支持 discuss 方法）
+        if hasattr(runner, "discuss"):
+            return runner.discuss(
+                plan=plan, peers=peers, round_num=round_num,
+                discussion_text=discussion_text,
+            )
+        # fallback: 不支持讨论则保持原判
+        return None
+
+    @staticmethod
+    def _lifecycle_act(action: str) -> str:
+        """映射执行动作到 lifecycle 事件类型。"""
+        a = (action or "").lower()
+        if a in ("open_long", "open_short", "add_long", "add_short",
+                 "stop_entry_long", "stop_entry_short", "buy_stop", "sell_stop"):
+            return "open"
+        if a in ("close", "close_all", "flatten", "close_long", "close_short"):
+            return "close"
+        if a in ("reduce_long", "reduce_short", "reduce"):
+            return "reduce"
+        if a == "modify_tp_sl":
+            return "modify_tp"
+        return "hold"
+
+    def _update_profile_on_close(self, order_id: str) -> None:
+        """平仓后更新策略画像（确定性统计）。"""
+        try:
+            from ..memory import MemoryProfile
+            rec = self.orders.get(order_id)
+            if rec is None:
+                return
+            profile = MemoryProfile(self.root, self.group.members[0])
+            lifecycle = rec.get("lifecycle") or []
+            hold_rounds = len([e for e in lifecycle if e.get("act") != "close"])
+            profile.record_trade(pnl_usd=0.0, hold_rounds=hold_rounds)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _symbol_of(self, plans: dict) -> str:
         for p in plans.values():
