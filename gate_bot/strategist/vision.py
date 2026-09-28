@@ -30,10 +30,12 @@ def generate_candlestick_chart(
     height: int = 700,
     output_path: Optional[Path] = None,
     indicators: Optional[dict] = None,
+    bar_count: bool = True,
 ) -> bytes:
     """从 K 线数据生成 TradingView 风格蜡烛图 PNG。
 
     indicators: {"ema20": [float, ...], "ema50": [...], ...} 叠加曲线。
+    bar_count: 在蜡烛下方标注日内 bar 序号（辅助 AI 计数）。
     """
     from PIL import Image, ImageDraw
 
@@ -189,6 +191,40 @@ def generate_candlestick_chart(
                 rect((lx - 2, ly - th // 2 - 3, lx + tw + 4, ly + th // 2 + 3),
                      (255, 255, 255))
                 text((lx, ly), label, color, font_indicator, anchor="lm")
+
+    # ── Bar Count（日内 bar 计数，辅助 AI，最上层）──
+    if bar_count:
+        import datetime
+        # 根据密度自适应字号
+        bar_font = _load_font(13 if n <= 30 else 11)
+        bar_color = (255, 140, 0)
+        day_counter = 0
+        prev_day = None
+        # 密集时只标每隔 N 根
+        step = 1 if n <= 30 else (2 if n <= 60 else 3)
+        for i, cd in enumerate(candles):
+            t = cd.get("t", 0)
+            if t > 1e12:
+                t = t / 1000
+            if t > 0:
+                dt = datetime.datetime.fromtimestamp(t, tz=datetime.timezone.utc)
+                cur_day = dt.date()
+            else:
+                cur_day = i // 24
+            if cur_day != prev_day:
+                day_counter = 1
+                prev_day = cur_day
+            else:
+                day_counter += 1
+            # 只标第 1 根 + 每 step 根 + 最后一根
+            if day_counter == 1 or day_counter % step == 0 or i == n - 1:
+                x = pad_left + i * (body_w + gap) + body_w // 2
+                y_bar = pad_top + price_h + 2
+                bbox = draw.textbbox((0, 0), str(day_counter), font=bar_font)
+                tw = bbox[2] - bbox[0]
+                rect((x - tw // 2 - 2, y_bar - 2, x + tw // 2 + 2, y_bar + 16),
+                     (255, 255, 255))
+                text((x, y_bar), str(day_counter), bar_color, bar_font, anchor="ma")
 
     # ── 成交量（半透明风格）─────────────────────────
     vol_top = pad_top + price_h + 12
