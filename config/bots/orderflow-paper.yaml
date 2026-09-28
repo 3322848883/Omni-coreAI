@@ -38,7 +38,7 @@ paper:
 strategist:
   enabled: true
   prompt_file: prompts/orderflow_pa.md
-  interval_sec: 180
+  interval_sec: 900
   timeframe: 5m
   event_on_kline_close: true
   event_timeframe: 5m

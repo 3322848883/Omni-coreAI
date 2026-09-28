@@ -37,7 +37,7 @@ paper:
 strategist:
   enabled: true
   prompt_file: prompts/multi_meanrev.md
-  interval_sec: 180
+  interval_sec: 900
   timeframe: 15m
   event_on_kline_close: true
   event_timeframe: 15m

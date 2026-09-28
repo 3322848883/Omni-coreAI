@@ -36,7 +36,7 @@ paper:
 strategist:
   enabled: true
   prompt_file: prompts/eth_range_mid.md
-  interval_sec: 180
+  interval_sec: 900
   timeframe: 15m
   event_on_kline_close: true
   event_timeframe: 15m
