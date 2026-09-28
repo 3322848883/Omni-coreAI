@@ -21,6 +21,25 @@ def _load_font(size: int):
     return ImageFont.load_default()
 
 
+def _forward_fill_ema(values: list, seed: float) -> list:
+    """前向填充 EMA 的 None 值（TV 风格：从 bar 0 就有线）。"""
+    out = list(values)
+    # 找第一个非 None
+    first_valid = None
+    for i, v in enumerate(out):
+        if v is not None:
+            first_valid = v
+            break
+    if first_valid is None:
+        return out
+    # 用种子值填充前面的 None
+    for i in range(len(out)):
+        if out[i] is not None:
+            break
+        out[i] = seed if i == 0 else out[i - 1]
+    return out
+
+
 def generate_candlestick_chart(
     klines: list[dict],
     *,
@@ -166,6 +185,9 @@ def generate_candlestick_chart(
         for name, values in indicators.items():
             if not values or len(values) < 2:
                 continue
+            # 前向填充 None（TV 风格：从 bar 0 就有线）
+            seed = next((float(v) for v in values if v is not None), 0.0)
+            values = _forward_fill_ema(list(values), seed)
             color = ind_colors.get(name.lower(), (100, 100, 100))
             pts = []
             for i, v in enumerate(values):
