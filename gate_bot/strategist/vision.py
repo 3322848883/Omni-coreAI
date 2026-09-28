@@ -29,8 +29,12 @@ def generate_candlestick_chart(
     width: int = 1200,
     height: int = 700,
     output_path: Optional[Path] = None,
+    indicators: Optional[dict] = None,
 ) -> bytes:
-    """从 K 线数据生成 TradingView 风格蜡烛图 PNG。"""
+    """从 K 线数据生成 TradingView 风格蜡烛图 PNG。
+
+    indicators: {"ema20": [float, ...], "ema50": [...], ...} 叠加曲线。
+    """
     from PIL import Image, ImageDraw
 
     # ── 解析 OHLCV ──────────────────────────────────
@@ -88,10 +92,11 @@ def generate_candlestick_chart(
     def text(pos, txt, fill, font, anchor=None):
         draw.text((S(pos[0]), S(pos[1])), txt, fill=fill, font=font, anchor=anchor)
 
-    # 字体
-    font_axis = _load_font(13)
-    font_title = _load_font(18)
-    font_label = _load_font(14)
+    # 字体（加大价格标签可读性）
+    font_axis = _load_font(16)
+    font_title = _load_font(20)
+    font_label = _load_font(17)
+    font_indicator = _load_font(13)
 
     # ── 标题 ────────────────────────────────────────
     title = f"{symbol} · {timeframe}" if symbol or timeframe else ""
@@ -144,6 +149,42 @@ def generate_candlestick_chart(
         if y_bot - y_top < 1.5:
             y_bot = y_top + 1.5
         rect((x - body_w / 2, y_top, x + body_w / 2, y_bot), color)
+
+    # ── 指标叠加线（EMA 等）─────────────────────────
+    if indicators:
+        # 指标颜色配置（TradingView 风格，高对比度）
+        ind_colors = {
+            "ema20": (255, 120, 0),     # 鲜橙
+            "ema50": (30, 100, 240),    # 鲜蓝
+            "ema200": (156, 39, 176),   # 紫色
+            "sma20": (255, 120, 0),
+            "sma50": (30, 100, 240),
+            "sma200": (156, 39, 176),
+        }
+        for name, values in indicators.items():
+            if not values or len(values) < 2:
+                continue
+            color = ind_colors.get(name.lower(), (100, 100, 100))
+            pts = []
+            for i, v in enumerate(values):
+                if i >= n or v is None:
+                    continue
+                x = pad_left + i * (body_w + gap) + body_w // 2
+                y = pad_top + (y_max - float(v)) / y_range * price_h
+                pts.append((x, y))
+            if len(pts) >= 2:
+                # 先画白色描边（提高可见度）
+                for j in range(len(pts) - 1):
+                    line([pts[j], pts[j + 1]], (255, 255, 255), 5)
+                # 再画指标线
+                for j in range(len(pts) - 1):
+                    line([pts[j], pts[j + 1]], color, 2)
+                # 标签（右端，带白色背景）
+                label = name.upper()
+                lx, ly = pts[-1][0] + 4, pts[-1][1]
+                # 背景
+                text((lx + 1, ly + 1), label, (255, 255, 255), font_indicator, anchor="lm")
+                text((lx, ly), label, color, font_indicator, anchor="lm")
 
     # ── 成交量（半透明风格）─────────────────────────
     vol_top = pad_top + price_h + 12
