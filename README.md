@@ -628,6 +628,39 @@ python -m gate_bot persona-run --once             # 单轮
 - **缓存优化**：稳定前缀 ~1850t 缓存命中，变化值殿后
 - **遗忘机制**：TTL 归档（90 天）+ 已平仓清理（365 天）
 
+### 监控告警与回测（prod-hardening）
+
+**自动生效**（挂钩 PlanRunner）：
+
+| 功能 | 说明 |
+|------|------|
+| 策略衰减检测 | 滚动 Sharpe/胜率监控，跌破阈值自动告警 |
+| 系统健康监控 | LLM 延迟/错误次数/心跳超时告警 |
+| 订单状态机 | mmp_canceled / IOC 部分成交正确记录 |
+| 波动率仓位 | ATR 目标波动自动缩放 size_usd |
+
+**飞书/Telegram 告警**（可选，不配则降级为日志）：
+
+```powershell
+$env:FEISHU_APP_ID = "cli_xxx"
+$env:FEISHU_APP_SECRET = "xxx"
+$env:FEISHU_USER_OPEN_ID = "ou_xxx"
+```
+
+**回测验证**（手动按需）：
+
+```powershell
+.venv\Scripts\python.exe -m gate_bot backtest --bot brooks-btc --days 30
+```
+
+**可扩展通知**（继承 NotificationChannel）：
+
+```python
+class SlackChannel(NotificationChannel):
+    def send(self, text): ...
+notifier.register(SlackChannel(...))
+```
+
 ## LLM 工具（20 个）与指标（23 族）
 
 AI 策略层按需调用：`klines` `indicators` `ticker` `orderbook` `contract` `stats` `account` `smc_map` `smc_events` `sqzmom` + 10 个 aux。
