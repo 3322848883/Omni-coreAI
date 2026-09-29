@@ -57,6 +57,9 @@ class StrategistConfig:
     bot_id: str = ""
     # K 线图视觉识别（需模型支持 vision/image input）
     vision: bool = True
+    # 发送哪些周期图（多选）；省略 = 只发主周期 timeframe
+    # 例: ["5m","15m","1h","4h"]
+    vision_timeframes: Optional[list] = None
 
     def __post_init__(self) -> None:
         if not self.event_timeframe:
@@ -167,7 +170,14 @@ class PlanRunner:
                 user = user + "\n【近期决策】\n" + "\n".join(recent)
         except Exception:  # noqa: BLE001
             pass
-        text = self._chat_with_tools(system, user)
+        # vision：多周期 K 线图（可选配置）
+        charts: list = []
+        if self.cfg.vision:
+            try:
+                charts = self._generate_charts(snapshot)
+            except Exception:  # noqa: BLE001
+                charts = []
+        text = self._chat_with_tools(system, user, chart_base64=charts or None)
         try:
             self._save_thinking(
                 cycle_id=cycle_id,
@@ -273,12 +283,15 @@ class PlanRunner:
             },
             self.cfg.symbols,
         )
-        # vision：从 snapshot klines 生成 K 线图（可配置）
-        chart_b64 = None
+        # vision：从 snapshot 生成 K 线图（可配置多周期）
+        charts: list = []
         if self.cfg.vision:
-            chart_b64 = self._generate_chart(snapshot)
+            try:
+                charts = self._generate_charts(snapshot)
+            except Exception:  # noqa: BLE001
+                charts = []
         try:
-            text = self._chat_with_tools(system, user, chart_base64=chart_b64)
+            text = self._chat_with_tools(system, user, chart_base64=charts or None)
             self._save_thinking(
                 cycle_id=cycle_id, system=system, user=user, text=text, trigger=trigger
             )
@@ -376,7 +389,59 @@ class PlanRunner:
         )
         return self.llm.chat(system, user)
 
+    def _generate_charts(self, snapshot: dict) -> list:
+        """按 vision_timeframes 生成多周期 K 线图 base64 列表。
+
+        省略 vision_timeframes → 只发主周期。
+        """
+        try:
+            from .vision import generate_and_encode
+        except Exception:  # noqa: BLE001
+            return []
+        symbols = self.cfg.symbols or []
+        if not symbols:
+            return []
+        sym = symbols[0]
+        market = snapshot.get("market") or {}
+        m = market.get(sym) or {}
+        if not isinstance(m, dict):
+            m = {}
+        tfs = list(self.cfg.vision_timeframes or []) or [self.cfg.timeframe]
+        # 去重保序
+        seen = set()
+        tfs = [t for t in tfs if t and not (t in seen or seen.add(t))]
+        out: list = []
+        for tf in tfs:
+            try:
+                if tf == self.cfg.timeframe:
+                    klines = m.get("candles") or m.get("klines") or []
+                    ind = m.get("indicators") or {}
+                else:
+                    block = (m.get("tf") or {}).get(tf) or {}
+                    klines = block.get("candles") or block.get("klines") or []
+                    ind = block.get("indicators") or {}
+                if isinstance(klines, dict):
+                    klines = klines.get("candles") or klines.get("klines") or []
+                if not klines or len(klines) < 10:
+                    continue
+                merged = []
+                for i, k in enumerate(klines):
+                    row = dict(k) if isinstance(k, dict) else {"c": k}
+                    for name, series in (ind or {}).items():
+                        if isinstance(series, (list, tuple)) and i < len(series):
+                            row.setdefault(name, series[i])
+                    merged.append(row)
+                b64 = generate_and_encode(merged, symbol=sym, timeframe=tf)
+                if b64:
+                    out.append(b64)
+            except Exception:  # noqa: BLE001
+                continue
+        return out
+
     def _generate_chart(self, snapshot: dict) -> Optional[str]:
+        """单图（主周期）；多周期请用 _generate_charts。"""
+        charts = self._generate_charts(snapshot)
+        return charts[0] if charts else None
         """从 snapshot 的 candles/indicators 生成 K 线图 base64（vision 模式）。"""
         try:
             from .vision import generate_and_encode
@@ -416,22 +481,23 @@ class PlanRunner:
             return None
 
     def _chat_with_tools(self, system: str, user: str,
-                         chart_base64: Optional[str] = None) -> str:
+                         chart_base64=None) -> str:
         """Official function-calling loop; falls back to text tool_calls JSON.
 
-        chart_base64 非空时附 K 线图（vision 模式，需模型支持 image input）。
+        chart_base64: str 或 list[str]，非空时附 K 线图（vision，需模型支持 image）。
         """
         if hasattr(self.llm, "last_reasoning_chain"):
             self.llm.last_reasoning_chain = []
         tools_on = bool(self.cfg.tools.get("enabled"))
         max_rounds = int(self.cfg.tools.get("max_rounds") or 3)
         native = bool(self.cfg.tools.get("native", True))
-        # vision：content 用 list 格式（text + image_url）
+        # vision：content 用 list 格式（text + 多张 image_url）
         if chart_base64:
-            user_content: Any = [
-                {"type": "text", "text": user},
-                {"type": "image_url", "image_url": {"url": chart_base64}},
-            ]
+            imgs = chart_base64 if isinstance(chart_base64, (list, tuple)) else [chart_base64]
+            user_content: Any = [{"type": "text", "text": user}]
+            for img in imgs:
+                if img:
+                    user_content.append({"type": "image_url", "image_url": {"url": img}})
         else:
             user_content = user
         messages = [

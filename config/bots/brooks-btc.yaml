@@ -32,6 +32,9 @@ strategist:
   prompt_file: prompts/brooks_btc_pa.md
   interval_sec: 900
   timeframe: 15m
+  vision: true
+  # 多周期图：5m / 15m / 1h / 4h 四张
+  vision_timeframes: ["5m", "15m", "1h", "4h"]
   event_on_kline_close: true
   event_timeframe: 15m
   candles: 120
@@ -43,8 +46,9 @@ strategist:
   market:
     mode: hybrid
     indicators: [ema20, atr14]
-    timeframes: []
-    extra_candles: 15
+    # 多周期图数据源
+    timeframes: ["5m", "1h", "4h"]
+    extra_candles: 80
   ai_triggers:
     enabled: true
     max_active: 5

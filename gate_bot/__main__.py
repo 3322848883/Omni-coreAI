@@ -38,6 +38,8 @@ def _build_plan_runner(bot, paths: ProjectPaths):
         enabled=bool(s.get("enabled", True)),
         interval_sec=int(s.get("interval_sec") or 300),
         timeframe=str(s.get("timeframe") or "15m"),
+        vision=bool(s.get("vision", True)),
+        vision_timeframes=[str(x) for x in (s.get("vision_timeframes") or [])] or None,
         event_on_kline_close=bool(s.get("event_on_kline_close", True)),
         event_timeframe=s.get("event_timeframe") or s.get("timeframe") or "15m",
         conditions=list(s.get("conditions") or []),
