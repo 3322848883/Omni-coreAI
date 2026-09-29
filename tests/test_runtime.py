@@ -152,18 +152,108 @@ class TestPidLock(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "a.lock"
-            dummy = subprocess.Popen([_sys.executable, "-c", "import time; time.sleep(30)"])
+            # another live process holds the OS lock
+            code = (
+                "import msvcrt,os,sys,time\n"
+                "f=open(sys.argv[1],'a+')\n"
+                "f.seek(0)\n"
+                "msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)\n"
+                "print('ready', os.getpid(), flush=True)\n"
+                "time.sleep(30)\n"
+            )
+            dummy = subprocess.Popen(
+                [_sys.executable, "-c", code, str(p)],
+                stdout=subprocess.PIPE, text=True,
+            )
             try:
-                p.write_text(str(dummy.pid), encoding="utf-8")
+                line = dummy.stdout.readline()
+                self.assertIn("ready", line)
                 self.assertIsNone(PidLock(p).acquire())
             finally:
                 dummy.kill()
                 dummy.wait(timeout=5)
-            p.write_text("999999999", encoding="utf-8")
+            # holder dead → OS released the lock → we can acquire
             l1 = PidLock(p).acquire()
             self.assertIsNotNone(l1)
             l1.release()
             self.assertIsNotNone(PidLock(p).acquire())
+
+    def test_pid_reuse_does_not_block(self):
+        """锁文件里的 PID 是诊断信息，不参与判定 —— PID 复用不能误拒。"""
+        import os
+        import subprocess
+        import sys as _sys
+
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "reused.lock"
+            # an unrelated live process's PID written into the file
+            other = subprocess.Popen([_sys.executable, "-c", "import time; time.sleep(30)"])
+            try:
+                p.write_text(str(other.pid), encoding="utf-8")
+                # no OS lock held → must acquire (old code wrongly refused here)
+                lk = PidLock(p).acquire()
+                self.assertIsNotNone(lk, "stale PID in file must not block acquire")
+                lk.release()
+                # file records the real owner (diagnostic; readable after unlock)
+                self.assertEqual(p.read_text(encoding="utf-8").strip(), str(os.getpid()))
+            finally:
+                other.kill()
+                other.wait(timeout=5)
+
+    def test_same_instance_reentrant(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "r.lock"
+            lk = PidLock(p).acquire()
+            self.assertIsNotNone(lk)
+            self.assertIs(lk.acquire(), lk, "same instance re-acquire returns self")
+            lk.release()
+
+    def test_second_instance_same_process_rejected(self):
+        """OS 文件锁跨 handle 不可重入 —— 同进程第二个实例也会被拒。"""
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "x.lock"
+            a = PidLock(p).acquire()
+            self.assertIsNotNone(a)
+            b = PidLock(p).acquire()
+            self.assertIsNone(b, "second handle in same process must be rejected")
+            a.release()
+            c = PidLock(p).acquire()
+            self.assertIsNotNone(c, "after release, lock is free")
+            c.release()
+
+    def test_crash_releases_lock(self):
+        """持锁进程被杀后，无需手工清锁即可接管。"""
+        import subprocess
+        import sys as _sys
+
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "crash.lock"
+            code = (
+                "import msvcrt,sys\n"
+                "f=open(sys.argv[1],'a+')\n"
+                "f.seek(0)\n"
+                "msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)\n"
+                "print('ready', flush=True)\n"
+                "import time; time.sleep(60)\n"
+            )
+            holder = subprocess.Popen(
+                [_sys.executable, "-c", code, str(p)],
+                stdout=subprocess.PIPE, text=True,
+            )
+            try:
+                self.assertIn("ready", holder.stdout.readline())
+                self.assertIsNone(PidLock(p).acquire())
+                holder.kill()
+                holder.wait(timeout=5)
+                import time as _t
+                _t.sleep(0.2)
+                lk = PidLock(p).acquire()
+                self.assertIsNotNone(lk, "OS must auto-release lock after holder death")
+                lk.release()
+            finally:
+                if holder.poll() is None:
+                    holder.kill()
+                    holder.wait(timeout=5)
 
     def test_cli_lock_paths_match_supervisor(self):
         from gate_bot.paths import bot_paths
@@ -175,12 +265,10 @@ class TestPidLock(unittest.TestCase):
             self.assertEqual(bp.lock_run, root.resolve() / "data" / "bots" / "b1" / "state" / "run.lock")
             self.assertEqual(bp.lock_plan, root.resolve() / "data" / "bots" / "b1" / "state" / "plan.lock")
 
-    def test_gate_lock_held_skips_acquire(self):
-        import os
+    def test_cli_refuses_when_lock_held(self):
         import subprocess
         import sys as _sys
         import types
-        from unittest import mock
 
         from gate_bot import __main__ as main
 
@@ -188,20 +276,22 @@ class TestPidLock(unittest.TestCase):
             root = Path(td)
             (root / "config" / "bots").mkdir(parents=True)
             bp = bot_paths(root, "b1", create=True)
-            # lock held by a foreign live pid (not this process)
-            dummy = subprocess.Popen([_sys.executable, "-c", "import time; time.sleep(30)"])
+            code = (
+                "import msvcrt,sys\n"
+                "f=open(sys.argv[1],'a+')\n"
+                "f.seek(0)\n"
+                "msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)\n"
+                "print('ready', flush=True)\n"
+                "import time; time.sleep(30)\n"
+            )
+            dummy = subprocess.Popen(
+                [_sys.executable, "-c", code, str(bp.lock_plan)],
+                stdout=subprocess.PIPE, text=True,
+            )
             try:
-                bp.lock_plan.write_text(str(dummy.pid), encoding="utf-8")
+                self.assertIn("ready", dummy.stdout.readline())
                 args = types.SimpleNamespace(bot="b1", root=str(root))
-                # lock held by another pid → CLI must refuse (exit 3)
                 self.assertEqual(main.cmd_plan_loop(args), 3)
-                # supervisor handoff: child skips acquire (then fails on missing yaml)
-                with mock.patch.dict(os.environ, {"GATE_LOCK_HELD": "1"}):
-                    try:
-                        rc = main.cmd_plan_loop(args)
-                    except Exception:
-                        rc = "past_lock"  # reached config load → lock was skipped
-                self.assertNotEqual(rc, 3)
             finally:
                 dummy.kill()
                 dummy.wait(timeout=5)

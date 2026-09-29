@@ -99,13 +99,11 @@ def cmd_plan_loop(args) -> int:
     paths.ensure()
     from .pidlock import PidLock
 
-    # supervisor already holds this lock for the child it spawned
-    lock = None
-    if os.environ.get("GATE_LOCK_HELD") != "1":
-        lock = PidLock(paths.bot_paths(args.bot).lock_plan).acquire()
-        if lock is None:
-            print(f"plan-loop already running for {args.bot}", flush=True)
-            return 3
+    # worker holds the lock itself — survives supervisor death (orphan-safe)
+    lock = PidLock(paths.bot_paths(args.bot).lock_plan).acquire()
+    if lock is None:
+        print(f"plan-loop already running for {args.bot}", flush=True)
+        return 3
     bot = load_bot_config(paths.config_dir / f"{args.bot}.yaml")
     runner = _build_plan_runner(bot, paths)
     try:
@@ -233,12 +231,10 @@ def cmd_paper_run(args) -> int:
     from .pidlock import PidLock
 
     lock_path = paths.bot_paths(args.bot).lock_run
-    lock = None
-    if os.environ.get("GATE_LOCK_HELD") != "1":
-        lock = PidLock(lock_path).acquire()
-        if lock is None:
-            print(f"paper-run already running ({args.bot})", flush=True)
-            return 3
+    lock = PidLock(lock_path).acquire()
+    if lock is None:
+        print(f"paper-run already running ({args.bot})", flush=True)
+        return 3
     bots = load_all_bots(paths.config_dir)
     bot = bots.get(args.bot)
     if bot is None:
@@ -361,7 +357,7 @@ def cmd_persona_run(args) -> int:
                 return 2
 
     lock = None
-    if args.group and os.environ.get("GATE_LOCK_HELD") != "1":
+    if args.group:
         lock = PidLock(paths.root / "data" / "shared" / f"persona-{args.group}.lock").acquire()
         if lock is None:
             print(f"persona-run already running ({args.group})")
@@ -411,12 +407,10 @@ def cmd_run(args) -> int:
     else:
         lock_path = paths.root / "data" / "bots" / "_all.run.lock"
         lock_name = "_all.run.lock"
-    lock = None
-    if os.environ.get("GATE_LOCK_HELD") != "1":
-        lock = PidLock(lock_path).acquire()
-        if lock is None:
-            print(f"run already running ({lock_name})", flush=True)
-            return 3
+    lock = PidLock(lock_path).acquire()
+    if lock is None:
+        print(f"run already running ({lock_name})", flush=True)
+        return 3
     bots = load_all_bots(paths.config_dir)
     try:
         run_forever(bots, paths, only=args.bot)

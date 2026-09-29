@@ -1,35 +1,19 @@
-"""Single-instance PID file lock (orphan-safe)."""
+"""Single-instance file lock (orphan-safe).
+
+Mutual exclusion comes from an OS file lock (``msvcrt.locking`` on Windows,
+``fcntl.flock`` elsewhere). The OS releases it when the holding process dies,
+so a crash/kill never leaves a stale lock behind.
+
+The lock file's contents (owner PID) are diagnostics only — they are never
+used to decide whether the lock is held. That avoids the PID-reuse trap:
+Windows recycles PIDs quickly, and a dead holder's PID can belong to an
+unrelated live process.
+"""
 from __future__ import annotations
 
 import os
 from pathlib import Path
 from typing import Optional
-
-
-def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        if os.name == "nt":
-            import ctypes
-
-            kernel32 = ctypes.windll.kernel32
-            kernel32.OpenProcess.restype = ctypes.c_void_p
-            kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
-            kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
-            kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-            STILL_ACTIVE = 259
-            h = kernel32.OpenProcess(0x1000, 0, int(pid))
-            if not h:
-                return False
-            code = ctypes.c_uint32(0)
-            ok = kernel32.GetExitCodeProcess(h, ctypes.byref(code))
-            kernel32.CloseHandle(h)
-            return bool(ok) and code.value == STILL_ACTIVE
-        os.kill(pid, 0)
-        return True
-    except Exception:  # noqa: BLE001
-        return False
 
 
 class PidLock:
@@ -39,38 +23,69 @@ class PidLock:
         self._fh = None
 
     def acquire(self) -> Optional["PidLock"]:
-        # atomic create; if exists, steal only when owner pid is dead
+        if self._fh is not None:
+            return self  # same instance already holds it
         try:
-            fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(str(os.getpid()))
-            return self
-        except FileExistsError:
+            fh = open(self.path, "a+", encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            return None
+        try:
+            self._lock_exclusive_nonblock(fh)
+        except Exception:  # noqa: BLE001
+            # held by another live process (or lock unavailable)
+            try:
+                fh.close()
+            except Exception:  # noqa: BLE001
+                pass
+            return None
+        try:
+            fh.seek(0)
+            fh.truncate()
+            fh.write(str(os.getpid()))
+            fh.flush()
+        except Exception:  # noqa: BLE001
             pass
-        try:
-            old = int((self.path.read_text(encoding="utf-8") or "0").strip() or "0")
-        except Exception:  # noqa: BLE001
-            old = 0
-        if old and _pid_alive(old) and old != os.getpid():
-            return None
-        # dead/empty/stale → take over
-        try:
-            self.path.unlink(missing_ok=True)
-            fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(str(os.getpid()))
-        except Exception:  # noqa: BLE001
-            return None
+        self._fh = fh
         return self
 
+    @staticmethod
+    def _lock_exclusive_nonblock(fh) -> None:
+        if os.name == "nt":
+            import msvcrt
+
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    @staticmethod
+    def _unlock(fh) -> None:
+        if os.name == "nt":
+            import msvcrt
+
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
     def release(self) -> None:
+        fh, self._fh = self._fh, None
+        if fh is None:
+            return
         try:
-            if self.path.exists():
-                txt = self.path.read_text(encoding="utf-8").strip()
-                if txt == str(os.getpid()):
-                    self.path.unlink(missing_ok=True)
+            self._unlock(fh)
         except Exception:  # noqa: BLE001
             pass
+        try:
+            fh.close()
+        except Exception:  # noqa: BLE001
+            pass
+        # Do not unlink: Windows cannot delete a file another process may have
+        # open, and the content is diagnostic-only (overwritten on next acquire).
 
     def __enter__(self) -> "PidLock":
         if self.acquire() is None:

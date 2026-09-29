@@ -482,23 +482,22 @@ class TestConfigAttackSurface(unittest.TestCase):
 # ─────────────────────────────────────────────────────
 class TestProcessSafety(unittest.TestCase):
     def test_pidlock_prevents_double_run(self):
-        """PidLock 同进程可重入，但不同 PID 会被拒。"""
+        """PidLock 同实例可重入；同进程第二实例（新 handle）会被 OS 锁拒绝。"""
         from gate_bot.pidlock import PidLock
         with tempfile.TemporaryDirectory() as td:
             lock_path = Path(td) / "test.lock"
             lock1 = PidLock(lock_path).acquire()
             self.assertIsNotNone(lock1)
-            # 同进程重入：允许（lock steal for same pid）
+            # 同实例重入：返回自身
+            self.assertIs(lock1.acquire(), lock1)
+            # 同进程新实例：OS 文件锁跨 handle 不可重入 → 拒绝
             lock2 = PidLock(lock_path).acquire()
-            self.assertIsNotNone(lock2, "same process re-acquire allowed")
-            # 模拟其他进程持有锁
-            lock_path.write_text("99999", encoding="utf-8")  # fake alive pid
-            lock3 = PidLock(lock_path).acquire()
-            # 99999 可能不存在 → steal；或存在 → None
-            # 两种都可接受，关键是不崩溃
-            if lock3:
-                lock3.release()
+            self.assertIsNone(lock2, "second instance must be rejected by OS lock")
             lock1.release()
+            # 释放后可再取
+            lock3 = PidLock(lock_path).acquire()
+            self.assertIsNotNone(lock3)
+            lock3.release()
 
     def test_signal_file_unique_names_rapid(self):
         """极快连续写入，文件名不冲突。"""

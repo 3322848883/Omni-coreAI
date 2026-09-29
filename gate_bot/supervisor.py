@@ -20,7 +20,6 @@ from typing import Optional
 from .config import load_all_bots
 from .ledger import Ledger, default_ledger_path
 from .paths import BotPaths, bot_paths, detect_legacy_layout
-from .pidlock import PidLock
 
 log_prefix = "[supervisor]"
 
@@ -31,9 +30,9 @@ class Child:
     component: str  # plan | run
     args: list[str]
     popen: Optional[subprocess.Popen] = None
-    lock: Optional[PidLock] = None
     restarts: list[float] = field(default_factory=list)
     stopped: bool = False
+    skip_until: float = 0.0
 
 
 class Supervisor:
@@ -91,20 +90,14 @@ class Supervisor:
 
     def _start(self, ch: Child) -> bool:
         bp = bot_paths(self.root, ch.bot_id, create=True)
-        lock_path = bp.lock_plan if ch.component == "plan" else bp.lock_run
-        lock = PidLock(lock_path)
-        if lock.acquire() is None:
-            self._log(f"skip {ch.bot_id}/{ch.component}: lock held")
-            return False
-        ch.lock = lock
+        # worker acquires its own PidLock (orphan-safe: lock lives with the
+        # worker, not the supervisor). Supervisor must NOT hold it.
         log = bp.logs / f"{ch.component}.out"
         err = bp.logs / f"{ch.component}.err"
         log.parent.mkdir(parents=True, exist_ok=True)
         out_fh = open(log, "ab")
         err_fh = open(err, "ab")
         env = os.environ.copy()
-        # child CLI skips PidLock — supervisor already holds lock_plan/lock_run
-        env["GATE_LOCK_HELD"] = "1"
         flags = 0
         if os.name == "nt":
             # windowless: DETACHED | NEW_PROCESS_GROUP | CREATE_NO_WINDOW
@@ -135,6 +128,8 @@ class Supervisor:
             if ch.stopped:
                 continue
             if ch.popen is None:
+                if time.time() < ch.skip_until:
+                    continue
                 # retry start (e.g. lock was briefly held); do not burn restart budget
                 self._start(ch)
                 continue
@@ -142,10 +137,15 @@ class Supervisor:
             if rc is None:
                 self.ledger.heartbeat(ch.bot_id, ch.component, pid=ch.popen.pid, detail="alive")
                 continue
+            if rc == 3:
+                # exit 3 = "already running" (worker's PidLock is held elsewhere).
+                # Not a crash: back off, do not burn restart budget.
+                self._log(f"lock held elsewhere {ch.bot_id}/{ch.component}")
+                self.ledger.heartbeat(ch.bot_id, ch.component, pid=0, detail="lock_held")
+                ch.popen = None
+                ch.skip_until = time.time() + 15.0
+                continue
             self._log(f"exit {ch.bot_id}/{ch.component} rc={rc}")
-            if ch.lock:
-                ch.lock.release()
-                ch.lock = None
             ch.popen = None
             if not self._stop and self._allow_restart(ch):
                 time.sleep(min(5.0, self.check_interval * 2))
@@ -181,8 +181,6 @@ class Supervisor:
                         ch.popen.terminate()
                     except Exception:  # noqa: BLE001
                         pass
-                if ch.lock:
-                    ch.lock.release()
             self.ledger.close()
             self._log("stopped")
 
