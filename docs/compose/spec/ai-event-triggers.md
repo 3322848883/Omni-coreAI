@@ -44,7 +44,7 @@ strategist:
     allow_modify: true            # AI 可增/删/替换自己的触发
     allow_symbols: []             # 空 = 用 bot.symbols
     limits:
-      lookback: [5, 100]
+      lookback: [5, 300]
       period: [2, 200]
       level: [1, 99]              # rsi
       mult: [1.0, 5.0]            # atr
