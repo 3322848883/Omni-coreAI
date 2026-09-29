@@ -50,9 +50,25 @@ class PaperExchange(ExchangeClient):
         if feed is None:
             raise ValueError("paper: feed exchange required")
         self.feed = feed
-        self.engine = PaperEngine(self.store, self.feed)
+        alert_store = self._alert_store_from_path(Path(store_path))
+        self.engine = PaperEngine(self.store, self.feed, alert_store=alert_store)
         self.risk = RiskEngine(self.store, self.feed, self.engine)
         self._lock = threading.RLock()
+
+    @staticmethod
+    def _alert_store_from_path(store_path: Path):
+        """从 <root>/data/bots/<bot_id>/paper/account.db 推导 AlertStore（失败返回 None）。"""
+        try:
+            from ..monitoring import AlertStore
+
+            # .../data/bots/<bot_id>/paper/account.db → root + bot_id
+            bot_id = store_path.parent.parent.name
+            root = store_path.parent.parent.parent.parent
+            if not bot_id or bot_id == "data":
+                return None
+            return AlertStore(root, bot_id)
+        except Exception:  # noqa: BLE001
+            return None
 
     # ── 行情（委托 feed）─────────────────────────────────
     def get_last_price(self, symbol: str) -> float:

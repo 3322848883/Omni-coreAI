@@ -18,6 +18,16 @@ from .schema import SchemaError, parse_signal
 log = logging.getLogger("gate_bot.watcher")
 
 
+def _alert_store(paths: "ProjectPaths", bot_id: str):
+    """P0.4 告警落盘（失败不阻塞执行）。"""
+    try:
+        from .monitoring import AlertStore
+
+        return AlertStore(paths.root, bot_id)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 @dataclass
 class ProjectPaths:
     root: Path
@@ -133,6 +143,7 @@ def process_file(path: Path, bot: BotConfig, paths: ProjectPaths, executor: Opti
             require_sl=getattr(bot, "require_sl", True),
             account_risk=getattr(bot, "account_risk", None) or {},
             label_prefix=getattr(bot, "label_prefix", "") or bot.bot_id,
+            alert_store=_alert_store(paths, bot.bot_id),
         )
 
     report: ExecReport = executor.execute_signal(signal)
@@ -252,6 +263,7 @@ def run_bot_once(bot: BotConfig, paths: ProjectPaths) -> dict:
                     require_sl=getattr(bot, "require_sl", True),
                     account_risk=getattr(bot, "account_risk", None),
                     label_prefix=getattr(bot, "label_prefix", "") or bot.bot_id,
+                    alert_store=_alert_store(paths, bot.bot_id),
                 )
             except GateApiError as e:
                 _archive_failed(paths, bot.bot_id, taken, path.name, f"credentials: {e}")

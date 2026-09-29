@@ -9,7 +9,13 @@ from typing import Any, Optional
 
 from .gate_client import GateApiError, GateClient, resolve_symbol
 from .schema import Intent, SignalFile, expand_signal, infer_trigger_rules
-from .sizing import default_trigger_limit_price, pct_to_size_usd, round_price, usd_to_contracts
+from .sizing import (
+    default_trigger_limit_price,
+    pct_to_size_usd,
+    round_price,
+    usd_to_contracts,
+    vol_adjust_size,
+)
 
 log = logging.getLogger("gate_bot.executor")
 
@@ -66,6 +72,7 @@ class Executor:
         require_sl: bool = True,
         account_risk: Optional[dict] = None,
         label_prefix: str = "",
+        alert_store: Optional[Any] = None,
     ):
         self.client = client
         self.symbols_whitelist = (
@@ -82,6 +89,8 @@ class Executor:
         self.account_risk = dict(account_risk or {})
         # bot namespace: order texts always under t-{label_prefix}*; signal labels cannot escape
         self.label_prefix = str(label_prefix or "").strip()
+        # P0.4 告警落盘：权益偏离 / 孤儿保护单
+        self.alert_store = alert_store
 
     def execute_signal(self, signal: SignalFile) -> ExecReport:
         report = ExecReport()
@@ -436,6 +445,15 @@ class Executor:
                     raise
                 except Exception:  # noqa: BLE001
                     pass
+            # P0.4：权益偏离告警（不拦截，只落盘）
+            try:
+                if self.alert_store is not None:
+                    acct = self.client.get_account() or {}
+                    total = float(acct.get("total") or acct.get("balance") or 0)
+                    start = self._day_start_equity(total)
+                    self.alert_store.equity_deviation(start, total)
+            except Exception:  # noqa: BLE001
+                pass
             max_lev = ar.get("max_leverage")
             if max_lev is not None and intent.leverage and int(intent.leverage) > int(max_lev):
                 raise GateApiError(
@@ -559,6 +577,50 @@ class Executor:
             return expected, note
         return float(size_usd), ""
 
+    def _atr_pct(self, symbol: str, lookback: int = 14) -> float:
+        """近 lookback 根 K 线的 ATR%（=ATR/close×100）。取不到返回 0。"""
+        try:
+            klines = self.client.get_klines(symbol, "1h", lookback + 1) or []
+            if len(klines) < 2:
+                return 0.0
+            trs = []
+            for i in range(1, len(klines)):
+                h = float(klines[i].get("h") or klines[i].get("high") or 0)
+                l = float(klines[i].get("l") or klines[i].get("low") or 0)
+                pc = float(klines[i - 1].get("c") or klines[i - 1].get("close") or 0)
+                if h <= 0 or l <= 0:
+                    continue
+                trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+            if not trs:
+                return 0.0
+            atr = sum(trs[-lookback:]) / len(trs[-lookback:])
+            close = float(klines[-1].get("c") or klines[-1].get("close") or 0)
+            if close <= 0:
+                return 0.0
+            return atr / close * 100.0
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    def _vol_adjust(self, intent: Intent, size_usd: float) -> tuple[float, str]:
+        """ATR 目标波动缩放（account_risk.vol_target_pct=0 或未配 → 不动）。"""
+        target = (self.account_risk or {}).get("vol_target_pct")
+        if not target:
+            return size_usd, ""
+        try:
+            target = float(target)
+        except (TypeError, ValueError):
+            return size_usd, ""
+        if target <= 0:
+            return size_usd, ""
+        atr_pct = self._atr_pct(intent.symbol)
+        if atr_pct <= 0:
+            return size_usd, ""
+        adjusted = vol_adjust_size(float(size_usd), atr_pct, target_pct=target)
+        if adjusted == float(size_usd):
+            return size_usd, ""
+        note = f"vol_adjust {float(size_usd):.0f}->{adjusted:.0f} (atr {atr_pct:.2f}% target {target:.2f}%)"
+        return adjusted, note
+
     # ── actions ──────────────────────────────────────────
     def _open(self, intent: Intent) -> StepResult:
         self._check_symbol(intent.symbol)
@@ -569,6 +631,10 @@ class Executor:
         size_note = ""
         if intent.size_usd is not None:
             intent.size_usd, size_note = self._align_size_to_risk(intent, float(entry_for_risk))
+            vol_size, vol_note = self._vol_adjust(intent, intent.size_usd)
+            intent.size_usd = vol_size
+            if vol_note:
+                size_note = f"{size_note}; {vol_note}" if size_note else vol_note
         self._check_notional(intent.size_usd)
 
         if intent.leverage:
@@ -1182,6 +1248,12 @@ class Executor:
             try:
                 self.client.cancel_price_order(pid)
                 cancelled.append(pid)
+            except Exception:  # noqa: BLE001
+                pass
+        # P0.4：发现并回收孤儿保护单 → 落盘告警
+        if cancelled and self.alert_store is not None:
+            try:
+                self.alert_store.orphan(symbol, len(cancelled), cancelled)
             except Exception:  # noqa: BLE001
                 pass
         return cancelled

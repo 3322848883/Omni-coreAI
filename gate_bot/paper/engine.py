@@ -46,9 +46,10 @@ def _price_order_view(po: dict) -> dict:
 
 
 class PaperEngine:
-    def __init__(self, store: PaperStore, feed: Any):
+    def __init__(self, store: PaperStore, feed: Any, alert_store: Optional[Any] = None):
         self.store = store
         self.feed = feed
+        self.alert_store = alert_store
 
     # ── 行情便捷 ─────────────────────────────────────────
     def _book(self, symbol: str) -> tuple[float, float]:
@@ -412,6 +413,16 @@ class PaperEngine:
                 continue
             # 原子占用，防止双进程/双线程同时触发同一单
             if not self.store.claim_price_order(po["order_id"]):
+                # P0.4：触发单被他人占用 = 重复成交尝试
+                if self.alert_store is not None:
+                    try:
+                        self.alert_store.dup_fill(
+                            po["order_id"],
+                            float(po.get("size") or 0),
+                            float(tp or 0),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
                 continue
             # po.size 已是带符号数量（负=卖平多）；side 仅用于触发方向
             body = {

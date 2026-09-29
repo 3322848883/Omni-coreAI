@@ -172,3 +172,84 @@ class AlertNotifier:
             except Exception as e:
                 log.warning("channel %s error: %s", ch.name, e)
         return ok
+
+
+# ── 工厂：从环境变量构建（飞书/Telegram） ────────────
+def build_notifier() -> AlertNotifier:
+    """按环境变量注册渠道：FEISHU_WEBHOOK / FEISHU_APP_* / TELEGRAM_*。"""
+    import os
+
+    n = AlertNotifier()
+    webhook = os.environ.get("FEISHU_WEBHOOK")
+    app_id = os.environ.get("FEISHU_APP_ID")
+    app_secret = os.environ.get("FEISHU_APP_SECRET")
+    user = os.environ.get("FEISHU_USER_OPEN_ID")
+    if webhook:
+        n.register(FeishuChannel(webhook=webhook))
+    elif app_id and app_secret and user:
+        n.register(FeishuChannel(app_id=app_id, app_secret=app_secret, user_open_id=user))
+    tg_token = os.environ.get("TELEGRAM_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
+    tg_chat = os.environ.get("TELEGRAM_CHAT_ID")
+    if tg_token and tg_chat:
+        n.register(TelegramChannel(bot_token=tg_token, chat_id=tg_chat))
+    return n
+
+
+# ── 成交事件模板（开/平/加减/TP/SL） ────────────────
+_OPEN_ACTIONS = {"open_long", "open_short", "add_long", "add_short",
+                 "stop_entry_long", "stop_entry_short", "stop_long", "stop_short"}
+_CLOSE_ACTIONS = {"close", "close_long", "close_short", "close_all", "flatten"}
+_REDUCE_ACTIONS = {"reduce", "reduce_long", "reduce_short"}
+_MANAGE_ACTIONS = {"modify_tp_sl", "hold", "cancel_all", "cancel_price_all"}
+
+
+def format_trade_steps(bot_id: str, steps: list) -> list[str]:
+    """把 ExecReport.steps 里值得推送的成交/保护事件格式化成文本行。
+
+    只推：开仓、平仓、减仓、modify_tp_sl；hold/cancel 静默。
+    """
+    lines: list[str] = []
+    for s in steps or []:
+        if not isinstance(s, dict):
+            continue
+        action = str(s.get("action") or "")
+        if action in _MANAGE_ACTIONS and action != "modify_tp_sl":
+            continue
+        ok = bool(s.get("ok"))
+        sym = s.get("symbol") or ""
+        detail = s.get("detail") or {}
+        mark = "✓" if ok else "✗"
+        if action in _OPEN_ACTIONS:
+            side = "多" if "long" in action else "空"
+            px = detail.get("price") or detail.get("avg_price") or ""
+            sz = detail.get("size_usd") or detail.get("filled_size") or ""
+            lines.append(f"{mark} 开仓 {sym} {side} @{px} size={sz}")
+        elif action in _CLOSE_ACTIONS:
+            px = detail.get("price") or detail.get("avg_price") or ""
+            pnl = detail.get("realized_pnl") or detail.get("pnl") or ""
+            lines.append(f"{mark} 平仓 {sym} @{px} pnl={pnl}")
+        elif action in _REDUCE_ACTIONS:
+            px = detail.get("price") or ""
+            sz = detail.get("size") or detail.get("size_usd") or ""
+            lines.append(f"{mark} 减仓 {sym} @{px} size={sz}")
+        elif action == "modify_tp_sl":
+            tp = detail.get("tp") or s.get("tp") or ""
+            sl = detail.get("sl") or s.get("sl") or ""
+            lines.append(f"{mark} 改保护 {sym} TP={tp} SL={sl}")
+    return lines
+
+
+def notify_trade_events(bot_id: str, steps: list) -> bool:
+    """成交事件推送（无渠道时静默返回 False）。"""
+    lines = format_trade_steps(bot_id, steps)
+    if not lines:
+        return False
+    text = f"[{bot_id}]\n" + "\n".join(lines)
+    try:
+        n = build_notifier()
+        if not n.has_channel:
+            return False
+        return n.send(text)
+    except Exception as e:  # noqa: BLE001
+        log.warning("trade notify error: %s", e)
+        return False

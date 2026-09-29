@@ -442,6 +442,23 @@ def cmd_supervisor(args) -> int:
     return 0
 
 
+def cmd_backtest(args) -> int:
+    from .backtest import BacktestReplayer
+
+    root = _root_from_args(args)
+    rp = BacktestReplayer(root, args.bot)
+    closes = None
+    if getattr(args, "closes", None):
+        try:
+            closes = [float(x) for x in args.closes.split(",") if x.strip()]
+        except ValueError:
+            print("bad --closes, expected comma-separated floats", file=sys.stderr)
+            return 2
+    result = rp.replay(days=int(args.days), closes=closes)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if "error" not in result else 2
+
+
 def cmd_migrate(args) -> int:
     root = _root_from_args(args)
     from .migrate import migrate_all, migrate_bot
@@ -519,6 +536,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_bc.add_argument("--once", action="store_true", help="one scan pass then exit")
     p_bc.add_argument("--root", default="")
     p_bc.set_defaults(func=cmd_broadcast)
+
+    p_bt = sub.add_parser("backtest", help="journal replay backtest (PnL/Sharpe/DSR)")
+    p_bt.add_argument("--bot", required=True)
+    p_bt.add_argument("--days", type=int, default=30)
+    p_bt.add_argument("--closes", default="", help="comma-separated closes for benchmark")
+    p_bt.set_defaults(func=cmd_backtest)
     return parser
 
 

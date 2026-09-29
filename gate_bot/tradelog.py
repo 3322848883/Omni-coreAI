@@ -56,6 +56,13 @@ class TradeLogger:
             led.close()
         except Exception:  # noqa: BLE001
             pass
+        # 成交事件推送（开/平/减仓/改保护；无渠道静默）
+        try:
+            from .monitoring import notify_trade_events
+
+            notify_trade_events(bot_id, report.get("steps"))
+        except Exception:  # noqa: BLE001
+            pass
         return row
 
     def log_plan(self, bot_id: str, plan_result: dict[str, Any]) -> dict[str, Any]:
