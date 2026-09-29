@@ -206,5 +206,43 @@ class TestBacktestReplay(unittest.TestCase):
             self.assertIn("benchmark_sma_pct", result)
 
 
+class TestAlertNotifier(unittest.TestCase):
+    """告警通知渠道测试。"""
+
+    def test_no_channel_has_no_channel(self):
+        from gate_bot.monitoring import AlertNotifier
+        n = AlertNotifier()
+        self.assertFalse(n.has_channel)
+
+    def test_feishu_channel(self):
+        from gate_bot.monitoring import AlertNotifier
+        n = AlertNotifier(feishu_webhook='https://fake/webhook')
+        self.assertTrue(n.has_channel)
+
+    def test_telegram_channel(self):
+        from gate_bot.monitoring import AlertNotifier
+        n = AlertNotifier(telegram_bot_token='123:abc', telegram_chat_id='456')
+        self.assertTrue(n.has_channel)
+
+    def test_both_channels(self):
+        from gate_bot.monitoring import AlertNotifier
+        n = AlertNotifier(feishu_webhook='https://fake',
+                          telegram_bot_token='123:abc', telegram_chat_id='456')
+        self.assertTrue(n.has_channel)
+
+    def test_send_without_channel_logs_warning(self):
+        from gate_bot.monitoring import AlertNotifier
+        n = AlertNotifier()
+        result = n.send('test alert')
+        self.assertFalse(result)
+
+    def test_send_with_invalid_webhook(self):
+        """无效 webhook 不崩溃，返回 False。"""
+        from gate_bot.monitoring import AlertNotifier
+        n = AlertNotifier(feishu_webhook='https://invalid.example.com/hook')
+        result = n.send('test alert')
+        self.assertFalse(result)
+
+
 if __name__ == "__main__":
     unittest.main()
