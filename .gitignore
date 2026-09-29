@@ -51,3 +51,6 @@ data/
 research/**/deflated-sharpe.pdf
 research/**/backtest-pseudo.pdf
 research/**/sharpe-frontier.pdf
+
+# 告警配置含密钥
+config/alerts.yaml

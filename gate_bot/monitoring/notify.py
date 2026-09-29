@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 import urllib.request
 from abc import ABC, abstractmethod
 from typing import Optional
@@ -175,27 +176,7 @@ class AlertNotifier:
 
 
 # ── 工厂：从环境变量构建（飞书/Telegram） ────────────
-def build_notifier() -> AlertNotifier:
-    """按环境变量注册渠道：FEISHU_WEBHOOK / FEISHU_APP_* / TELEGRAM_*。"""
-    import os
-
-    n = AlertNotifier()
-    webhook = os.environ.get("FEISHU_WEBHOOK")
-    app_id = os.environ.get("FEISHU_APP_ID")
-    app_secret = os.environ.get("FEISHU_APP_SECRET")
-    user = os.environ.get("FEISHU_USER_OPEN_ID")
-    if webhook:
-        n.register(FeishuChannel(webhook=webhook))
-    elif app_id and app_secret and user:
-        n.register(FeishuChannel(app_id=app_id, app_secret=app_secret, user_open_id=user))
-    tg_token = os.environ.get("TELEGRAM_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
-    tg_chat = os.environ.get("TELEGRAM_CHAT_ID")
-    if tg_token and tg_chat:
-        n.register(TelegramChannel(bot_token=tg_token, chat_id=tg_chat))
-    return n
-
-
-# ── 成交事件模板（开/平/加减/TP/SL） ────────────────
+# ── 成交事件动作分类 ──────────────────────────────
 _OPEN_ACTIONS = {"open_long", "open_short", "add_long", "add_short",
                  "stop_entry_long", "stop_entry_short", "stop_long", "stop_short"}
 _CLOSE_ACTIONS = {"close", "close_long", "close_short", "close_all", "flatten"}
@@ -203,6 +184,47 @@ _REDUCE_ACTIONS = {"reduce", "reduce_long", "reduce_short"}
 _MANAGE_ACTIONS = {"modify_tp_sl", "hold", "cancel_all", "cancel_price_all"}
 
 
+def _load_alerts_yaml(root: Path) -> dict:
+    """读 config/alerts.yaml（含密钥，不入 git）。"""
+    try:
+        import yaml
+        p = Path(root) / "config" / "alerts.yaml"
+        if p.exists():
+            return yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("load alerts.yaml failed: %s", e)
+    return {}
+
+
+def build_notifier(root: Path = None) -> AlertNotifier:
+    """注册通知渠道：优先环境变量，其次 config/alerts.yaml。"""
+    import os
+
+    n = AlertNotifier()
+    webhook = os.environ.get("FEISHU_WEBHOOK")
+    app_id = os.environ.get("FEISHU_APP_ID")
+    app_secret = os.environ.get("FEISHU_APP_SECRET")
+    user = os.environ.get("FEISHU_USER_OPEN_ID")
+    tg_token = os.environ.get("TELEGRAM_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
+    tg_chat = os.environ.get("TELEGRAM_CHAT_ID")
+    if not webhook and not (app_id and app_secret):
+        cfg = _load_alerts_yaml(root or Path.cwd())
+        feishu = cfg.get("feishu") or {}
+        webhook = webhook or feishu.get("webhook")
+        app_id = app_id or feishu.get("app_id")
+        app_secret = app_secret or feishu.get("app_secret")
+        user = user or feishu.get("user_open_id")
+        tg = cfg.get("telegram") or {}
+        tg_token = tg_token or tg.get("bot_token")
+        tg_chat = tg_chat or tg.get("chat_id")
+    if webhook:
+        n.register(FeishuChannel(webhook=webhook))
+    elif app_id and app_secret and user:
+        n.register(FeishuChannel(app_id=app_id, app_secret=app_secret, user_open_id=user))
+    if tg_token and tg_chat:
+        n.register(TelegramChannel(bot_token=tg_token, chat_id=tg_chat))
+    return n
 def format_trade_steps(bot_id: str, steps: list) -> list[str]:
     """把 ExecReport.steps 里值得推送的成交/保护事件格式化成文本行。
 
@@ -239,14 +261,14 @@ def format_trade_steps(bot_id: str, steps: list) -> list[str]:
     return lines
 
 
-def notify_trade_events(bot_id: str, steps: list) -> bool:
+def notify_trade_events(bot_id: str, steps: list, root: Path = None) -> bool:
     """成交事件推送（无渠道时静默返回 False）。"""
     lines = format_trade_steps(bot_id, steps)
     if not lines:
         return False
     text = f"[{bot_id}]\n" + "\n".join(lines)
     try:
-        n = build_notifier()
+        n = build_notifier(root=root)
         if not n.has_channel:
             return False
         return n.send(text)

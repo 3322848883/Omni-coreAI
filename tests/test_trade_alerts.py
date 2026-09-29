@@ -66,19 +66,19 @@ class TestFormatTradeSteps(unittest.TestCase):
 class TestBuildNotifier(unittest.TestCase):
     def test_no_env_no_channel(self):
         with mock.patch.dict("os.environ", {}, clear=True):
-            n = build_notifier()
+            n = build_notifier(root=Path("/nonexistent"))
             self.assertFalse(n.has_channel)
 
     def test_feishu_webhook(self):
         with mock.patch.dict("os.environ", {"FEISHU_WEBHOOK": "https://x"}, clear=True):
-            n = build_notifier()
+            n = build_notifier(root=Path("/nonexistent"))
             self.assertTrue(n.has_channel)
             self.assertEqual(n.channel_names, ["FeishuChannel"])
 
     def test_telegram(self):
         env = {"TELEGRAM_TOKEN": "t", "TELEGRAM_CHAT_ID": "c"}
         with mock.patch.dict("os.environ", env, clear=True):
-            n = build_notifier()
+            n = build_notifier(root=Path("/nonexistent"))
             self.assertTrue(n.has_channel)
             self.assertEqual(n.channel_names, ["TelegramChannel"])
 
@@ -89,7 +89,7 @@ class TestNotifyTradeEvents(unittest.TestCase):
             self.assertFalse(notify_trade_events("bb", [
                 {"action": "open_long", "ok": True, "symbol": "BTC_USDT",
                  "detail": {"price": 1, "size_usd": 2}},
-            ]))
+            ], root=Path("/nonexistent")))
 
     def test_hold_only_no_send(self):
         with mock.patch.dict("os.environ", {"FEISHU_WEBHOOK": "https://x"}, clear=True):
