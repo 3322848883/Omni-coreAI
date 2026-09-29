@@ -178,6 +178,15 @@ class PlanRunner:
             except Exception:  # noqa: BLE001
                 charts = []
         text = self._chat_with_tools(system, user, chart_base64=charts or None)
+        # monitoring: heartbeat（LLM 调用完成）
+        try:
+            from ..monitoring import HealthMonitor
+            root = self.cfg.bot_root or Path.cwd()
+            bid = self.cfg.bot_id or self.inbox.name
+            HealthMonitor(root, bid).heartbeat(
+                llm_latency=0, exec_latency=0, cycle_id=cycle_id)
+        except Exception:  # noqa: BLE001
+            pass
         try:
             self._save_thinking(
                 cycle_id=cycle_id,
@@ -191,6 +200,13 @@ class PlanRunner:
             plan = parse_plan_text(text)
         except PlanError as e:
             log.error("plan parse failed: %s", e)
+            try:
+                from ..monitoring import HealthMonitor
+                root = self.cfg.bot_root or Path.cwd()
+                bid = self.cfg.bot_id or self.inbox.name
+                HealthMonitor(root, bid).record_error()
+            except Exception:
+                pass
             return {"ok": False, "cycle_id": cycle_id, "error": str(e), "trigger": trigger}
         if not plan.cycle_id:
             plan.cycle_id = cycle_id
@@ -229,6 +245,8 @@ class PlanRunner:
             self._record_plan(cycle_id=plan.cycle_id, trigger=trigger, orders=0,
                               notes=risk_result.notes + rejected_triggers,
                               reasoning=plan.reasoning)
+            # monitoring: decay（hold 不计盈亏）
+            self._record_decay(plan, executed=False, pnl_usd=0.0)
             return {
                 "ok": True,
                 "cycle_id": plan.cycle_id,
@@ -240,6 +258,8 @@ class PlanRunner:
         path = write_signal_file(self.inbox, payload, cycle_id=plan.cycle_id)
         self._record_plan(cycle_id=plan.cycle_id, trigger=trigger, orders=len(orders),
                           notes=risk_result.notes + rejected_triggers, reasoning=plan.reasoning)
+        # monitoring: decay（执行后按方向记 PnL）
+        self._record_decay(plan, executed=True, pnl_usd=0.0)
         return {
             "ok": True,
             "cycle_id": plan.cycle_id,
@@ -329,6 +349,44 @@ class PlanRunner:
                 "confidence": chips_out[0]["confidence"] if chips_out else 0.0,
             },
         }
+
+    def _record_decay(self, plan: Any, executed: bool, pnl_usd: float = 0.0) -> None:
+        """monitoring: 每轮记录到 decay detector。"""
+        try:
+            from ..monitoring import DecayDetector
+            root = self.cfg.bot_root or Path.cwd()
+            bid = self.cfg.bot_id or self.inbox.name
+            det = DecayDetector(root, bid)
+            acts = [c.action for c in (plan.chips or [])]
+            det.record_cycle(
+                cycle_id=plan.cycle_id or '',
+                decision=','.join(acts) or 'hold',
+                executed=executed, pnl_usd=pnl_usd,
+            )
+            alert = det.check()
+            if alert:
+                log.warning('decay alert: %s', alert)
+                # 发到飞书/Telegram（可选）
+                try:
+                    from ..monitoring import AlertNotifier, FeishuChannel
+                    import os
+                    feishu_webhook = os.environ.get('FEISHU_WEBHOOK')
+                    feishu_app_id = os.environ.get('FEISHU_APP_ID')
+                    feishu_app_secret = os.environ.get('FEISHU_APP_SECRET')
+                    feishu_user = os.environ.get('FEISHU_USER_OPEN_ID')
+                    n = AlertNotifier()
+                    if feishu_webhook:
+                        n.register(FeishuChannel(webhook=feishu_webhook))
+                    elif feishu_app_id and feishu_app_secret and feishu_user:
+                        n.register(FeishuChannel(app_id=feishu_app_id,
+                                                  app_secret=feishu_app_secret,
+                                                  user_open_id=feishu_user))
+                    if n.has_channel:
+                        n.send('decay: ' + '; '.join(alert.get('alerts', [])))
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception:  # noqa: BLE001
+            pass
 
     def _save_thinking(self, **kw: Any) -> None:
         """Persist LLM reasoning_content (CoT) for audit/replay."""
