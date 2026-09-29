@@ -1,19 +1,19 @@
-bot_id: pa-b
+bot_id: pa-d
 enabled: true
 env: paper
-exchange: okx
+exchange: gate
 symbols: [BTC_USDT]
 max_notional_usd: 3000
-label_prefix: pab
+label_prefix: pad
 position_policy: free
 require_sl: true
 paper:
-  feed_exchange: okx
+  feed_exchange: gate
   initial_capital: 5000
   leverage: 20
 strategist:
   enabled: true
-  prompt_file: prompts/smc_trader.md
+  prompt_file: prompts/multi_breakout.md
   timeframe: 15m
   candles: 30
   write_hold: false

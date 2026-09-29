@@ -13,7 +13,7 @@ paper:
   leverage: 20
 strategist:
   enabled: true
-  prompt_file: prompts/vergex_default.md
+  prompt_file: prompts/multi_meanrev.md
   timeframe: 15m
   candles: 30
   write_hold: false

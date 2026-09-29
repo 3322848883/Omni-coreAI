@@ -1,10 +1,50 @@
 groups:
-  - name: e2e-trio
+  - name: e2e-quad
+    topology: single_account
+    members: [pa-a, pa-b, pa-c, pa-d]
+    target_account: pa-a
+    fusion: weighted_vote
+    fusion_config:
+      weights: {pa-a: 2, pa-b: 1, pa-c: 1, pa-d: 1}
+    on_conflict: hold
+    enabled: true
+  - name: single-test
+    topology: single_account
+    members: [pa-a, pa-b]
+    target_account: pa-a
+    fusion: master_arbiter
+    fusion_config: {master: pa-a}
+    on_conflict: hold
+    enabled: true
+  - name: disc-test
     topology: single_account
     members: [pa-a, pa-b, pa-c]
     target_account: pa-a
     fusion: weighted_vote
     fusion_config:
-      weights: {pa-a: 2, pa-b: 1, pa-c: 1}
+      weights: {pa-a: 1, pa-b: 1, pa-c: 1}
+    on_conflict: hold
+    enabled: true
+    discussion:
+      enabled: true
+      rounds: 2
+      timeout_sec: 120
+      early_exit_on_agreement: true
+  - name: consensus-test
+    topology: single_account
+    members: [pa-a, pa-b, pa-c]
+    target_account: pa-a
+    fusion: consensus
+    fusion_config:
+      threshold: 0.6
+      weights: {pa-a: 1, pa-b: 1, pa-c: 1}
+    on_conflict: hold
+    enabled: true
+  - name: mirror-test
+    topology: mirror_accounts
+    members: [pa-a, pa-b]
+    fusion: weighted_vote
+    fusion_config:
+      weights: {pa-a: 1, pa-b: 1}
     on_conflict: hold
     enabled: true
