@@ -207,41 +207,93 @@ class TestBacktestReplay(unittest.TestCase):
 
 
 class TestAlertNotifier(unittest.TestCase):
-    """告警通知渠道测试。"""
+    """可扩展通知渠道测试。"""
 
-    def test_no_channel_has_no_channel(self):
+    def test_no_channel(self):
         from gate_bot.monitoring import AlertNotifier
         n = AlertNotifier()
         self.assertFalse(n.has_channel)
 
-    def test_feishu_channel(self):
-        from gate_bot.monitoring import AlertNotifier
-        n = AlertNotifier(feishu_webhook='https://fake/webhook')
-        self.assertTrue(n.has_channel)
-
-    def test_telegram_channel(self):
-        from gate_bot.monitoring import AlertNotifier
-        n = AlertNotifier(telegram_bot_token='123:abc', telegram_chat_id='456')
-        self.assertTrue(n.has_channel)
-
-    def test_both_channels(self):
-        from gate_bot.monitoring import AlertNotifier
-        n = AlertNotifier(feishu_webhook='https://fake',
-                          telegram_bot_token='123:abc', telegram_chat_id='456')
-        self.assertTrue(n.has_channel)
-
-    def test_send_without_channel_logs_warning(self):
-        from gate_bot.monitoring import AlertNotifier
+    def test_register_feishu_webhook(self):
+        from gate_bot.monitoring import AlertNotifier, FeishuChannel
         n = AlertNotifier()
-        result = n.send('test alert')
-        self.assertFalse(result)
+        n.register(FeishuChannel(webhook='https://fake/webhook'))
+        self.assertTrue(n.has_channel)
+        self.assertIn('FeishuChannel', n.channel_names)
 
-    def test_send_with_invalid_webhook(self):
-        """无效 webhook 不崩溃，返回 False。"""
+    def test_register_feishu_app(self):
+        from gate_bot.monitoring import AlertNotifier, FeishuChannel
+        n = AlertNotifier()
+        n.register(FeishuChannel(app_id='id', app_secret='secret', user_open_id='ou_xxx'))
+        self.assertTrue(n.has_channel)
+
+    def test_register_telegram(self):
+        from gate_bot.monitoring import AlertNotifier, TelegramChannel
+        n = AlertNotifier()
+        n.register(TelegramChannel(bot_token='123:abc', chat_id='456'))
+        self.assertTrue(n.has_channel)
+
+    def test_register_dingtalk(self):
+        from gate_bot.monitoring import AlertNotifier, DingTalkChannel
+        n = AlertNotifier()
+        n.register(DingTalkChannel(webhook='https://fake'))
+        self.assertTrue(n.has_channel)
+
+    def test_register_multiple_channels(self):
+        from gate_bot.monitoring import AlertNotifier, FeishuChannel, TelegramChannel
+        n = AlertNotifier()
+        n.register(FeishuChannel(webhook='https://fake'))
+        n.register(TelegramChannel(bot_token='1:abc', chat_id='2'))
+        self.assertEqual(len(n.channel_names), 2)
+
+    def test_chaining(self):
+        from gate_bot.monitoring import AlertNotifier, FeishuChannel, TelegramChannel
+        n = AlertNotifier()
+        n.register(FeishuChannel(webhook='https://fake')).register(
+            TelegramChannel(bot_token='1:abc', chat_id='2'))
+        self.assertEqual(len(n.channel_names), 2)
+
+    def test_send_without_channel(self):
         from gate_bot.monitoring import AlertNotifier
-        n = AlertNotifier(feishu_webhook='https://invalid.example.com/hook')
-        result = n.send('test alert')
-        self.assertFalse(result)
+        self.assertFalse(AlertNotifier().send('test'))
+
+    def test_custom_channel(self):
+        """自定义渠道可扩展。"""
+        from gate_bot.monitoring import AlertNotifier, NotificationChannel
+
+        class MockChannel(NotificationChannel):
+            def send(self, text):
+                return True
+
+        n = AlertNotifier()
+        n.register(MockChannel())
+        self.assertTrue(n.send('test'))
+
+    def test_channel_error_doesnt_crash(self):
+        """一个渠道出错不影响其他渠道。"""
+        from gate_bot.monitoring import AlertNotifier, NotificationChannel
+
+        class BrokenChannel(NotificationChannel):
+            def send(self, text):
+                raise RuntimeError('broken')
+
+        class GoodChannel(NotificationChannel):
+            def send(self, text):
+                return True
+
+        n = AlertNotifier()
+        n.register(BrokenChannel())
+        n.register(GoodChannel())
+        self.assertTrue(n.send('test'))
+
+    def test_feishu_webhook_send_invalid(self):
+        from gate_bot.monitoring import FeishuChannel
+        ch = FeishuChannel(webhook='https://invalid.example.com/hook')
+        self.assertFalse(ch.send('test'))
+
+    def test_feishu_no_config(self):
+        from gate_bot.monitoring import FeishuChannel
+        self.assertFalse(FeishuChannel().send('test'))
 
 
 if __name__ == "__main__":
