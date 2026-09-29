@@ -1,0 +1,6 @@
+# 调研原始材料不入库：只保留 REPORT/brief/findings 等 .md 证据链
+*.pdf
+*.html
+*.txt
+*.json
+*.py
