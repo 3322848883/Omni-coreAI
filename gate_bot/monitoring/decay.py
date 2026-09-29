@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -15,6 +16,9 @@ from typing import Any, Optional
 class DecayDetector:
     """滚动窗口策略衰减检测。"""
 
+    _locks: dict[str, threading.Lock] = {}
+    _locks_guard = threading.Lock()
+
     def __init__(self, root: Path, bot_id: str, window: int = 20):
         self.root = Path(root)
         self.bot_id = bot_id
@@ -22,22 +26,28 @@ class DecayDetector:
         self.path = self.root / "data" / "bots" / bot_id / "state" / "perf_metrics.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._history: list[float] = []  # pnl 序列
+        key = str(self.path)
+        with self._locks_guard:
+            if key not in self._locks:
+                self._locks[key] = threading.Lock()
+            self._lock = self._locks[key]
 
     def record_cycle(self, cycle_id: str, decision: str,
                      executed: bool, pnl_usd: float = 0.0) -> dict:
         """每轮追加指标，返回当前滚动指标。"""
-        self._history.append(pnl_usd)
-        metrics = self._compute()
-        rec = {
-            "ts": int(time.time()),
-            "cycle_id": cycle_id,
-            "decision": decision,
-            "executed": executed,
-            "pnl_usd": pnl_usd,
-            **metrics,
-        }
-        with self.path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        with self._lock:
+            self._history.append(pnl_usd)
+            metrics = self._compute()
+            rec = {
+                "ts": int(time.time()),
+                "cycle_id": cycle_id,
+                "decision": decision,
+                "executed": executed,
+                "pnl_usd": pnl_usd,
+                **metrics,
+            }
+            with self.path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         return rec
 
     def check(self) -> Optional[dict]:
