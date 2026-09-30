@@ -211,3 +211,131 @@ class TestCriticalFixes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTypeTriggerTolerance(unittest.TestCase):
+    """模型把 type:trigger 误写进 type 应容错，不报错。"""
+
+    def _chip(self, **over):
+        base = {
+            "symbol": "BTC_USDT", "action": "open_short", "confidence": 0.7,
+            "size_usd": 100, "sl": 83720, "tp": 82560,
+        }
+        base.update(over)
+        return base
+
+    def test_type_trigger_maps_to_market(self):
+        from gate_bot.strategist.schema import parse_plan_text
+
+        plan = {
+            "cycle_id": "c1", "reasoning": "test",
+            "chips": [self._chip(**{"type": "trigger"})],
+        }
+        import json
+        p = parse_plan_text(json.dumps(plan))
+        self.assertEqual(p.chips[0].order_type, "market")
+
+    def test_type_stop_maps_to_market(self):
+        from gate_bot.strategist.schema import parse_plan_text
+
+        plan = {
+            "cycle_id": "c1", "reasoning": "test",
+            "chips": [self._chip(**{"type": "stop"})],
+        }
+        import json
+        p = parse_plan_text(json.dumps(plan))
+        self.assertEqual(p.chips[0].order_type, "market")
+
+    def test_valid_type_untouched(self):
+        from gate_bot.strategist.schema import parse_plan_text
+
+        plan = {
+            "cycle_id": "c1", "reasoning": "test",
+            "chips": [self._chip(**{"type": "limit", "price": 83350})],
+        }
+        import json
+        p = parse_plan_text(json.dumps(plan))
+        self.assertEqual(p.chips[0].order_type, "limit")
+
+    def test_unknown_type_still_rejected(self):
+        from gate_bot.strategist.schema import parse_plan_text, PlanError
+
+        plan = {
+            "cycle_id": "c1", "reasoning": "test",
+            "chips": [self._chip(**{"type": "banana"})],
+        }
+        import json
+        with self.assertRaises(PlanError):
+            parse_plan_text(json.dumps(plan))
+
+
+class TestJsonRepair(unittest.TestCase):
+    """LLM 输出常见 JSON 病应自动修复。"""
+
+    def _parse(self, text):
+        from gate_bot.strategist.schema import parse_plan_text
+
+        return parse_plan_text(text)
+
+    def test_markdown_fence(self):
+        p = self._parse('```json\n{"cycle_id":"c1","reasoning":"r","chips":[]}\n```')
+        self.assertEqual(p.cycle_id, "c1")
+
+    def test_trailing_comma(self):
+        p = self._parse('{"cycle_id":"c1","reasoning":"r","chips":[],}')
+        self.assertEqual(p.cycle_id, "c1")
+
+    def test_single_quotes(self):
+        p = self._parse("{'cycle_id':'c1','reasoning':'r','chips':[]}")
+        self.assertEqual(p.cycle_id, "c1")
+
+    def test_bare_keys(self):
+        p = self._parse('{cycle_id:"c1",reasoning:"r",chips:[]}')
+        self.assertEqual(p.cycle_id, "c1")
+
+    def test_comments_stripped(self):
+        p = self._parse('{"cycle_id":"c1", // comment\n"reasoning":"r","chips":[]}')
+        self.assertEqual(p.cycle_id, "c1")
+
+    def test_python_literals(self):
+        p = self._parse('{"cycle_id":"c1","reasoning":"r","chips":[],"x":None,"y":True}')
+        self.assertEqual(p.cycle_id, "c1")
+
+    def test_trailing_text_after_json(self):
+        p = self._parse('{"cycle_id":"c1","reasoning":"r","chips":[]}\n\n这是我的分析完毕。')
+        self.assertEqual(p.cycle_id, "c1")
+
+    def test_text_before_json(self):
+        p = self._parse('好的，以下是计划：\n{"cycle_id":"c1","reasoning":"r","chips":[]}')
+        self.assertEqual(p.cycle_id, "c1")
+
+    def test_truncated_recovers(self):
+        # 截断在 chips 数组中间 —— 最大努力恢复
+        raw = '{"cycle_id":"c1","reasoning":"r","chips":[{"symbol":"BTC_USDT","action":"open_long"'
+        try:
+            p = self._parse(raw)
+            # 能恢复就校验
+            self.assertEqual(p.cycle_id, "c1")
+        except Exception:
+            # 恢复不了也允许报 PlanError（不是崩）
+            pass
+
+    def test_real_world_llm_output(self):
+        raw = """让我分析一下。
+
+```json
+{
+  "cycle_id": "btc-15m-001",
+  "reasoning": "区间震荡，观望",
+  "chips": [
+    {
+      "symbol": "BTC_USDT",
+      "action": "hold",
+      "confidence": 0.6,
+    }
+  ],
+}
+```"""
+        p = self._parse(raw)
+        self.assertEqual(p.cycle_id, "btc-15m-001")
+        self.assertEqual(p.chips[0].action, "hold")

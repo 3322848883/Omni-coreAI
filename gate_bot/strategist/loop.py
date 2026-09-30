@@ -103,6 +103,21 @@ class PlanRunner:
             allow_modify=bool((cfg.ai_triggers or {}).get("allow_modify", True)),
         )
         self._ai_store = AITriggerStore(self.history_dir / "ai_triggers.json", self._ai_policy)
+        # 工具使用统计（每轮累计，随 thinking 落盘）——防 AI 偷懒不查数据
+        self.tool_usage: list[dict] = []
+
+    def _record_tool_use(self, name: str, args: dict, result: Any) -> None:
+        """记录一次工具调用：工具名、参数摘要、结果规模。"""
+        try:
+            preview = str(result)[:120] if result is not None else ""
+            self.tool_usage.append({
+                "tool": str(name or ""),
+                "args": {k: str(v)[:40] for k, v in (args or {}).items()},
+                "result_preview": preview,
+                "result_len": len(str(result or "")),
+            })
+        except Exception:  # noqa: BLE001
+            pass
 
     def _load_last_cycle(self) -> Optional[str]:
         try:
@@ -479,6 +494,20 @@ class PlanRunner:
         except Exception:  # noqa: BLE001
             return None
 
+    def _tool_usage_summary(self) -> dict:
+        """工具使用摘要：{工具名: 次数} + 是否查过数据。"""
+        counts: dict[str, int] = {}
+        for u in self.tool_usage:
+            t = u.get("tool") or "?"
+            counts[t] = counts.get(t, 0) + 1
+        data_tools = {"klines", "indicators", "ticker", "orderbook", "contract",
+                      "stats", "account", "smc_map", "smc_events", "sqzmom"}
+        return {
+            "counts": counts,
+            "total_calls": len(self.tool_usage),
+            "data_checked": bool(data_tools.intersection(counts.keys())),
+        }
+
     def _save_thinking(self, **kw: Any) -> None:
         """Persist LLM reasoning_content (CoT) for audit/replay."""
         from datetime import datetime
@@ -494,8 +523,11 @@ class PlanRunner:
             "trigger": kw.get("trigger"),
             "reasoning_chain": kw.get("reasoning") or [],
             "content_head": (kw.get("content") or "")[:500],
+            "tool_usage": list(self.tool_usage),  # 本轮工具使用明细（防偷懒）
+            "tool_usage_summary": self._tool_usage_summary(),
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.tool_usage = []  # 下一轮重新累计
         # also into sqlite ledger
         try:
             from ..ledger import Ledger, default_ledger_path
@@ -666,10 +698,12 @@ class PlanRunner:
             for c in calls[:8]:
                 name = c.get("tool") or c.get("name") or ""
                 args = c.get("args") or c.get("arguments") or {}
-                results.append({"tool": name, "result": run_tool(
+                res = run_tool(
                     self.client, name, args,
                     env=self.cfg.env, bot_root=self.cfg.bot_root, market_cfg=self.cfg.market,
-                )})
+                )
+                self._record_tool_use(name, args, res)
+                results.append({"tool": name, "result": res})
             messages.append({"role": "assistant", "content": text})
             messages.append({
                 "role": "user",
@@ -704,6 +738,7 @@ class PlanRunner:
                     self.client, name, args,
                     env=self.cfg.env, bot_root=self.cfg.bot_root, market_cfg=self.cfg.market,
                 )
+                self._record_tool_use(name, args, result)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.get("id") or "",

@@ -145,7 +145,17 @@ def parse_plan(data: Any) -> Plan:
                 raise PlanError(f"chips[{i}].confidence out of range")
         order_type = order_type_raw
         if order_type not in CHIP_ORDER_TYPES:
-            raise PlanError(f"chips[{i}].type unsupported: {order_type!r}")
+            # recovery: 模型常把 tp_mode/sl_mode 的值（trigger）误写进 type
+            # trigger/stop 类条件单实际是 market/limit 挂触发，归一到 market
+            _type_aliases = {
+                "trigger": "market", "stop": "market", "stop_order": "market",
+                "tp": "market", "sl": "market", "tp_sl": "market",
+                "stop_loss": "market", "take_profit": "market",
+            }
+            if order_type in _type_aliases:
+                order_type = _type_aliases[order_type]
+            else:
+                raise PlanError(f"chips[{i}].type unsupported: {order_type!r}")
         side = raw.get("side")
         if side is not None:
             side = str(side).strip().lower()
@@ -195,8 +205,39 @@ def parse_plan(data: Any) -> Plan:
     )
 
 
+def _repair_json(t: str) -> str:
+    """修复 LLM 输出的常见 JSON 病：Markdown 围栏、注释、尾逗号、单引号、裸键名。"""
+    import re
+
+    s = t.strip()
+    # 1) 剥离 Markdown 围栏（前后都要）
+    if s.startswith("```"):
+        s = re.sub(r"^```[a-zA-Z]*\s*", "", s)
+        s = re.sub(r"\s*```$", "", s).strip()
+    # 2) 去掉 // 与 /* */ 注释（字符串外的简化处理）
+    s = re.sub(r"/\*.*?\*/", "", s, flags=re.DOTALL)
+    s = re.sub(r"(^|[^:])//.*?$", r"\1", s, flags=re.MULTILINE)
+    # 3) 尾逗号 , 后跟 } 或 ]
+    s = re.sub(r",\s*([}\]])", r"\1", s)
+    # 4) 单引号字符串 → 双引号（仅当该串无双引号）
+    def _sq(m):
+        inner = m.group(1)
+        return '"' + inner + '"' if '"' not in inner else m.group(0)
+    s = re.sub(r"'([^']*)'", _sq, s)
+    # 5) 裸键名 { key: → { "key":
+    s = re.sub(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)", r'\1"\2"\3', s)
+    # 6) True/False/None → true/false/null
+    s = re.sub(r"\bTrue\b", "true", s)
+    s = re.sub(r"\bFalse\b", "false", s)
+    s = re.sub(r"\bNone\b", "null", s)
+    return s
+
+
 def _extract_json_object(text: str):
-    """Extract the first balanced JSON object from LLM output."""
+    """Extract the first balanced JSON object from LLM output.
+
+    带 _repair_json 修复层：LLM 常输出 Markdown 围栏 / 尾逗号 / 截断 JSON。
+    """
     import json
 
     t = (text or "").strip()
@@ -205,16 +246,20 @@ def _extract_json_object(text: str):
         if t.startswith("json"):
             t = t[4:]
         t = t.strip()
-    try:
-        return json.loads(t)
-    except json.JSONDecodeError:
-        pass
+    # 直接解析
+    for candidate in (t, _repair_json(t)):
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+    # 平衡括号提取 + 修复
     start = t.find("{")
     if start < 0:
         raise PlanError("LLM output has no JSON object")
     depth = 0
     in_str = False
     esc = False
+    last_good = -1
     for i in range(start, len(t)):
         ch = t[i]
         if in_str:
@@ -232,10 +277,23 @@ def _extract_json_object(text: str):
         elif ch == "}":
             depth -= 1
             if depth == 0:
-                try:
-                    return json.loads(t[start : i + 1])
-                except json.JSONDecodeError as e:
-                    raise PlanError(f"LLM output is not valid JSON: {e}") from e
+                chunk = t[start : i + 1]
+                for candidate in (chunk, _repair_json(chunk)):
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        continue
+                raise PlanError(f"LLM output is not valid JSON: {chunk[:120]!r}")
+        elif depth > 0 and ch in ",":
+            last_good = i
+    # 截断：退回到最后一个逗号处闭合，做最大努力恢复
+    if last_good > start:
+        chunk = t[start : last_good] + "}]}"
+        for candidate in (chunk, _repair_json(chunk)):
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
     raise PlanError("LLM output JSON object is truncated/unterminated")
 
 

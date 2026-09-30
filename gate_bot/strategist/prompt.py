@@ -36,6 +36,9 @@ _SYSTEM_HEAD = (
     "13) 孤儿保护单（必须处理）：**无持仓但存在 tp/sl 类 reduce_only 挂单** = 前一笔仓位止盈/止损触发后遗留。"
     "本轮必须撤销（action=cancel_price_all 或 cancel_*），reasoning 写明「孤儿保护单已撤」。"
     "禁止对孤儿单只 hold 不管。\n"
+    "14) **禁止偷懒不查数据**：决策前**必须调用行情工具**（klines/indicators/ticker/orderbook/"
+    "smc_map/smc_events/sqzmom/trades_flow 至少 1 个）获取当前市场数据。"
+    "工具返回不足可继续查；**从未调用任何工具就直接输出 Plan = 违规**，视为猜测不是分析。\n"
 )
 
 PLAN_SCHEMA_HINT = (
@@ -48,11 +51,13 @@ PLAN_SCHEMA_HINT = (
 SYSTEM_PROMPT = _SYSTEM_HEAD + PLAN_SCHEMA_HINT
 
 
-def build_system_prompt(strategy_prompt: str, tools_guide: str = "") -> str:
-    """Fixed contract + optional tool guide (system layer) + strategy persona."""
+def build_system_prompt(strategy_prompt: str, tools_guide: str = "", skill_catalog: str = "") -> str:
+    """Fixed contract + optional tool guide (system layer) + skill catalog + strategy persona."""
     head = SYSTEM_PROMPT
     if tools_guide:
         head = head + "\n\n" + tools_guide
+    if skill_catalog:
+        head = head + "\n\n" + skill_catalog
     return head + "\n\n【策略人格】\n" + strategy_prompt
 
 
@@ -124,9 +129,10 @@ def build_messages(
     risk: dict[str, Any],
     symbols: list[str],
     chart_base64: Optional[str] = None,
+    skill_catalog: str = "",
 ):
     """构建消息列表。chart_base64 非空时附 K 线图（vision 模式）。"""
-    system = build_system_prompt(strategy_prompt)
+    system = build_system_prompt(strategy_prompt, skill_catalog=skill_catalog)
     text = build_user_prompt(snapshot, risk, symbols)
 
     if chart_base64:
