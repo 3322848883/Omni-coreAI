@@ -73,6 +73,8 @@ class Executor:
         account_risk: Optional[dict] = None,
         label_prefix: str = "",
         alert_store: Optional[Any] = None,
+        root: Optional[Path] = None,
+        bot_id: str = "",
     ):
         self.client = client
         self.symbols_whitelist = (
@@ -87,6 +89,9 @@ class Executor:
         self.require_sl = bool(require_sl)
         # account-level risk: halt / max_total_notional_usd / daily_loss_limit_usd / max_leverage
         self.account_risk = dict(account_risk or {})
+        # bot 隔离：日初权益等状态写 data/bots/<bot_id>/state/（勿用共享目录）
+        self.root = Path(root) if root is not None else Path.cwd()
+        self.bot_id = str(bot_id or "").strip()
         # bot namespace: order texts always under t-{label_prefix}*; signal labels cannot escape
         self.label_prefix = str(label_prefix or "").strip()
         # P0.4 告警落盘：权益偏离 / 孤儿保护单
@@ -494,13 +499,22 @@ class Executor:
                     raise GateApiError("MAX_TOTAL_NOTIONAL: cannot measure account exposure")
 
     def _day_start_equity(self, current_total: float) -> float:
-        """Persist UTC-day start equity for daily_loss_limit (per bot process root)."""
+        """Persist UTC-day start equity for daily_loss_limit.
+
+        **按 bot 隔离**：写 data/bots/<bot_id>/state/_account_risk/equity_<day>.json。
+        所有 bot 共享一个文件会让 DAILY_LOSS_LIMIT 拿别家的日初对比自家权益。
+        """
         from datetime import datetime, timezone
         import json as _json
 
         day = datetime.now(timezone.utc).strftime("%Y%m%d")
-        root = Path(getattr(self, "state_dir", None) or Path.cwd() / "history" / "_account_risk")
-        path = root / f"equity_{day}.json"
+        try:
+            from .paths import bot_paths
+
+            base = bot_paths(self.root, self.bot_id or "_unknown").state / "_account_risk"
+        except Exception:  # noqa: BLE001
+            base = Path(self.root) / "data" / "bots" / (self.bot_id or "_unknown") / "state" / "_account_risk"
+        path = base / f"equity_{day}.json"
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             if path.exists():
