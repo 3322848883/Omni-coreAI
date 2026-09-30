@@ -5,8 +5,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, ".")
-os.environ["OPENAI_BASE_URL"] = "http://69.12.85.185:7863/v1"
-os.environ["OPENAI_API_KEY"] = "sk-wb-Sm2NXyLm2rylSEQ7I_8HzNu_4pxmNfpoVtjcfyc9chM"
+# 密钥从环境变量来（勿硬编码）；跑前先设 OPENAI_API_KEY / OPENAI_BASE_URL
+os.environ.setdefault("OPENAI_BASE_URL", "http://69.12.85.185:7863/v1")
+os.environ.setdefault("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
 os.environ["LLM_MODEL"] = "global:deepseek-v4.1-flash"
 
 from gate_bot.config import load_bot_config

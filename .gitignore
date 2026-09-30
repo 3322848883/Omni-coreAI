@@ -54,3 +54,10 @@ research/**/sharpe-frontier.pdf
 
 # 告警配置含密钥
 config/alerts.yaml
+
+# secrets — never commit
+scripts/secrets.bat
+.env
+.env.*
+*.key
+*.pem

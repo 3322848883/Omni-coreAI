@@ -76,6 +76,25 @@ Set-ItemProperty $p DelegationConsole "{00000000-0000-0000-0000-000000000000}"
 Set-ItemProperty $p DelegationTerminal "{00000000-0000-0000-0000-000000000000}"
 ```
 
+### 2.0b 必做：uv venv 的 pythonw 弹窗陷阱
+
+**现象**：每个 worker 都弹一个控制台窗口；或弹 `pythonw.exe - 系统错误：找不到 python314.dll`。
+
+**根因**：`uv venv` 生成的 `.venv\Scripts\pythonw.exe` 是个 launcher 存根，实际拉起的是 uv 的 **`python.exe`（console 子系统）**——Windows 就给它一个控制台窗。若直接换成 uv 真 `pythonw.exe`，又会因找不到 `python314.dll` 报错。
+
+**修复（三项一起拷）**：
+
+```powershell
+$uv = "C:\Users\<user>\AppData\Roaming\uv\python\cpython-3.14-windows-x86_64-none"
+Copy-Item "$uv\pythonw.exe"   .venv\Scripts\ -Force   # 真 pythonw（windows 子系统）
+Copy-Item "$uv\python314.dll" .venv\Scripts\ -Force   # 依赖 DLL
+Copy-Item "$uv\python3.dll"   .venv\Scripts\ -Force
+```
+
+**验证**：`Get-Process python | Where-Object { $_.CommandLine -match 'gate_bot' }` 应为 **0**；`pythonw` 数量 = worker 数。
+
+**注意**：用 `uv venv` / `uv sync` 重建环境后**会复发**，重建完必须重做这一步。
+
 ### 2.1 推荐启动
 
 ```powershell
