@@ -146,23 +146,29 @@ class TestSupervisorArgs(unittest.TestCase):
 
 
 class TestPidLock(unittest.TestCase):
+    # 跨平台：让外部子进程持 OS 锁（Windows msvcrt / Unix fcntl）
+    _HOLD_LOCK_SNIPPET = (
+        "import os,sys,time\n"
+        "f=open(sys.argv[1],'a+')\n"
+        "f.seek(0)\n"
+        "if os.name=='nt':\n"
+        "    import msvcrt\n"
+        "    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)\n"
+        "else:\n"
+        "    import fcntl\n"
+        "    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "print('ready', os.getpid(), flush=True)\n"
+        "time.sleep(30)\n"
+    )
+
     def test_exclusive(self):
         import subprocess
         import sys as _sys
 
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "a.lock"
-            # another live process holds the OS lock
-            code = (
-                "import msvcrt,os,sys,time\n"
-                "f=open(sys.argv[1],'a+')\n"
-                "f.seek(0)\n"
-                "msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)\n"
-                "print('ready', os.getpid(), flush=True)\n"
-                "time.sleep(30)\n"
-            )
             dummy = subprocess.Popen(
-                [_sys.executable, "-c", code, str(p)],
+                [_sys.executable, "-c", self._HOLD_LOCK_SNIPPET, str(p)],
                 stdout=subprocess.PIPE, text=True,
             )
             try:
@@ -228,16 +234,8 @@ class TestPidLock(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "crash.lock"
-            code = (
-                "import msvcrt,sys\n"
-                "f=open(sys.argv[1],'a+')\n"
-                "f.seek(0)\n"
-                "msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)\n"
-                "print('ready', flush=True)\n"
-                "import time; time.sleep(60)\n"
-            )
             holder = subprocess.Popen(
-                [_sys.executable, "-c", code, str(p)],
+                [_sys.executable, "-c", self._HOLD_LOCK_SNIPPET, str(p)],
                 stdout=subprocess.PIPE, text=True,
             )
             try:
@@ -276,16 +274,8 @@ class TestPidLock(unittest.TestCase):
             root = Path(td)
             (root / "config" / "bots").mkdir(parents=True)
             bp = bot_paths(root, "b1", create=True)
-            code = (
-                "import msvcrt,sys\n"
-                "f=open(sys.argv[1],'a+')\n"
-                "f.seek(0)\n"
-                "msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)\n"
-                "print('ready', flush=True)\n"
-                "import time; time.sleep(30)\n"
-            )
             dummy = subprocess.Popen(
-                [_sys.executable, "-c", code, str(bp.lock_plan)],
+                [_sys.executable, "-c", self._HOLD_LOCK_SNIPPET, str(bp.lock_plan)],
                 stdout=subprocess.PIPE, text=True,
             )
             try:
