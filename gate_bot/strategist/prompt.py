@@ -33,6 +33,9 @@ _SYSTEM_HEAD = (
     "11) tp_mode/sl_mode 默认 trigger（条件计划委托）；limit_order=盘口 reduce_only 限价。\n"
     "12) triggers[] 可选：自设唤醒条件（如 {type:price_break,symbol,lookback,side:high|low}），"
     "命中后重新分析，不直接下单。\n"
+    "13) 孤儿保护单（必须处理）：**无持仓但存在 tp/sl 类 reduce_only 挂单** = 前一笔仓位止盈/止损触发后遗留。"
+    "本轮必须撤销（action=cancel_price_all 或 cancel_*），reasoning 写明「孤儿保护单已撤」。"
+    "禁止对孤儿单只 hold 不管。\n"
 )
 
 PLAN_SCHEMA_HINT = (
