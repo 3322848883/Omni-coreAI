@@ -28,10 +28,19 @@ def _make_root(td: str, bots: dict) -> Path:
     return root
 
 
+def _touch_locks(root: Path, *bot_ids: str) -> None:
+    for bid in bot_ids:
+        st = root / "data" / "bots" / bid / "state"
+        st.mkdir(parents=True, exist_ok=True)
+        (st / "plan.lock").write_text("0", encoding="utf-8")
+        (st / "run.lock").write_text("0", encoding="utf-8")
+
+
 class TestDiscover(unittest.TestCase):
     def test_paper_gets_plan_and_paper_run(self):
         with tempfile.TemporaryDirectory() as td:
             root = _make_root(td, {"p1": "paper", "l1": "live"})
+            _touch_locks(root, "p1", "l1")
             wd = Watchdog(root)
             targets = wd.discover()
             pairs = {(t.bot_id, t.component) for t in targets}
@@ -50,6 +59,44 @@ class TestDiscover(unittest.TestCase):
                          encoding="utf-8")
             wd = Watchdog(root)
             self.assertEqual(wd.discover(), [])
+
+    def test_no_allowlist_only_manages_existing_locks(self):
+        """无 allowlist 时：只管已有 lock 的组件，绝不凭空开新 bot。"""
+        with tempfile.TemporaryDirectory() as td:
+            root = _make_root(td, {"p1": "paper", "p2": "paper"})
+            # p1 跑过（有 lock）；p2 从没跑过（无 lock）
+            st = root / "data" / "bots" / "p1" / "state"
+            st.mkdir(parents=True)
+            (st / "plan.lock").write_text("0", encoding="utf-8")
+            (st / "run.lock").write_text("0", encoding="utf-8")
+            wd = Watchdog(root)
+            pairs = {(t.bot_id, t.component) for t in wd.discover()}
+            self.assertIn(("p1", "plan"), pairs)
+            self.assertIn(("p1", "paper"), pairs)
+            self.assertNotIn(("p2", "plan"), pairs)
+            self.assertNotIn(("p2", "paper"), pairs)
+
+    def test_allowlist_from_yaml(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = _make_root(td, {"p1": "paper", "p2": "paper", "p3": "paper"})
+            (root / "config" / "watchdog.yaml").write_text(
+                "bots: [p1, p3]\n", encoding="utf-8"
+            )
+            wd = Watchdog(root)
+            bids = {t.bot_id for t in wd.discover()}
+            self.assertEqual(bids, {"p1", "p3"})
+            # allowlist 命中即可，不要求 lock 存在
+            pairs = {(t.bot_id, t.component) for t in wd.discover()}
+            self.assertIn(("p1", "plan"), pairs)
+            self.assertIn(("p1", "paper"), pairs)
+
+    def test_explicit_bot_ids_overrides(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = _make_root(td, {"p1": "paper", "p2": "paper"})
+            (root / "config" / "watchdog.yaml").write_text("bots: [p1]\n", encoding="utf-8")
+            wd = Watchdog(root, bot_ids=["p2"])
+            bids = {t.bot_id for t in wd.discover()}
+            self.assertEqual(bids, {"p2"})
 
     def test_bot_ids_filter(self):
         with tempfile.TemporaryDirectory() as td:
@@ -122,6 +169,7 @@ class TestCheckOnce(unittest.TestCase):
     def test_spawns_missing(self):
         with tempfile.TemporaryDirectory() as td:
             root = _make_root(td, {"p1": "paper"})
+            _touch_locks(root, "p1")
             wd = Watchdog(root, notify=False)
             wd.discover()
             spawned = []
@@ -134,6 +182,7 @@ class TestCheckOnce(unittest.TestCase):
     def test_skips_alive(self):
         with tempfile.TemporaryDirectory() as td:
             root = _make_root(td, {"p1": "paper"})
+            _touch_locks(root, "p1")
             wd = Watchdog(root, notify=False)
             wd.discover()
             with mock.patch.object(wd, "_spawn") as sp:
@@ -146,6 +195,7 @@ class TestCheckOnce(unittest.TestCase):
     def test_notifies_on_restart(self):
         with tempfile.TemporaryDirectory() as td:
             root = _make_root(td, {"p1": "paper"})
+            _touch_locks(root, "p1")
             wd = Watchdog(root, notify=True)
             wd.discover()
             sent = []
