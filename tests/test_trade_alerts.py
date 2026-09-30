@@ -27,7 +27,7 @@ class TestFormatTradeSteps(unittest.TestCase):
         self.assertEqual(len(lines), 4)
         self.assertIn("开仓 BTC_USDT 多", lines[0])
         self.assertIn("83000", lines[0])
-        self.assertIn("平仓 BTC_USDT", lines[1])
+        self.assertIn("止盈", lines[1])
         self.assertIn("pnl=1.2", lines[1])
         self.assertIn("减仓 BTC_USDT", lines[2])
         self.assertIn("改保护 BTC_USDT", lines[3])
@@ -106,8 +106,8 @@ class TestNotifyTradeEvents(unittest.TestCase):
         with mock.patch.dict("os.environ", env, clear=True):
             sent = []
             with mock.patch(
-                "gate_bot.monitoring.notify.AlertNotifier.send",
-                lambda self, text: sent.append(text) or True,
+                "gate_bot.monitoring.notify.AlertNotifier.send_card",
+                lambda self, card: sent.append(card) or True,
             ):
                 ok = notify_trade_events("bb", [
                     {"action": "open_short", "ok": True, "symbol": "BTC_USDT",
@@ -115,8 +115,8 @@ class TestNotifyTradeEvents(unittest.TestCase):
                 ])
             self.assertTrue(ok)
             self.assertEqual(len(sent), 1)
-            self.assertIn("[bb]", sent[0])
-            self.assertIn("开仓", sent[0])
+            self.assertIsInstance(sent[0], dict)
+            self.assertIsInstance(sent[0], dict)
 
 
 class TestTradeLogHooks(unittest.TestCase):

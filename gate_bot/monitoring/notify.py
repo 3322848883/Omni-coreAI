@@ -26,6 +26,10 @@ log = logging.getLogger(__name__)
 class NotificationChannel(ABC):
     """通知渠道基类。新增渠道只需继承并实现 send()。"""
 
+    def send_card(self, card: dict) -> bool:
+        """发送卡片消息（默认降级为文本）。"""
+        return self.send(str(card))
+
     @abstractmethod
     def send(self, text: str) -> bool:
         """发送消息。返回是否成功。"""
@@ -48,6 +52,35 @@ class FeishuChannel(NotificationChannel):
         self.app_id = app_id
         self.app_secret = app_secret
         self.user_open_id = user_open_id
+
+    def send_card(self, card: dict) -> bool:
+        """发送飞书卡片消息。"""
+        try:
+            if self.webhook:
+                data = json.dumps({"msg_type": "interactive", "card": card}).encode()
+                req = urllib.request.Request(self.webhook, data=data,
+                                            headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    return json.loads(resp.read()).get("code") == 0
+            if self.app_id and self.app_secret and self.user_open_id:
+                token = self._get_token()
+                if not token:
+                    return False
+                msg = json.dumps({
+                    "receive_id": self.user_open_id,
+                    "msg_type": "interactive",
+                    "content": json.dumps(card),
+                }).encode()
+                req = urllib.request.Request(
+                    "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id",
+                    data=msg,
+                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    return json.loads(resp.read()).get("code") == 0
+        except Exception as e:
+            log.warning("feishu card error: %s", e)
+            return False
+        return False
 
     def send(self, text: str) -> bool:
         if self.webhook:
@@ -161,6 +194,21 @@ class AlertNotifier:
     def channel_names(self) -> list[str]:
         return [c.name for c in self._channels]
 
+    def send_card(self, card: dict) -> bool:
+        """发送飞书卡片到所有已注册渠道。"""
+        if not self._channels:
+            return False
+        ok = False
+        for ch in self._channels:
+            try:
+                if hasattr(ch, "send_card"):
+                    ok = ch.send_card(card) or ok
+                else:
+                    ok = ch.send(str(card)) or ok
+            except Exception as e:
+                log.warning("channel %s card error: %s", ch.name, e)
+        return ok
+
     def send(self, text: str) -> bool:
         """发送到所有已注册渠道。返回是否有任一成功。"""
         if not self._channels:
@@ -248,8 +296,11 @@ def format_trade_steps(bot_id: str, steps: list) -> list[str]:
             lines.append(f"{mark} 开仓 {sym} {side} @{px} size={sz}")
         elif action in _CLOSE_ACTIONS:
             px = detail.get("price") or detail.get("avg_price") or ""
-            pnl = detail.get("realized_pnl") or detail.get("pnl") or ""
-            lines.append(f"{mark} 平仓 {sym} @{px} pnl={pnl}")
+            pnl = detail.get("realized_pnl") or detail.get("pnl") or detail.get("pnl_usd") or ""
+            pnl_val = float(pnl) if pnl else 0
+            label = "止盈" if pnl_val > 0 else ("止损" if pnl_val < 0 else "平仓")
+            icon = "✅" if pnl_val > 0 else ("🔴" if pnl_val < 0 else "📉")
+            lines.append(f"{mark} {icon} {label} {sym} @{px} pnl={pnl}")
         elif action in _REDUCE_ACTIONS:
             px = detail.get("price") or ""
             sz = detail.get("size") or detail.get("size_usd") or ""
@@ -261,17 +312,107 @@ def format_trade_steps(bot_id: str, steps: list) -> list[str]:
     return lines
 
 
+def format_trade_card(bot_id: str, steps: list) -> list[dict]:
+    """把成交事件格式化成飞书卡片元素（彩色标题+字段布局）。"""
+    cards = []
+    for s in steps or []:
+        if not isinstance(s, dict):
+            continue
+        action = str(s.get("action") or "")
+        if action in _MANAGE_ACTIONS and action != "modify_tp_sl":
+            continue
+        ok = bool(s.get("ok"))
+        sym = s.get("symbol") or ""
+        detail = s.get("detail") or {}
+
+        if action in _OPEN_ACTIONS:
+            side = "多" if "long" in action else "空"
+            px = detail.get("price") or detail.get("avg_price") or ""
+            sz = detail.get("size_usd") or detail.get("filled_size") or ""
+            sl = detail.get("sl") or ""
+            tp = detail.get("tp") or ""
+            color = "green"
+            title = f"📈 开仓告警"
+            fields = [
+                ("Bot", bot_id), ("标的", sym),
+                ("方向", f"开{side}"), ("入场价", str(px)),
+                ("仓位", f"{sz} USDT"), ("止损", str(sl)),
+                ("止盈", str(tp)),
+            ]
+        elif action in _CLOSE_ACTIONS:
+            px = detail.get("price") or detail.get("avg_price") or ""
+            pnl = detail.get("realized_pnl") or detail.get("pnl") or detail.get("pnl_usd") or ""
+            pnl_val = 0
+            try:
+                pnl_val = float(pnl) if pnl else 0
+            except (TypeError, ValueError):
+                pass
+            if pnl_val > 0:
+                color, icon, label = "green", "\u2705", "止盈"
+            elif pnl_val < 0:
+                color, icon, label = "red", "\U0001f534", "止损"
+            else:
+                color, icon, label = "blue", "\U0001f4c9", "平仓"
+            title = f"{icon} {label}告警"
+            fields = [
+                ("Bot", bot_id), ("标的", sym),
+                ("平仓价", str(px)), ("盈亏", f"{pnl} USDT"),
+            ]
+        elif action in _REDUCE_ACTIONS:
+            px = detail.get("price") or ""
+            sz = detail.get("size") or detail.get("size_usd") or ""
+            color = "blue"
+            title = f"📊 减仓告警"
+            fields = [
+                ("Bot", bot_id), ("标的", sym),
+                ("减仓价", str(px)), ("减仓量", f"{sz} USDT"),
+            ]
+        elif action == "modify_tp_sl":
+            tp = detail.get("tp") or s.get("tp") or ""
+            sl = detail.get("sl") or s.get("sl") or ""
+            color = "blue"
+            title = f"✏️ 改单告警"
+            fields = [
+                ("Bot", bot_id), ("标的", sym),
+                ("止盈", str(tp)), ("止损", str(sl)),
+            ]
+        else:
+            continue
+
+        # 构建飞书卡片
+        field_elements = []
+        for i in range(0, len(fields), 2):
+            pair = fields[i:i+2]
+            field_elements.append({
+                "tag": "div",
+                "fields": [
+                    {"is_short": True, "text": {"tag": "lark_md",
+                     "content": f"**{k}:** {v}"}}
+                    for k, v in pair
+                ],
+            })
+        card = {
+            "config": {"wide_screen_mode": True},
+            "header": {"title": {"tag": "plain_text", "content": title}, "template": color},
+            "elements": field_elements,
+        }
+        cards.append(card)
+    return cards
+
+
 def notify_trade_events(bot_id: str, steps: list, root: Path = None) -> bool:
-    """成交事件推送（无渠道时静默返回 False）。"""
-    lines = format_trade_steps(bot_id, steps)
-    if not lines:
+    """成交事件推送（飞书卡片，无渠道时静默返回 False）。"""
+    cards = format_trade_card(bot_id, steps)
+    if not cards:
         return False
-    text = f"[{bot_id}]\n" + "\n".join(lines)
     try:
         n = build_notifier(root=root)
         if not n.has_channel:
             return False
-        return n.send(text)
+        ok = False
+        for card in cards:
+            ok = n.send_card(card) or ok
+        return ok
     except Exception as e:  # noqa: BLE001
         log.warning("trade notify error: %s", e)
         return False
