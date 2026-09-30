@@ -1,4 +1,4 @@
-"""Execute parsed intents against Gate.io."""
+﻿"""Execute parsed intents against Gate.io."""
 
 from __future__ import annotations
 
@@ -216,7 +216,7 @@ class Executor:
                 continue
             slot = snap.setdefault(intent.symbol, {"prefix": prefix, "price_ids": set(), "order_ids": set()})
             for p in self._owned_price_orders(intent.symbol, prefix):
-                pid = str(p.get("id") or "")
+                pid = self._order_id(p)
                 if pid:
                     slot["price_ids"].add(pid)
             for o in self._owned_open_orders(intent.symbol, prefix):
@@ -254,7 +254,7 @@ class Executor:
             keep_price.setdefault(intent.symbol, set())
             keep_orders.setdefault(intent.symbol, set())
             for p in self._owned_price_orders(intent.symbol, prefix):
-                keep_price[intent.symbol].add(str(p.get("id") or ""))
+                keep_price[intent.symbol].add(self._order_id(p))
             for o in self._owned_open_orders(intent.symbol, prefix):
                 keep_orders[intent.symbol].add(str(o.get("id") or ""))
 
@@ -892,7 +892,7 @@ class Executor:
             status = str(po.get("status") or "").lower()
             if status in ("cancelled", "finished", "filled", "triggered", "failed", "closed"):
                 continue  # already terminal — do not re-cancel
-            pid = str(po.get("id") or "")
+            pid = self._order_id(po)
             if not pid or pid in new_ids:
                 continue
             try:
@@ -1198,6 +1198,11 @@ class Executor:
         return StepResult(intent.action, intent.symbol, True, detail=detail)
 
     @staticmethod
+    def _order_id(po: dict) -> str:
+        """Gate 用 `id`，paper 用 `order_id` —— 两个都认。"""
+        return str(po.get("id") or po.get("order_id") or po.get("id_string") or "")
+
+    @staticmethod
     def _order_is_reduce_only(po: dict) -> bool:
         """Gate 返回 `initial.is_reduce_only`，paper 侧用 `reduce_only` —— 两个都认。"""
         init = po.get("initial") or {}
@@ -1260,7 +1265,7 @@ class Executor:
             status = str(p.get("status") or "").lower()
             if status in ("cancelled", "finished", "filled", "triggered", "failed", "closed"):
                 continue
-            pid = str(p.get("id") or "")
+            pid = self._order_id(p)
             if not pid or pid in keep:
                 continue
             if self.label_prefix:
@@ -1322,7 +1327,7 @@ class Executor:
                 continue
             if abs(psz) == total:
                 continue
-            pid = str(p.get("id") or "")
+            pid = self._order_id(p)
             trig = p.get("trigger") or {}
             trigger_price = trig.get("price") or init.get("trigger_price") or p.get("trigger_price")
             if not trigger_price:
@@ -1489,7 +1494,7 @@ class Executor:
             errors = []
             for sym in symbols or ([symbol] if symbol else []):
                 for p in self._owned_price_orders(sym, prefix):
-                    pid = str(p.get("id") or "")
+                    pid = self._order_id(p)
                     if not pid:
                         continue
                     try:
