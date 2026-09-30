@@ -112,7 +112,12 @@ class Watchdog:
         t.restarts = [x for x in t.restarts if now - x < 3600]
         if len(t.restarts) >= self.max_restarts:
             t.stopped = True
-            self._alert(f"⛔ {t.bot_id}/{t.component}：1 小时内重启 {self.max_restarts} 次，已停手，请人工介入")
+            self._alert(
+                f"{t.bot_id}/{t.component}：1 小时内重启 {self.max_restarts} 次，已停手",
+                kind="storm", color="red",
+                fields=[("Bot", t.bot_id), ("组件", t.component),
+                        ("重启次数", str(self.max_restarts)), ("处置", "请人工介入")],
+            )
             return False
         t.restarts.append(now)
         return True
@@ -155,17 +160,19 @@ class Watchdog:
         return str(exe)
 
     # ── 通知 ──────────────────────────────────────
-    def _alert(self, text: str) -> None:
+    def _alert(self, text: str, kind: str = "info", fields: Optional[list] = None,
+               color: str = "blue") -> None:
         log.warning(text)
         if not self.notify:
             return
         try:
-            if self._notifier is None:
-                from .monitoring import build_notifier
+            from .monitoring import notify_process_event
 
-                self._notifier = build_notifier(self.root)
-            if self._notifier and self._notifier.has_channel:
-                self._notifier.send(f"[watchdog] {text}")
+            notify_process_event(
+                root=self.root, kind=kind,
+                title=text.replace("[watchdog] ", ""),
+                fields=fields or [], color=color,
+            )
         except Exception:  # noqa: BLE001
             pass
 
@@ -186,7 +193,11 @@ class Watchdog:
             if self._allow_restart(t):
                 if self._spawn(t):
                     restarted.append(f"{t.bot_id}/{t.component}")
-                    self._alert(f"↻ 自动拉起 {t.bot_id}/{t.component}")
+                    self._alert(
+                        f"自动拉起 {t.bot_id}/{t.component}",
+                        kind="restart", color="green",
+                        fields=[("Bot", t.bot_id), ("组件", t.component), ("动作", "已自动重启")],
+                    )
                 else:
                     t.skip_until = time.time() + 30.0
         return {"held": held, "missing": missing, "restarted": restarted}
@@ -196,7 +207,12 @@ class Watchdog:
         if not self.targets:
             self._alert("watchdog: 无目标 bot，退出")
             return
-        self._alert(f"🐕 看门狗已启动，接管 {len({t.bot_id for t in self.targets})} 个 bot / {len(self.targets)} 个组件")
+        self._alert(
+            f"看门狗已启动，接管 {len({t.bot_id for t in self.targets})} 个 bot / {len(self.targets)} 个组件",
+            kind="start", color="blue",
+            fields=[("Bot 数", str(len({t.bot_id for t in self.targets}))),
+                    ("组件数", str(len(self.targets)))],
+        )
 
         def _sig(*_a):
             self._stop = True
@@ -217,4 +233,4 @@ class Watchdog:
                     log.warning("check error: %s", e)
                 time.sleep(self.interval_sec)
         finally:
-            self._alert("看门狗已停止")
+            self._alert("看门狗已停止", kind="stop", color="grey", fields=[("状态", "已停止")])

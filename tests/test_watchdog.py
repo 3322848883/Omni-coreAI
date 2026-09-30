@@ -111,7 +111,7 @@ class TestAliveProbe(unittest.TestCase):
 
 class TestRestartLimit(unittest.TestCase):
     def test_storm_holds(self):
-        wd = Watchdog(Path("."), max_restarts_per_hour=2)
+        wd = Watchdog(Path("."), max_restarts_per_hour=2, notify=False)
         t = Target("b1", "plan")
         self.assertTrue(wd._allow_restart(t))
         self.assertTrue(wd._allow_restart(t))
@@ -119,7 +119,7 @@ class TestRestartLimit(unittest.TestCase):
         self.assertTrue(t.stopped)
 
     def test_window_slides(self):
-        wd = Watchdog(Path("."), max_restarts_per_hour=2)
+        wd = Watchdog(Path("."), max_restarts_per_hour=2, notify=False)
         t = Target("b1", "plan")
         wd._allow_restart(t)
         wd._allow_restart(t)
@@ -162,14 +162,42 @@ class TestCheckOnce(unittest.TestCase):
             wd = Watchdog(root, notify=True)
             wd.discover()
             sent = []
-            fake = mock.MagicMock()
-            fake.has_channel = True
-            fake.send = lambda text: sent.append(text) or True
-            wd._notifier = fake
-            with mock.patch.object(wd, "_spawn", return_value=True):
-                with mock.patch.object(Watchdog, "_alive", return_value=False):
-                    wd.check_once()
-            self.assertTrue(any("自动拉起" in s for s in sent))
+            with mock.patch(
+                "gate_bot.monitoring.notify_process_event",
+                side_effect=lambda **kw: sent.append(kw.get("title", "")) or True,
+            ):
+                with mock.patch.object(wd, "_spawn", return_value=True):
+                    with mock.patch.object(Watchdog, "_alive", return_value=False):
+                        wd.check_once()
+            self.assertTrue(any("自动拉起" in s for s in sent), f"sent={sent}")
+
+    def test_no_notify_sends_nothing(self):
+        """notify=False 时绝不发通知。"""
+        with tempfile.TemporaryDirectory() as td:
+            root = _make_root(td, {"p1": "paper"})
+            _touch_locks(root, "p1")
+            wd = Watchdog(root, notify=False)
+            wd.discover()
+            with mock.patch("gate_bot.monitoring.notify_process_event") as m:
+                with mock.patch.object(wd, "_spawn", return_value=True):
+                    with mock.patch.object(Watchdog, "_alive", return_value=False):
+                        wd.check_once()
+                m.assert_not_called()
+
+    def test_storm_card_fields(self):
+        """重启风暴用 storm 红色卡片。"""
+        wd = Watchdog(Path("."), max_restarts_per_hour=1, notify=True)
+        t = Target("bot-x", "plan")
+        calls = []
+        with mock.patch(
+            "gate_bot.monitoring.notify_process_event",
+            side_effect=lambda **kw: calls.append(kw) or True,
+        ):
+            self.assertTrue(wd._allow_restart(t))
+            self.assertFalse(wd._allow_restart(t))  # 触发风暴
+        self.assertTrue(calls, "应发出风暴告警")
+        self.assertEqual(calls[0].get("kind"), "storm")
+        self.assertEqual(calls[0].get("color"), "red")
 
 
 if __name__ == "__main__":

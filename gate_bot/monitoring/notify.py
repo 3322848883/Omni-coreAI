@@ -416,3 +416,41 @@ def notify_trade_events(bot_id: str, steps: list, root: Path = None) -> bool:
     except Exception as e:  # noqa: BLE001
         log.warning("trade notify error: %s", e)
         return False
+
+# ── 进程/看门狗事件卡片（与成交卡片同风格） ─────────
+def format_process_card(kind: str, title: str, fields: Optional[list] = None, color: str = "blue") -> dict:
+    """看门狗/进程事件飞书卡片。kind: restart | storm | start | stop | info。"""
+    icon = {
+        "restart": "↻", "storm": "⛔", "start": "🐕",
+        "stop": "🛑", "info": "ℹ️",
+    }.get(kind, "ℹ️")
+    field_elements = []
+    for i in range(0, len(fields or []), 2):
+        pair = (fields or [])[i:i + 2]
+        field_elements.append({
+            "tag": "div",
+            "fields": [
+                {"is_short": True, "text": {"tag": "lark_md",
+                 "content": f"**{k}:** {v}"}}
+                for k, v in pair
+            ],
+        })
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"title": {"tag": "plain_text", "content": f"{icon} {title}"}, "template": color},
+        "elements": field_elements or [{"tag": "div", "text": {"tag": "lark_md", "content": title}}],
+    }
+
+
+def notify_process_event(root: Path = None, kind: str = "info", title: str = "",
+                         fields: Optional[list] = None, color: str = "blue") -> bool:
+    """进程事件推送（飞书卡片）。"""
+    try:
+        n = build_notifier(root=root)
+        if not n.has_channel:
+            return False
+        card = format_process_card(kind, title, fields, color)
+        return n.send_card(card)
+    except Exception as e:  # noqa: BLE001
+        log.warning("process notify error: %s", e)
+        return False
