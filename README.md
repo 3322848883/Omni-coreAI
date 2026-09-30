@@ -638,20 +638,62 @@ python -m gate_bot persona-run --once             # 单轮
 | 系统健康监控 | LLM 延迟/错误次数/心跳超时告警 |
 | 订单状态机 | mmp_canceled / IOC 部分成交正确记录 |
 | 波动率仓位 | ATR 目标波动自动缩放 size_usd |
+| **告警落盘** `alerts.json` | 权益偏离 / 重复成交 / 孤儿保护单 → `data/bots/<id>/state/alerts.json` |
+| **成交推送** | 开/平/减仓/改保护 → 飞书彩色卡片（止盈绿/止损红/平仓蓝） |
+| **进程看门狗** | 挂了自动拉起 + 飞书通知；1 小时崩 5 次停手报警 |
+
+**告警落盘（P0.4）**——体检脚本可直接读：
+
+```python
+from gate_bot.monitoring import read_alerts
+read_alerts(root, "brooks-btc")              # 全部
+read_alerts(root, "brooks-btc", "dup_fill")  # 按类型
+```
+
+触发即写：`equity_deviation`（日初权益偏离 >10%）、`dup_fill`（重复成交）、`orphan_protector`（平仓后遗留 SL/TP）。
 
 **飞书/Telegram 告警**（可选，不配则降级为日志）：
 
 ```powershell
+# 方式 1：环境变量
 $env:FEISHU_APP_ID = "cli_xxx"
 $env:FEISHU_APP_SECRET = "xxx"
 $env:FEISHU_USER_OPEN_ID = "ou_xxx"
+# 或群机器人：$env:FEISHU_WEBHOOK = "https://open.feishu.cn/open-apis/bot/v2/hook/..."
+
+# 方式 2：config/alerts.yaml（不入 git）
+# feishu: {app_id: ..., app_secret: ..., user_open_id: ...}
 ```
+
+推送内容：开仓/止盈/止损/平仓/减仓/改单 卡片 + 衰减/权益/孤儿/进程事件。
+
+**波动率仓位**（可选，`account_risk` 里开）：
+
+```yaml
+account_risk:
+  vol_target_pct: 2.0   # 目标 ATR%；0/不配 = 关闭
+```
+
+ATR 高于目标 → 减仓；低于目标 → 加仓（倍数钳在 0.5–2.0）。
 
 **回测验证**（手动按需）：
 
 ```powershell
 .venv\Scripts\python.exe -m gate_bot backtest --bot brooks-btc --days 30
+# 加基准：--closes 83000,83100,82900,...
 ```
+
+**进程看门狗**——守护 `enabled: true` 的 bot，挂了自动补拉：
+
+```powershell
+scripts\start_watchdog_bg.bat
+# 或
+.venv\Scripts\python.exe -m gate_bot watchdog --interval 15
+```
+
+- **开关**：每个 bot yaml 的 `enabled: true/false` 就是唯一开关；关了不看、开了守护
+- **存活判定**：探 OS 文件锁（worker 持锁）
+- **限频**：单组件 1 小时最多重启 5 次，超了停手并推送「请人工介入」
 
 **可扩展通知**（继承 NotificationChannel）：
 

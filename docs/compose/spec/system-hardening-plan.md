@@ -1,7 +1,7 @@
 # 系统深度归因与升级方案
 
 > 基于 21 个模拟盘全面体检 + 实盘/纸面链路联调问题。  
-> 状态：**P0.1–P0.3 / P1.1–P1.4 已落地**（见 §6）；P0.4（alerts.json）未做。
+> 状态：**P0.1–P0.4 / P1.1–P1.4 已落地**（见 §6）。
 
 ---
 
@@ -32,7 +32,7 @@
   ├─ 无「权益比例」级仓位硬顶     → 已修（max_notional_pct，默认 5×）
   ├─ paper 账本无跨进程文件锁     → 已修（_FileLock + msvcrt/flock）
   ├─ 入场后无持续风控（日亏/熔断）→ 已修（halt + daily_loss_limit_usd）
-  └─ 可观测性弱（双倍成交无告警）→ 部分（notify/decay 有；alerts.json 未做）
+  └─ 可观测性弱（双倍成交无告警）→ 已修（alerts.json + 飞书卡片 + 看门狗）
 
 策略问题（系统算对了，但单子质量差）
   ├─ 仓位公式执行不稳定          → 提示词 + 可程序验算 P1
@@ -53,7 +53,7 @@
 | P0.1 | **孤儿保护单回收** | `close`/强平/仓位归零时：撤该合约 reduce-only 条件单（仅本 bot label 前缀） | 平仓后 `orphanSLTP=0` |
 | P0.2 | **权益比例仓位硬顶** | executor：`size_usd ≤ equity × max_notional_pct`（**默认 5.0 = 5×权益**，即验收口径；非 50%）+ 绝对 max_notional | 1 万权益单笔名义 ≤ 5 万 |
 | P0.3 | **入账唯一约束** | fills 表 `(order_id, size, price)` 防重；`_apply_fill` 再查一次 | 人工双写被拒 |
-| P0.4 | **监控告警** | 权益偏离 &gt;10%、dup fill、orphan&gt;0 → 写 `state/alerts.json` | 体检脚本读告警 |
+| P0.4 | **监控告警** | 权益偏离 &gt;10%、dup fill、orphan&gt;0 → 写 `state/alerts.json` | **已实现** `monitoring/alerts.py` |
 
 ### P1 — 风控与稳定
 
@@ -114,8 +114,14 @@
 - **P1.2 程序验算仓位**：`_align_size_to_risk` 按 SL 距离反推并钳制
 - **P1.3 paper 跨进程文件锁**：`paper/store._FileLock`（msvcrt/flock）
 - **P1.4 单实例强化**：PidLock 改 OS 文件锁 + worker 自持锁（防 PID 复用/孤儿双开）
-- paper 单测 24 + 全量 625（含锁 9 项）
+- **P0.4 监控告警落盘**：`monitoring/alerts.py` — 权益偏离/dup fill/orphan → `state/alerts.json`
+- **成交飞书卡片**：开/止盈/止损/平/减仓/改单 彩色卡片推送（`config/alerts.yaml` 或 `FEISHU_*`）
+- **进程看门狗**：`python -m gate_bot watchdog` — 按 `enabled` 开关补拉挂掉组件 + 飞书通知
+- **波动率仓位挂钩**：`account_risk.vol_target_pct` + `executor._vol_adjust`（ATR 目标缩放）
+- **回测 CLI**：`python -m gate_bot backtest --bot X --days N`（journal 回放 + DSR）
+- 全量 665 测试 OK
 
-### 未做
+### 遗留（非阻塞）
 
-- **P0.4 监控告警 `state/alerts.json`**（权益偏离/dup fill/orphan 告警落盘）—— `notify.py`/`decay.py` 已有通道与衰减检测，但无 alerts.json 产物
+- **P2.x**：`paper-audit` 体检 CLI、评分板 Sharpe/回撤列、配置模板 `max_notional_pct` 统一、账本可信度标记
+- **P1.5 replace 收窄**：`replace: symbol` 默认只撤「过期入场」

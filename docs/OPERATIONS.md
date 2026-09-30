@@ -30,9 +30,34 @@ python -m gate_bot status           # 含 heartbeats / PID
 .\scripts\start_brooks_btc_bg.bat
 ```
 
-- 每 bot 每组件 **PID 锁**（`data/bots/<id>/state/*.lock`）防双开  
+- 每 bot 每组件 **OS 文件锁**（`data/bots/<id>/state/*.lock`）防双开  
 - 崩溃约 5s 拉起；**≤5 次/小时** 防重启风暴  
 - **子进程使用 `pythonw.exe`**，不弹黑框  
+
+### 看门狗（watchdog）—— 兜底补拉 + 飞书通知
+
+Supervisor 只管自己启动的那组；**看门狗**是从全局视角扫「该跑的组件」，发现缺失就补拉。
+
+```powershell
+.\scripts\start_watchdog_bg.bat          # 无窗口
+python -m gate_bot watchdog --interval 15
+```
+
+| 项 | 行为 |
+|----|------|
+| **在管判据** | bot yaml 的 `enabled: true`（唯一开关；false 一律不看） |
+| 组件映射 | plan→`plan-loop`；paper→`paper-run`；live→`run` |
+| 存活判定 | 探 OS 文件锁：被持有 = 活着 |
+| 重启限频 | 单组件 ≤5 次/小时，超了停手 + 推送「请人工介入」 |
+| 飞书通知 | 启动接管、自动拉起、崩溃风暴 |
+
+**新增 bot**：把 `enabled: true` 即可被看门狗接管；`enabled: false` 立即不管。
+
+### 单实例锁（PidLock）
+
+- 互斥来自 **OS 文件锁**（Windows `msvcrt.locking` / Unix `fcntl.flock`），进程死亡自动释放
+- 锁文件里的 PID 只作诊断，**不参与判定**（防 Windows PID 复用误拒）
+- **worker 自己持锁**（不是 supervisor 代持）——supervisor 死了、子进程仍在时，新实例无法双开
 - 存储：`data/bots.db` 台账 + `data/bots/<id>/` 文件树  
 - 详细设计：`docs/compose/spec/runtime-upgrade.md`
 
@@ -164,8 +189,12 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
 | `OPENAI_BASE_URL` / `OPENAI_API_KEY` | LLM |
 | `GATE_BOT_ROOT` | 仓库根（systemd/cron 用） |
 | `GATE_BOT_PA_DATA` | 行情库目录（可选） |
+| `FEISHU_APP_ID` / `FEISHU_APP_SECRET` / `FEISHU_USER_OPEN_ID` | 飞书推送（应用机器人） |
+| `FEISHU_WEBHOOK` | 飞书推送（群机器人，二选一） |
+| `TELEGRAM_TOKEN` / `TELEGRAM_CHAT_ID` | Telegram 推送（可选） |
 
 **不要**把密钥写进 yaml。服务/任务计划的「环境」或系统用户环境变量里配置。
+飞书凭据也可放 `config/alerts.yaml`（已 gitignore，不入 git）。
 
 ---
 
@@ -174,9 +203,11 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
 | 频率 | 动作 |
 |------|------|
 | 每天 | `python -m gate_bot status`；看 `logs/*plan.err` / `run.err` |
+| 每天 | 看 `data/bots/*/state/alerts.json` 是否有新告警（权益/重复成交/孤儿） |
 | 有单时 | `python -m gate_bot trades --bot brooks-btc --tail 20` |
 | 失败 | `archive/failed/brooks-btc/*.error.json` |
 | 异常空转 | 确认两进程都在、OPENAI/GATE 余额与权限 |
+| 告警推送 | 飞书是否收到开平仓卡片；没收到先查 `config/alerts.yaml` |
 
 ---
 

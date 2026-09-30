@@ -119,6 +119,49 @@ LLM 策略另需 `OPENAI_BASE_URL` / `OPENAI_API_KEY`，然后：
 # 无窗口启动
 .\scripts\start_brooks_btc_bg.bat
 .venv\Scripts\python.exe scripts\prelaunch_runner.py --phase readonly --env testnet
+# 回测（journal 回放，PnL/Sharpe/DSR）
+.venv\Scripts\python.exe -m gate_bot backtest --bot <id> --days 30
+# 进程看门狗（挂了自动拉起 + 飞书通知）
+.\scripts\start_watchdog_bg.bat
+.venv\Scripts\python.exe -m gate_bot watchdog --interval 15
+```
+
+---
+
+## 5a. 告警与守护（运维必读）
+
+| 能力 | 入口 | 说明 |
+|------|------|------|
+| **告警落盘** | `data/bots/<id>/state/alerts.json` | 权益偏离/重复成交/孤儿保护单，自动写入 |
+| **成交推送** | 飞书彩色卡片 | 开/止盈/止损/平/减仓/改单；`config/alerts.yaml` 或 `FEISHU_*` 环境变量 |
+| **进程看门狗** | `python -m gate_bot watchdog` | 守护 `enabled: true` 的 bot，挂了补拉 |
+| **单实例锁** | `state/plan.lock` / `run.lock` | OS 文件锁（msvcrt/flock），防 PID 复用/孤儿双开 |
+
+**bot 开关 = 唯一在管判据**：
+
+```yaml
+# config/bots/xxx.yaml
+enabled: true    # 看门狗守护、supervisor 拉起
+enabled: false   # 一律不管，绝不凭空开
+```
+
+**告警类型**（`gate_bot.monitoring`）：
+
+| type | 触发 | 落盘 |
+|------|------|------|
+| `equity_deviation` | 权益相对日初偏离 >10% | alerts.json |
+| `dup_fill` | 同一 order_id 重复成交 | alerts.json |
+| `orphan_protector` | 平仓后遗留 reduce-only SL/TP | alerts.json |
+| 成交卡片 | 开/平/减仓/改保护 | 飞书 |
+| 衰减 | 滚动胜率/Sharpe 跌破阈值 | 飞书 |
+| 进程事件 | 看门狗重启/停手 | 飞书 |
+
+读告警：
+
+```python
+from gate_bot.monitoring import read_alerts
+read_alerts(root, "brooks-btc")              # 全部
+read_alerts(root, "brooks-btc", "dup_fill")  # 按类型
 ```
 
 ---
