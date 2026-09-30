@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """P0.4 alerts.json 告警落盘测试。"""
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from gate_bot.monitoring import (
     TYPE_DUP_FILL,
@@ -201,3 +202,87 @@ class TestOrphanFieldName(unittest.TestCase):
         }
         positions = [{"contract": "BTC_USDT", "size": 5}]  # 有多仓 → 卖平不是孤儿
         self.assertFalse(ex._is_orphan_protector(po, positions))
+
+
+class TestNotifySwitch(unittest.TestCase):
+    """模拟盘/实盘通知开关：模拟盘默认关。"""
+
+    def test_paper_default_off(self):
+        from gate_bot.monitoring import should_notify
+
+        with tempfile.TemporaryDirectory() as td:
+            # 无配置 → 实盘开、模拟盘关（安全默认）
+            self.assertTrue(should_notify(Path(td), "live"))
+            self.assertFalse(should_notify(Path(td), "paper"))
+
+    def test_yaml_switch(self):
+        from gate_bot.monitoring import should_notify
+
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "config").mkdir()
+            (Path(td) / "config" / "alerts.yaml").write_text(
+                "notify:\n  live: true\n  paper: true\n", encoding="utf-8"
+            )
+            self.assertTrue(should_notify(Path(td), "live"))
+            self.assertTrue(should_notify(Path(td), "paper"))
+
+    def test_live_can_be_disabled(self):
+        from gate_bot.monitoring import should_notify
+
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "config").mkdir()
+            (Path(td) / "config" / "alerts.yaml").write_text(
+                "notify:\n  live: false\n  paper: false\n", encoding="utf-8"
+            )
+            self.assertFalse(should_notify(Path(td), "live"))
+
+    def test_trade_events_gated_by_env(self):
+        from gate_bot.monitoring import notify_trade_events
+
+        steps = [{"action": "open_long", "ok": True, "symbol": "BTC_USDT",
+                  "detail": {"price": 83000, "sl": 82800, "tp": 83500, "size_usd": 100}}]
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch("gate_bot.monitoring.notify_process_event") as _:
+                # paper 默认关 → 不发
+                with mock.patch("gate_bot.monitoring.notify.build_notifier") as bn:
+                    notify_trade_events("bot-x", steps, root=Path(td), env="paper")
+                    bn.assert_not_called()
+                # live → 会尝试发
+                with mock.patch("gate_bot.monitoring.notify.build_notifier") as bn:
+                    bn.return_value.has_channel = False
+                    notify_trade_events("bot-x", steps, root=Path(td), env="live")
+                    bn.assert_called()
+
+    def test_open_card_has_tp_sl(self):
+        """开仓卡片必须含止损/止盈（不能是空模板）。"""
+        from gate_bot.monitoring import format_trade_card
+
+        steps = [{
+            "action": "open_short", "ok": True, "symbol": "BTC_USDT",
+            "detail": {
+                "price": 83350.0, "size_usd": 24373.295400837662,
+                "sl": 83720.0, "tp": 82560.0,
+            },
+        }]
+        cards = format_trade_card("brooks-btc", steps)
+        self.assertEqual(len(cards), 1)
+        text = str(cards[0])
+        self.assertIn("83350", text)   # 入场价
+        self.assertIn("83720", text)   # 止损
+        self.assertIn("82560", text)   # 止盈
+        self.assertIn("24373", text)   # 仓位（已格式化）
+
+    def test_open_card_no_empty_fields(self):
+        """关键字段不能是空字符串。"""
+        from gate_bot.monitoring import format_trade_card
+
+        steps = [{
+            "action": "open_long", "ok": True, "symbol": "BTC_USDT",
+            "detail": {"entry_price": 83000, "sl": 82800, "tp": 83500, "size_usd": 100},
+        }]
+        cards = format_trade_card("bb", steps)
+        elems = str(cards[0])
+        # 关键数值必须在卡片里
+        self.assertIn("82800", elems)
+        self.assertIn("82800", elems)
+        self.assertIn("83500", elems)

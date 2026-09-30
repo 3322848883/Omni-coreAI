@@ -158,6 +158,7 @@ def process_file(path: Path, bot: BotConfig, paths: ProjectPaths, executor: Opti
             (signal.meta or {}),
             result,
             source="watcher",
+            env=getattr(bot, "env", "live") or "live",
         )
     except Exception as e:  # noqa: BLE001
         log.warning("trade log write failed: %s", e)

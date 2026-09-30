@@ -1,4 +1,4 @@
-"""gate_bot.monitoring — 策略衰减检测 + 健康监控告警 + 告警落盘 + 可扩展通知渠道。"""
+﻿"""gate_bot.monitoring — 策略衰减检测 + 健康监控告警 + 告警落盘 + 可扩展通知渠道。"""
 from .alerts import (
     TYPE_DUP_FILL,
     TYPE_EQUITY_DEVIATION,
@@ -16,6 +16,8 @@ from .notify import (
     TelegramChannel,
     build_notifier,
     format_process_card,
+    format_trade_card,
+    should_notify,
     format_trade_steps,
     notify_process_event,
     notify_trade_events,
@@ -26,6 +28,6 @@ __all__ = [
     "NotificationChannel", "FeishuChannel", "TelegramChannel", "DingTalkChannel",
     "AlertStore", "read_alerts",
     "TYPE_EQUITY_DEVIATION", "TYPE_DUP_FILL", "TYPE_ORPHAN",
-    "build_notifier", "format_trade_steps", "notify_trade_events",
+    "build_notifier", "format_trade_steps", "format_trade_card", "notify_trade_events", "should_notify",
     "format_process_card", "notify_process_event",
 ]

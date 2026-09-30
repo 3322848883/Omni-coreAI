@@ -245,6 +245,27 @@ def _load_alerts_yaml(root: Path) -> dict:
     return {}
 
 
+
+
+def should_notify(root: Path = None, env: str = "live") -> bool:
+    """通知开关：实盘默认开、模拟盘默认关。
+
+    config/alerts.yaml:
+      notify:
+        live: true
+        paper: false
+    """
+    try:
+        cfg = _load_alerts_yaml(root or Path.cwd())
+        sw = (cfg.get("notify") or {}) if isinstance(cfg, dict) else {}
+        env = (env or "live").lower()
+        if env == "paper":
+            return bool(sw.get("paper", False))
+        return bool(sw.get("live", True))
+    except Exception:  # noqa: BLE001
+        # 读不到配置时：实盘开、模拟盘关（安全默认）
+        return (env or "live").lower() != "paper"
+
 def build_notifier(root: Path = None) -> AlertNotifier:
     """注册通知渠道：优先环境变量，其次 config/alerts.yaml。"""
     import os
@@ -295,14 +316,14 @@ def format_trade_steps(bot_id: str, steps: list) -> list[str]:
             sz = detail.get("size_usd") or detail.get("filled_size") or ""
             lines.append(f"{mark} 开仓 {sym} {side} @{px} size={sz}")
         elif action in _CLOSE_ACTIONS:
-            px = detail.get("price") or detail.get("avg_price") or ""
+            px = _entry_price(detail, s)
             pnl = detail.get("realized_pnl") or detail.get("pnl") or detail.get("pnl_usd") or ""
             pnl_val = float(pnl) if pnl else 0
             label = "止盈" if pnl_val > 0 else ("止损" if pnl_val < 0 else "平仓")
             icon = "✅" if pnl_val > 0 else ("🔴" if pnl_val < 0 else "📉")
             lines.append(f"{mark} {icon} {label} {sym} @{px} pnl={pnl}")
         elif action in _REDUCE_ACTIONS:
-            px = detail.get("price") or ""
+            px = _entry_price(detail, s)
             sz = detail.get("size") or detail.get("size_usd") or ""
             lines.append(f"{mark} 减仓 {sym} @{px} size={sz}")
         elif action == "modify_tp_sl":
@@ -310,6 +331,34 @@ def format_trade_steps(bot_id: str, steps: list) -> list[str]:
             sl = detail.get("sl") or s.get("sl") or ""
             lines.append(f"{mark} 改保护 {sym} TP={tp} SL={sl}")
     return lines
+
+
+def _fmt_num(v, digits: int = 2) -> str:
+    """数字格式化：去掉浮点噪声，空值显示 —。"""
+    if v is None or v == "":
+        return "—"
+    try:
+        f = float(v)
+        if f == int(f):
+            return str(int(f))
+        return f"{f:.{digits}f}".rstrip("0").rstrip(".")
+    except (TypeError, ValueError):
+        return str(v) or "—"
+
+
+def _entry_price(detail: dict, s: dict) -> str:
+    """入场价：detail.entry_price → order.fill_price/price → detail.price。"""
+    for src in (
+        detail.get("entry_price"),
+        (detail.get("order") or {}).get("fill_price"),
+        (detail.get("order") or {}).get("price"),
+        detail.get("price"),
+        detail.get("avg_price"),
+        s.get("price"),
+    ):
+        if src is not None and src != "" and str(src) != "0":
+            return _fmt_num(src, 1)
+    return "—"
 
 
 def format_trade_card(bot_id: str, steps: list) -> list[dict]:
@@ -327,20 +376,20 @@ def format_trade_card(bot_id: str, steps: list) -> list[dict]:
 
         if action in _OPEN_ACTIONS:
             side = "多" if "long" in action else "空"
-            px = detail.get("price") or detail.get("avg_price") or ""
+            px = _entry_price(detail, s)
             sz = detail.get("size_usd") or detail.get("filled_size") or ""
-            sl = detail.get("sl") or ""
-            tp = detail.get("tp") or ""
+            sl = detail.get("sl") or s.get("sl") or ""
+            tp = detail.get("tp") or s.get("tp") or ""
             color = "green"
             title = f"📈 开仓告警"
             fields = [
                 ("Bot", bot_id), ("币种", sym),
-                ("方向", f"开{side}"), ("入场价", str(px)),
-                ("仓位", f"{sz} USDT"), ("止损", str(sl)),
-                ("止盈", str(tp)),
+                ("方向", f"开{side}"), ("入场价", px),
+                ("仓位", f"{_fmt_num(sz)} USDT"), ("止损", _fmt_num(sl)),
+                ("止盈", _fmt_num(tp)),
             ]
         elif action in _CLOSE_ACTIONS:
-            px = detail.get("price") or detail.get("avg_price") or ""
+            px = _entry_price(detail, s)
             pnl = detail.get("realized_pnl") or detail.get("pnl") or detail.get("pnl_usd") or ""
             pnl_val = 0
             try:
@@ -356,16 +405,16 @@ def format_trade_card(bot_id: str, steps: list) -> list[dict]:
             title = f"{icon} {label}告警"
             fields = [
                 ("Bot", bot_id), ("币种", sym),
-                ("平仓价", str(px)), ("盈亏", f"{pnl} USDT"),
+                ("平仓价", px), ("盈亏", f"{_fmt_num(pnl)} USDT"),
             ]
         elif action in _REDUCE_ACTIONS:
-            px = detail.get("price") or ""
+            px = _entry_price(detail, s)
             sz = detail.get("size") or detail.get("size_usd") or ""
             color = "blue"
             title = f"📊 减仓告警"
             fields = [
                 ("Bot", bot_id), ("币种", sym),
-                ("减仓价", str(px)), ("减仓量", f"{sz} USDT"),
+                ("减仓价", px), ("减仓量", f"{_fmt_num(sz)} USDT"),
             ]
         elif action == "modify_tp_sl":
             tp = detail.get("tp") or s.get("tp") or ""
@@ -374,7 +423,7 @@ def format_trade_card(bot_id: str, steps: list) -> list[dict]:
             title = f"✏️ 改单告警"
             fields = [
                 ("Bot", bot_id), ("币种", sym),
-                ("止盈", str(tp)), ("止损", str(sl)),
+                ("止盈", _fmt_num(tp)), ("止损", _fmt_num(sl)),
             ]
         else:
             continue
@@ -400,8 +449,10 @@ def format_trade_card(bot_id: str, steps: list) -> list[dict]:
     return cards
 
 
-def notify_trade_events(bot_id: str, steps: list, root: Path = None) -> bool:
-    """成交事件推送（飞书卡片，无渠道时静默返回 False）。"""
+def notify_trade_events(bot_id: str, steps: list, root: Path = None, env: str = "live") -> bool:
+    """成交事件推送（飞书卡片）。env=paper 且 notify.paper=false 时静默跳过。"""
+    if not should_notify(root, env):
+        return False
     cards = format_trade_card(bot_id, steps)
     if not cards:
         return False

@@ -27,6 +27,7 @@ class TradeLogger:
         signal_meta: dict,
         report: dict,
         source: str = "watcher",
+        env: str = "live",
     ) -> dict[str, Any]:
         row = self.write(
             {
@@ -56,11 +57,11 @@ class TradeLogger:
             led.close()
         except Exception:  # noqa: BLE001
             pass
-        # 成交事件推送（开/平/减仓/改保护；无渠道静默）
+        # 成交事件推送（开/平/减仓/改保护；无渠道或模拟盘关闭则静默）
         try:
             from .monitoring import notify_trade_events
 
-            notify_trade_events(bot_id, report.get("steps"))
+            notify_trade_events(bot_id, report.get("steps"), env=env)
         except Exception:  # noqa: BLE001
             pass
         return row

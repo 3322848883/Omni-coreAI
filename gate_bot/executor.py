@@ -1,4 +1,4 @@
-﻿"""Execute parsed intents against Gate.io."""
+"""Execute parsed intents against Gate.io."""
 
 from __future__ import annotations
 
@@ -682,6 +682,13 @@ class Executor:
             "size_usd": intent.size_usd,
             "order_type": intent.order_type,
             "price": intent.price,
+            # 通知卡片用：明确暴露入场/止损/止盈价位
+            "entry_price": intent.price if intent.price is not None else (
+                self.client.get_last_price(intent.symbol) if entry_rec else None
+            ),
+            "sl": intent.sl,
+            "tp": intent.tp,
+            "tp2": intent.tp2,
             "quanto_multiplier": meta.quanto_multiplier,
             "leg_entry_ok": entry_rec is not None,
         }
