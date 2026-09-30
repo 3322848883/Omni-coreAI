@@ -35,7 +35,7 @@ __all__ = [
     "ema_boll",
     "stochastic",
     "cci",
-    "williams_r",
+    "williams_r", "williams",
     "mfi",
     "adx",
     "vwap",
@@ -986,6 +986,18 @@ def parse_indicator_name(name: str) -> dict[str, Any]:
     m = re.match(r"^cci(\d+)$", n)
     if m:
         return {"kind": "cci", "period": int(m.group(1)), "name": n}
+    m = re.match(r"^williams(?:_r)?(\d+)$", n)
+    if m:
+        return {"kind": "wr", "period": int(m.group(1)), "name": n}
+    m = re.match(r"^stochastic(\d+)$", n)
+    if m:
+        return {"kind": "stochastic", "k_period": int(m.group(1)), "field": "k", "name": n}
+    m = re.match(r"^williams(?:_r)?(\d+)$", n)
+    if m:
+        return {"kind": "wr", "period": int(m.group(1)), "name": n}
+    m = re.match(r"^stochastic(\d+)$", n)
+    if m:
+        return {"kind": "stochastic", "k_period": int(m.group(1)), "field": "k", "name": n}
     m = re.match(r"^wr(\d+)$", n)
     if m:
         return {"kind": "wr", "period": int(m.group(1)), "name": n}
@@ -997,6 +1009,27 @@ def parse_indicator_name(name: str) -> dict[str, Any]:
         return {"kind": "adx", "period": int(m.group(1)), "field": "adx", "name": n}
     if n in ("plus_di", "minus_di", "plus_di14", "minus_di14"):
         return {"kind": "adx", "period": 14, "field": "plus_di" if "plus" in n else "minus_di", "name": n}
+    m = re.match(r"^linreg_channel(\d+)$", n)
+    if m:
+        return {"kind": "linreg_channel", "period": int(m.group(1)), "name": n}
+    m = re.match(r"^linreg(\d+)$", n)
+    if m:
+        return {"kind": "linreg", "period": int(m.group(1)), "name": n}
+    m = re.match(r"^lsma(\d+)$", n)
+    if m:
+        return {"kind": "lsma", "period": int(m.group(1)), "name": n}
+    m = re.match(r"^t3(\d*)$", n)
+    if m:
+        return {"kind": "t3", "period": int(m.group(1) or 5), "name": n}
+    m = re.match(r"^kama(\d+)$", n)
+    if m:
+        return {"kind": "kama", "period": int(m.group(1)), "name": n}
+    m = re.match(r"^hma(\d+)$", n)
+    if m:
+        return {"kind": "hma", "period": int(m.group(1)), "name": n}
+    m = re.match(r"^alma(\d+)$", n)
+    if m:
+        return {"kind": "alma", "period": int(m.group(1)), "name": n}
     m = re.match(r"^vwap(\d+)$", n)
     if m:
         return {"kind": "vwap", "period": int(m.group(1)), "name": n}
@@ -1346,3 +1379,119 @@ def latest_indicators(rows: list[dict[str, Any]], wanted: list[str] | None = Non
         return {k: None for k in wanted}
     last = rows[-1]
     return {name: last.get(name) for name in wanted}
+
+
+# ── Linear Regression (from TV Pine Script) ─────────
+
+def linreg(values: list, period: int) -> list:
+    """Linear Regression value at each bar."""
+    n = len(values)
+    out = [None] * n
+    for i in range(period - 1, n):
+        seg = values[i - period + 1:i + 1]
+        sx = sum(range(1, period + 1))
+        sy = sum(seg)
+        sxy = sum((j + 1) * seg[j] for j in range(period))
+        sxx = sum((j + 1) ** 2 for j in range(period))
+        denom = period * sxx - sx * sx
+        if denom == 0:
+            out[i] = sy / period
+            continue
+        slope = (period * sxy - sx * sy) / denom
+        intercept = (sy - slope * sx) / period
+        out[i] = intercept + slope * period
+    return out
+
+
+def lsma(values: list, period: int) -> list:
+    """Linear Regression Moving Average."""
+    return linreg(values, period)
+
+
+def linreg_channel(values: list, period: int,
+                   upper_mult=2.0, lower_mult=2.0) -> dict:
+    """Linear Regression Channel with upper/lower bands."""
+    n = len(values)
+    base = [None] * n
+    upper = [None] * n
+    lower = [None] * n
+    slopes = [None] * n
+    for i in range(period - 1, n):
+        seg = values[i - period + 1:i + 1]
+        sx = sum(range(1, period + 1))
+        sy = sum(seg)
+        sxy = sum((j + 1) * seg[j] for j in range(period))
+        sxx = sum((j + 1) ** 2 for j in range(period))
+        denom = period * sxx - sx * sx
+        if denom == 0:
+            continue
+        slope = (period * sxy - sx * sy) / denom
+        intercept = (sy - slope * sx) / period
+        residuals = [seg[j] - (intercept + slope * (j + 1)) for j in range(period)]
+        std = (sum(r * r for r in residuals) / period) ** 0.5
+        end_val = intercept + slope * period
+        base[i] = end_val
+        upper[i] = end_val + upper_mult * std
+        lower[i] = end_val - lower_mult * std
+        slopes[i] = slope
+    return {"base": base, "upper": upper, "lower": lower, "slope": slopes}
+
+
+def _gd(src: list, length: int, alpha: float) -> list:
+    e1 = ema(src, length)
+    e2 = ema([v if v is not None else 0 for v in e1], length)
+    return [(e1[i] * (1 + alpha) - (e2[i] or 0) * alpha) if e1[i] is not None else None
+            for i in range(len(src))]
+
+
+def t3(src: list, length: int, alpha=0.7) -> list:
+    """T3 Moving Average (Tillson)."""
+    g1 = _gd(src, length, alpha)
+    g2 = _gd([v if v is not None else 0 for v in g1], length, alpha)
+    g3 = _gd([v if v is not None else 0 for v in g2], length, alpha)
+    return g3
+
+
+def kama(values: list, period: int) -> list:
+    """Kaufman Adaptive Moving Average."""
+    n = len(values)
+    out = [None] * n
+    if n < period + 1:
+        return out
+    fastest = 2.0 / 3.0
+    slowest = 2.0 / 31.0
+    prev = values[period - 1]
+    out[period - 1] = prev
+    for i in range(period, n):
+        chg = abs(values[i] - values[i - period])
+        vol = sum(abs(values[j] - values[j - 1]) for j in range(i - period + 1, i + 1))
+        er = chg / vol if vol > 0 else 0
+        sc = (er * (fastest - slowest) + slowest) ** 2
+        prev = prev + sc * (values[i] - prev)
+        out[i] = prev
+    return out
+
+
+def hma(values: list, period: int) -> list:
+    """Hull Moving Average."""
+    half = period // 2
+    wma_half = wma(values, half)
+    wma_full = wma(values, period)
+    diff = [(2 * (wma_half[i] or 0) - (wma_full[i] or 0)) if wma_half[i] is not None else None
+            for i in range(len(values))]
+    return wma([v if v is not None else 0 for v in diff], max(1, int(period ** 0.5)))
+
+
+def alma(values: list, period: int, offset=0.85, sigma=6.0) -> list:
+    """Arnaud Legoux Moving Average."""
+    import math
+    n = len(values)
+    out = [None] * n
+    m = offset * (period - 1)
+    s = period / sigma
+    weights = [math.exp(-((i - m) ** 2) / (2 * s * s)) for i in range(period)]
+    w_sum = sum(weights)
+    for i in range(period - 1, n):
+        seg = values[i - period + 1:i + 1]
+        out[i] = sum(w * v for w, v in zip(weights, seg)) / w_sum
+    return out
