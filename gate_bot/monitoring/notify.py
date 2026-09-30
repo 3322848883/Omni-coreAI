@@ -334,7 +334,7 @@ def format_trade_card(bot_id: str, steps: list) -> list[dict]:
             color = "green"
             title = f"📈 开仓告警"
             fields = [
-                ("Bot", bot_id), ("标的", sym),
+                ("Bot", bot_id), ("币种", sym),
                 ("方向", f"开{side}"), ("入场价", str(px)),
                 ("仓位", f"{sz} USDT"), ("止损", str(sl)),
                 ("止盈", str(tp)),
@@ -355,7 +355,7 @@ def format_trade_card(bot_id: str, steps: list) -> list[dict]:
                 color, icon, label = "blue", "\U0001f4c9", "平仓"
             title = f"{icon} {label}告警"
             fields = [
-                ("Bot", bot_id), ("标的", sym),
+                ("Bot", bot_id), ("币种", sym),
                 ("平仓价", str(px)), ("盈亏", f"{pnl} USDT"),
             ]
         elif action in _REDUCE_ACTIONS:
@@ -364,7 +364,7 @@ def format_trade_card(bot_id: str, steps: list) -> list[dict]:
             color = "blue"
             title = f"📊 减仓告警"
             fields = [
-                ("Bot", bot_id), ("标的", sym),
+                ("Bot", bot_id), ("币种", sym),
                 ("减仓价", str(px)), ("减仓量", f"{sz} USDT"),
             ]
         elif action == "modify_tp_sl":
@@ -373,7 +373,7 @@ def format_trade_card(bot_id: str, steps: list) -> list[dict]:
             color = "blue"
             title = f"✏️ 改单告警"
             fields = [
-                ("Bot", bot_id), ("标的", sym),
+                ("Bot", bot_id), ("币种", sym),
                 ("止盈", str(tp)), ("止损", str(sl)),
             ]
         else:
