@@ -1,5 +1,5 @@
-bot_id: pa-c
-enabled: true
+﻿bot_id: pa-c
+enabled: false
 env: paper
 exchange: gate
 symbols: [BTC_USDT]
@@ -12,11 +12,11 @@ paper:
   initial_capital: 5000
   leverage: 20
 strategist:
-  enabled: true
+  enabled: false
   prompt_file: prompts/multi_meanrev.md
   timeframe: 15m
   candles: 30
   write_hold: false
-  tools: {enabled: true, native: true, max_rounds: 1}
+  tools: {enabled: false, native: true, max_rounds: 1}
   risk: {min_confidence: 0.3, max_chips: 1, max_notional_usd: 3000}
   llm: {provider: gw-flash, reasoning_effort: low}

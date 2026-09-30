@@ -1,7 +1,7 @@
-# 既有策略8 · 网格/均值回归 — 本地模拟盘（试跑）
+﻿# 既有策略8 · 网格/均值回归 — 本地模拟盘（试跑）
 # prompt: prompts/multi_meanrev.md（3-5层网格 / 多空双向 / 合计风险≤5% / limit_order tp）
 bot_id: meanrev-paper
-enabled: true
+enabled: false
 env: paper
 symbols:
   - BTC_USDT
@@ -26,7 +26,7 @@ paper:
   leverage: 20
   fee_rate: 0.0005
   maker_fee_rate: 0.0
-  funding_enabled: true
+  funding_enabled: false
   position_mode: single
   margin_mode: isolated
   price_band_pct: 5.0
@@ -35,7 +35,7 @@ paper:
   tick_interval_sec: 2
 
 strategist:
-  enabled: true
+  enabled: false
   prompt_file: prompts/multi_meanrev.md
   interval_sec: 900
   timeframe: 15m
@@ -44,7 +44,7 @@ strategist:
   candles: 40
   write_hold: true
   tools:
-    enabled: true
+    enabled: false
     native: true
     max_rounds: 4
   market:
@@ -53,7 +53,7 @@ strategist:
     extra_timeframes: ["1h"]
     extra_candles: 15
   ai_triggers:
-    enabled: true
+    enabled: false
     max_active: 5
   risk:
     min_confidence: 0.5

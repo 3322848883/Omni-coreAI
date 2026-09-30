@@ -56,60 +56,34 @@ class Watchdog:
 
     # ── 目标发现 ──────────────────────────────────
     def discover(self) -> list[Target]:
-        """只守护「在管清单」内的 bot。
+        """只守护 enabled: true 的 bot（每个 bot yaml 的开关）。
 
-        清单来源（按优先级）：
-          1. 显式 bot_ids 参数 / --bot
-          2. config/watchdog.yaml 的 bots: [..]
-          3. 无清单 → 守护「已有 lock 文件」的组件（曾跑过、崩了才补拉，
-             **绝不凭空开新 bot**）
+        - enabled: false → 跳过，绝不拉起
+        - enabled: true  → 挂了自动补拉
+        - self.bot_ids   → 再收窄到指定 id（可选）
         """
         from .config import load_all_bots
 
         bots = load_all_bots(self.root / "config" / "bots")
-        allow = self._allowlist()
-        selected = {
-            b: cfg for b, cfg in bots.items()
-            if getattr(cfg, "enabled", True)
-            and (self.bot_ids is None or b in self.bot_ids)
-        }
         self.targets = []
-        for bid, cfg in selected.items():
-            if allow is not None and bid not in allow and self.bot_ids is None:
+        for bid, cfg in bots.items():
+            if not getattr(cfg, "enabled", True):
+                continue  # 开关关着 = 不管
+            if self.bot_ids is not None and bid not in self.bot_ids:
                 continue
             env = (getattr(cfg, "env", "") or "").lower()
             runtime = dict(getattr(cfg, "strategist", {}) or {}).get("runtime") or {}
-            state = self.root / "data" / "bots" / bid / "state"
-            plan_lock = state / "plan.lock"
-            run_lock = state / "run.lock"
-            # plan-loop
+            # plan-loop：默认开
             if runtime.get("plan_loop", True):
-                if allow is not None or plan_lock.exists():
-                    self.targets.append(Target(bid, "plan"))
-            # 执行侧
+                self.targets.append(Target(bid, "plan"))
+            # 执行侧：paper → paper-run；其它 → run
             if env == "paper":
-                if runtime.get("paper_run", True) and (allow is not None or run_lock.exists()):
+                if runtime.get("paper_run", True):
                     self.targets.append(Target(bid, "paper"))
             else:
-                if runtime.get("run", True) and (allow is not None or run_lock.exists()):
+                if runtime.get("run", True):
                     self.targets.append(Target(bid, "run"))
         return self.targets
-
-    def _allowlist(self) -> Optional[set]:
-        """config/watchdog.yaml → {bot_id, ...}；无文件/无 bots 字段返回 None。"""
-        try:
-            import yaml
-
-            p = self.root / "config" / "watchdog.yaml"
-            if not p.exists():
-                return None
-            data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-            lst = data.get("bots")
-            if not lst:
-                return None
-            return {str(x) for x in lst}
-        except Exception:  # noqa: BLE001
-            return None
 
     # ── 存活探测（OS 锁） ─────────────────────────
     @staticmethod

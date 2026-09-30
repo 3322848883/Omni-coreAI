@@ -1,5 +1,5 @@
 ﻿# 缁煎悎鍓ュご鐨?路 BTC/ETH 路 妯℃嫙鐩?bot_id: scalper-live
-enabled: true
+enabled: false
 env: live
 api_key_env: GATE_API_KEY
 api_secret_env: GATE_API_SECRET
@@ -23,7 +23,7 @@ account_risk:
   max_total_notional_usd: 60
 
 strategist:
-  enabled: true
+  enabled: false
   prompt_file: prompts/scalper_btc_eth.md
   interval_sec: 60
   timeframe: 5m
@@ -32,7 +32,7 @@ strategist:
   candles: 80
   write_hold: true
   tools:
-    enabled: true
+    enabled: false
     native: true
     max_rounds: 3
   market:
@@ -41,7 +41,7 @@ strategist:
     timeframes: []
     extra_candles: 20
   ai_triggers:
-    enabled: true
+    enabled: false
     max_active: 3
   risk:
     min_confidence: 0.55

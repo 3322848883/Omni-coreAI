@@ -1,8 +1,8 @@
-# ETH 区间中值策略机器人
+﻿# ETH 区间中值策略机器人
 # 复制为 config/bots/eth-range.yaml 后修改
 
 bot_id: eth-range
-enabled: true
+enabled: false
 env: testnet                 # 先模拟盘；上实盘改 live + GATE_API_KEY
 api_key_env: GATE_TESTNET_API_KEY
 api_secret_env: GATE_TESTNET_API_SECRET
@@ -23,7 +23,7 @@ account_risk:
   max_total_notional_usd: 50
 
 strategist:
-  enabled: true
+  enabled: false
   prompt_file: prompts/eth_range_mid.md
   interval_sec: 900          # 15m 节奏
   timeframe: 15m
@@ -32,7 +32,7 @@ strategist:
   candles: 120
   write_hold: true
   tools:
-    enabled: true            # AI 按需拉行情，不全量灌入
+    enabled: false            # AI 按需拉行情，不全量灌入
     max_rounds: 3
   market:
     mode: hybrid
@@ -52,5 +52,5 @@ strategist:
     timeout_sec: 90
     max_tokens: 2048
   ai_triggers:
-    enabled: true            # 破边界后再跑 Plan（追单判断）
+    enabled: false            # 破边界后再跑 Plan（追单判断）
     max_active: 2

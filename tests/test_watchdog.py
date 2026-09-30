@@ -42,8 +42,7 @@ class TestDiscover(unittest.TestCase):
             root = _make_root(td, {"p1": "paper", "l1": "live"})
             _touch_locks(root, "p1", "l1")
             wd = Watchdog(root)
-            targets = wd.discover()
-            pairs = {(t.bot_id, t.component) for t in targets}
+            pairs = {(t.bot_id, t.component) for t in wd.discover()}
             self.assertIn(("p1", "plan"), pairs)
             self.assertIn(("p1", "paper"), pairs)   # paper → paper-run
             self.assertIn(("l1", "plan"), pairs)
@@ -52,58 +51,24 @@ class TestDiscover(unittest.TestCase):
             self.assertNotIn(("l1", "paper"), pairs)
 
     def test_disabled_bot_skipped(self):
+        """enabled 是唯一开关：false 一律不看。"""
         with tempfile.TemporaryDirectory() as td:
-            root = _make_root(td, {"p1": "paper"})
-            y = root / "config" / "bots" / "p1.yaml"
+            root = _make_root(td, {"on1": "paper", "off1": "paper"})
+            y = root / "config" / "bots" / "off1.yaml"
             y.write_text(y.read_text(encoding="utf-8").replace("enabled: true", "enabled: false"),
                          encoding="utf-8")
-            wd = Watchdog(root)
-            self.assertEqual(wd.discover(), [])
-
-    def test_no_allowlist_only_manages_existing_locks(self):
-        """无 allowlist 时：只管已有 lock 的组件，绝不凭空开新 bot。"""
-        with tempfile.TemporaryDirectory() as td:
-            root = _make_root(td, {"p1": "paper", "p2": "paper"})
-            # p1 跑过（有 lock）；p2 从没跑过（无 lock）
-            st = root / "data" / "bots" / "p1" / "state"
-            st.mkdir(parents=True)
-            (st / "plan.lock").write_text("0", encoding="utf-8")
-            (st / "run.lock").write_text("0", encoding="utf-8")
-            wd = Watchdog(root)
-            pairs = {(t.bot_id, t.component) for t in wd.discover()}
-            self.assertIn(("p1", "plan"), pairs)
-            self.assertIn(("p1", "paper"), pairs)
-            self.assertNotIn(("p2", "plan"), pairs)
-            self.assertNotIn(("p2", "paper"), pairs)
-
-    def test_allowlist_from_yaml(self):
-        with tempfile.TemporaryDirectory() as td:
-            root = _make_root(td, {"p1": "paper", "p2": "paper", "p3": "paper"})
-            (root / "config" / "watchdog.yaml").write_text(
-                "bots: [p1, p3]\n", encoding="utf-8"
-            )
+            _touch_locks(root, "on1", "off1")
             wd = Watchdog(root)
             bids = {t.bot_id for t in wd.discover()}
-            self.assertEqual(bids, {"p1", "p3"})
-            # allowlist 命中即可，不要求 lock 存在
-            pairs = {(t.bot_id, t.component) for t in wd.discover()}
-            self.assertIn(("p1", "plan"), pairs)
-            self.assertIn(("p1", "paper"), pairs)
+            self.assertEqual(bids, {"on1"})
 
-    def test_explicit_bot_ids_overrides(self):
+    def test_bot_ids_filter_narrows(self):
         with tempfile.TemporaryDirectory() as td:
             root = _make_root(td, {"p1": "paper", "p2": "paper"})
-            (root / "config" / "watchdog.yaml").write_text("bots: [p1]\n", encoding="utf-8")
-            wd = Watchdog(root, bot_ids=["p2"])
-            bids = {t.bot_id for t in wd.discover()}
-            self.assertEqual(bids, {"p2"})
-
-    def test_bot_ids_filter(self):
-        with tempfile.TemporaryDirectory() as td:
-            root = _make_root(td, {"p1": "paper", "p2": "paper"})
+            _touch_locks(root, "p1", "p2")
             wd = Watchdog(root, bot_ids=["p1"])
-            targets = wd.discover()
-            self.assertTrue(all(t.bot_id == "p1" for t in targets))
+            bids = {t.bot_id for t in wd.discover()}
+            self.assertEqual(bids, {"p1"})
 
     def test_component_cmd_map(self):
         self.assertEqual(COMPONENT_CMD["plan"], "plan-loop")
@@ -150,7 +115,6 @@ class TestRestartLimit(unittest.TestCase):
         t = Target("b1", "plan")
         self.assertTrue(wd._allow_restart(t))
         self.assertTrue(wd._allow_restart(t))
-        # 第 3 次 → 停手
         self.assertFalse(wd._allow_restart(t))
         self.assertTrue(t.stopped)
 
@@ -159,7 +123,6 @@ class TestRestartLimit(unittest.TestCase):
         t = Target("b1", "plan")
         wd._allow_restart(t)
         wd._allow_restart(t)
-        # 老记录过期
         t.restarts = [0.0, 0.0]
         self.assertTrue(wd._allow_restart(t))
         self.assertFalse(t.stopped)

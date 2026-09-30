@@ -1,6 +1,6 @@
-# 本地模拟盘测试 bot（paper trading）
+﻿# 本地模拟盘测试 bot（paper trading）
 bot_id: paper-test
-enabled: true
+enabled: false
 env: paper                     # 本地模拟交易所，不需要交易所密钥
 symbols:
   - BTC_USDT
@@ -26,7 +26,7 @@ paper:
   leverage: 20                 # 默认 20x
   fee_rate: 0.0005             # taker 0.05%
   maker_fee_rate: 0.0
-  funding_enabled: true
+  funding_enabled: false
   position_mode: single
   margin_mode: isolated
   price_band_pct: 5.0
@@ -36,7 +36,7 @@ paper:
 
 # LLM 策略层（真实 AI 分析 → Plan → 信号 → paper 执行）
 strategist:
-  enabled: true
+  enabled: false
   prompt_file: prompts/vergex_default.md
   interval_sec: 900
   timeframe: 15m
@@ -45,7 +45,7 @@ strategist:
   candles: 120
   write_hold: true
   tools:
-    enabled: true
+    enabled: false
     native: true
     max_rounds: 3
   market:
@@ -53,7 +53,7 @@ strategist:
     indicators: [ema20, rsi14, atr14, macd, sqzmom]
     extra_candles: 15
   ai_triggers:
-    enabled: true
+    enabled: false
     max_active: 5
   risk:
     min_confidence: 0.6

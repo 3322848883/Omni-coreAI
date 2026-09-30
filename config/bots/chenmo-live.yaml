@@ -1,6 +1,6 @@
-# 陈默 · 生存式小账户 · 实盘行情（只分析）
+﻿# 陈默 · 生存式小账户 · 实盘行情（只分析）
 bot_id: chenmo-live
-enabled: true
+enabled: false
 env: live
 api_key_env: GATE_API_KEY
 api_secret_env: GATE_API_SECRET
@@ -20,7 +20,7 @@ account_risk:
   max_total_notional_usd: 20
 
 strategist:
-  enabled: true
+  enabled: false
   prompt_file: prompts/chenmo_survival.md
   interval_sec: 300
   timeframe: 5m
@@ -29,7 +29,7 @@ strategist:
   candles: 80
   write_hold: true
   tools:
-    enabled: true
+    enabled: false
     native: true
     max_rounds: 3
   market:
