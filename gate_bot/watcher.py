@@ -280,15 +280,47 @@ def run_bot_once(bot: BotConfig, paths: ProjectPaths) -> dict:
     return processed
 
 
-def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[str] = None) -> None:
+def _orphan_sweep(bot: BotConfig, paths: ProjectPaths) -> int:
+    """定期扫孤儿保护单（TP/SL 无对应持仓）。返回撤单数。
+
+    为什么需要：close/reduce 动作后才清理远远不够 ——
+    TP/SL 由交易所触发平仓时，对应保护单会变成孤儿一直挂着。
+    """
+    try:
+        client = bot.create_client()
+    except Exception:  # noqa: BLE001
+        return 0
+    executor = Executor(
+        client,
+        label_prefix=getattr(bot, "label_prefix", "") or bot.bot_id,
+        root=paths.root,
+        bot_id=bot.bot_id,
+    )
+    total = 0
+    for sym in (bot.symbols or []):
+        try:
+            cleaned = executor._cleanup_orphan_protectors(sym)
+            if cleaned:
+                total += len(cleaned)
+                log.info("orphan sweep %s %s: cancelled %s", bot.bot_id, sym, cleaned)
+        except Exception:  # noqa: BLE001
+            continue
+    return total
+
+
+def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[str] = None,
+                orphan_sweep_sec: float = 300.0) -> None:
     paths.ensure()
     selected = {k: v for k, v in bots.items() if v.enabled and (only is None or k == only)}
     if not selected:
         raise SystemExit("no enabled bots to run")
     # use max poll among bots as sleep base
     interval = min((b.poll_interval_sec for b in selected.values()), default=2.0)
-    log.info("watching bots: %s", sorted(selected))
+    log.info("watching bots: %s (orphan sweep every %.0fs)", sorted(selected), orphan_sweep_sec)
+    last_sweep = 0.0
     while True:
+        now = time.time()
+        do_sweep = (now - last_sweep) >= orphan_sweep_sec
         for bot in selected.values():
             try:
                 stats = run_bot_once(bot, paths)
@@ -296,4 +328,11 @@ def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[
                     log.info("bot %s: %s", bot.bot_id, stats)
             except Exception as e:  # noqa: BLE001 — keep loop alive
                 log.exception("bot %s crashed: %s", bot.bot_id, e)
+            if do_sweep:
+                try:
+                    _orphan_sweep(bot, paths)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("orphan sweep %s failed: %s", bot.bot_id, e)
+        if do_sweep:
+            last_sweep = now
         time.sleep(max(0.2, interval))

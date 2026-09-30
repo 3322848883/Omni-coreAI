@@ -1197,6 +1197,17 @@ class Executor:
                                   error="exit_not_placed: " + "; ".join(str(x) for x in errs))
         return StepResult(intent.action, intent.symbol, True, detail=detail)
 
+    @staticmethod
+    def _order_is_reduce_only(po: dict) -> bool:
+        """Gate 返回 `initial.is_reduce_only`，paper 侧用 `reduce_only` —— 两个都认。"""
+        init = po.get("initial") or {}
+        return bool(
+            init.get("is_reduce_only")
+            or init.get("reduce_only")
+            or po.get("is_reduce_only")
+            or po.get("reduce_only")
+        )
+
     def _is_orphan_protector(self, po: dict, positions: list) -> bool:
         """判断保护单是否孤儿（无对应持仓）。
 
@@ -1208,7 +1219,7 @@ class Executor:
         tail = text.rsplit("-", 1)[-1].lower() if text else ""
         if tail not in ("tp", "sl", "lp", "ls"):
             return False
-        if not (init.get("reduce_only") or po.get("reduce_only")):
+        if not self._order_is_reduce_only(po):
             return False
         sz = float(init.get("size") or po.get("size") or 0)
         # 保护单方向：负=卖平多，正=买平空
@@ -1244,7 +1255,7 @@ class Executor:
             tail = text.rsplit("-", 1)[-1].lower() if text else ""
             if tail not in ("tp", "sl", "lp", "ls"):
                 continue
-            if not (init.get("reduce_only") or p.get("reduce_only")):
+            if not self._order_is_reduce_only(p):
                 continue
             status = str(p.get("status") or "").lower()
             if status in ("cancelled", "finished", "filled", "triggered", "failed", "closed"):
@@ -1298,7 +1309,7 @@ class Executor:
             tail = text.rsplit("-", 1)[-1].lower() if text else ""
             if tail not in ("tp", "sl", "lp", "ls"):
                 continue
-            if not (init.get("reduce_only") or p.get("reduce_only")):
+            if not self._order_is_reduce_only(p):
                 continue
             status = str(p.get("status") or "").lower()
             if status in ("cancelled", "finished", "filled", "triggered", "failed", "closed"):

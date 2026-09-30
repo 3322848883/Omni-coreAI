@@ -136,3 +136,68 @@ class TestExecutorAlertHooks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestOrphanFieldName(unittest.TestCase):
+    """Gate 返回 is_reduce_only —— 字段名不匹配会导致孤儿永不被识别。"""
+
+    def _ex(self):
+        from gate_bot.executor import Executor
+
+        class DummyClient:
+            def list_price_orders(self, symbol):
+                return []
+            def get_positions(self):
+                return []
+            def cancel_price_order(self, pid):
+                return True
+            def get_account(self):
+                return {"total": "10000"}
+
+        return Executor(DummyClient(), label_prefix="brk")
+
+    def test_is_reduce_only_field_from_gate(self):
+        """Gate API 用 initial.is_reduce_only。"""
+        ex = self._ex()
+        po = {
+            "id": "p1",
+            "text": "t-brk-tp",
+            "status": "open",
+            "initial": {"text": "t-brk-tp", "is_reduce_only": True, "size": -10},
+        }
+        self.assertTrue(ex._order_is_reduce_only(po))
+        self.assertTrue(ex._is_orphan_protector(po, []))  # 无持仓 → 孤儿
+
+    def test_reduce_only_field_from_paper(self):
+        """paper 侧用 reduce_only。"""
+        ex = self._ex()
+        po = {
+            "id": "p1",
+            "text": "t-brk-sl",
+            "status": "open",
+            "reduce_only": True,
+            "initial": {"text": "t-brk-sl", "reduce_only": True, "size": -10},
+        }
+        self.assertTrue(ex._order_is_reduce_only(po))
+        self.assertTrue(ex._is_orphan_protector(po, []))
+
+    def test_non_reduce_only_not_orphan(self):
+        ex = self._ex()
+        po = {
+            "id": "p1",
+            "text": "t-brk-entry",
+            "status": "open",
+            "initial": {"text": "t-brk-entry", "is_reduce_only": False, "size": 10},
+        }
+        self.assertFalse(ex._order_is_reduce_only(po))
+        self.assertFalse(ex._is_orphan_protector(po, []))
+
+    def test_protector_with_position_not_orphan(self):
+        ex = self._ex()
+        po = {
+            "id": "p1",
+            "text": "t-brk-tp",
+            "status": "open",
+            "initial": {"text": "t-brk-tp", "is_reduce_only": True, "size": -10},
+        }
+        positions = [{"contract": "BTC_USDT", "size": 5}]  # 有多仓 → 卖平不是孤儿
+        self.assertFalse(ex._is_orphan_protector(po, positions))
