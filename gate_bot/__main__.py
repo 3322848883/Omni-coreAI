@@ -442,6 +442,26 @@ def cmd_supervisor(args) -> int:
     return 0
 
 
+def cmd_watchdog(args) -> int:
+    import logging
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    from .watchdog import Watchdog
+
+    wd = Watchdog(
+        _root_from_args(args),
+        bot_ids=args.bot,
+        interval_sec=float(args.interval or 15.0),
+        max_restarts_per_hour=int(args.max_restarts or 5),
+        notify=not args.no_notify,
+    )
+    try:
+        wd.run_forever()
+    except KeyboardInterrupt:
+        print("bye")
+    return 0
+
+
 def cmd_backtest(args) -> int:
     from .backtest import BacktestReplayer
 
@@ -542,6 +562,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_bt.add_argument("--days", type=int, default=30)
     p_bt.add_argument("--closes", default="", help="comma-separated closes for benchmark")
     p_bt.set_defaults(func=cmd_backtest)
+
+    p_wd = sub.add_parser("watchdog", help="auto-restart dead bot processes + notify")
+    p_wd.add_argument("--bot", action="append", default=None, help="limit to bot id(s)")
+    p_wd.add_argument("--interval", type=float, default=15.0, help="check interval seconds")
+    p_wd.add_argument("--max-restarts", type=int, default=5, help="max restarts per hour per component")
+    p_wd.add_argument("--no-notify", action="store_true", help="disable Feishu/Telegram push")
+    p_wd.set_defaults(func=cmd_watchdog)
     return parser
 
 
