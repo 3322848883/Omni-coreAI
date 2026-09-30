@@ -211,7 +211,9 @@ class PersonaRunner:
                     })
                 # 让该人格重新审视（修正决策）
                 try:
-                    revised = self._revise_with_discussion(bot_id, plan, peers, round_num)
+                    revised = self._revise_with_discussion(
+                        bot_id, plan, peers, round_num, max_rounds=max_rounds,
+                    )
                     if revised:
                         discussions[bot_id] = revised
                 except Exception:  # noqa: BLE001
@@ -232,9 +234,11 @@ class PersonaRunner:
         return current, max_rounds
 
     def _revise_with_discussion(self, bot_id: str, plan: dict,
-                                 peers: list[dict], round_num: int) -> Optional[dict]:
-        """让一个 personality 基于讨论修正决策（可选，LLM 调用）。
+                                 peers: list[dict], round_num: int,
+                                 max_rounds: int = 3) -> Optional[dict]:
+        """让一个 personality 基于讨论修正决策（三阶段递进）。
 
+        阶段：1=相互讨论与反驳  2=深化讨论  3=最终决策
         通过 plan_runners 的 LLM 做修正。如果 runner 不支持则返回 None。
         """
         runner = self.plan_runners.get(bot_id)
@@ -251,7 +255,7 @@ class PersonaRunner:
         if hasattr(runner, "discuss"):
             return runner.discuss(
                 plan=plan, peers=peers, round_num=round_num,
-                discussion_text=discussion_text,
+                discussion_text=discussion_text, max_rounds=max_rounds,
             )
         # fallback: 不支持讨论则保持原判
         return None

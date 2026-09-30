@@ -55,6 +55,8 @@ class StrategistConfig:
     # on-demand market tools for the LLM (not a full dump)
     tools: dict = field(default_factory=dict)
     bot_id: str = ""
+    # SkillKit：None=默认可见全部；[]=无 skill；[id,...]=白名单
+    skills: Optional[list] = None
     # K 线图视觉识别（需模型支持 vision/image input）
     vision: bool = True
     # 发送哪些周期图（多选）；省略 = 只发主周期 timeframe
@@ -144,6 +146,7 @@ class PlanRunner:
         system = build_system_prompt(
             self.strategy_prompt,
             tools_guide=TOOL_GUIDE if self.cfg.tools.get("enabled") else "",
+            skill_catalog=self._skill_catalog(),
         )
         user = build_user_prompt(
             snapshot,
@@ -271,6 +274,20 @@ class PlanRunner:
         }
 
 
+    def _skill_catalog(self) -> str:
+        """SkillKit L1 catalog：仅 name+description，空则不渲染。"""
+        try:
+            from ..skillkit import SkillRegistry, render_catalog
+
+            root = Path(self.cfg.bot_root) if self.cfg.bot_root else Path.cwd()
+            reg = SkillRegistry()
+            reg.scan([root / ".mimocode" / "skills", root / "skills"])
+            enabled = getattr(self.cfg, "skills", None)
+            metas = reg.visible_for(self.cfg.bot_id or "", enabled)
+            return render_catalog(metas)
+        except Exception:  # noqa: BLE001
+            return ""
+
     def analyze_once(self, trigger: str = "manual") -> dict[str, Any]:
         """各人格独立分析：LLM → Plan，不写 inbox、不执行（供多人格融合）。"""
         cycle_id = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -290,6 +307,7 @@ class PlanRunner:
         system = build_system_prompt(
             self.strategy_prompt,
             tools_guide=TOOL_GUIDE if self.cfg.tools.get("enabled") else "",
+            skill_catalog=self._skill_catalog(),
         )
         user = build_user_prompt(
             snapshot,
@@ -387,6 +405,79 @@ class PlanRunner:
                     pass
         except Exception:  # noqa: BLE001
             pass
+
+    def discuss(self, plan: dict, peers: list, round_num: int,
+                discussion_text: str, max_rounds: int = 3) -> Optional[dict]:
+        """多人格讨论：基于他人观点修订决策（三阶段递进）。
+
+        阶段语义（round_num 1-based，max_rounds 默认 3）：
+          1 = 相互讨论与反驳：看对方理由，可反驳、可被说服
+          2 = 深化讨论：聚焦分歧点，尝试达成一致
+          3 = 最终决策：定稿，给出最终 decision + 置信度
+
+        返回 {decision, confidence, reasoning} 或 None（无法修订）。
+        """
+        if self.llm is None:
+            return None
+        stage = min(round_num, max_rounds)
+        if stage == 1:
+            stage_hint = (
+                "这是【相互讨论与反驳】阶段。请看同伴观点，若有分歧请明确反驳理由；"
+                "若对方有理请修改自己的决策。保持独立判断，不盲从多数。"
+            )
+        elif stage >= max_rounds:
+            stage_hint = (
+                "这是【最终决策】阶段。综合全部讨论后给出你的最终决定。"
+                "必须定稿一个决策，不要再摇摆。"
+            )
+        else:
+            stage_hint = (
+                "这是【深化讨论】阶段。聚焦未解决的分歧，尝试找到更高置信度的共识。"
+            )
+
+        my_decision = plan.get("decision") or "hold"
+        my_reasoning = str(plan.get("reasoning") or "")[:200]
+        sys_prompt = (
+            "你是交易策略人格，参与多空讨论。只输出一个 JSON 对象，不要 Markdown 前后缀。\n"
+            '{"decision":"open_long|open_short|close|reduce_long|reduce_short|hold|'
+            'stop_entry_long|stop_entry_short",'
+            '"confidence":0.0,"reasoning":"≤30字"}\n'
+            f"{stage_hint}\n"
+            "规则：1) decision 用英文枚举；2) confidence 0~1；3) reasoning ≤30 字。"
+        )
+        user_prompt = (
+            f"我的当前决策：{my_decision}\n我的理由：{my_reasoning}\n\n"
+            f"同伴观点：\n{discussion_text}\n\n"
+            f"讨论轮次：第 {stage}/{max_rounds} 轮。请输出修订后的决策 JSON。"
+        )
+        try:
+            raw = self.llm.chat(sys_prompt, user_prompt)
+        except Exception:  # noqa: BLE001
+            return None
+        if not raw:
+            return None
+        try:
+            import json as _json
+            import re as _re
+            text = str(raw).strip()
+            m = _re.search(r"\{.*\}", text, _re.DOTALL)
+            if not m:
+                return None
+            data = _json.loads(m.group(0))
+            decision = str(data.get("decision") or my_decision).lower()
+            allowed = {"open_long", "open_short", "close", "reduce_long", "reduce_short",
+                       "hold", "stop_entry_long", "stop_entry_short", "close_all", "flatten"}
+            if decision not in allowed:
+                decision = my_decision
+            conf = data.get("confidence")
+            try:
+                conf = max(0.0, min(1.0, float(conf))) if conf is not None else plan.get("confidence")
+            except (TypeError, ValueError):
+                conf = plan.get("confidence")
+            reasoning = str(data.get("reasoning") or my_reasoning)[:30]
+            return {"decision": decision, "confidence": conf, "reasoning": reasoning}
+        except Exception:  # noqa: BLE001
+            return None
 
     def _save_thinking(self, **kw: Any) -> None:
         """Persist LLM reasoning_content (CoT) for audit/replay."""

@@ -1,4 +1,4 @@
-groups:
+﻿groups:
   - name: e2e-quad
     topology: single_account
     members: [pa-a, pa-b, pa-c, pa-d]
@@ -27,7 +27,7 @@ groups:
     enabled: true
     discussion:
       enabled: true
-      rounds: 2
+      rounds: 3
       timeout_sec: 120
       early_exit_on_agreement: true
   - name: consensus-test

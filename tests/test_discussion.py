@@ -40,7 +40,7 @@ class FakePlanRunner:
                         "size_usd": self.size_usd, "confidence": self.confidence}],
         }}
 
-    def discuss(self, plan, peers, round_num, discussion_text):
+    def discuss(self, plan, peers, round_num, discussion_text, max_rounds=3):
         self.discuss_calls += 1
         if self.discuss_result is not None:
             return self.discuss_result
