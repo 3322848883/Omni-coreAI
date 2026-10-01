@@ -103,6 +103,8 @@ def main() -> int:
     ap.add_argument("--no-push", action="store_true", help="跳过本地 push")
     ap.add_argument("--no-restart", action="store_true", help="远程只同步不重启")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--strict", action="store_true",
+                    help="本地有未提交改动时中止（默认仅警告并继续）")
     ap.add_argument("--branch", default="master")
     args = ap.parse_args()
 
@@ -121,13 +123,23 @@ def main() -> int:
                 if not ln.startswith("?? config/bots.local/")
                 and not ln.startswith("?? data/")
                 and not ln.startswith("?? skills/")
+                and not ln.startswith("?? verify_data/")
+                and not ln.startswith("?? tmp")
                 and "config/bots.local/" not in ln]
         if real:
-            print("  ⛔ 本地有未提交改动，请先提交：")
+            # 不阻断：未提交的改动本就不会被 push，服务器拿到的是已提交内容。
+            # 但必须让用户知道「本次部署不含这些改动」。
+            print(f"  ⚠️  本地有 {len(real)} 项未提交改动（本次部署【不含】它们）：")
             for ln in real[:10]:
                 print("     ", ln)
-            return 1
-        print("  OK 工作区干净")
+            if len(real) > 10:
+                print(f"      ... 另有 {len(real) - 10} 项")
+            if args.strict:
+                print("  ⛔ --strict：中止（请先提交或 --no-push）")
+                return 1
+            print("  （继续；如需中止加 --strict）")
+        else:
+            print("  OK 工作区干净")
         if args.dry_run:
             print(f"  [dry-run] git push origin {args.branch}")
         else:

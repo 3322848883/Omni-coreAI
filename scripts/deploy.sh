@@ -129,16 +129,19 @@ fi
 # ── 7) 重启 + 验证 ────────────────────────────
 echo
 echo "[7/7] 重启 + 验证"
+# 用文件检测而非 `systemctl list-unit-files | grep -q`：
+# 后者因 grep -q 提前退出触发 SIGPIPE，配合 set -o pipefail 会误判为失败。
+UNIT=/etc/systemd/system/gate-watchdog.service
 if [ "$NO_RESTART" = "1" ]; then
   echo "  (--no-restart：跳过重启)"
-elif command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q gate-watchdog; then
+elif [ -f "$UNIT" ] && command -v systemctl >/dev/null 2>&1; then
   run systemctl restart gate-watchdog
   if [ "$DRY_RUN" = "0" ]; then
     sleep 12
     echo "  service: $(systemctl is-active gate-watchdog)"
   fi
 else
-  echo "  (无 gate-watchdog 服务，跳过重启；如需手动：python -m gate_bot watchdog)"
+  echo "  (未发现 $UNIT，跳过重启；如需手动：python -m gate_bot watchdog)"
 fi
 
 if [ "$DRY_RUN" = "0" ]; then
