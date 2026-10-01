@@ -73,9 +73,36 @@ EOF
 
 ## 3. 部署流水线（`scripts/deploy.sh`）
 
+### 3.0 本地一键（推荐）
+
+```bash
+python scripts/deploy_remote.py                # push + 远程部署（含重启）
+python scripts/deploy_remote.py --no-push      # 跳过 push
+python scripts/deploy_remote.py --no-restart   # 远程只同步
+python scripts/deploy_remote.py --dry-run      # 预览
+python scripts/deploy_remote.py --strict       # 本地有未提交改动时中止
+```
+
+凭据（不入库）：环境变量 `GATE_DEPLOY_*` 或 `scripts/.deploy.env`：
+
+```ini
+GATE_DEPLOY_HOST=...
+GATE_DEPLOY_PORT=2222
+GATE_DEPLOY_USER=root
+GATE_DEPLOY_PASSWORD=...
+GATE_DEPLOY_ROOT=/opt/gate-signal-bot
+GATE_DEPLOY_HOSTKEY=SHA256:...
+# 或改用密钥：GATE_DEPLOY_KEY=~/.ssh/id_ed25519
+```
+
+**GitHub 不可达时自动回退**：`git push` 失败 → 取服务器 HEAD 作基线 → 生成增量
+`git bundle` → scp 上传 → 服务器 `fetch + merge --ff-only`。传输链路不单点依赖 GitHub。
+
+### 3.1 服务器上直接跑
+
 ```
 [1/7] 前置检查    git 干净（仅允许 bots.local/ 与 data/ 未提交）
-[2/7] 拉取代码    git pull --ff-only
+[2/7] 拉取代码    git pull --ff-only（若 deploy.sh 自身有更新则 re-exec 新版）
 [3/7] 依赖        uv pip install -r requirements.txt -e .
 [4/7] 同步 skill  skills-src/ → validate → install
 [5/7] 编码自检    skill doctor --fix（修 Linux unzip 乱码目录名）
