@@ -530,6 +530,21 @@ def cmd_deploy_check(args) -> int:
         print(f"已装 skill: ⛔ {e}")
         ok = False
 
+    # 4b) 通知渠道（漏配会导致成交/告警静默不发）
+    try:
+        from .monitoring.notify import build_notifier
+
+        n = build_notifier(root)
+        names = n.channel_names
+        if names:
+            print(f"通知渠道:   {len(names)} 个 {names}")
+        else:
+            print("通知渠道:   ⚠️  未配置（成交/告警不会推送）")
+            print("              → 放 config/alerts.yaml 或设 FEISHU_APP_ID/SECRET/USER_OPEN_ID")
+            ok = False
+    except Exception as e:  # noqa: BLE001
+        print(f"通知渠道:   ⚠️  检测失败: {e}")
+
     # 5) 健康
     health_dir = root / "data" / "bots"
     if health_dir.is_dir():

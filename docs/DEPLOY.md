@@ -61,15 +61,41 @@ uv pip install -r requirements.txt -e .
 cp .env.example .env   # 若无模板则手写
 chmod 600 .env         # GATE_BOT_ROOT / OPENAI_* / GATE_*
 
-# 3) 环境 overlay（关键：决定本机启用哪些 bot）
+# 3) 通知（飞书）—— gitignore，必须手工放，漏了会静默不推送
+cat > config/alerts.yaml <<'EOF'
+feishu:
+  app_id: cli_xxx
+  app_secret: xxx
+  user_open_id: ou_xxx
+notify:
+  live: true      # 实盘推送
+  paper: false    # 模拟盘不推送
+EOF
+chmod 600 config/alerts.yaml
+# 或改用环境变量：FEISHU_APP_ID / FEISHU_APP_SECRET / FEISHU_USER_OPEN_ID
+
+# 4) 环境 overlay（关键：决定本机启用哪些 bot）
 mkdir -p config/bots.local
 cat > config/bots.local/brooks-btc.yaml <<'EOF'
 enabled: true
+strategist:
+  skills: [price-action-trading]   # skill 白名单
 EOF
 
-# 4) 部署
+# 5) 部署 + 自检
 ./scripts/deploy.sh
+python -m gate_bot deploy-check     # 看「通知渠道」是否 >=1
 ```
+
+### ⚠️ 不进 git 的机器专属配置（每台都要单独放）
+
+| 文件 | 内容 | 漏配后果 |
+|------|------|----------|
+| `.env` | 交易所/LLM 密钥 | bot 起不来 |
+| `config/alerts.yaml` | 飞书/Telegram 凭据 | **成交/告警静默不推送** |
+| `config/bots.local/*.yaml` | 本机启用哪些 bot + skill 白名单 | 该 bot 不运行 / skill 全可见 |
+
+`deploy-check` 会逐项检查：**通知渠道 = 0 会告警**。
 
 ## 3. 部署流水线（`scripts/deploy.sh`）
 
