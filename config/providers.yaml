@@ -23,9 +23,11 @@ providers:
     base_url: http://69.12.85.185:7863/v1
     api_key_env: OPENAI_API_KEY
     model: global:deepseek-v4.1-flash
-    thinking: false
+    # thinking 必须为 true：该模型本身就会推理，关掉会让 effective_max_tokens()
+    # 回退到 8192（而非 65536），推理一超预算就截断，Plan JSON 根本写不出来
+    thinking: true
     reasoning_effort: high
-    timeout_sec: 120
+    timeout_sec: 240
     max_tokens: 8192
     json_mode: true
 
