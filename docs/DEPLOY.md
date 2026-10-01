@@ -109,6 +109,29 @@ python -m gate_bot skill install skills-src/<id> --yes             # 安装
 解读 → 乱码（曾导致 `references/knowledge/source/V1_趋势篇` 无法读取）。
 统一用 Python `zipfile`（强制 UTF-8 标志位）+ `skill doctor` 自检。
 
+### 4.1 每个 bot 的 skill 启用开关（`strategist.skills`）
+
+`skills:` 键就是**该 bot 的 skill 白名单**：
+
+| 取值 | 含义 |
+|------|------|
+| 缺省（无该键） | **全部可见** —— 新装 skill 下一个 cycle 自动对该 bot 可见 |
+| `skills: []` | **全关** —— 该 bot 不加载任何 skill |
+| `skills: [a, b]` | **白名单** —— 只有 a/b 可见，新装 skill 进不来 |
+
+> ⚠️ `_skill_catalog()` **每个 cycle 重新扫描**，所以「缺省」= 新装即生效，无需重启。
+
+**实盘 bot 建议显式锁定**（发布 ≠ 可用）：
+
+```yaml
+# config/bots.local/brooks-btc.yaml
+enabled: true
+strategist:
+  skills: [price-action-trading]   # 白名单：只有这个进实盘决策
+```
+
+改动后需 `systemctl restart gate-watchdog`（runner 启动时读配置）。
+
 ## 5. 部署后验证
 
 ```bash
