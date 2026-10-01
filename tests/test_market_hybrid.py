@@ -618,7 +618,8 @@ class TestSnapshot(unittest.TestCase):
 
 
 class TestPlanRunnerAccountAbort(unittest.TestCase):
-    def test_account_unavailable_aborts(self):
+    def test_account_unavailable_continues(self):
+        """账户取不到 → 不中止，继续行情分析（新行为）。"""
         import tempfile
 
         from gate_bot.strategist.loop import PlanRunner, StrategistConfig
@@ -627,19 +628,24 @@ class TestPlanRunnerAccountAbort(unittest.TestCase):
             def __init__(self):
                 super().__init__(fail_account=True)
 
-        class NeverLLM:
+        called = {"n": 0}
+
+        class StubLLM:
+            last_reasoning = ""
+            last_reasoning_chain = []
+
             def chat(self, system, user):
-                raise AssertionError("LLM must not be called when account unavailable")
+                called["n"] += 1
+                return '{"cycle_id":"c","reasoning":"行情","chips":[{"symbol":"BTC_USDT","action":"hold","confidence":0.5}]}'
 
         with tempfile.TemporaryDirectory() as td:
             inbox = Path(td) / "inbox"
             inbox.mkdir()
             cfg = StrategistConfig(symbols=["BTC_USDT"], candles=5, timeframe="15m", write_hold=True)
-            runner = PlanRunner(BoomClient(), cfg, inbox, Path(td) / "hist", llm=NeverLLM())
+            runner = PlanRunner(BoomClient(), cfg, inbox, Path(td) / "hist", llm=StubLLM())
             result = runner.run_once()
-            self.assertFalse(result.get("ok"))
-            self.assertEqual(result.get("error"), "account_unavailable")
-            self.assertEqual(list(inbox.glob("*.json")), [])
+            self.assertNotEqual(result.get("error"), "account_unavailable")
+            self.assertGreater(called["n"], 0, "账户缺失时仍应调用 LLM 做行情分析")
 
     def test_positions_fail_still_aborts_but_keeps_available(self):
         class PosFailClient(FakeClient):

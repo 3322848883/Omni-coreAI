@@ -346,7 +346,9 @@ class TestPlanTriggers(unittest.TestCase):
         self.assertTrue(r1.get("ok"))
         self.assertEqual(r2.get("skipped"), "duplicate_cycle")
 
-    def test_account_fail_does_not_call_llm(self):
+    def test_account_fail_still_calls_llm(self):
+        """账户取不到不阻断：仍用行情分析（不再返回 account_unavailable）。"""
+
         class Boom:
             def get_ticker(self, symbol):
                 return {"last": "1"}
@@ -369,16 +371,23 @@ class TestPlanTriggers(unittest.TestCase):
             def get_positions(self):
                 return []
 
-        class NeverLLM:
+        called = {"n": 0}
+
+        class StubLLM:
+            last_reasoning = ""
+            last_reasoning_chain = []
+
             def chat(self, a, b):
-                raise AssertionError("no llm")
+                called["n"] += 1
+                return '{"cycle_id":"c","reasoning":"行情分析","chips":[{"symbol":"BTC_USDT","action":"hold","confidence":0.5}]}'
 
         from gate_bot.strategist.loop import PlanRunner, StrategistConfig
 
         cfg = StrategistConfig(symbols=["BTC_USDT"], candles=3, timeframe="15m")
-        runner = PlanRunner(Boom(), cfg, Path("inbox/x"), Path("hist/x"), llm=NeverLLM())
+        runner = PlanRunner(Boom(), cfg, Path("inbox/x"), Path("hist/x"), llm=StubLLM())
         r = runner.run_once()
-        self.assertEqual(r.get("error"), "account_unavailable")
+        self.assertNotEqual(r.get("error"), "account_unavailable", "账户缺失不应中止分析")
+        self.assertGreater(called["n"], 0, "LLM 应仍被调用（行情分析）")
 
 
 class TestPromptSandbox(unittest.TestCase):

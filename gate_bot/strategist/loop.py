@@ -151,13 +151,9 @@ class PlanRunner:
         )
         account = snapshot.get("account") or {}
         if account.get("error"):
-            return {
-                "ok": False,
-                "cycle_id": cycle_id,
-                "error": "account_unavailable",
-                "detail": account.get("error"),
-                "trigger": trigger,
-            }
+            # 账户取不到不阻断——行情分析仍可进行（AI 会看到 account 为空）
+            log.warning("account unavailable, continue with market-only analysis: %s",
+                        account.get("error"))
         system = build_system_prompt(
             self.strategy_prompt,
             tools_guide=TOOL_GUIDE if self.cfg.tools.get("enabled") else "",
@@ -350,8 +346,8 @@ class PlanRunner:
         )
         account = snapshot.get("account") or {}
         if account.get("error"):
-            return {"ok": False, "cycle_id": cycle_id, "error": "account_unavailable",
-                    "detail": account.get("error"), "trigger": trigger}
+            # 账户取不到不阻断：多人格里仍给出行情观点，不掉票
+            log.warning("account unavailable (persona), market-only: %s", account.get("error"))
         system = build_system_prompt(
             self.strategy_prompt,
             tools_guide=TOOL_GUIDE if self.cfg.tools.get("enabled") else "",
