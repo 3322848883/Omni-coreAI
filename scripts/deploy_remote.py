@@ -138,15 +138,27 @@ def scp_to(cfg: dict, local: Path, remote_dir: str) -> bool:
 
 def push_or_bundle(cfg: dict, branch: str, dry_run: bool) -> bool:
     """先试 GitHub push；不可达则回退 git bundle 直传。返回是否成功送达服务器。"""
-    r = _run(["git", "push", "origin", branch], cwd=str(ROOT), timeout=300)
-    out = ((r.stdout or "") + (r.stderr or "")).strip()
-    if r.returncode == 0 or "Everything up-to-date" in out:
-        print("  " + (out.splitlines()[-1] if out else "pushed"))
+    pushed = False
+    try:
+        r = _run(["git", "push", "origin", branch], cwd=str(ROOT), timeout=120)
+        out = ((r.stdout or "") + (r.stderr or "")).strip()
+        if r.returncode == 0 or "Everything up-to-date" in out:
+            print("  " + (out.splitlines()[-1] if out else "pushed"))
+            pushed = True
+        else:
+            print(f"  ⚠️  push 失败：{(out.splitlines()[-1] if out else '')[:100]}")
+    except subprocess.TimeoutExpired:
+        print("  ⚠️  push 超时（GitHub 不可达）")
+
+    if pushed:
         return True
 
-    print("  ⚠️  GitHub 不可达 → 回退 bundle 直传")
+    print("  → 回退 bundle 直传")
     # 找服务器当前 HEAD 作为 bundle 基线
-    rc, remote_head = ssh_exec(cfg, f"cd {cfg['GATE_DEPLOY_ROOT']} && git rev-parse HEAD", timeout=60)
+    try:
+        rc, remote_head = ssh_exec(cfg, f"cd {cfg['GATE_DEPLOY_ROOT']} && git rev-parse HEAD", timeout=60)
+    except subprocess.TimeoutExpired:
+        rc, remote_head = 1, ""
     remote_head = remote_head.strip().splitlines()[-1] if rc == 0 else ""
     base = remote_head if len(remote_head) == 40 else ""
     if not base:
