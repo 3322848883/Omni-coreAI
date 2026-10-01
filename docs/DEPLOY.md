@@ -21,8 +21,24 @@ config/
 - overlay 里写 `null` → 显式删除该键
 - **没有 overlay 时行为不变**（向后兼容）
 
+### ⛔ 关键不变量：`enabled` 只认 overlay
+
+**基线里的 `enabled` 一律被忽略**（即使写了 `true`）。这是结构性防护：
+
+- 想启用 bot → 必须在 `config/bots.local/<同名>.yaml` 写 `enabled: true`
+- 误改基线 `enabled: true` → 引擎忽略并打 WARNING，`deploy-check` 报「基线违规」
+- 因此：**在 A 机启用某个 bot，永远不会意外带到 B 机**
+
+```bash
+# 正确：启用 pa-d
+echo "enabled: true" > config/bots.local/pa-d.yaml
+
+# 错误（无效，会被忽略并告警）
+sed -i 's/enabled: false/enabled: true/' config/bots/pa-d.yaml
+```
+
 **为什么这样设计**：`config/bots.local/` 被 gitignore → `git pull` **永远不会与它冲突**，
-每台机器的启用集天然保留。
+每台机器的启用集天然保留；基线不可启用 → 并发编辑也不会污染生产。
 
 ### 环境差异对照
 

@@ -107,6 +107,48 @@ class TestOverlayLoading(unittest.TestCase):
             bots = load_all_bots(cfg, overlay_dir=other)
             self.assertTrue(bots["bot-a"].enabled)
 
+    # ── 结构性防护：基线 enabled 一律忽略 ──
+    def test_baseline_enabled_true_is_ignored(self):
+        """基线写 enabled: true 不生效（防误改基线把 bot 带上生产）。"""
+        with tempfile.TemporaryDirectory() as t:
+            td = Path(t)
+            cfg = self._setup(td)
+            # 直接改基线为 true
+            (cfg / "bot-a.yaml").write_text(
+                BASE_YAML.format(bid="bot-a").replace("enabled: false", "enabled: true"),
+                encoding="utf-8",
+            )
+            bots = load_all_bots(cfg)
+            self.assertFalse(bots["bot-a"].enabled, "基线 enabled:true 必须被忽略")
+
+    def test_baseline_enabled_true_with_overlay_false_stays_false(self):
+        with tempfile.TemporaryDirectory() as t:
+            td = Path(t)
+            cfg = self._setup(td)
+            (cfg / "bot-a.yaml").write_text(
+                BASE_YAML.format(bid="bot-a").replace("enabled: false", "enabled: true"),
+                encoding="utf-8",
+            )
+            ov = td / "config" / "bots.local"
+            ov.mkdir()
+            (ov / "bot-a.yaml").write_text("enabled: false\n", encoding="utf-8")
+            bots = load_all_bots(cfg)
+            self.assertFalse(bots["bot-a"].enabled)
+
+    def test_only_overlay_can_enable(self):
+        with tempfile.TemporaryDirectory() as t:
+            td = Path(t)
+            cfg = self._setup(td)
+            (cfg / "bot-a.yaml").write_text(
+                BASE_YAML.format(bid="bot-a").replace("enabled: false", "enabled: true"),
+                encoding="utf-8",
+            )
+            ov = td / "config" / "bots.local"
+            ov.mkdir()
+            (ov / "bot-a.yaml").write_text("enabled: true\n", encoding="utf-8")
+            bots = load_all_bots(cfg)
+            self.assertTrue(bots["bot-a"].enabled, "只有 overlay 能启用")
+
 
 class TestDemojibake(unittest.TestCase):
     def test_cp866_recovery(self):

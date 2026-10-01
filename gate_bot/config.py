@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,6 +11,8 @@ from typing import Optional
 import yaml
 
 from .gate_client import GateApiError, GateClient, load_credentials
+
+log = logging.getLogger("gate_bot.config")
 
 
 @dataclass
@@ -115,17 +118,29 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None) -> BotConfig
     # overlay：显式传入 > 自动推导（<config>/bots.local）
     ov_dir = Path(overlay_dir) if overlay_dir else overlay_dir_for(path.parent)
     ov = ov_dir / path.name
+    ov_data: dict = {}
     if ov.is_file():
-        ov_data = yaml.safe_load(ov.read_text(encoding="utf-8")) or {}
-        if isinstance(ov_data, dict):
-            data = deep_merge(data, ov_data)
+        loaded = yaml.safe_load(ov.read_text(encoding="utf-8")) or {}
+        if isinstance(loaded, dict):
+            ov_data = loaded
+    # ── 结构性防护：enabled 只认 overlay ──
+    # 基线里的 enabled 一律忽略（防误改基线把 bot 带上生产）。
+    # 想启用 → 在 config/bots.local/<同名>.yaml 写 enabled: true
+    baseline_enabled = bool(data.get("enabled", False))
+    if baseline_enabled:
+        log.warning(
+            "baseline %s has enabled: true — IGNORED (enable via %s/%s instead)",
+            path.name, ov_dir.name, path.name,
+        )
+    data = deep_merge(data, ov_data)
+    enabled = bool(ov_data.get("enabled", False))
     env = str(data.get("env") or "live").lower()
     if env not in ("live", "testnet", "paper"):
         raise GateApiError(f"env must be live|testnet in {path}")
     bot_id = data.get("bot_id") or path.stem
     return BotConfig(
         bot_id=str(bot_id),
-        enabled=bool(data.get("enabled", True)),
+        enabled=enabled,
         env=env,
         api_key_env=str(data.get("api_key_env") or ""),
         api_secret_env=str(data.get("api_secret_env") or ""),

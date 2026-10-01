@@ -11,7 +11,7 @@ from gate_bot.watchdog import COMPONENT_CMD, Target, Watchdog
 
 YAML = """
 bot_id: {bid}
-enabled: true
+enabled: false
 env: {env}
 symbols: [BTC_USDT]
 max_notional_usd: 100
@@ -19,11 +19,19 @@ max_notional_usd: 100
 
 
 def _make_root(td: str, bots: dict) -> Path:
+    """造 root：基线（enabled: false）+ overlay（enabled: true）。
+
+    注意：基线 enabled 被引擎忽略，启用必须走 config/bots.local/。
+    """
     root = Path(td)
     (root / "config" / "bots").mkdir(parents=True, exist_ok=True)
+    (root / "config" / "bots.local").mkdir(parents=True, exist_ok=True)
     for bid, env in bots.items():
         (root / "config" / "bots" / f"{bid}.yaml").write_text(
             YAML.format(bid=bid, env=env), encoding="utf-8"
+        )
+        (root / "config" / "bots.local" / f"{bid}.yaml").write_text(
+            "enabled: true\n", encoding="utf-8"
         )
     return root
 
@@ -51,12 +59,11 @@ class TestDiscover(unittest.TestCase):
             self.assertNotIn(("l1", "paper"), pairs)
 
     def test_disabled_bot_skipped(self):
-        """enabled 是唯一开关：false 一律不看。"""
+        """enabled 是唯一开关：无 overlay（或 overlay=false）一律不看。"""
         with tempfile.TemporaryDirectory() as td:
             root = _make_root(td, {"on1": "paper", "off1": "paper"})
-            y = root / "config" / "bots" / "off1.yaml"
-            y.write_text(y.read_text(encoding="utf-8").replace("enabled: true", "enabled: false"),
-                         encoding="utf-8")
+            # 禁用 = 移除 overlay（基线本身不可启用）
+            (root / "config" / "bots.local" / "off1.yaml").unlink()
             _touch_locks(root, "on1", "off1")
             wd = Watchdog(root)
             bids = {t.bot_id for t in wd.discover()}

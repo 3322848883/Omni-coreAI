@@ -457,13 +457,19 @@ def cmd_deploy_check(args) -> int:
     print("=" * 52)
 
     # 1) 代码版本
+    def _git(*a: str) -> str:
+        try:
+            return subprocess.run(
+                ["git", *a], cwd=str(root), capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=10,
+            ).stdout.strip()
+        except Exception:  # noqa: BLE001
+            return ""
+
     try:
-        head = subprocess.run(["git", "log", "--oneline", "-1"], cwd=str(root),
-                              capture_output=True, text=True, timeout=10).stdout.strip()
-        branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=str(root),
-                                capture_output=True, text=True, timeout=10).stdout.strip()
-        dirty = subprocess.run(["git", "status", "--porcelain"], cwd=str(root),
-                               capture_output=True, text=True, timeout=10).stdout.strip()
+        head = _git("log", "--oneline", "-1")
+        branch = _git("rev-parse", "--abbrev-ref", "HEAD")
+        dirty = _git("status", "--porcelain")
         print(f"代码版本:   {branch} @ {head}")
         if dirty:
             n = len(dirty.splitlines())
@@ -486,6 +492,27 @@ def cmd_deploy_check(args) -> int:
     except Exception as e:  # noqa: BLE001
         print(f"启用 bot:   ⛔ 配置加载失败: {e}")
         ok = False
+
+    # 3b) 基线违规检测（基线写 enabled: true 会被忽略，属误改）
+    violations = []
+    for p in sorted(paths.config_dir.glob("*.yaml")):
+        if p.name.startswith("_"):
+            continue
+        try:
+            import re as _re
+
+            txt = p.read_text(encoding="utf-8")
+            if _re.search(r"^enabled:\s*true\s*$", txt, _re.MULTILINE):
+                violations.append(p.name)
+        except Exception:  # noqa: BLE001
+            continue
+    if violations:
+        print(f"⚠️  基线违规: {len(violations)} 个基线文件写了 enabled: true（已忽略，应改 overlay）")
+        for v in violations[:5]:
+            print(f"              config/bots/{v}")
+        ok = False
+    else:
+        print("基线检查:   OK（无基线 enabled: true）")
 
     # 4) skill
     try:
