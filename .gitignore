@@ -68,3 +68,9 @@ skills/*
 
 # SkillKit: audit journal
 logs/skill_journal.jsonl*
+
+# dev script output artifacts / key-handling one-offs
+scripts/_*.txt
+scripts/_*.json
+scripts/_gate_env.tmp
+scripts/_export_gate_keys.py
