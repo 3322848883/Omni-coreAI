@@ -99,7 +99,54 @@ strategist:
 EOF
 ```
 
-## 九、遗留建议
+## 九、结构性防护（彻底解决并发/误改）
 
-1. **实盘 brooks-btc 仍未显式配 `skills:`** —— 缺省 = 全部可见。建议在 `config/bots.local/brooks-btc.yaml` 显式声明白名单，避免今后新装 skill 自动对实盘可见。
-2. 本地 `config/bots.local/` 有 24 个 overlay（开发用），服务器 1 个 —— 这正是设计意图（环境差异），但需注意本地测试 bot 不要误部署。
+**问题**：基线 `config/bots/*.yaml` 若被改成 `enabled: true`（并发会话或误操作），
+pull 到生产会让本不该跑的 bot 启动。
+
+**修法**：`enabled` **只认 overlay**，基线值一律忽略。
+
+```python
+# gate_bot/config.py
+baseline_enabled = bool(data.get("enabled", False))
+if baseline_enabled:
+    log.warning("baseline %s has enabled: true — IGNORED (enable via %s/%s instead)", ...)
+data = deep_merge(data, ov_data)
+enabled = bool(ov_data.get("enabled", False))   # ← 只从 overlay 读
+```
+
+**配套**：
+- `deploy-check` 新增「基线检查」行（检测基线 `enabled: true` 并告警）
+- `config/bots/pa-d.yaml` 恢复 `enabled: false`；启用改走 `config/bots.local/pa-d.yaml`
+- `tests/test_watchdog.py` 的 `_make_root` 同时写 overlay
+- `tests/test_deploy_env.py` +3 例（基线 true 被忽略 / overlay false 保持 / 只有 overlay 能启用）
+- `deploy-check` 的 git 子进程指定 `encoding=utf-8`（修 Windows GBK 解码）
+
+**服务器实测**：
+```
+1) 基线改写 enabled: true → pa-a.enabled = False   ✅ 被忽略
+2) 基线 true + overlay true → pa-a.enabled = True  ✅ 只有 overlay 能启用
+   日志: baseline pa-a.yaml has enabled: true — IGNORED
+结论: PASS 结构性防护生效
+```
+
+## 十、最终状态
+
+**服务器**：
+```
+HEAD:        f87a215
+git status:  干净 ✅
+overlay:     1 个（brooks-btc）
+启用 bot:    1 个（brooks-btc）
+基线检查:    OK（无基线 enabled: true）
+skill:       price-action-trading v34.2, 100 files, validate PASS 0 warnings
+进程:        3 个（watchdog + plan-loop + run）
+```
+
+**本地**：全量 **887 PASS**
+
+## 十一、遗留建议
+
+1. **实盘 brooks-btc 仍未显式配 `skills:`** —— 缺省 = 全部可见。建议在
+   `config/bots.local/brooks-btc.yaml` 显式声明 `strategist.skills: [price-action-trading]`。
+2. 本地 `config/bots.local/` 有 25 个 overlay（开发用），服务器 1 个 —— 这正是设计意图。
