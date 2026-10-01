@@ -152,9 +152,13 @@ enabled: false   # 一律不管，绝不凭空开
 | `equity_deviation` | 权益相对日初偏离 >10% | alerts.json |
 | `dup_fill` | 同一 order_id 重复成交 | alerts.json |
 | `orphan_protector` | 平仓后遗留 reduce-only SL/TP | alerts.json |
+| `plan_fail` | plan 周期连续失败（LLM/解析），每 `error_warn`(5) 次一条 | alerts.json + 飞书 |
 | 成交卡片 | 开/平/减仓/改保护 | 飞书 |
 | 衰减 | 滚动胜率/Sharpe 跌破阈值 | 飞书 |
 | 进程事件 | 看门狗重启/停手 | 飞书 |
+
+`health.json` 的 `error_streak` **跨实例落盘**（`record_error()` 每次续算，不是实例内计数），
+所以每轮新建 `HealthMonitor(root, bot_id)` 也能累计；`llm_latency` 取 LLM 调用真实耗时。
 
 读告警：
 

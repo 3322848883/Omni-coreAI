@@ -191,46 +191,52 @@ class PlanRunner:
                 charts = self._generate_charts(snapshot)
             except Exception:  # noqa: BLE001
                 charts = []
+        root = self.cfg.bot_root or Path.cwd()
+        bid = self.cfg.bot_id or self.inbox.name
+        degraded: Optional[str] = None
+        t_llm = time.time()
         try:
             text = self._chat_with_tools(system, user, chart_base64=charts or None)
-        except LLMError as e:
-            return {
-                "ok": False,
-                "cycle_id": cycle_id,
-                "error": "llm_unavailable",
-                "detail": str(e),
-                "trigger": trigger,
-            }
-        # monitoring: heartbeat（LLM 调用完成）
+        except Exception as e:  # noqa: BLE001 — 网络/模型/工具异常都不该让整轮缺席
+            log.exception("plan llm failed: %s", e)
+            degraded = f"llm_failed: {e}"
+            text = ""
+        llm_latency = round(time.time() - t_llm, 1)
+        # monitoring: heartbeat（LLM 调用完成；延迟取真实值，别再硬编码 0）
         try:
             from ..monitoring import HealthMonitor
-            root = self.cfg.bot_root or Path.cwd()
-            bid = self.cfg.bot_id or self.inbox.name
             HealthMonitor(root, bid).heartbeat(
-                llm_latency=0, exec_latency=0, cycle_id=cycle_id)
+                llm_latency=llm_latency, cycle_id=cycle_id)
         except Exception:  # noqa: BLE001
             pass
-        try:
-            self._save_thinking(
-                cycle_id=cycle_id,
-                trigger=trigger,
-                content=text,
-                reasoning=list(getattr(self.llm, "last_reasoning_chain", []) or []),
-            )
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            plan = parse_plan_text(text)
-        except PlanError as e:
-            log.error("plan parse failed: %s", e)
+        if text:
+            try:
+                self._save_thinking(
+                    cycle_id=cycle_id,
+                    trigger=trigger,
+                    content=text,
+                    reasoning=list(getattr(self.llm, "last_reasoning_chain", []) or []),
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        if degraded:
+            plan = self._hold_plan(cycle_id, degraded)
+        else:
+            try:
+                plan = parse_plan_text(text)
+            except PlanError as e:
+                log.error("plan parse failed: %s", e)
+                degraded = f"parse_failed: {e}"
+                plan = self._hold_plan(cycle_id, degraded)
+        if degraded:
+            self._record_cycle_failure(root, bid, degraded)
+        else:
             try:
                 from ..monitoring import HealthMonitor
-                root = self.cfg.bot_root or Path.cwd()
-                bid = self.cfg.bot_id or self.inbox.name
-                HealthMonitor(root, bid).record_error()
-            except Exception:
+                HealthMonitor(root, bid).record_success()
+            except Exception:  # noqa: BLE001
                 pass
-            return {"ok": False, "cycle_id": cycle_id, "error": str(e), "trigger": trigger}
+        tail_extra = {"degraded": degraded} if degraded else {}
         if not plan.cycle_id:
             plan.cycle_id = cycle_id
         if plan.cycle_id == self._last_cycle_id:
@@ -240,6 +246,7 @@ class PlanRunner:
                 "skipped": "duplicate_cycle",
                 "orders": 0,
                 "trigger": trigger,
+                **tail_extra,
             }
         self._last_cycle_id = plan.cycle_id
         self._save_last_cycle(plan.cycle_id)
@@ -277,6 +284,7 @@ class PlanRunner:
                 "notes": risk_result.notes + rejected_triggers,
                 "rejected": len(risk_result.rejected),
                 "trigger": trigger,
+                **tail_extra,
             }
         path = write_signal_file(self.inbox, payload, cycle_id=plan.cycle_id)
         self._record_plan(cycle_id=plan.cycle_id, trigger=trigger, orders=len(orders),
@@ -307,6 +315,48 @@ class PlanRunner:
             return render_catalog(metas)
         except Exception:  # noqa: BLE001
             return ""
+
+    def _hold_plan(self, cycle_id: str, reason: str) -> Plan:
+        """降级用的 hold Plan：让本轮照常走完风控/记录链路，不留下空周期。"""
+        from .schema import Chip, Plan
+
+        sym = (self.cfg.symbols or ["BTC_USDT"])[0]
+        return Plan(
+            cycle_id=cycle_id,
+            reasoning=f"[降级] {reason[:60]}",
+            chips=[Chip(
+                symbol=sym,
+                action="hold",
+                confidence=0.0,
+                reasoning="数据/模型异常，降级观望",
+            )],
+        )
+
+    def _record_cycle_failure(self, root: Path, bid: str, detail: str) -> None:
+        """记一次周期失败（落盘 + 连续失败告警）；实盘额外推飞书。"""
+        try:
+            from ..monitoring import HealthMonitor
+
+            hm = HealthMonitor(root, bid)
+            streak = hm.record_error(detail=detail)
+        except Exception:  # noqa: BLE001
+            return
+        if not streak or streak % hm.error_warn:
+            return
+        try:
+            from ..monitoring import notify_process_event, should_notify
+
+            if not should_notify(root, self.cfg.env):
+                return
+            notify_process_event(
+                root=root, kind="plan_fail",
+                title=f"plan 连续失败 {streak} 次",
+                fields=[("Bot", bid), ("连续失败", str(streak)),
+                        ("最近原因", detail[:80])],
+                color="red",
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     def _hold_fallback(self, cycle_id: str, trigger: str, reason: str) -> dict:
         """降级：LLM/解析失败时不丢票——返回 hold 计划，标记 degraded。

@@ -645,6 +645,8 @@ python -m gate_bot persona-run --once             # 单轮
 | **强制查数据** | 全程未调用任何工具 | 明确要求后**重试一次** |
 | **JSON 修复** | 围栏/尾逗号/单引号/注释/截断/多对象 | 自动修复；triggers 片段不会误当主 Plan |
 
+单人格 bot（`plan-loop`）同样不中断：LLM 调用或 JSON 解析失败 → 降级 `hold` 并照常记账（返回里带 `degraded`），同时累计 `error_streak`；连续失败达 `error_warn`(5) 次落 `alerts.json` 并推飞书。
+
 **工具使用可审计**：每轮记录 `tool_usage` + `tool_usage_summary`（工具名/参数/是否查过数据），随 `state/*.thinking.json` 落盘——**防 AI 偷懒不查数据**。
 
 ### 记忆系统（agent-memory）
@@ -686,7 +688,9 @@ read_alerts(root, "brooks-btc")              # 全部
 read_alerts(root, "brooks-btc", "dup_fill")  # 按类型
 ```
 
-触发即写：`equity_deviation`（日初权益偏离 >10%）、`dup_fill`（重复成交）、`orphan_protector`（平仓后遗留 SL/TP）。
+触发即写：`equity_deviation`（日初权益偏离 >10%）、`dup_fill`（重复成交）、`orphan_protector`（平仓后遗留 SL/TP）、`plan_fail`（plan 周期连续失败，每 5 次一条）。
+
+`health.json` 的 `error_streak` 跨实例落盘，连续失败达 `error_warn`(5) 次时落 `alerts.json` 并推飞书（实盘）。
 
 **飞书/Telegram 告警**（可选，不配则降级为日志）：
 

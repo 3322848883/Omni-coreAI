@@ -4,6 +4,7 @@
   - equity_deviation  权益偏离 >10%
   - dup_fill          同一 order_id 成交入账重复
   - orphan_protector  平仓后遗留 reduce-only SL/TP
+  - plan_fail         plan 周期连续失败（LLM/解析），每 error_warn 次记一条
 
 数据文件：data/bots/<id>/state/alerts.json
 结构：{"alerts": [{ts, type, detail, ...}, ...]}  最多保留 200 条。
@@ -21,6 +22,7 @@ MAX_ALERTS = 200
 TYPE_EQUITY_DEVIATION = "equity_deviation"
 TYPE_DUP_FILL = "dup_fill"
 TYPE_ORPHAN = "orphan_protector"
+TYPE_PLAN_FAIL = "plan_fail"
 
 
 class AlertStore:

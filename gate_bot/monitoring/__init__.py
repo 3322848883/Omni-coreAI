@@ -3,6 +3,7 @@ from .alerts import (
     TYPE_DUP_FILL,
     TYPE_EQUITY_DEVIATION,
     TYPE_ORPHAN,
+    TYPE_PLAN_FAIL,
     AlertStore,
     read_alerts,
 )
@@ -27,7 +28,7 @@ __all__ = [
     "DecayDetector", "HealthMonitor", "AlertNotifier",
     "NotificationChannel", "FeishuChannel", "TelegramChannel", "DingTalkChannel",
     "AlertStore", "read_alerts",
-    "TYPE_EQUITY_DEVIATION", "TYPE_DUP_FILL", "TYPE_ORPHAN",
+    "TYPE_EQUITY_DEVIATION", "TYPE_DUP_FILL", "TYPE_ORPHAN", "TYPE_PLAN_FAIL",
     "build_notifier", "format_trade_steps", "format_trade_card", "notify_trade_events", "should_notify",
     "format_process_card", "notify_process_event",
 ]
