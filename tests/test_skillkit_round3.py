@@ -247,7 +247,7 @@ class TestSkillRefL3(unittest.TestCase):
     def test_skill_ref_in_tool_surface(self):
         from gate_bot.strategist.tools import NATIVE_TOOLS, TOOL_NAMES
         self.assertIn("skill_ref", TOOL_NAMES)
-        self.assertEqual(len(NATIVE_TOOLS), 22)
+        self.assertEqual(len(NATIVE_TOOLS), 25)  # 22 基础 + 3 TV
 
     def test_ref_truncation(self):
         from gate_bot.skillkit import SkillRegistry, run_skill_ref

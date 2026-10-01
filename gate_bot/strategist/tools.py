@@ -100,6 +100,15 @@ TOOL_GUIDE = """【行情工具 · 按需调用】
 - sqzmom(symbol, tf, limit) → Squeeze Momentum（BB/KC 挤压 + linreg 动量）
 
 
+- tv_linreg_trendlines(symbol, tf, limit, length) → TV Linreg & Trendlines：3 层回归通道(±1σ/±2σ/±3σ) + 枢轴趋势线
+
+
+- tv_rsi_yata(symbol, tf, limit, length) → TV RSI Yata：平滑 RSI + MA + BB + RSI 蜡烛 + OB/OS + 直方图 + RSI-MACD + HH/HL/LH/LL 结构
+
+
+- tv_lr_ha_candles(symbol, tf, limit, length) → TV LR HA Candles：线性回归 Heikin-Ashi + T3 + ATR 波动带
+
+
 默认快照只有主周期少量数据；更长历史、更高周期用工具拉。
 
 
@@ -125,6 +134,9 @@ TOOL_NAMES = (
 
 
     "smc_map", "smc_events", "sqzmom", "skill", "skill_ref",
+
+    # TV Pine 指标（真实指标名）
+    "tv_linreg_trendlines", "tv_rsi_yata", "tv_lr_ha_candles",
 
 
 )
@@ -1097,6 +1109,11 @@ from ..skillkit.tool import SKILL_REF_TOOL_DEF as _SKILL_REF_TOOL_DEF  # noqa: E
 NATIVE_TOOLS.append(_SKILL_TOOL_DEF)
 NATIVE_TOOLS.append(_SKILL_REF_TOOL_DEF)
 
+# TV Pine 指标工具（Linreg & Trendlines / RSI Yata / LR HA Candles）
+from .tv_tools import TV_TOOL_DEFS as _TV_TOOL_DEFS  # noqa: E402
+
+NATIVE_TOOLS.extend(_TV_TOOL_DEFS)
+
 
 
 
@@ -1226,6 +1243,12 @@ def run_tool(
 
 
     try:
+
+
+        if name.startswith("tv_"):
+            from .tv_tools import run_tv_tool
+            return run_tv_tool(client, name, args, env=env, bot_root=bot_root,
+                               market_cfg=market_cfg)
 
 
         if name == "klines":

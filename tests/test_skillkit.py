@@ -259,7 +259,7 @@ class TestToolsIntegration(unittest.TestCase):
         from gate_bot.strategist.tools import NATIVE_TOOLS, TOOL_NAMES
         self.assertIn("skill", TOOL_NAMES)
         self.assertIn("skill_ref", TOOL_NAMES)
-        self.assertEqual(len(NATIVE_TOOLS), 22)
+        self.assertEqual(len(NATIVE_TOOLS), 25)  # 22 基础 + 3 TV
 
     def test_prompt_catalog_slot(self):
         from gate_bot.strategist.prompt import build_system_prompt

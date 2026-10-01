@@ -183,11 +183,12 @@ llm:
 | 落盘 | 每轮 **`state/*.thinking.json`**（思维链 reasoning_content） |
 | 账户 | **REST**：余额+持仓+open_orders+TP/SL（全 bot） |
 
-**22 个工具**（原生 function calling）：
+**25 个工具**（原生 function calling）：
 
 - 行情：`klines` `indicators` `ticker` `orderbook` `contract` `stats` `account` `smc_map` `smc_events` `sqzmom`
 - aux：`trades_flow` `liquidations` `market_stats` `tech_analysis` `coin_info` `onchain` `social` `overview` `sentiment` `macro`
 - skill：`skill` `skill_ref`（SkillKit）
+- **TV 指标**：`tv_linreg_trendlines`（Linreg & Trendlines）`tv_rsi_yata`（RSI Yata）`tv_lr_ha_candles`（LR HA Candles）
 
 **SkillKit（可安装 skill）** —— 三级渐进披露：
 
@@ -216,7 +217,9 @@ skill 可声明 `allowed-tools`（激活后**收窄**工具面）、`model-invoc
 - `smc_events`（结构事件 → 发生了什么/何时动手）：枢轴 BOS/CHoCH 事件流、流动性扫荡(x)、OB+Breaker+活动、FVG+突袭
 - `sqzmom`（Squeeze Momentum）：BB/KC 挤压状态 + linreg 动量
 
-**指标 23 族**（`indicators` 工具，周期任意）：EMA/SMA/RMA/WMA/VWMA、ATR（Pine 平滑 rma/sma/ema/wma）、RSI（含平滑+BB）、MACD（EMA/SMA）、BOLL（SMA/EMA/RMA/WMA/VWMA 基线）、Stoch、CCI、Williams %R、MFI、ADX、VWAP、OBV、SuperTrend、SQZMOM、pine_ema 套件。
+**指标 26 族**（`indicators` 工具，周期任意）：EMA/SMA/MA/RMA/WMA/VWMA/HMA/KAMA/ALMA/T3/LSMA、Linreg/Linreg Channel、ATR（Pine 平滑 rma/sma/ema/wma）、RSI（含平滑+BB）、MACD（EMA/SMA）、BOLL（SMA/EMA/RMA/WMA/VWMA 基线）、Stoch、CCI、Williams %R、MFI、ADX、VWAP、OBV、SuperTrend、SQZMOM、pine_ema 套件。
+
+**TV 指标 3 套**（独立工具，Pine 原版移植并已对齐验证）：`tv_linreg_trendlines`（Linreg & Trendlines：3 层回归通道 + 枢轴趋势线）、`tv_rsi_yata`（RSI Yata：平滑 RSI + MA + BB + RSI 蜡烛 + OB/OS + 直方图 + RSI-MACD + HH/HL/LH/LL）、`tv_lr_ha_candles`（LR HA Candles：线性回归 Heikin-Ashi + T3 + ATR 波动带）。
 
 取数与 `klines` 同源：hybrid 时优先本所 `kline_<ex>.db`，否则走**该所** REST（`exchange:` 决定数据源）。
 

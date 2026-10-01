@@ -739,12 +739,13 @@ class SlackChannel(NotificationChannel):
 notifier.register(SlackChannel(...))
 ```
 
-## LLM 工具（22 个）与指标（25 族）
+## LLM 工具（25 个）与指标（26 族）
 
-AI 策略层按需调用：`klines` `indicators` `ticker` `orderbook` `contract` `stats` `account` `smc_map` `smc_events` `sqzmom` + 10 个 aux + `skill` `skill_ref`。
+AI 策略层按需调用：`klines` `indicators` `ticker` `orderbook` `contract` `stats` `account` `smc_map` `smc_events` `sqzmom` + 10 个 aux + `skill` `skill_ref` + 3 个 TV 指标。
 
 - **两套 SMC**：`smc_map`（市场地图：趋势/估值区/关键位）与 `smc_events`（结构事件：BOS/CHoCH/扫荡/Breaker）互补
-- **指标 25 族**（任意周期）：EMA/SMA/RMA/WMA/VWMA、ATR（Pine 平滑）、RSI、MACD、BOLL、Stoch、CCI、WR、MFI、ADX、VWAP、OBV、SuperTrend、SQZMOM、Linreg/LSMA/Channel、T3、KAMA、HMA、ALMA
+- **指标 26 族**（任意周期）：EMA/SMA/MA/RMA/WMA/VWMA/HMA/KAMA/ALMA/T3/LSMA、Linreg/Linreg Channel、ATR（4 平滑）、BOLL（5 基线）、RSI（含平滑+BB）、Stoch、CCI、WR、MFI、ADX、MACD、VWAP、OBV、SuperTrend、SQZMOM、pine_ema 套件
+- **TV 指标 3 套**（Pine 原版移植，已对齐验证）：`tv_linreg_trendlines`（3 层回归通道+枢轴趋势线）、`tv_rsi_yata`（增强 RSI 全套）、`tv_lr_ha_candles`（LR Heikin-Ashi + T3 + 波动带）
 
 ## SkillKit — 可安装 Skill
 
