@@ -249,7 +249,12 @@ skill 可声明 `allowed-tools`（激活后**收窄**工具面）、`model-invoc
 - 资金费率：每 8h 取真实费率对持仓结算
 - 精度校验：tick/lot/最小名义/价格带/杠杆上限，拒绝原因对齐交易所
 
-**多人格共管**：N 人格（brooks/smc/scalper…）共管订单。各人格独立分析 → 融合（`weighted_vote`/`master_arbiter`/`consensus`）→ 按拓扑执行（`single_account` 去重 / `mirror_accounts` 同步）。可选讨论模式（互看 reasoning 后修正，`discussion.enabled: true`，硬上限 4 轮）。共同记忆 `data/shared/orders/<order_id>.json`。`python -m gate_bot persona-run --group <name>`。
+**多人格共管**：N 人格（brooks/smc/scalper…）共管订单。各人格独立分析 → 融合（`weighted_vote`/`master_arbiter`/`consensus`）→ 按拓扑执行（`single_account` 去重 / `mirror_accounts` 同步）= **2 拓扑 × 3 融合 = 6 种组合**。
+
+- **讨论模式**（3 阶段，可选）：`discussion.enabled: true` + `rounds: 3` → ①相互讨论与反驳 ②深化讨论 ③最终决策；`early_exit_on_agreement` 控制一致即退；改口落盘 `data/shared/discussion_log.jsonl`
+- **稳定性（不掉票）**：LLM 5xx/网络错误**指数退避重试 3 次**；重试仍失败或解析失败 → **降级 hold**（保留投票权）；`analyze_once` 异常也降级；**账户缺失继续行情分析**；无工具调用**强制重试**
+- **工具审计**：每轮 `tool_usage` + `tool_usage_summary` 随 `thinking.json` 落盘（防偷懒）
+- 共同记忆 `data/shared/orders/<order_id>.json`。`python -m gate_bot persona-run --group <name>`
 
 **记忆系统**（agent-memory）：四层记忆（Order/Journal/Profile/Working），恒定 ~4k token/轮。订单上下文含 reason/lifecycle/recent_events(top-5)/memory_refs/invalidation。决策日志 append-only 事件溯源（`state/memory_journal.jsonl`）。策略画像确定性统计（`state/memory_profile.json`）。缓存优化（稳定前缀+变化值殿后）。`gate_bot.memory` 模块。
 

@@ -1,4 +1,4 @@
----
+﻿---
 feature: multi-persona
 status: delivered
 updated: 2026-09-27
@@ -68,28 +68,56 @@ groups:
 - **冲突**：long/short 冲突时 `on_conflict`：hold（默认）/ master / majority
 - **action 字段**：融合输出 `action`（open_long/close/reduce_long/modify_tp_sl…）为执行权威
 
-### [S2.4] 共同记忆（共享订单库）
+### [S2.4] 讨论模式（3 阶段，可选）
+
+`discussion.enabled: true` 时，融合前插入辩论阶段：
+
+| 轮次 | 阶段 | 行为 |
+|------|------|------|
+| 1 | 相互讨论与反驳 | 看同伴 decision+reasoning；可反驳、可被说服；不盲从多数 |
+| 2 | 深化讨论 | 聚焦未解决分歧，追求更高置信度共识 |
+| 3 | 最终决策 | 综合定稿，不再摇摆 |
+
+- `rounds: 3`（硬上限 4）；`early_exit_on_agreement` 控制是否一致即退
+- 每轮只交换 `decision + reasoning(≤50字)`，不暴露完整 Plan
+- **改口可审计**：`data/shared/discussion_log.jsonl` 记录每轮谁从什么改成什么
+
+### [S2.5] 稳定性（不掉票）
+
+融合要求**每个成员都投票**；成员失败会削弱融合质量。四层保护：
+
+| 机制 | 触发 | 行为 |
+|------|------|------|
+| LLM 重试 | 5xx / 网络中断 / 超时 | 指数退避 3 次；4xx 不重试 |
+| 降级 hold | 重试仍失败 / 解析失败 | 返回 hold（`ok=True`），保留投票权 |
+| 异常降级 | `analyze_once` 抛异常 | 同上，不掉票 |
+| 账户缺失继续 | 取不到账户 | 警告后继续行情分析 |
+| 强制查数据 | 全程无工具调用 | 明确要求后重试一次 |
+
+**工具用量审计**：`tool_usage` + `tool_usage_summary` 随 `thinking.json` 落盘，防偷懒。
+
+### [S2.6] 共同记忆（共享订单库）
 
 `data/shared/orders/<order_id>.json`（跨 bot 读写）：
 
 - **生命周期**：开仓建新单 → 持仓期**复用同一 order_id**（votes/reason/log 累积）→ 平仓标 closed
 - 记录：订单状态 / 各人格理由 / 每轮投票 / 融合决策日志
 
-### [S2.5] 执行映射
+### [S2.7] 执行映射
 
 | 拓扑 | 执行 |
 |---|---|
 | `single_account` | 写 `target_account` inbox，**去重单执行** |
 | `mirror_accounts` | 广播各成员 inbox（原子写 + JSON 校验 + exists 跳过） |
 
-### [S2.6] 风控（不绕过、不误拦）
+### [S2.8] 风控（不绕过、不误拦）
 
 融合信号在写 inbox 前过 `source_bot` 的 strategist 风控：
 - `min_confidence`：低于阈值 → 降级 hold（含 confidence=0）
 - `max_notional_usd`：超限 → 封顶
 - **减险出场豁免**：close/reduce/modify 不被风控拦（不能因低置信度而无法平仓）
 
-### [S2.7] 进程
+### [S2.9] 进程
 
 ```bash
 python -m gate_bot persona-run --group btc-trio   # 常驻

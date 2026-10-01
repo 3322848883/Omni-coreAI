@@ -594,22 +594,58 @@ python -m gate_bot persona-run --once             # 单轮
 | `master_arbiter` | master 人格裁决，其他作参考 |
 | `consensus` | 共识分 ≥ threshold 才执行 |
 
+**6 种组合**（2 拓扑 × 3 融合）：
+
+| # | 拓扑 | 融合 | 效果 |
+|---|------|------|------|
+| 1 | single_account | weighted_vote | 加权投票 → 一单 |
+| 2 | single_account | master_arbiter | 老大哥定 → 一单 |
+| 3 | single_account | consensus | 需共识 → 一单 |
+| 4 | mirror_accounts | weighted_vote | 加权后各账户同步 |
+| 5 | mirror_accounts | master_arbiter | 老大哥定 → 各账户同步 |
+| 6 | mirror_accounts | consensus | 共识后 → 各账户同步 |
+
 **共同记忆**：`data/shared/orders/<order_id>.json`——订单状态/各人格理由/投票史/管理记录，跨 bot 读写。
 
-### 讨论模式（可选）
+### 讨论模式（可选，3 阶段）
 
-各人格**互看 reasoning 后修正决策**，再融合执行：
+各人格**互看 reasoning 后辩论、改口**，再融合执行：
 
 ```yaml
 # config/persona_groups.yaml — 加 discussion 段即可
     discussion:
       enabled: true
-      rounds: 2            # 讨论轮次（1-4，硬上限防无限讨论）
+      rounds: 3            # 3 阶段：讨论与反驳 → 深化 → 最终决策（硬上限 4）
       timeout_sec: 120     # 单轮超时
-      early_exit_on_agreement: true   # 首轮一致则跳过讨论
+      early_exit_on_agreement: false  # true=首轮一致即退出；false=强制跑满
 ```
 
+**三阶段语义**（`rounds: 3`）：
+
+| 轮次 | 阶段 | 提示词引导 |
+|------|------|-----------|
+| 1 | **相互讨论与反驳** | 看同伴观点，分歧请明确反驳；有理请改口，**不盲从多数** |
+| 2 | **深化讨论** | 聚焦未解决分歧，尝试达成更高置信度共识 |
+| 3 | **最终决策** | 综合全部讨论定稿，**不再摇摆** |
+
 **流程**：独立分析 → 互看对方 decision+reasoning → 修正 → 融合。基于 Du et al. 2023（2-4 轮最优）+ 硬预算防死讨论。
+
+**讨论过程可审计**：每轮改口落盘 `data/shared/discussion_log.jsonl`（谁从什么改成什么）。
+
+### 稳定性（不掉票）
+
+多人格融合要求**每个成员都投票**；任一成员失败会削弱融合质量。以下机制确保不丢票：
+
+| 机制 | 触发 | 行为 |
+|------|------|------|
+| **LLM 重试** | 5xx / 网络中断 / 超时 | 指数退避重试 3 次（1.5s→3s→6s）；4xx 不重试 |
+| **降级 hold** | 重试仍失败 / JSON 解析失败 | 返回 `hold` 计划（`ok=True`），**保留投票权** |
+| **异常降级** | `analyze_once` 抛异常 | 同样降级 hold，不掉票 |
+| **账户缺失继续** | 取不到账户 | 警告后**继续行情分析**（不阻断） |
+| **强制查数据** | 全程未调用任何工具 | 明确要求后**重试一次** |
+| **JSON 修复** | 围栏/尾逗号/单引号/注释/截断/多对象 | 自动修复；triggers 片段不会误当主 Plan |
+
+**工具使用可审计**：每轮记录 `tool_usage` + `tool_usage_summary`（工具名/参数/是否查过数据），随 `state/*.thinking.json` 落盘——**防 AI 偷懒不查数据**。
 
 ### 记忆系统（agent-memory）
 
