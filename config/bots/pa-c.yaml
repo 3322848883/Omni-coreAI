@@ -1,5 +1,5 @@
 ﻿bot_id: pa-c
-enabled: true
+enabled: false
 env: paper
 exchange: gate
 symbols: [BTC_USDT]

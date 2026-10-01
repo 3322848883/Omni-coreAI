@@ -1,7 +1,7 @@
 # 人格6 · Linda Raschke — 本地模拟盘
 # 日线/小时波段 1–2 天；Momentum Pinball / Turtle Soup；MACD/Stoch 仅确认
 bot_id: linda-paper
-enabled: true
+enabled: false
 env: paper
 symbols:
   - BTC_USDT

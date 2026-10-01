@@ -1,7 +1,7 @@
 # 人格3 · 方方土 剥头皮 — 本地模拟盘
 # 5m 背景 + 1m 信号；裸K+EMA20；突破单入场；0.7%–2% 风险
 bot_id: fangfangtu-paper
-enabled: true
+enabled: false
 env: paper
 symbols:
   - BTC_USDT

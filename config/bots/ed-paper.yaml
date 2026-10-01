@@ -1,7 +1,7 @@
 # 人格7 · Ed Seykota — 本地模拟盘
 # 日线趋势跟踪；EMA25/100/9 + ADX≥25 + ATR×2；严格 1% 风险
 bot_id: ed-paper
-enabled: true
+enabled: false
 env: paper
 symbols:
   - BTC_USDT

@@ -1,7 +1,7 @@
 # 人格13 · Wyckoff — 本地模拟盘
 # 四阶段 + Spring/UTAD/SOS/LPS + 量价确认
 bot_id: wyckoff-paper
-enabled: true
+enabled: false
 env: paper
 symbols:
   - BTC_USDT

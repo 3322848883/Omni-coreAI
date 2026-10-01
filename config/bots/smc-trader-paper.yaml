@@ -1,7 +1,7 @@
 # 既有策略2 · SMC 实盘版 — 本地模拟盘（试跑）
 # prompt: prompts/smc_trader.md（2% / 50x / modify_tp_sl / Premium-Discount）
 bot_id: smc-trader-paper
-enabled: true
+enabled: false
 env: paper
 symbols:
   - BTC_USDT

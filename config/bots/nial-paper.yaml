@@ -1,7 +1,7 @@
 # 人格4 · Nial Fuller — 本地模拟盘
 # 日线主 + 4h 辅；Pin Bar / Fakey / Inside Bar；Set and Forget；1%–2% 风险
 bot_id: nial-paper
-enabled: true
+enabled: false
 env: paper
 symbols:
   - BTC_USDT

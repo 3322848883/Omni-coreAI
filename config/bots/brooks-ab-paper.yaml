@@ -1,7 +1,7 @@
 # 人格1 · Al Brooks 价格行为 — 本地模拟盘
 # 风格：贴近实盘常驻；1% 风险真算仓位；多币由 AI 自主风控
 bot_id: brooks-ab-paper
-enabled: true
+enabled: false
 env: paper
 symbols:
   - BTC_USDT

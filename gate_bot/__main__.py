@@ -443,6 +443,86 @@ def cmd_supervisor(args) -> int:
     return 0
 
 
+def cmd_deploy_check(args) -> int:
+    """部署后验证：代码版本 / overlay / 启用 bot / skill / 健康。"""
+    import json as _json
+    import subprocess
+
+    root = _root_from_args(args)
+    paths = ProjectPaths(root)
+    ok = True
+
+    print("=" * 52)
+    print("部署检查")
+    print("=" * 52)
+
+    # 1) 代码版本
+    try:
+        head = subprocess.run(["git", "log", "--oneline", "-1"], cwd=str(root),
+                              capture_output=True, text=True, timeout=10).stdout.strip()
+        branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=str(root),
+                                capture_output=True, text=True, timeout=10).stdout.strip()
+        dirty = subprocess.run(["git", "status", "--porcelain"], cwd=str(root),
+                               capture_output=True, text=True, timeout=10).stdout.strip()
+        print(f"代码版本:   {branch} @ {head}")
+        if dirty:
+            n = len(dirty.splitlines())
+            print(f"工作区:     {n} 个未提交改动")
+    except Exception as e:  # noqa: BLE001
+        print(f"代码版本:   (git 不可用: {e})")
+
+    # 2) overlay
+    from .config import load_all_bots, overlay_dir_for
+
+    ov_dir = overlay_dir_for(paths.config_dir)
+    ov_files = sorted(ov_dir.glob("*.yaml")) if ov_dir.is_dir() else []
+    print(f"配置 overlay: {len(ov_files)} 个 ({ov_dir})")
+
+    # 3) 启用 bot
+    try:
+        bots = load_all_bots(paths.config_dir)
+        enabled = sorted(k for k, v in bots.items() if v.enabled)
+        print(f"启用 bot:   {len(enabled)} 个 {enabled if len(enabled) <= 8 else enabled[:8] + ['...']}")
+    except Exception as e:  # noqa: BLE001
+        print(f"启用 bot:   ⛔ 配置加载失败: {e}")
+        ok = False
+
+    # 4) skill
+    try:
+        from .skillkit import SkillRegistry
+        from .skillkit.loader import BUNDLED_DIRS
+
+        reg = SkillRegistry()
+        reg.scan([root / ".mimocode" / "skills", root / "skills"])
+        ids = reg.ids()
+        print(f"已装 skill: {len(ids)} 个 {ids}")
+        for sid in ids:
+            pkg = reg.get_package(sid)
+            print(f"              {sid} v{pkg.meta.version or '-'} ({len(pkg.files)} files)")
+    except Exception as e:  # noqa: BLE001
+        print(f"已装 skill: ⛔ {e}")
+        ok = False
+
+    # 5) 健康
+    health_dir = root / "data" / "bots"
+    if health_dir.is_dir():
+        for hf in sorted(health_dir.glob("*/state/health.json")):
+            try:
+                h = _json.loads(hf.read_text(encoding="utf-8"))
+                bot = hf.parent.parent.name
+                streak = h.get("error_streak", 0)
+                mark = "OK" if streak == 0 else f"⚠️ error_streak={streak}"
+                print(f"健康 {bot}: {mark}  cycle={h.get('cycle_id', '-')}")
+                if streak:
+                    ok = False
+            except Exception:  # noqa: BLE001
+                continue
+
+    print("=" * 52)
+    print("结论:", "PASS" if ok else "有告警")
+    return 0 if ok else 1
+
+
 def cmd_watchdog(args) -> int:
     import logging
 
@@ -573,6 +653,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     from .skillkit.cli import register_parser as _register_skill_parser
     _register_skill_parser(sub)
+
+    p_dc = sub.add_parser("deploy-check", help="部署后验证（版本/overlay/bot/skill/健康）")
+    p_dc.add_argument("--root", help="project root (default: cwd / GATE_BOT_ROOT)")
+    p_dc.set_defaults(func=cmd_deploy_check)
     return parser
 
 

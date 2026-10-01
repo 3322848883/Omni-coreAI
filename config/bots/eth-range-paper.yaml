@@ -1,7 +1,7 @@
 # 既有策略4 · ETH 区间中值 — 本地模拟盘（试跑）
 # prompt: prompts/eth_range_mid.md（中值限价 / 近20-30根K区间 / 杠杆1-50 / 每轮微调）
 bot_id: eth-range-paper
-enabled: true
+enabled: false
 env: paper
 symbols:
   - ETH_USDT

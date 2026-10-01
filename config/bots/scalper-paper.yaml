@@ -1,7 +1,7 @@
 # 既有策略5 · 综合剥头皮 — 本地模拟盘（试跑）
 # prompt: prompts/scalper_btc_eth.md（1% 仓位 / 杠杆≤50 / modify_tp_sl / 每轮微调）
 bot_id: scalper-paper
-enabled: true
+enabled: false
 env: paper
 symbols:
   - BTC_USDT

@@ -1,7 +1,7 @@
 # 人格2 · PriceActionRose — 本地模拟盘
 # 5m 背景 + 1m 信号；EMA20/200；限价优先；1% 风险真算仓位
 bot_id: rose-paper
-enabled: true
+enabled: false
 env: paper
 symbols:
   - BTC_USDT

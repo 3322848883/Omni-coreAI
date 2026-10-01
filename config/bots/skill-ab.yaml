@@ -1,7 +1,7 @@
 # A/B 对比测试：价格行为人格 + 4周期图
 # 差异点：skills 有无
 bot_id: skill-ab
-enabled: true
+enabled: false
 env: testnet
 api_key_env: GATE_TESTNET_API_KEY
 api_secret_env: GATE_TESTNET_API_SECRET

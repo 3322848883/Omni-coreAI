@@ -292,6 +292,28 @@ skill 可声明 `allowed-tools`（激活后**收窄**工具面）、`model-invoc
 
 **代码不绑本机路径**，换目录/换 OS 只需处理环境与启动方式。
 
+### 8.1 环境区分（本地 vs 服务器）
+
+**同一份代码 + overlay 声明差异**。完整流程见 `docs/DEPLOY.md`。
+
+```
+config/bots/        ① 基线（git 跟踪）— 全部 enabled: false
+config/bots.local/  ② 环境覆盖（gitignore，每机一份）— 本机启用哪些 bot
+config/alerts.yaml  ③ 密钥（gitignore）
+```
+
+合并：先读基线 → `bots.local/<同名>` **深度合并**覆盖（dict 递归 / list 替换 / `null` 删除键）。
+
+**关键**：`bots.local/` 被 gitignore → `git pull` **永不冲突**，本机启用集天然保留。
+
+```bash
+# 部署（七步：检查→pull→依赖→skill→编码自检→测试→重启验证）
+./scripts/deploy.sh [--no-restart|--dry-run]
+python -m gate_bot deploy-check      # 部署后验证
+```
+
+### 8.2 平台差异
+
 | 项 | Windows | Linux / 服务器 |
 |----|---------|----------------|
 | Python | `.venv\Scripts\python.exe` | `python3` 或 `.venv/bin/python` |
@@ -299,6 +321,10 @@ skill 可声明 `allowed-tools`（激活后**收窄**工具面）、`model-invoc
 | 项目根 | 当前目录或 `--root` | `--root /opt/gate-signal-bot` 或 **`GATE_BOT_ROOT`** |
 | 行情库 | 默认 `<root>/pa-data-source/data` | 可用 **`GATE_BOT_PA_DATA`** 改到数据盘 |
 | 密钥 | 终端 `$env:...` / 系统环境变量 | systemd `Environment=` 或 `.env` 由外部注入 |
+| skill 打包 | `scripts/pack_skill.py`（UTF-8 安全） | 解压用 Python / `skill doctor --fix` 修乱码 |
+
+> ⚠️ **编码陷阱**：Windows 打的 zip 在 Linux 用 `unzip` 解，UTF-8 文件名会被按 CP866
+> 解读 → 乱码。用 `scripts/pack_skill.py` 打包 + `python -m gate_bot skill doctor --fix` 自检。
 
 ```bash
 # Linux 服务器示例

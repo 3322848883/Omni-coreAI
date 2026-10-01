@@ -1,6 +1,6 @@
 # SkillKit 真实行情分析测试 bot
 bot_id: skill-real
-enabled: true
+enabled: false
 env: testnet
 api_key_env: GATE_TESTNET_API_KEY
 api_secret_env: GATE_TESTNET_API_SECRET

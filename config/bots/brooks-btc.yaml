@@ -2,8 +2,7 @@
 # 模板：_brooks_btc.example.yaml ｜ 策略：prompts/brooks_btc_pa.md
 
 bot_id: brooks-btc
-enabled: true
-
+enabled: false
 env: live
 api_key_env: GATE_API_KEY
 api_secret_env: GATE_API_SECRET

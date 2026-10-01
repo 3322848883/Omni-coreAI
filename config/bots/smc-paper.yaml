@@ -1,7 +1,7 @@
 ﻿# 人格11 · SMC — 本地模拟盘
 # 扫荡 / OB / FVG / BOS；smc_map + smc_events；限价优先；1% 风险
 bot_id: smc-paper
-enabled: true
+enabled: false
 env: paper
 symbols:
   - BTC_USDT

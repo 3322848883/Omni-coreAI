@@ -1,7 +1,7 @@
 # 既有策略1 · Brooks 实盘版 — 本地模拟盘
 # prompt: prompts/brooks_btc_pa.md（2% 风险 / 50x / BTC only / 结构破坏即走）
 bot_id: brooks-pa-paper
-enabled: true
+enabled: false
 env: paper
 symbols:
   - BTC_USDT

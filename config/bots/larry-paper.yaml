@@ -1,7 +1,7 @@
 # 人格5 · Larry Williams — 本地模拟盘
 # 日线 OOPS + 波动率突破 + Williams %R；UTC 00:00 日界
 bot_id: larry-paper
-enabled: true
+enabled: false
 env: paper
 symbols:
   - BTC_USDT

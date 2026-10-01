@@ -1,6 +1,6 @@
 # SkillKit e2e test bot (testnet, plan only)
 bot_id: skill-e2e
-enabled: true
+enabled: false
 env: testnet
 api_key_env: GATE_TESTNET_API_KEY
 api_secret_env: GATE_TESTNET_API_SECRET

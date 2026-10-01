@@ -1,7 +1,7 @@
 # 人格12 · ICT — 本地模拟盘
 # Killzone(London 07-10 / NY 12-15 UTC) + 流动性/FVG/OB/OTE
 bot_id: ict-paper
-enabled: true
+enabled: false
 env: paper
 symbols:
   - BTC_USDT

@@ -1,7 +1,7 @@
 # 既有策略3 · 陈默生存式 — 本地模拟盘（试跑）
 # prompt: prompts/chenmo_survival.md（工具/指标全开，杠杆≤50，日亏 5% 程序停）
 bot_id: chenmo-paper
-enabled: true
+enabled: false
 env: paper
 symbols:
   - BTC_USDT

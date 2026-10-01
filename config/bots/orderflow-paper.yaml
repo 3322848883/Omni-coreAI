@@ -1,7 +1,7 @@
 ﻿# 人格10 · 订单流 — 本地模拟盘
 # DOM + 成交流水（Delta）+ 多空比/OI；限价优先；0.5%–1% 风险
 bot_id: orderflow-paper
-enabled: true
+enabled: false
 env: paper
 symbols:
   - BTC_USDT

@@ -90,10 +90,35 @@ class BotConfig:
                              store_path=_P(store_path), feed=feed, config=cfg)
 
 
-def load_bot_config(path: Path) -> BotConfig:
+def deep_merge(base: dict, overlay: dict) -> dict:
+    """深度合并：dict 递归；list/scalar 整体替换；overlay 的 null 显式删除键。"""
+    out = dict(base)
+    for k, v in (overlay or {}).items():
+        if v is None:
+            out.pop(k, None)  # 显式删除
+        elif isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def overlay_dir_for(config_dir: Path) -> Path:
+    """环境覆盖目录：<config>/bots.local（与 bots/ 同级）。"""
+    return Path(config_dir).parent / "bots.local"
+
+
+def load_bot_config(path: Path, overlay_dir: Optional[Path] = None) -> BotConfig:
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(data, dict):
         raise GateApiError(f"bot config must be a mapping: {path}")
+    # overlay：显式传入 > 自动推导（<config>/bots.local）
+    ov_dir = Path(overlay_dir) if overlay_dir else overlay_dir_for(path.parent)
+    ov = ov_dir / path.name
+    if ov.is_file():
+        ov_data = yaml.safe_load(ov.read_text(encoding="utf-8")) or {}
+        if isinstance(ov_data, dict):
+            data = deep_merge(data, ov_data)
     env = str(data.get("env") or "live").lower()
     if env not in ("live", "testnet", "paper"):
         raise GateApiError(f"env must be live|testnet in {path}")
@@ -121,13 +146,15 @@ def load_bot_config(path: Path) -> BotConfig:
     )
 
 
-def load_all_bots(config_dir: Path) -> dict[str, BotConfig]:
+def load_all_bots(config_dir: Path, overlay_dir: Optional[Path] = None) -> dict[str, BotConfig]:
     bots: dict[str, BotConfig] = {}
+    config_dir = Path(config_dir)
     if not config_dir.exists():
         return bots
+    ov_dir = Path(overlay_dir) if overlay_dir else overlay_dir_for(config_dir)
     for path in sorted(config_dir.glob("*.yaml")):
         if path.name.startswith("_"):
             continue
-        cfg = load_bot_config(path)
+        cfg = load_bot_config(path, overlay_dir=ov_dir)
         bots[cfg.bot_id] = cfg
     return bots

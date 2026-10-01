@@ -1,6 +1,6 @@
 # 人格8 · Mark Douglas — 心理/纪律层（只核查，不下单）
 bot_id: douglas-paper
-enabled: true
+enabled: false
 env: paper
 symbols:
   - BTC_USDT

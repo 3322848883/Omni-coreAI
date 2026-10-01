@@ -39,8 +39,77 @@ def cmd_skill(args: Any) -> int:
         return _remove(args, root)
     if sub == "run":
         return _run(args, root)
-    print("usage: gate_bot skill {install,list,show,validate,remove,run}", file=sys.stderr)
+    if sub == "doctor":
+        return _doctor(args, root)
+    print("usage: gate_bot skill {install,list,show,validate,remove,run,doctor}", file=sys.stderr)
     return 2
+
+
+# 乱码还原候选编码（UTF-8 字节被误解为这些编码 → 名字二次编码）
+_MOJIBAKE_ENCODINGS = ("cp866", "cp437", "cp850")
+
+
+def demojibake(name: str) -> Optional[str]:
+    """尝试还原乱码目录/文件名；无法还原返回 None。"""
+    for enc in _MOJIBAKE_ENCODINGS:
+        try:
+            fixed = name.encode(enc).decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            continue
+        if fixed != name and not fixed.isascii():
+            return fixed
+    return None
+
+
+def _doctor(args: Any, root: Path) -> int:
+    """体检已装 skill：乱码名 / 校验 / 结构。--fix 时自动修复乱码名。"""
+    fix = bool(getattr(args, "fix", False))
+    skills_root = default_skills_root(root)
+    if not skills_root.is_dir():
+        print(f"(no skills dir: {skills_root})")
+        return 0
+
+    issues = 0
+    for skill_dir in sorted(p for p in skills_root.iterdir() if p.is_dir()):
+        print(f"\n[{skill_dir.name}]")
+        # 1) 乱码名扫描
+        bad = []
+        for p in skill_dir.rglob("*"):
+            if p.name.isascii():
+                continue
+            fixed = demojibake(p.name)
+            if fixed:
+                bad.append((p, fixed))
+        if bad:
+            issues += len(bad)
+            for p, fixed in bad:
+                rel = p.relative_to(skill_dir)
+                print(f"  MOJIBAKE {rel}  ->  {fixed}")
+                if fix:
+                    target = p.with_name(fixed)
+                    if target.exists():
+                        print(f"    (目标已存在，跳过)")
+                    else:
+                        p.rename(target)
+                        print(f"    renamed OK")
+            if not fix:
+                print("  (用 --fix 自动修复)")
+        else:
+            print("  乱码名: 无")
+
+        # 2) 校验
+        rep = validate_package(skill_dir)
+        print(f"  validate: {'PASS' if rep.ok else 'FAIL'}  "
+              f"errors={len(rep.errors)} warnings={len(rep.warnings)}")
+        for e in rep.errors:
+            print(f"    ERROR {e}")
+        for w in rep.warnings:
+            print(f"    WARN  {w}")
+        if not rep.ok:
+            issues += 1
+
+    print(f"\n体检完成：{issues} 个问题" + ("（已修复乱码名）" if fix else ""))
+    return 0 if issues == 0 else 1
 
 
 def _install(args: Any, root: Path) -> int:
@@ -205,3 +274,7 @@ def register_parser(sub: Any) -> None:
     pn.add_argument("id")
     pn.add_argument("--bot", default="")
     pn.set_defaults(func=cmd_skill)
+
+    pd = ssub.add_parser("doctor", help="体检已装 skill（乱码名/校验/结构）")
+    pd.add_argument("--fix", action="store_true", help="自动修复乱码目录名")
+    pd.set_defaults(func=cmd_skill)
