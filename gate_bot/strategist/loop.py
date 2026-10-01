@@ -195,7 +195,16 @@ class PlanRunner:
                 charts = self._generate_charts(snapshot)
             except Exception:  # noqa: BLE001
                 charts = []
-        text = self._chat_with_tools(system, user, chart_base64=charts or None)
+        try:
+            text = self._chat_with_tools(system, user, chart_base64=charts or None)
+        except LLMError as e:
+            return {
+                "ok": False,
+                "cycle_id": cycle_id,
+                "error": "llm_unavailable",
+                "detail": str(e),
+                "trigger": trigger,
+            }
         # monitoring: heartbeat（LLM 调用完成）
         try:
             from ..monitoring import HealthMonitor
@@ -305,6 +314,7 @@ class PlanRunner:
 
     def analyze_once(self, trigger: str = "manual") -> dict[str, Any]:
         """各人格独立分析：LLM → Plan，不写 inbox、不执行（供多人格融合）。"""
+        self.tool_usage = []  # 每轮开始时清零
         cycle_id = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         snapshot = collect_snapshot(
             self.client,
@@ -527,7 +537,6 @@ class PlanRunner:
             "tool_usage_summary": self._tool_usage_summary(),
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        self.tool_usage = []  # 下一轮重新累计
         # also into sqlite ledger
         try:
             from ..ledger import Ledger, default_ledger_path
@@ -661,8 +670,25 @@ class PlanRunner:
         except Exception:  # noqa: BLE001
             return None
 
-    def _chat_with_tools(self, system: str, user: str,
-                         chart_base64=None) -> str:
+    def _chat_with_tools(self, system: str, user: str, chart_base64=None) -> str:
+        """工具循环 + **防偷懒**：若全程未调用任何工具，强制重试一次。"""
+        text = self._chat_with_tools_inner(system, user, chart_base64=chart_base64)
+        tools_on = bool(self.cfg.tools.get("enabled"))
+        if tools_on and not self.tool_usage:
+            log.warning("no tool calls this cycle; forcing a data-fetch retry")
+            nudge = (
+                "【强制要求】你上一轮**没有调用任何行情工具**就想输出计划，这是违规的。"
+                "现在必须先用工具获取真实市场数据（klines / indicators / ticker / orderbook / "
+                "smc_map / smc_events / sqzmom / trades_flow 至少一个），拿到数据后再输出 Plan JSON。"
+            )
+            text2 = self._chat_with_tools_inner(system, user + "\n\n" + nudge,
+                                                chart_base64=chart_base64)
+            if self.tool_usage:
+                return text2
+        return text
+
+    def _chat_with_tools_inner(self, system: str, user: str,
+                               chart_base64=None) -> str:
         """Official function-calling loop; falls back to text tool_calls JSON.
 
         chart_base64: str 或 list[str]，非空时附 K 线图（vision，需模型支持 image）。
@@ -701,6 +727,7 @@ class PlanRunner:
                 res = run_tool(
                     self.client, name, args,
                     env=self.cfg.env, bot_root=self.cfg.bot_root, market_cfg=self.cfg.market,
+                    bot_id=self.cfg.bot_id, skill_ids=self.cfg.skills,
                 )
                 self._record_tool_use(name, args, res)
                 results.append({"tool": name, "result": res})
@@ -713,10 +740,31 @@ class PlanRunner:
             text = self._llm_send(messages)
         return text
 
+    def _skill_allowed_tools(self, skill_id: str) -> Optional[set]:
+        """读取某 skill 声明的 allowed-tools（None = 不收窄）。"""
+        try:
+            from ..skillkit import SkillRegistry
+
+            root = Path(self.cfg.bot_root) if self.cfg.bot_root else Path.cwd()
+            reg = SkillRegistry()
+            reg.scan([root / ".mimocode" / "skills", root / "skills"])
+            meta = reg.get_meta(skill_id)
+            if meta and meta.allowed_tools:
+                return set(meta.allowed_tools)
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
     def _chat_native_tools(self, messages: list, max_rounds: int) -> str:
-        """DeepSeek function calling + thinking: must echo reasoning_content on tool turns."""
+        """DeepSeek function calling + thinking: must echo reasoning_content on tool turns.
+
+        allowed-tools：激活带该声明的 skill 后，后续轮次工具面收窄（skill/skill_ref 始终保留）。
+        """
+        META_TOOLS = {"skill", "skill_ref"}
+        active_tools: Optional[list] = None
         for _round in range(max(1, max_rounds) + 1):
-            msg = self.llm.chat_message_full(messages, tools=NATIVE_TOOLS, tool_choice="auto")
+            tools = active_tools if active_tools is not None else NATIVE_TOOLS
+            msg = self.llm.chat_message_full(messages, tools=tools, tool_choice="auto")
             calls = msg.get("tool_calls") or []
             if not calls:
                 return msg.get("content") or ""
@@ -737,8 +785,17 @@ class PlanRunner:
                 result = run_tool(
                     self.client, name, args,
                     env=self.cfg.env, bot_root=self.cfg.bot_root, market_cfg=self.cfg.market,
+                    bot_id=self.cfg.bot_id, skill_ids=self.cfg.skills,
                 )
                 self._record_tool_use(name, args, result)
+                # 收窄：skill 成功加载且声明 allowed-tools → 限定后续工具面
+                if name == "skill" and isinstance(result, dict) and result.get("content"):
+                    allowed = self._skill_allowed_tools(str(args.get("name") or ""))
+                    if allowed:
+                        keep = set(allowed) | META_TOOLS
+                        narrowed = [t for t in NATIVE_TOOLS if t["function"]["name"] in keep]
+                        if narrowed:
+                            active_tools = narrowed
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.get("id") or "",

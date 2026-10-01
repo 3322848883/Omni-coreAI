@@ -183,10 +183,33 @@ llm:
 | 落盘 | 每轮 **`state/*.thinking.json`**（思维链 reasoning_content） |
 | 账户 | **REST**：余额+持仓+open_orders+TP/SL（全 bot） |
 
-**20 个工具**（原生 function calling）：
+**22 个工具**（原生 function calling）：
 
 - 行情：`klines` `indicators` `ticker` `orderbook` `contract` `stats` `account` `smc_map` `smc_events` `sqzmom`
 - aux：`trades_flow` `liquidations` `market_stats` `tech_analysis` `coin_info` `onchain` `social` `overview` `sentiment` `macro`
+- skill：`skill` `skill_ref`（SkillKit）
+
+**SkillKit（可安装 skill）** —— 三级渐进披露：
+
+| 层 | 机制 | 说明 |
+|----|------|------|
+| **L1** | `<skill_catalog>` 注入 system prompt | 只含 name + description（含使用提示），body 永不预载 |
+| **L2** | `skill(name)` 工具 | 载入 SKILL.md 正文，本回合生效 |
+| **L3** | `skill_ref(name, path)` 工具 | 按需读 `references/`/`scripts/`/`assets/`（realpath 遏制） |
+
+```powershell
+python -m gate_bot skill validate <dir>      # 校验（E01-E10 拒装）
+python -m gate_bot skill install <dir>       # 安装（不自动启用）
+python -m gate_bot skill list [--bot ID]     # 列出 + 启用状态
+python -m gate_bot skill show <id>           # 元数据
+python -m gate_bot skill remove <id> --yes   # 卸载
+python -m gate_bot skill run <id>            # 用户专属 skill 的 CLI 入口
+```
+
+启用：bot yaml `skills: [id]`（`[]` = 无 skill；缺省 = 全部可见）。
+skill 可声明 `allowed-tools`（激活后**收窄**工具面）、`model-invocation: false`（模型不可自主触发）。
+
+**红线**：skill 只影响 Plan 的观点与理由；`allowed-tools` 只能收窄；执行闸门永远在 executor + yaml 风控。详见 `docs/HOWTO-add-skill.md` 与 `docs/compose/spec/skillkit.md`。
 
 **两套 SMC 并存（按作用命名）**：
 - `smc_map`（市场地图 → 在哪/往哪）：swing/internal 双周期趋势、Premium/Discount 估值区、EQH/EQL 关键位、OB/FVG 区域

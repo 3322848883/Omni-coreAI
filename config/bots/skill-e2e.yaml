@@ -1,0 +1,48 @@
+# SkillKit e2e test bot (testnet, plan only)
+bot_id: skill-e2e
+enabled: true
+env: testnet
+api_key_env: GATE_TESTNET_API_KEY
+api_secret_env: GATE_TESTNET_API_SECRET
+symbols:
+  - BTC_USDT
+max_notional_usd: 10
+max_orders_per_file: 1
+label_prefix: sille2e
+position_policy: free
+default_replace: none
+require_sl: true
+
+strategist:
+  enabled: true
+  interval_sec: 300
+  timeframe: 1h
+  event_on_kline_close: false
+  symbols: [BTC_USDT]
+  prompt_file: prompts/skill_e2e_full.md
+  candles: 60
+  write_hold: true
+  skills: [price-action-trading]
+  vision: true
+  vision_timeframes: [5m, 15m, 1h, 4h]
+  tools:
+    enabled: true
+    native: true
+    max_rounds: 8
+  market:
+    mode: rest_only
+    refresh: [ticker, stats]
+    extra_timeframes: [5m, 15m, 4h]
+    extra_candles: 60
+  risk:
+    min_confidence: 0.7
+    max_notional_usd: 10
+    max_chips: 1
+    allow_actions: [hold, open_long, open_short]
+  llm:
+    base_url_env: OPENAI_BASE_URL
+    api_key_env: OPENAI_API_KEY
+    model: global:deepseek-v4.1-flash
+    temperature: 0.1
+    timeout_sec: 120
+    max_tokens: 4096

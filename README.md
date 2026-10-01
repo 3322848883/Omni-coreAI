@@ -703,12 +703,31 @@ class SlackChannel(NotificationChannel):
 notifier.register(SlackChannel(...))
 ```
 
-## LLM 工具（20 个）与指标（23 族）
+## LLM 工具（22 个）与指标（25 族）
 
-AI 策略层按需调用：`klines` `indicators` `ticker` `orderbook` `contract` `stats` `account` `smc_map` `smc_events` `sqzmom` + 10 个 aux。
+AI 策略层按需调用：`klines` `indicators` `ticker` `orderbook` `contract` `stats` `account` `smc_map` `smc_events` `sqzmom` + 10 个 aux + `skill` `skill_ref`。
 
 - **两套 SMC**：`smc_map`（市场地图：趋势/估值区/关键位）与 `smc_events`（结构事件：BOS/CHoCH/扫荡/Breaker）互补
-- **指标 23 族**（任意周期）：EMA/SMA/RMA/WMA/VWMA、ATR（Pine 平滑）、RSI、MACD、BOLL、Stoch、CCI、WR、MFI、ADX、VWAP、OBV、SuperTrend、SQZMOM
+- **指标 25 族**（任意周期）：EMA/SMA/RMA/WMA/VWMA、ATR（Pine 平滑）、RSI、MACD、BOLL、Stoch、CCI、WR、MFI、ADX、VWAP、OBV、SuperTrend、SQZMOM、Linreg/LSMA/Channel、T3、KAMA、HMA、ALMA
+
+## SkillKit — 可安装 Skill
+
+skill = 含 `SKILL.md` 的目录（`references/` `scripts/` `assets/` 可选）。**三级渐进披露**：
+
+| 层 | 机制 |
+|----|------|
+| L1 | `<skill_catalog>` 只注入 name + description |
+| L2 | `skill(name)` 载入正文（本回合） |
+| L3 | `skill_ref(name, path)` 按需读深层文档 |
+
+```powershell
+python -m gate_bot skill install <dir>     # 校验 + 安装（不自动启用）
+python -m gate_bot skill list              # 列出
+# 启用：config/bots/<bot>.yaml 加  skills: [<id>]
+```
+
+**红线**：skill 只影响 Plan 的观点与理由，不改变下单动作与风控约束；`allowed-tools` 只能收窄工具面。
+详见 `docs/HOWTO-add-skill.md`、`docs/compose/spec/skillkit.md`。
 
 ## 信号 JSON
 

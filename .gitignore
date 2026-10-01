@@ -61,3 +61,10 @@ scripts/secrets.bat
 .env.*
 *.key
 *.pem
+
+# SkillKit: runtime skill install dir (install via \gate_bot skill install\)
+skills/*
+!skills/.gitkeep
+
+# SkillKit: audit journal
+logs/skill_journal.jsonl*

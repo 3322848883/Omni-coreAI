@@ -124,7 +124,7 @@ TOOL_NAMES = (
     "overview", "sentiment", "macro",
 
 
-    "smc_map", "smc_events", "sqzmom",
+    "smc_map", "smc_events", "sqzmom", "skill", "skill_ref",
 
 
 )
@@ -1090,6 +1090,14 @@ NATIVE_TOOLS = [
 ]
 
 
+# SkillKit: L2 on-demand skill loading (read-only advisory injection)
+from ..skillkit.tool import SKILL_TOOL_DEF as _SKILL_TOOL_DEF  # noqa: E402
+from ..skillkit.tool import SKILL_REF_TOOL_DEF as _SKILL_REF_TOOL_DEF  # noqa: E402
+
+NATIVE_TOOLS.append(_SKILL_TOOL_DEF)
+NATIVE_TOOLS.append(_SKILL_REF_TOOL_DEF)
+
+
 
 
 
@@ -1141,6 +1149,12 @@ def run_tool(
     market_cfg: Optional[MarketConfig] = None,
 
 
+    bot_id: str = "",
+
+
+    skill_ids: Optional[list] = None,
+
+
 ) -> Any:
 
 
@@ -1157,6 +1171,55 @@ def run_tool(
 
 
         return {"error": f"unknown tool {name!r}", "allowed": list(TOOL_NAMES)}
+
+
+    # skill: SkillKit L2 loading (no gate client needed)
+    if name == "skill":
+        from pathlib import Path as _P
+        from ..skillkit.registry import SkillRegistry
+        from ..skillkit.tool import run_skill_tool
+        from ..skillkit.models import SkillError as _SkillError
+
+        root = _P(bot_root) if bot_root else _P.cwd()
+        reg = SkillRegistry()
+        reg.scan([root / ".mimocode" / "skills", root / "skills"])
+        # 白名单由 runner 显式注入（不信任 LLM 传参）：
+        #   None = 默认全可见；[] = 该 bot 无 skill；[..] = 白名单
+        enabled = skill_ids if skill_ids is not None else args.get("enabled_skills")
+        try:
+            text = run_skill_tool(
+                reg,
+                {"name": args.get("name")},
+                bot_id=str(bot_id or args.get("bot_id") or ""),
+                enabled_ids=list(enabled) if isinstance(enabled, (list, tuple)) else None,
+                root=root,
+            )
+            return {"skill": args.get("name"), "content": text}
+        except _SkillError as e:
+            return {"error": str(e), "available": reg.ids()}
+
+    # skill_ref: SkillKit L3 — read bundled reference/script/asset (contained)
+    if name == "skill_ref":
+        from pathlib import Path as _P
+        from ..skillkit.registry import SkillRegistry
+        from ..skillkit.tool import run_skill_ref
+        from ..skillkit.models import SkillError as _SkillError
+
+        root = _P(bot_root) if bot_root else _P.cwd()
+        reg = SkillRegistry()
+        reg.scan([root / ".mimocode" / "skills", root / "skills"])
+        enabled = skill_ids if skill_ids is not None else args.get("enabled_skills")
+        try:
+            text = run_skill_ref(
+                reg,
+                {"name": args.get("name"), "path": args.get("path")},
+                bot_id=str(bot_id or args.get("bot_id") or ""),
+                enabled_ids=list(enabled) if isinstance(enabled, (list, tuple)) else None,
+                root=root,
+            )
+            return {"skill": args.get("name"), "path": args.get("path"), "content": text}
+        except _SkillError as e:
+            return {"error": str(e), "available": reg.ids()}
 
 
 

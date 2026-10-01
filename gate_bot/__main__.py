@@ -67,6 +67,7 @@ def _build_plan_runner(bot, paths: ProjectPaths):
         env=bot.env,
         bot_root=paths.root,
         bot_id=bot.bot_id,
+        skills=(s.get("skills") if s.get("skills") is not None else getattr(bot, "skills", None)),
         risk=RiskConfig(
             min_confidence=float(risk.get("min_confidence") or 0.75),
             max_notional_usd=float(risk["max_notional_usd"]) if risk.get("max_notional_usd") is not None else bot.max_notional_usd,
@@ -569,6 +570,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_wd.add_argument("--max-restarts", type=int, default=5, help="max restarts per hour per component")
     p_wd.add_argument("--no-notify", action="store_true", help="disable Feishu/Telegram push")
     p_wd.set_defaults(func=cmd_watchdog)
+
+    from .skillkit.cli import register_parser as _register_skill_parser
+    _register_skill_parser(sub)
     return parser
 
 
