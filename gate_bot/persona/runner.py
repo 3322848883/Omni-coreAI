@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -15,6 +16,8 @@ from typing import Any, Optional
 from .config import PersonaGroup, PersonaError, member_weight, validate_group
 from .fusion import DIR_HOLD, fuse_plans
 from .orders import SharedOrderStore, new_order_id
+
+log = logging.getLogger(__name__)
 
 
 class PersonaRunner:
@@ -48,7 +51,16 @@ class PersonaRunner:
             try:
                 plans[bot_id] = runner.analyze_once(trigger=trigger)
             except Exception as e:  # noqa: BLE001
-                plans[bot_id] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+                # 不丢票：异常也降级为 hold（保留该成员的投票权）
+                log.warning("analyze_once raised for %s: %s; degrade to hold", bot_id, e)
+                fb = getattr(runner, "_hold_fallback", None)
+                if callable(fb):
+                    try:
+                        plans[bot_id] = fb("", trigger, f"exception: {e}")
+                    except Exception:  # noqa: BLE001
+                        plans[bot_id] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+                else:
+                    plans[bot_id] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
         return plans
 
     # ── 融合 → 执行 ─────────────────────────────────────
