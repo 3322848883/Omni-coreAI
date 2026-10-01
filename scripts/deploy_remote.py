@@ -76,19 +76,24 @@ def ssh_exec(cfg: dict, remote_cmd: str, timeout: int = 900) -> tuple[int, str]:
     target = f"{cfg['GATE_DEPLOY_USER']}@{host}"
 
     for i in range(4):
-        if keyfile:
-            r = _run(base + [target, remote_cmd], timeout=timeout)
-        else:
-            # 无 key 时用 plink（支持 -pw 密码）
-            plink = r"C:\Program Files\PuTTY\plink.exe"
-            if not Path(plink).is_file():
-                return 2, "无 SSH key 且找不到 plink.exe；请配 GATE_DEPLOY_KEY 或装 PuTTY"
-            cmd = [plink, "-batch", "-ssh"]
-            if cfg.get("GATE_DEPLOY_HOSTKEY"):
-                cmd += ["-hostkey", cfg["GATE_DEPLOY_HOSTKEY"]]
-            cmd += ["-pw", cfg.get("GATE_DEPLOY_PASSWORD", ""),
-                    "-P", cfg["GATE_DEPLOY_PORT"], target, remote_cmd]
-            r = _run(cmd, timeout=timeout)
+        try:
+            if keyfile:
+                r = _run(base + [target, remote_cmd], timeout=timeout)
+            else:
+                # 无 key 时用 plink（支持 -pw 密码）
+                plink = r"C:\Program Files\PuTTY\plink.exe"
+                if not Path(plink).is_file():
+                    return 2, "无 SSH key 且找不到 plink.exe；请配 GATE_DEPLOY_KEY 或装 PuTTY"
+                cmd = [plink, "-batch", "-ssh"]
+                if cfg.get("GATE_DEPLOY_HOSTKEY"):
+                    cmd += ["-hostkey", cfg["GATE_DEPLOY_HOSTKEY"]]
+                cmd += ["-pw", cfg.get("GATE_DEPLOY_PASSWORD", ""),
+                        "-P", cfg["GATE_DEPLOY_PORT"], target, remote_cmd]
+                r = _run(cmd, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            print(f"    (远程执行超时，重试 {i + 1}/4)")
+            time.sleep(3 * (i + 1))
+            continue
         out = (r.stdout or "") + (r.stderr or "")
         if "Connection timed out" in out or "Network error" in out:
             print(f"    (网络抖动，重试 {i + 1}/4)")
@@ -99,26 +104,34 @@ def ssh_exec(cfg: dict, remote_cmd: str, timeout: int = 900) -> tuple[int, str]:
 
 
 def scp_to(cfg: dict, local: Path, remote_dir: str) -> bool:
-    """上传文件到服务器（自动重试）。"""
+    """上传文件到服务器（自动重试）。无 key 时直接用 pscp，避免 scp 卡密码提示。"""
     host = cfg["GATE_DEPLOY_HOST"]
     target = f"{cfg['GATE_DEPLOY_USER']}@{host}:{remote_dir}"
+    keyfile = cfg.get("GATE_DEPLOY_KEY", "")
     for i in range(4):
-        r = _run(["scp", "-o", "StrictHostKeyChecking=accept-new",
-                  "-P", cfg["GATE_DEPLOY_PORT"], str(local), target], timeout=300)
+        try:
+            if keyfile:
+                r = _run(["scp", "-o", "StrictHostKeyChecking=accept-new",
+                          "-i", keyfile, "-P", cfg["GATE_DEPLOY_PORT"],
+                          str(local), target], timeout=180)
+            else:
+                pscp = r"C:\Program Files\PuTTY\pscp.exe"
+                if not Path(pscp).is_file():
+                    print("  ⛔ 无 SSH key 且找不到 pscp.exe")
+                    return False
+                cmd = [pscp, "-batch"]
+                if cfg.get("GATE_DEPLOY_HOSTKEY"):
+                    cmd += ["-hostkey", cfg["GATE_DEPLOY_HOSTKEY"]]
+                cmd += ["-pw", cfg.get("GATE_DEPLOY_PASSWORD", ""),
+                        "-P", cfg["GATE_DEPLOY_PORT"], str(local), target]
+                r = _run(cmd, timeout=180)
+        except subprocess.TimeoutExpired:
+            print(f"    (上传超时，重试 {i + 1}/4)")
+            time.sleep(3 * (i + 1))
+            continue
         if r.returncode == 0:
             return True
-        # 无 key 时用 pscp
-        pscp = r"C:\Program Files\PuTTY\pscp.exe"
-        if not cfg.get("GATE_DEPLOY_KEY") and Path(pscp).is_file():
-            cmd = [pscp, "-batch"]
-            if cfg.get("GATE_DEPLOY_HOSTKEY"):
-                cmd += ["-hostkey", cfg["GATE_DEPLOY_HOSTKEY"]]
-            cmd += ["-pw", cfg.get("GATE_DEPLOY_PASSWORD", ""),
-                    "-P", cfg["GATE_DEPLOY_PORT"], str(local), target]
-            r = _run(cmd, timeout=300)
-            if r.returncode == 0:
-                return True
-        print(f"    (上传重试 {i + 1}/4)")
+        print(f"    (上传重试 {i + 1}/4): {((r.stderr or '')[:120]).strip()}")
         time.sleep(3 * (i + 1))
     return False
 
