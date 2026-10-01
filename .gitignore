@@ -82,3 +82,7 @@ scripts/_export_gate_keys.py
 # 环境差异 overlay（每台机器一份，不入库）
 config/bots.local/
 config/.bots-backup/
+
+# 远程部署凭据（含密码，绝不入库）
+scripts/.deploy.env
+.gate-deploy.env
