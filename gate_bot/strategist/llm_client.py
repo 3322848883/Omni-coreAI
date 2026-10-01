@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Optional
+
+log = logging.getLogger(__name__)
 
 
 class LLMError(Exception):
@@ -31,6 +34,9 @@ class LLMConfig:
     user_id: str = ""
     # official JSON Output: guarantee valid JSON (prompt must contain "json" + sample)
     json_mode: bool = True
+    # 稳定性：5xx/网络错误重试（4xx 不重试）
+    max_retries: int = 3
+    retry_backoff_sec: float = 1.5
 
     def base_url(self) -> str:
         return (
@@ -69,6 +75,33 @@ class LLMClient:
                 {"role": "user", "content": user},
             ]
         )
+
+    def _post_with_retry(self, req) -> str:
+        """HTTP 请求 + 指数退避重试（仅重试可恢复错误：5xx / 网络中断 / 超时）。
+
+        4xx（鉴权、参数错）不重试——重试也没用，直接抛。
+        """
+        attempts = max(1, int(getattr(self.cfg, "max_retries", 3) or 3))
+        base = float(getattr(self.cfg, "retry_backoff_sec", 1.5) or 1.5)
+        last_err: Optional[Exception] = None
+        for i in range(attempts):
+            try:
+                with urllib.request.urlopen(req, timeout=self.cfg.timeout_sec) as resp:
+                    return resp.read().decode("utf-8")
+            except urllib.error.HTTPError as e:
+                err = e.read().decode("utf-8", "replace")[:400]
+                code = getattr(e, "code", 0) or 0
+                # 4xx（非 429）不重试
+                if 400 <= code < 500 and code != 429:
+                    raise LLMError(f"LLM HTTP {code}: {err}") from e
+                last_err = LLMError(f"LLM HTTP {code}: {err}")
+                log.warning("LLM HTTP %s (attempt %d/%d), retrying...", code, i + 1, attempts)
+            except Exception as e:  # noqa: BLE001 — 网络中断/超时/连接重置
+                last_err = LLMError(f"LLM request failed: {e}")
+                log.warning("LLM request error (attempt %d/%d): %s", i + 1, attempts, e)
+            if i < attempts - 1:
+                time.sleep(base * (2 ** i))  # 1.5s, 3s, 6s...
+        raise last_err or LLMError("LLM request failed: unknown")
 
     def chat_messages(self, messages: list, tools: Optional[list] = None,
                       tool_choice: Optional[str] = None) -> str:
@@ -109,14 +142,7 @@ class LLMClient:
             method="POST",
         )
         t0 = time.time()
-        try:
-            with urllib.request.urlopen(req, timeout=self.cfg.timeout_sec) as resp:
-                raw = resp.read().decode("utf-8")
-        except urllib.error.HTTPError as e:
-            err = e.read().decode("utf-8", "replace")[:400]
-            raise LLMError(f"LLM HTTP {e.code}: {err}") from e
-        except Exception as e:  # noqa: BLE001
-            raise LLMError(f"LLM request failed: {e}") from e
+        raw = self._post_with_retry(req)
         try:
             data = json.loads(raw)
             choice = data["choices"][0]

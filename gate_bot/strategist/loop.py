@@ -312,6 +312,29 @@ class PlanRunner:
         except Exception:  # noqa: BLE001
             return ""
 
+    def _hold_fallback(self, cycle_id: str, trigger: str, reason: str) -> dict:
+        """降级：LLM/解析失败时不丢票——返回 hold 计划，标记 degraded。
+
+        稳定优先：一个成员失败不应让它整轮缺席（否则融合只剩少数人）。
+        """
+        log.warning("degrade to hold: %s", reason)
+        return {
+            "ok": True,
+            "degraded": reason,
+            "cycle_id": cycle_id,
+            "trigger": trigger,
+            "plan": {
+                "cycle_id": cycle_id,
+                "reasoning": f"[降级] {reason[:40]}",
+                "chips": [{
+                    "symbol": (self.cfg.symbols or ["BTC_USDT"])[0],
+                    "action": "hold",
+                    "confidence": 0.0,
+                    "reasoning": "数据/模型异常，降级观望",
+                }],
+            },
+        }
+
     def analyze_once(self, trigger: str = "manual") -> dict[str, Any]:
         """各人格独立分析：LLM → Plan，不写 inbox、不执行（供多人格融合）。"""
         self.tool_usage = []  # 每轮开始时清零
@@ -360,12 +383,12 @@ class PlanRunner:
             )
         except Exception as e:  # noqa: BLE001
             log.error("analyze llm failed: %s", e)
-            return {"ok": False, "cycle_id": cycle_id, "error": str(e), "trigger": trigger}
+            return self._hold_fallback(cycle_id, trigger, f"llm_failed: {e}")
         try:
             plan = parse_plan_text(text)
         except PlanError as e:
             log.error("analyze plan parse failed: %s", e)
-            return {"ok": False, "cycle_id": cycle_id, "error": str(e), "trigger": trigger}
+            return self._hold_fallback(cycle_id, trigger, f"parse_failed: {e}")
         if not plan.cycle_id:
             plan.cycle_id = cycle_id
         # 给融合层的紧凑 Plan（不写 inbox）
