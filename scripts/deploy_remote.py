@@ -98,6 +98,81 @@ def ssh_exec(cfg: dict, remote_cmd: str, timeout: int = 900) -> tuple[int, str]:
     return 1, "SSH 多次重试仍失败"
 
 
+def scp_to(cfg: dict, local: Path, remote_dir: str) -> bool:
+    """上传文件到服务器（自动重试）。"""
+    host = cfg["GATE_DEPLOY_HOST"]
+    target = f"{cfg['GATE_DEPLOY_USER']}@{host}:{remote_dir}"
+    for i in range(4):
+        r = _run(["scp", "-o", "StrictHostKeyChecking=accept-new",
+                  "-P", cfg["GATE_DEPLOY_PORT"], str(local), target], timeout=300)
+        if r.returncode == 0:
+            return True
+        # 无 key 时用 pscp
+        pscp = r"C:\Program Files\PuTTY\pscp.exe"
+        if not cfg.get("GATE_DEPLOY_KEY") and Path(pscp).is_file():
+            cmd = [pscp, "-batch"]
+            if cfg.get("GATE_DEPLOY_HOSTKEY"):
+                cmd += ["-hostkey", cfg["GATE_DEPLOY_HOSTKEY"]]
+            cmd += ["-pw", cfg.get("GATE_DEPLOY_PASSWORD", ""),
+                    "-P", cfg["GATE_DEPLOY_PORT"], str(local), target]
+            r = _run(cmd, timeout=300)
+            if r.returncode == 0:
+                return True
+        print(f"    (上传重试 {i + 1}/4)")
+        time.sleep(3 * (i + 1))
+    return False
+
+
+def push_or_bundle(cfg: dict, branch: str, dry_run: bool) -> bool:
+    """先试 GitHub push；不可达则回退 git bundle 直传。返回是否成功送达服务器。"""
+    r = _run(["git", "push", "origin", branch], cwd=str(ROOT), timeout=300)
+    out = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 or "Everything up-to-date" in out:
+        print("  " + (out.splitlines()[-1] if out else "pushed"))
+        return True
+
+    print("  ⚠️  GitHub 不可达 → 回退 bundle 直传")
+    # 找服务器当前 HEAD 作为 bundle 基线
+    rc, remote_head = ssh_exec(cfg, f"cd {cfg['GATE_DEPLOY_ROOT']} && git rev-parse HEAD", timeout=60)
+    remote_head = remote_head.strip().splitlines()[-1] if rc == 0 else ""
+    base = remote_head if len(remote_head) == 40 else ""
+    if not base:
+        print("  ⛔ 取不到服务器 HEAD，无法生成增量 bundle")
+        return False
+
+    local_head = _run(["git", "rev-parse", "HEAD"], cwd=str(ROOT)).stdout.strip()
+    if base == local_head:
+        print("  服务器已是最新，无需传输")
+        return True
+
+    bundle = ROOT / "tmp_deploy.bundle"
+    args = ["git", "bundle", "create", str(bundle), branch, "--not", base]
+    rb = _run(args, cwd=str(ROOT), timeout=120)
+    if rb.returncode != 0:
+        print("  ⛔ bundle 创建失败:", (rb.stderr or "")[:200])
+        return False
+    print(f"  bundle: {bundle.stat().st_size:,} bytes ({base[:7]}..{local_head[:7]})")
+
+    if not scp_to(cfg, bundle, "/tmp/"):
+        print("  ⛔ bundle 上传失败")
+        return False
+
+    remote = (
+        f"cd {cfg['GATE_DEPLOY_ROOT']} && "
+        "git fetch /tmp/tmp_deploy.bundle "
+        f"{branch}:refs/heads/_incoming && "
+        "git merge --ff-only _incoming && git branch -D _incoming && "
+        "rm -f /tmp/tmp_deploy.bundle && git log --oneline -1"
+    )
+    rc, out2 = ssh_exec(cfg, remote, timeout=300)
+    print("  " + out2.strip().replace("\n", "\n  "))
+    try:
+        bundle.unlink()
+    except OSError:
+        pass
+    return rc == 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-push", action="store_true", help="跳过本地 push")
@@ -141,13 +216,10 @@ def main() -> int:
         else:
             print("  OK 工作区干净")
         if args.dry_run:
-            print(f"  [dry-run] git push origin {args.branch}")
+            print(f"  [dry-run] git push origin {args.branch}（失败则 bundle 直传）")
         else:
-            r = _run(["git", "push", "origin", args.branch], cwd=str(ROOT), timeout=300)
-            out = ((r.stdout or "") + (r.stderr or "")).strip()
-            print("  " + (out.splitlines()[-1] if out else "pushed"))
-            if r.returncode != 0 and "Everything up-to-date" not in out:
-                print("  ⛔ push 失败")
+            if not push_or_bundle(cfg, args.branch, args.dry_run):
+                print("  ⛔ 代码未能送达服务器")
                 return 1
 
     # 2) 远程部署
