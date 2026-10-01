@@ -42,14 +42,30 @@ echo "=============================================="
 # ── 1) 前置检查 ────────────────────────────────
 echo
 echo "[1/7] 前置检查"
-DIRTY=$(git status --porcelain | grep -v -E '^\?\? (config/bots\.local/|data/|skills/|logs/|verify_data/)|^ M config/bots\.local/' || true)
+# 允许：overlay/runtime 未跟踪、以及 mode-only 变更（如 chmod +x）
+ALLOW_RE='^\?\? (config/bots\.local/|data/|skills/|logs/|verify_data/|tmp)|^ M config/bots\.local/'
+DIRTY=$(git status --porcelain | grep -v -E "$ALLOW_RE" || true)
+# 剔除 mode-only（numstat 为 "0\t0"）
 if [ -n "$DIRTY" ]; then
+  REAL=""
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    f="${line:3}"
+    stat=$(git diff --numstat -- "$f" 2>/dev/null | head -1)
+    case "$stat" in
+      "0	0") ;;              # 仅 mode 变化 → 忽略
+      *) REAL="$REAL$line"$'\n' ;;
+    esac
+  done <<< "$DIRTY"
+  DIRTY="$REAL"
+fi
+if [ -n "$(echo "$DIRTY" | tr -d '[:space:]')" ]; then
   echo "  ⛔ 工作区有未提交改动（应只允许 bots.local/ 与 data/）："
   echo "$DIRTY" | sed 's/^/     /'
   echo "  请先提交或 stash，再部署。"
   exit 1
 fi
-echo "  OK 工作区干净（除 overlay/runtime）"
+echo "  OK 工作区干净（除 overlay/runtime/mode）"
 echo "  overlay: $(ls config/bots.local/*.yaml 2>/dev/null | wc -l) 个"
 
 # ── 2) 拉取代码 ────────────────────────────────
