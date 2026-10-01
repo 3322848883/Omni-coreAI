@@ -1,0 +1,194 @@
+//@version=5
+// ============================================================================
+// gate-signal-bot ↔ TradingView 数值对照脚本
+// 数据：BTC_USDT 1h  2026-09-23 11:00 ~ 2026-09-25 22:00 UTC（Gate kline.db，60 根）
+// 用法：Pine Editor → 粘贴本文件 → Add to chart → 看右上角表格
+// 全部指标从下方固定数组计算，与图表 close 无关，可贴在任意图上。
+// 期望值见 verify_data/tv_manual_check.md
+// ============================================================================
+indicator("gbot TV check BTC_USDT 1h", overlay=true)
+
+var float[] _o = array.from(85889.3000, 85626.1000, 85470.0000, 85760.0000, 84499.3000, 83964.7000, 84011.8000, 84281.7000, 84281.8000, 84469.7000,
+     84203.2000, 84377.1000, 84525.1000, 84350.7000, 84278.9000, 84067.1000, 84325.4000, 83901.6000, 84004.1000, 83935.3000,
+     84075.2000, 84473.1000, 83625.0000, 83226.0000, 83474.7000, 83447.8000, 83558.0000, 84209.9000, 83626.6000, 84377.1000,
+     84454.9000, 84073.7000, 84440.1000, 84372.7000, 84327.2000, 84302.7000, 84237.3000, 84365.5000, 84549.9000, 84570.0000,
+     84196.8000, 84201.3000, 84176.6000, 84158.9000, 83994.1000, 83992.8000, 84375.4000, 84529.1000, 84677.4000, 84533.8000,
+     84426.9000, 83890.7000, 83961.2000, 83760.0000, 83708.7000, 83746.9000, 83925.6000, 83970.3000, 83840.4000, 83754.0000)
+var float[] _h = array.from(85939.3000, 85649.6000, 85844.5000, 85933.2000, 84760.8000, 84331.6000, 84357.4000, 84369.3000, 84526.9000, 84542.5000,
+     84474.9000, 84635.3000, 84538.4000, 84458.8000, 84433.1000, 84336.2000, 84438.0000, 84026.5000, 84374.1000, 84190.0000,
+     84570.4000, 84579.5000, 83704.2000, 83533.1000, 83577.6000, 83636.1000, 84304.6000, 84909.2000, 84428.0000, 84880.0000,
+     84522.0000, 84521.4000, 84626.3000, 84433.6000, 84453.8000, 84332.6000, 84429.9000, 84694.4000, 84757.7000, 84850.0000,
+     84346.9000, 84260.3000, 84314.9000, 84248.8000, 84059.1000, 84469.4000, 84819.9000, 84823.7000, 85212.0000, 84666.0000,
+     84534.1000, 83994.0000, 84061.1000, 84075.7000, 83942.8000, 84037.3000, 84034.8000, 84145.9000, 83883.2000, 83932.4000)
+var float[] _l = array.from(85417.2000, 85232.0000, 85247.6000, 83830.0000, 83911.0000, 83444.5000, 83676.6000, 84088.9000, 84177.2000, 84176.0000,
+     84170.0000, 84306.4000, 84303.2000, 84172.9000, 84020.0000, 83685.4000, 83814.5000, 83742.0000, 83913.4000, 83866.2000,
+     83905.0000, 83174.8000, 82828.1000, 83114.3000, 83358.0000, 83285.6000, 83552.3000, 83333.3000, 83460.0000, 83984.6000,
+     83964.4000, 83840.0000, 84252.4000, 84125.6000, 84243.4000, 83905.0000, 84222.1000, 84365.4000, 84307.9000, 84127.1000,
+     84024.6000, 84022.0000, 84055.0000, 83890.4000, 83700.0000, 83983.0000, 84375.4000, 84344.7000, 84529.0000, 83828.8000,
+     83484.6000, 83120.0000, 83319.0000, 83675.6000, 83580.0000, 83746.9000, 83883.0000, 83797.5000, 83584.8000, 83726.6000)
+var float[] _c = array.from(85626.1000, 85470.1000, 85759.9000, 84499.2000, 83964.7000, 84011.8000, 84281.5000, 84281.7000, 84464.5000, 84203.2000,
+     84377.1000, 84529.3000, 84350.8000, 84278.9000, 84067.1000, 84325.3000, 83901.6000, 84004.2000, 83931.1000, 84075.2000,
+     84467.1000, 83624.5000, 83226.1000, 83474.7000, 83447.8000, 83558.0000, 84209.9000, 83626.7000, 84377.0000, 84449.1000,
+     84073.7000, 84435.7000, 84370.9000, 84327.2000, 84302.8000, 84235.8000, 84365.4000, 84549.9000, 84569.9000, 84196.8000,
+     84201.3000, 84176.6000, 84158.9000, 83994.1000, 83992.9000, 84375.4000, 84529.1000, 84677.5000, 84533.7000, 84427.0000,
+     83890.8000, 83966.5000, 83759.9000, 83708.7000, 83746.8000, 83925.5000, 83970.3000, 83840.3000, 83754.0000, 83873.0000)
+
+// ── RMA（Wilder，与 TV ta.rma 同）──
+rma_arr(src, len) =>
+    float[] out = array.new_float(array.size(src), na)
+    if array.size(src) >= len
+        float acc = 0.0
+        for i = 0 to len - 1
+            acc += array.get(src, i)
+        acc /= len
+        array.set(out, len - 1, acc)
+        if array.size(src) > len
+            for i = len to array.size(src) - 1
+                acc := (acc * (len - 1) + array.get(src, i)) / len
+                array.set(out, i, acc)
+    out
+
+// ── RSI(len)：首值 index=len，公式同 ta.rsi ──
+rsi_from_arr(cl, len) =>
+    int n = array.size(cl)
+    float[] gains = array.new_float(n - 1, 0.0)
+    float[] losses = array.new_float(n - 1, 0.0)
+    if n > 1
+        for i = 1 to n - 1
+            float d = array.get(cl, i) - array.get(cl, i - 1)
+            array.set(gains, i - 1, math.max(d, 0.0))
+            array.set(losses, i - 1, math.max(-d, 0.0))
+    float[] up = rma_arr(gains, len)
+    float[] dn = rma_arr(losses, len)
+    float[] out = array.new_float(n, na)
+    for i = 0 to n - 1
+        int gi = i - 1
+        if gi >= 0 and not na(array.get(up, gi)) and not na(array.get(dn, gi))
+            float u = array.get(up, gi)
+            float d = array.get(dn, gi)
+            float v = d == 0 ? 100.0 : u == 0 ? 0.0 : 100.0 - 100.0 / (1.0 + u / d)
+            array.set(out, i, v)
+    out
+
+// ── ta.linreg(src, len, 0)：x=1..len，末点拟合值 ──
+linreg_arr(src, len) =>
+    int n = array.size(src)
+    float[] out = array.new_float(n, na)
+    float sumX = len * (len + 1) / 2.0
+    float sumXX = len * (len + 1) * (2 * len + 1) / 6.0
+    if n >= len
+        for i = len - 1 to n - 1
+            float sumY = 0.0
+            float sumXY = 0.0
+            for j = 0 to len - 1
+                float v = array.get(src, i - len + 1 + j)
+                sumY += v
+                sumXY += (j + 1) * v
+            float denom = len * sumXX - sumX * sumX
+            float slope = (len * sumXY - sumX * sumY) / denom
+            float intercept = (sumY - slope * sumX) / len
+            array.set(out, i, intercept + slope * len)
+    out
+
+ema_arr(src, len) =>
+    float k = 2.0 / (len + 1.0)
+    float[] out = array.new_float(array.size(src), na)
+    if array.size(src) > 0
+        float prev = array.get(src, 0)
+        array.set(out, 0, prev)
+        if array.size(src) > 1
+            for i = 1 to array.size(src) - 1
+                prev := array.get(src, i) * k + prev * (1.0 - k)
+                array.set(out, i, prev)
+    out
+
+gd_arr(src, len, a) =>
+    float[] e1 = ema_arr(src, len)
+    float[] e1f = array.new_float(array.size(e1), 0.0)
+    for i = 0 to array.size(e1) - 1
+        float v = array.get(e1, i)
+        array.set(e1f, i, na(v) ? 0.0 : v)
+    float[] e2 = ema_arr(e1f, len)
+    float[] out = array.new_float(array.size(src), na)
+    for i = 0 to array.size(src) - 1
+        float v1 = array.get(e1, i)
+        if not na(v1)
+            array.set(out, i, v1 * (1.0 + a) - array.get(e2, i) * a)
+    out
+
+kama_arr(src, len) =>
+    int n = array.size(src)
+    float[] out = array.new_float(n, na)
+    float fastest = 2.0 / 3.0
+    float slowest = 2.0 / 31.0
+    if n > len
+        float prev = array.get(src, len - 1)
+        array.set(out, len - 1, prev)
+        for i = len to n - 1
+            float chg = math.abs(array.get(src, i) - array.get(src, i - len))
+            float vol = 0.0
+            for j = i - len + 1 to i
+                vol += math.abs(array.get(src, j) - array.get(src, j - 1))
+            float er = vol > 0 ? chg / vol : 0.0
+            float sc = math.pow(er * (fastest - slowest) + slowest, 2)
+            prev := prev + sc * (array.get(src, i) - prev)
+            array.set(out, i, prev)
+    out
+
+ha_close_arr(o, h, l, c) =>
+    int n = array.size(c)
+    float[] out = array.new_float(n, na)
+    for i = 0 to n - 1
+        array.set(out, i, (array.get(o, i) + array.get(h, i) + array.get(l, i) + array.get(c, i)) / 4.0)
+    out
+
+float[] rsiS = rsi_from_arr(_c, 14)
+float[] linS = linreg_arr(_c, 20)
+float[] t3g1 = gd_arr(_c, 5, 0.7)
+float[] t3g2 = gd_arr(t3g1, 5, 0.7)
+float[] t3g3 = gd_arr(t3g2, 5, 0.7)
+float[] kamaS = kama_arr(_c, 10)
+float[] haS = ha_close_arr(_o, _h, _l, _c)
+
+int last = array.size(_c) - 1
+float rsiLast = array.get(rsiS, last)
+float linLast = array.get(linS, last)
+float t3Last = array.get(t3g3, last)
+float kamaLast = array.get(kamaS, last)
+float haLast = array.get(haS, last)
+
+calcSlope() =>
+    int n = 20
+    float sumX = n * (n + 1) / 2.0
+    float sumY = 0.0
+    float sumXY = 0.0
+    float sumXX = n * (n + 1) * (2 * n + 1) / 6.0
+    for j = 0 to n - 1
+        float v = array.get(_c, array.size(_c) - n + j)
+        sumY += v
+        sumXY += (j + 1) * v
+    float slope = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX)
+    float avg = sumY / n
+    float intercept = avg - slope * sumX / n + slope
+    [slope, avg, intercept, intercept + slope * (n - 1)]
+
+[fSlope, fAvg, fInt, fEnd] = calcSlope()
+
+if barstate.islast
+    var table t = table.new(position.top_right, 2, 8, border_width=1, bgcolor=color.new(color.black, 20))
+    table.cell(t, 0, 0, "metric", text_color=color.white, bgcolor=color.new(color.blue, 60))
+    table.cell(t, 1, 0, "value (fixed data)", text_color=color.white, bgcolor=color.new(color.blue, 60))
+    table.cell(t, 0, 1, "rsi14")
+    table.cell(t, 1, 1, str.tostring(rsiLast, "#.####"), text_color=color.orange)
+    table.cell(t, 0, 2, "linreg20")
+    table.cell(t, 1, 2, str.tostring(linLast, "#.####"), text_color=color.aqua)
+    table.cell(t, 0, 3, "t3(5,0.7)")
+    table.cell(t, 1, 3, str.tostring(t3Last, "#.####"), text_color=color.purple)
+    table.cell(t, 0, 4, "kama10")
+    table.cell(t, 1, 4, str.tostring(kamaLast, "#.####"), text_color=color.yellow)
+    table.cell(t, 0, 5, "ha_close")
+    table.cell(t, 1, 5, str.tostring(haLast, "#.####"), text_color=color.green)
+    table.cell(t, 0, 6, "base.end(ch20)")
+    table.cell(t, 1, 6, str.tostring(fEnd, "#.####"), text_color=color.white)
+    table.cell(t, 0, 7, "slope")
+    table.cell(t, 1, 7, str.tostring(fSlope, "#.##########"), text_color=color.white)
