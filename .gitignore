@@ -13,6 +13,10 @@ logs/*
 history/
 hist/
 
+# 例外：skill 包内的 references/history 属于内容，必须跟踪
+!skills-src/**/history/
+!skills-src/**/history/**
+
 # runtime bot configs may be local-only (examples stay tracked)
 config/bots/llm-test.yaml
 
