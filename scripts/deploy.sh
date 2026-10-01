@@ -23,6 +23,7 @@ PY="$ROOT/.venv/bin/python"
 
 NO_RESTART=0
 DRY_RUN=0
+ARGS=("$@")
 for a in "$@"; do
   case "$a" in
     --no-restart) NO_RESTART=1 ;;
@@ -71,8 +72,20 @@ echo "  overlay: $(ls config/bots.local/*.yaml 2>/dev/null | wc -l) 个"
 # ── 2) 拉取代码 ────────────────────────────────
 echo
 echo "[2/7] 拉取代码"
+BEFORE=$(git rev-parse HEAD)
 run git pull --ff-only origin master
-if [ "$DRY_RUN" = "0" ]; then echo "  HEAD: $(git log --oneline -1)"; fi
+if [ "$DRY_RUN" = "0" ]; then
+  AFTER=$(git rev-parse HEAD)
+  echo "  HEAD: $(git log --oneline -1)"
+  # 自更新保护：本次 pull 若改了 deploy.sh，用新版本重新执行
+  # （否则 bash 继续跑内存里的旧版逻辑，出现「改了没生效」）
+  if [ "${DEPLOY_REEXEC:-0}" != "1" ] && [ "$BEFORE" != "$AFTER" ] \
+     && ! git diff --quiet "$BEFORE" "$AFTER" -- scripts/deploy.sh; then
+    echo "  ↻ deploy.sh 本身有更新 → 用新版本重新执行"
+    export DEPLOY_REEXEC=1
+    exec bash "$ROOT/scripts/deploy.sh" ${ARGS[@]+"${ARGS[@]}"}
+  fi
+fi
 
 # ── 3) 依赖 ───────────────────────────────────
 echo
