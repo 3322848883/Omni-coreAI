@@ -339,3 +339,31 @@ class TestJsonRepair(unittest.TestCase):
         p = self._parse(raw)
         self.assertEqual(p.cycle_id, "btc-15m-001")
         self.assertEqual(p.chips[0].action, "hold")
+
+
+class TestMultiObjectExtract(unittest.TestCase):
+    """模型先吐 triggers 片段再吐主 Plan —— 应选主 Plan。"""
+
+    def test_triggers_fragment_then_plan(self):
+        from gate_bot.strategist.schema import parse_plan_text
+
+        raw = '''{type:price_break, symbol, lookback, side:high}
+{"cycle_id":"c1","reasoning":"r","chips":[{"symbol":"BTC_USDT","action":"hold","confidence":0.6}]}'''
+        p = parse_plan_text(raw)
+        self.assertEqual(p.cycle_id, "c1")
+        self.assertEqual(p.chips[0].action, "hold")
+
+    def test_triggers_array_then_plan(self):
+        from gate_bot.strategist.schema import parse_plan_text
+
+        raw = '''思考：先列触发条件 {"type":"price_break","symbol":"BTC_USDT"} 然后给计划：
+{"cycle_id":"c2","reasoning":"r","chips":[]}'''
+        p = parse_plan_text(raw)
+        self.assertEqual(p.cycle_id, "c2")
+
+    def test_only_fragment_no_plan(self):
+        from gate_bot.strategist.schema import parse_plan_text, PlanError
+
+        raw = "{type:price_break, symbol, lookback, side:high}"
+        with self.assertRaises(PlanError):
+            parse_plan_text(raw)

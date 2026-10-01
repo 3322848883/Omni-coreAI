@@ -1,5 +1,5 @@
 ﻿bot_id: pa-a
-enabled: false
+enabled: true
 env: paper
 exchange: gate
 symbols: [BTC_USDT]
@@ -17,6 +17,6 @@ strategist:
   timeframe: 15m
   candles: 30
   write_hold: false
-  tools: {enabled: false, native: true, max_rounds: 1}
+  tools: {enabled: true, native: true, max_rounds: 5}
   risk: {min_confidence: 0.3, max_chips: 1, max_notional_usd: 3000}
-  llm: {provider: gw-flash, reasoning_effort: low}
+  llm: {provider: gw-flash, reasoning_effort: medium}

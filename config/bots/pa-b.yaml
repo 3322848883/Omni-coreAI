@@ -1,5 +1,5 @@
 ﻿bot_id: pa-b
-enabled: false
+enabled: true
 env: paper
 exchange: okx
 symbols: [BTC_USDT]

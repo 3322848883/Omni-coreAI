@@ -233,10 +233,50 @@ def _repair_json(t: str) -> str:
     return s
 
 
-def _extract_json_object(text: str):
-    """Extract the first balanced JSON object from LLM output.
+def _iter_json_objects(text: str):
+    """扫描文本中所有平衡的 {..} 片段（跳过字符串内的花括号）。"""
+    t = text or ""
+    i = 0
+    n = len(t)
+    while i < n:
+        if t[i] != "{":
+            i += 1
+            continue
+        depth = 0
+        in_str = False
+        esc = False
+        j = i
+        while j < n:
+            ch = t[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+            elif ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    yield t[i : j + 1]
+                    break
+            j += 1
+        i = (j + 1) if j > i else i + 1
 
-    带 _repair_json 修复层：LLM 常输出 Markdown 围栏 / 尾逗号 / 截断 JSON。
+
+def _looks_like_plan(obj) -> bool:
+    return isinstance(obj, dict) and ("chips" in obj or "cycle_id" in obj or "reasoning" in obj)
+
+
+def _extract_json_object(text: str):
+    """从 LLM 输出提取 Plan JSON。
+
+    容错：Markdown 围栏 / 尾逗号 / 单引号 / 注释 / 截断 / **多个 JSON 对象**
+    （模型有时先吐一个 triggers 片段再吐主 Plan——优先选像 Plan 的那个）。
     """
     import json
 
@@ -246,20 +286,43 @@ def _extract_json_object(text: str):
         if t.startswith("json"):
             t = t[4:]
         t = t.strip()
-    # 直接解析
+
+    # 1) 整段直接解析
     for candidate in (t, _repair_json(t)):
         try:
-            return json.loads(candidate)
+            obj = json.loads(candidate)
+            if isinstance(obj, dict):
+                return obj
         except json.JSONDecodeError:
             pass
-    # 平衡括号提取 + 修复
+
+    # 2) 扫描所有平衡对象：先收像 Plan 的，再兜底第一个能解析的
+    plan_like = []
+    others = []
+    for chunk in _iter_json_objects(t):
+        for candidate in (chunk, _repair_json(chunk)):
+            try:
+                obj = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if _looks_like_plan(obj):
+                plan_like.append(obj)
+            else:
+                others.append(obj)
+            break
+    if plan_like:
+        return plan_like[0]
+    if others:
+        return others[0]
+
+    # 3) 截断恢复：退到最后一个逗号闭合
     start = t.find("{")
     if start < 0:
         raise PlanError("LLM output has no JSON object")
+    last_good = -1
     depth = 0
     in_str = False
     esc = False
-    last_good = -1
     for i in range(start, len(t)):
         ch = t[i]
         if in_str:
@@ -276,25 +339,18 @@ def _extract_json_object(text: str):
             depth += 1
         elif ch == "}":
             depth -= 1
-            if depth == 0:
-                chunk = t[start : i + 1]
-                for candidate in (chunk, _repair_json(chunk)):
-                    try:
-                        return json.loads(candidate)
-                    except json.JSONDecodeError:
-                        continue
-                raise PlanError(f"LLM output is not valid JSON: {chunk[:120]!r}")
-        elif depth > 0 and ch in ",":
+        elif depth > 0 and ch == ",":
             last_good = i
-    # 截断：退回到最后一个逗号处闭合，做最大努力恢复
     if last_good > start:
-        chunk = t[start : last_good] + "}]}"
+        chunk = t[start:last_good] + "}]}"
         for candidate in (chunk, _repair_json(chunk)):
             try:
-                return json.loads(candidate)
+                obj = json.loads(candidate)
+                if isinstance(obj, dict):
+                    return obj
             except json.JSONDecodeError:
                 continue
-    raise PlanError("LLM output JSON object is truncated/unterminated")
+    raise PlanError("LLM output has no valid JSON object")
 
 
 def parse_plan_text(text: str) -> Plan:

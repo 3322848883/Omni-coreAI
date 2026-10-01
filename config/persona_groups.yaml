@@ -1,4 +1,18 @@
 ﻿groups:
+  - name: disc-trio
+    topology: single_account
+    members: [pa-a, smc-paper, orderflow-paper]
+    target_account: pa-a
+    fusion: weighted_vote
+    fusion_config:
+      weights: {pa-a: 1, smc-paper: 1, orderflow-paper: 1}
+    on_conflict: hold
+    enabled: true
+    discussion:
+      enabled: true
+      rounds: 3
+      timeout_sec: 120
+      early_exit_on_agreement: false
   - name: e2e-quad
     topology: single_account
     members: [pa-a, pa-b, pa-c, pa-d]
@@ -29,7 +43,7 @@
       enabled: true
       rounds: 3
       timeout_sec: 120
-      early_exit_on_agreement: true
+      early_exit_on_agreement: false
   - name: consensus-test
     topology: single_account
     members: [pa-a, pa-b, pa-c]

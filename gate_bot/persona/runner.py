@@ -29,6 +29,7 @@ class PersonaRunner:
         self.plan_runners = plan_runners
         self.orders = SharedOrderStore(self.root)
         self.log_path = self.root / "data" / "shared" / "persona_log.jsonl"
+        self.discussion_log: list = []
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _log(self, rec: dict) -> None:
@@ -107,7 +108,22 @@ class PersonaRunner:
             "plans": {b: {"ok": p.get("ok"), "decision": (p.get("plan") or {}).get("decision")}
                       for b, p in plans.items()},
             "order_id": order_id,
+            "discussion_log": self.discussion_log,
         }
+        # 讨论过程落盘（可审计辩论细节）
+        if self.discussion_log:
+            try:
+                import json as _json
+                import time as _time
+                dpath = self.root / "data" / "shared" / "discussion_log.jsonl"
+                with dpath.open("a", encoding="utf-8") as fh:
+                    fh.write(_json.dumps({
+                        "ts": _time.time(), "group": self.group.name,
+                        "rounds": len(self.discussion_log) - 1,
+                        "log": self.discussion_log,
+                    }, ensure_ascii=False) + "\n")
+            except Exception:  # noqa: BLE001
+                pass
 
         # 仅 hold 不执行；管理动作（close/reduce/modify）与开仓都要执行
         if decision == DIR_HOLD and action in ("hold", ""):
@@ -182,6 +198,15 @@ class PersonaRunner:
         d = self.group.discussion
         max_rounds = min(d.rounds, 4)
         current = dict(plans)
+        # 讨论过程记录（每轮：谁说了什么、是否改口）
+        self.discussion_log = [{
+            "round": 0,
+            "stage": "独立分析",
+            "positions": {
+                b: {"decision": p.get("decision"), "reasoning": str(p.get("reasoning") or "")[:80]}
+                for b, p in current.items() if p.get("ok", True)
+            },
+        }]
 
         for round_num in range(1, max_rounds + 1):
             # 检查是否全体一致（提前终止）
@@ -191,6 +216,10 @@ class PersonaRunner:
             }
             if d.early_exit_on_agreement and round_num > 1:
                 if len(set(decisions.values())) == 1:
+                    self.discussion_log.append({
+                        "round": round_num, "stage": "一致提前退出",
+                        "positions": {b: {"decision": v} for b, v in decisions.items()},
+                    })
                     return current, round_num - 1
 
             # 构建讨论消息：每人看到其他人的 decision + reasoning
@@ -218,6 +247,29 @@ class PersonaRunner:
                         discussions[bot_id] = revised
                 except Exception:  # noqa: BLE001
                     continue
+
+            # 记录本轮：改口 vs 坚持
+            stage = {1: "相互讨论与反驳", 2: "深化讨论"}.get(round_num, "最终决策")
+            round_rec = {"round": round_num, "stage": stage, "positions": {}}
+            for bot_id in self.group.members:
+                old = current.get(bot_id) or {}
+                new = discussions.get(bot_id)
+                old_dec = str(old.get("decision") or "")
+                if new:
+                    new_dec = str(new.get("decision") or old_dec)
+                    changed = new_dec != old_dec
+                    round_rec["positions"][bot_id] = {
+                        "was": old_dec,
+                        "now": new_dec,
+                        "changed": changed,
+                        "reasoning": str(new.get("reasoning") or "")[:80],
+                    }
+                else:
+                    round_rec["positions"][bot_id] = {
+                        "was": old_dec, "now": old_dec, "changed": False,
+                        "reasoning": "(未修订/保持)",
+                    }
+            self.discussion_log.append(round_rec)
 
             # 应用修正
             if discussions:
