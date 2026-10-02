@@ -790,7 +790,7 @@ class Executor:
         detail["all_legs_ok"] = detail["leg_entry_ok"] and detail["exits_ok"]
         if exit_errors or not detail["exits_ok"]:
             # entry landed but exits missing — do NOT pretend full success
-            detail["rollback"] = self._rollback_unprotected_entry(intent, entry_order, exit_size)
+            detail["rollback"] = self._rollback_unprotected_entry(intent, entry_order)
             return StepResult(
                 intent.action,
                 intent.symbol,
@@ -800,14 +800,20 @@ class Executor:
             )
         return StepResult(intent.action, intent.symbol, True, detail=detail)
 
-    def _rollback_unprotected_entry(self, intent: Intent, entry_order: dict, exit_size: int) -> str:
+    def _rollback_unprotected_entry(self, intent: Intent, entry_order: dict) -> str:
         """exits 挂失败后的兜底：不留无保护敞口。
 
-        - 入场单未成交 → 撤掉它，回到「什么都没挂」的干净状态
-        - 已成交 → 计划的保护价既然挂不上，就市价平掉这一笔，不留裸仓
+        - 入场单**未成交** → 撤掉它，回到「什么都没挂」的干净状态（无副作用）
+        - 入场单**已成交** → **只告警，不自动平仓**
 
-        注：预检 `_precheck_exit_triggers` 已挡掉绝大多数情况，这里是兜底 ——
-        比如预检与挂单之间 mark 移动了、或交易所因别的原因拒绝。
+        为什么已成交不自动平仓：这条路径新写、未在实盘验证过。若因误判而自动
+        市价平仓，等于**主动扔掉策略本来想持有的仓位** —— 比原问题更主动、更难
+        回滚；而且任何一次挂单失败（网络抖动、5xx、保证金不足…）都会触发平仓，
+        爆炸半径过大。交给下一轮 plan（≤ interval）+ 人工处理，同时落盘告警。
+
+        注：预检 `_precheck_exit_triggers` 已挡掉已知成因（触发价落在 mark 非法
+        一侧），这里是兜底 —— 比如预检与挂单之间 mark 移动了、或交易所因别的
+        原因拒绝。
         """
         oid = str(entry_order.get("id") or "")
         size = abs(int(entry_order.get("size") or 0))
@@ -821,12 +827,17 @@ class Executor:
                 return f"cancelled_entry:{oid}"
             except Exception as e:  # noqa: BLE001
                 return f"cancel_failed:{oid}:{str(e)[:90]}"
-        pos_side = "long" if intent.action == "open_long" else "short"
-        try:
-            self.client.close_position(intent.symbol, side=pos_side, size=int(exit_size))
-            return f"closed_position:{intent.symbol} size={int(exit_size)}"
-        except Exception as e:  # noqa: BLE001
-            return f"close_failed:{intent.symbol}:{str(e)[:90]}"
+        if self.alert_store is not None:
+            try:
+                self.alert_store.raise_alert(
+                    "unprotected_entry",
+                    f"{intent.symbol} {intent.action} 入场已成交 {filled}/{size}，保护单未挂上，需人工/下一轮 plan 处理",
+                    symbol=intent.symbol, action=intent.action,
+                    entry_order_id=oid, filled=filled, size=size,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        return f"alert_only: 已成交 {filled}/{size} 但保护单未挂上（未自动平仓）"
 
     def _tp_legs(self, intent: Intent, exit_size: int) -> list[tuple[float, int]]:
         """多级止盈腿：tp/tp2/tp3 → [(price, size)]。份额缺省 1/N。"""
