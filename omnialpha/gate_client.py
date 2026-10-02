@@ -113,17 +113,40 @@ class GateClient:
         except Exception as e:
             raise GateApiError(f"request failed {path}: {e}") from e
 
-    def public_get(self, path: str, query_string: str = "") -> Any:
+    def public_get(self, path: str, query_string: str = "", attempts: int = 3) -> Any:
+        """GET 公开端点。**对瞬时网络故障做有界重试**。
+
+        本地直连交易所 API 的链路会抖（实测底层错误全是 TLS 层：
+        `handshake operation timed out` / `SSL: UNEXPECTED_EOF_WHILE_READING` /
+        `IncompleteRead(1168689 bytes read, 137723 more expected)`），而原来这里
+        一次失败就抛 —— 于是每次抖动都变成一笔操作失败（模拟盘 20% 的失败源于此）。
+        """
         url = f"{self.base}{path}"
         if query_string:
             url += f"?{query_string}"
-        req = urllib.request.Request(url, method="GET")
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                raw = resp.read().decode("utf8")
-                return json.loads(raw) if raw.strip() else {}
-        except Exception as e:
-            raise GateApiError(f"public get failed {path}: {e}") from e
+        last: Optional[Exception] = None
+        for i in range(max(1, int(attempts))):
+            req = urllib.request.Request(url, method="GET")
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    raw = resp.read().decode("utf8")
+                    return json.loads(raw) if raw.strip() else {}
+            except Exception as e:  # noqa: BLE001 — 只重试瞬时故障，其余立即抛
+                last = e
+                if i + 1 >= max(1, int(attempts)) or not self._is_transient(e):
+                    break
+                time.sleep(0.4 * (i + 1))
+        raise GateApiError(f"public get failed {path}: {last}") from last
+
+    @staticmethod
+    def _is_transient(e: Exception) -> bool:
+        """瞬时网络/传输故障（值得重试）；4xx 之类不该重试。"""
+        s = str(e).lower()
+        return any(h in s for h in (
+            "timed out", "timeout", "eof occurred", "unexpected_eof", "connection reset",
+            "incompleteread", "handshake", "remote end closed", "connection aborted",
+            "temporarily unavailable", "tunnel connection failed",
+        ))
 
     # ── account / market ─────────────────────────────────
     def get_account(self) -> dict:
@@ -152,7 +175,17 @@ class GateClient:
         now = time.time()
         if self._contract_cache and (now - self._contract_cache_ts) < max_age_sec:
             return self._contract_cache
-        raw = self.public_get(f"{FUTURES_API}/contracts") or []
+        try:
+            raw = self.public_get(f"{FUTURES_API}/contracts") or []
+        except GateApiError:
+            # 合约元数据（quanto_multiplier / tick / lot / 杠杆上限）几乎不变，所以拉取失败时
+            # **回退到上一份缓存**，而不是让整笔操作失败。实测 /contracts 返回约 1.1 MB，
+            # 在抖动的 TLS 链路上极易截断（IncompleteRead / handshake timeout）——
+            # 模拟盘「public get failed」有 93%（95/102）来自这个端点。
+            # 首次调用（无缓存）时仍然抛出，不掩盖真正的不可用。
+            if self._contract_cache:
+                return self._contract_cache
+            raise
         cache: dict[str, ContractMeta] = {}
         for item in raw:
             name = str(item.get("name") or "")
