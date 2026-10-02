@@ -63,6 +63,11 @@ strategist:
   ai_triggers:
     enabled: true
     max_active: 5
+    # 同一条件最快多久能再唤醒一轮（默认 60s）。触发子系统修好之前它一直没工作；
+    # 修好后实测「条件持续成立」时会约 1 分钟唤醒一轮，而每轮都是一次 LLM 调用 ——
+    # 节奏从 15 分钟变成分钟级，成本与交易频率都会上去。调到 300s，让事件唤醒回到
+    # 「辅助 interval」的定位（interval 仍是 900s 主节奏）。
+    default_cooldown_sec: 300
   risk:
     min_confidence: 0.6
     max_chips: 1
