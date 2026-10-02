@@ -1391,21 +1391,39 @@ class Executor:
         )
 
     def _has_pending_entry(self, symbol: str) -> bool:
-        """该 symbol 上是否还有本 bot 未成交的入场单（非 reduce-only）。
+        """该 symbol 上是否还有本 bot 未成交的入场委托（**普通单 + 条件单**）。
 
         入场单挂出后 1-3 秒，执行器就把它的 TP/SL 一起挂上了 —— 此时账户还没有持仓。
         若按「无持仓」把这些保护单当孤儿撤掉，委托一成交就是**裸仓**（无 SL/TP）。
         所以只要有待成交入场单，本 symbol 的保护单一律保留；真孤儿留到下一轮扫描再清。
+
+        **必须同时扫条件单**：`stop_entry_*`（突破进场）是**条件单**，挂在
+        `/price_orders` 而不是 `/orders`。只扫普通单会漏掉它们 —— 线上实测
+        2026-10-02 16:12 / 16:17 / 16:28 连续三次把突破进场单的保护单当孤儿撤掉，
+        而当时 mark 距触发只差 0.17%。
         """
+        # 1) 普通挂单（limit 未成交的入场单）
         try:
             rows = self._owned_open_orders(symbol, self.label_prefix)
         except Exception:  # noqa: BLE001 — 取不到就当没有，保持原行为
-            return False
+            rows = []
         for o in rows:
             if o.get("is_reduce_only"):
                 continue
             if int(o.get("left") or 0) <= 0:
                 continue
+            return True
+        # 2) 条件单（stop_entry_* 突破进场，未触发）
+        try:
+            conds = self._owned_price_orders(symbol, self.label_prefix)
+        except Exception:  # noqa: BLE001
+            conds = []
+        for p in conds:
+            if self._order_is_reduce_only(p):
+                continue  # reduce_only = 保护单，不是入场单
+            status = str(p.get("status") or "").lower()
+            if status in ("cancelled", "finished", "filled", "triggered", "failed", "closed"):
+                continue  # 已终结
             return True
         return False
 

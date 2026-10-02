@@ -214,5 +214,44 @@ class TestOrphanCleanupE2E(unittest.TestCase):
             self.assertEqual(len(ex._cleanup_orphan_protectors("BTC_USDT")), 1)
 
 
+    def test_pending_stop_entry_blocks_sweep(self):
+        """`stop_entry_*` 是**条件单**（挂在 price_orders），也必须算「待成交入场」。
+
+        只扫普通挂单会漏掉它 → 无持仓时把它的预挂保护单当孤儿撤掉 →
+        委托一成交就是裸仓。线上实测 2026-10-02 16:12/16:17/16:28 连续三次发生，
+        当时 mark 距触发只差 0.17%。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            client, ex = self._make(Path(td))
+            client.set_position(0)                      # 还没成交 → 无持仓
+            # 突破进场单：条件单、非 reduce_only、text 无 tp/sl 后缀
+            client.place_protector("t-pt", -39, 85050, is_reduce_only=False)
+            # 为它预挂的保护单
+            client.place_protector("t-pt-sl", 39, 85480)
+            client.place_protector("t-pt-tp", 19, 84200)
+            self.assertTrue(ex._has_pending_entry("BTC_USDT"),
+                            "条件单形态的待成交入场单必须被识别")
+            cleaned = ex._cleanup_orphan_protectors("BTC_USDT")
+            self.assertEqual(cleaned, [], "有待成交条件单时不该撤保护单")
+            self.assertEqual(len(client.price_orders), 3, "三张单都该保留")
+
+    def test_finished_stop_entry_does_not_block(self):
+        """已终结（cancelled/finished）的条件单不算待成交。"""
+        with tempfile.TemporaryDirectory() as td:
+            client, ex = self._make(Path(td))
+            client.set_position(0)
+            e = client.place_protector("t-pt", -39, 85050, is_reduce_only=False)
+            e["status"] = "cancelled"
+            self.assertFalse(ex._has_pending_entry("BTC_USDT"))
+
+    def test_reduce_only_condition_not_treated_as_entry(self):
+        """reduce_only 的条件单是保护单，不是入场单。"""
+        with tempfile.TemporaryDirectory() as td:
+            client, ex = self._make(Path(td))
+            client.set_position(0)
+            client.place_protector("t-pt-sl", 39, 85480)   # reduce_only 默认 True
+            self.assertFalse(ex._has_pending_entry("BTC_USDT"))
+
+
 if __name__ == "__main__":
     unittest.main()
