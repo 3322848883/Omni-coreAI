@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 import logging
+import time
+from datetime import datetime
 from pathlib import Path
 import urllib.request
 from abc import ABC, abstractmethod
@@ -314,11 +316,12 @@ def format_trade_steps(bot_id: str, steps: list) -> list[str]:
             # 推送「改单告警 止盈:— 止损:—」只会让人以为失败了 —— 静默。
             continue
         mark = "✓" if ok else "✗"
+        tstamp = _step_time(detail, s)
         if action in _OPEN_ACTIONS:
             side = "多" if "long" in action else "空"
             px = _entry_price(detail, s)
             sz, unit = _resolve_size(detail, s)
-            lines.append(f"{mark} 开仓 {sym} {side} @{px} size={sz}{unit}")
+            lines.append(f"{mark} 开仓 {sym} {side} @{px} size={sz}{unit}  [{tstamp}]")
         elif action in _CLOSE_ACTIONS:
             px = _entry_price(detail, s)
             pnl = _resolve_pnl(detail, s)
@@ -329,16 +332,52 @@ def format_trade_steps(bot_id: str, steps: list) -> list[str]:
                 pnl_val = 0.0
             label = "止盈" if pnl_val > 0 else ("止损" if pnl_val < 0 else "平仓")
             icon = "✅" if pnl_val > 0 else ("🔴" if pnl_val < 0 else "📉")
-            lines.append(f"{mark} {icon} {label} {sym} @{px} pnl={_fmt_num(pnl)}")
+            lines.append(f"{mark} {icon} {label} {sym} @{px} pnl={_fmt_num(pnl)}  [{tstamp}]")
         elif action in _REDUCE_ACTIONS:
             px = _entry_price(detail, s)
             sz, unit = _resolve_size(detail, s)
-            lines.append(f"{mark} 减仓 {sym} @{px} size={sz}{unit}")
+            lines.append(f"{mark} 减仓 {sym} @{px} size={sz}{unit}  [{tstamp}]")
         elif action == "modify_tp_sl":
             tp = _resolve_tp(detail, s)
             sl = _resolve_sl(detail, s)
-            lines.append(f"{mark} 改保护 {sym} TP={_fmt_num(tp)} SL={_fmt_num(sl)}")
+            lines.append(f"{mark} 改保护 {sym} TP={_fmt_num(tp)} SL={_fmt_num(sl)}  [{tstamp}]")
     return lines
+
+
+def _fmt_ts(v) -> str:
+    """把 Unix 时间戳格式化成「本地时间 + 时区偏移」。
+
+    用**事件发生时间**而不是发送时间：飞书自己会显示送达时间，但两者可能差很远
+    （LLM 一轮 30-90 秒、或进程重启后补发）。带偏移是为了无歧义 —— 服务器是 UTC
+    而读卡片的人在 UTC+8 时，光看「22:17」会误判。
+    """
+    if v is None or v == "":
+        return "—"
+    try:
+        ts = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    if ts <= 0:
+        return "—"
+    try:
+        dt = datetime.fromtimestamp(ts).astimezone()
+    except (OverflowError, OSError, ValueError):
+        return "—"
+    off = dt.strftime("%z") or ""
+    off = f"{off[:3]}:{off[3:]}" if len(off) == 5 else off
+    return dt.strftime("%Y-%m-%d %H:%M:%S") + (f" {off}" if off else "")
+
+
+def _step_time(detail: dict, s: dict) -> str:
+    """取该 step 的事件时间：订单 create_time → update_time → 当前时间。"""
+    o = detail.get("order") or {}
+    for src in (o.get("create_time"), o.get("update_time"),
+                detail.get("create_time"), s.get("create_time"), s.get("ts")):
+        if src not in (None, "", 0, "0"):
+            out = _fmt_ts(src)
+            if out != "—":
+                return out
+    return _fmt_ts(time.time())
 
 
 def _unwrap_price(v):
@@ -504,6 +543,7 @@ def format_trade_card(bot_id: str, steps: list) -> list[dict]:
         detail = s.get("detail") or {}
         if detail.get("noop"):
             continue  # 良性 no-op：什么都没发生，不推送（同 format_trade_steps）
+        tstamp = _step_time(detail, s)
 
         if action in _OPEN_ACTIONS:
             side = "多" if "long" in action else "空"
@@ -517,7 +557,7 @@ def format_trade_card(bot_id: str, steps: list) -> list[dict]:
                 ("Bot", bot_id), ("币种", sym),
                 ("方向", f"开{side}"), ("入场价", px),
                 ("仓位", f"{sz} {unit}".strip()), ("止损", _fmt_num(sl)),
-                ("止盈", _fmt_num(tp)),
+                ("止盈", _fmt_num(tp)), ("时间", tstamp),
             ]
         elif action in _CLOSE_ACTIONS:
             px = _entry_price(detail, s)
@@ -537,6 +577,7 @@ def format_trade_card(bot_id: str, steps: list) -> list[dict]:
             fields = [
                 ("Bot", bot_id), ("币种", sym),
                 ("平仓价", px), ("盈亏", f"{_fmt_num(pnl)} USDT"),
+                ("时间", tstamp),
             ]
         elif action in _REDUCE_ACTIONS:
             px = _entry_price(detail, s)
@@ -546,6 +587,7 @@ def format_trade_card(bot_id: str, steps: list) -> list[dict]:
             fields = [
                 ("Bot", bot_id), ("币种", sym),
                 ("减仓价", px), ("减仓量", f"{sz} {unit}".strip()),
+                ("时间", tstamp),
             ]
         elif action == "modify_tp_sl":
             tp = _resolve_tp(detail, s)
@@ -555,6 +597,7 @@ def format_trade_card(bot_id: str, steps: list) -> list[dict]:
             fields = [
                 ("Bot", bot_id), ("币种", sym),
                 ("止盈", _fmt_num(tp)), ("止损", _fmt_num(sl)),
+                ("时间", tstamp),
             ]
         else:
             continue
@@ -606,9 +649,11 @@ def format_process_card(kind: str, title: str, fields: Optional[list] = None, co
         "restart": "↻", "storm": "⛔", "start": "🐕",
         "stop": "🛑", "info": "ℹ️",
     }.get(kind, "ℹ️")
+    # 进程事件是「此刻发生」的，所以用发送时间；带时区偏移避免 UTC/本地误判
+    all_fields = list(fields or []) + [("时间", _fmt_ts(time.time()))]
     field_elements = []
-    for i in range(0, len(fields or []), 2):
-        pair = (fields or [])[i:i + 2]
+    for i in range(0, len(all_fields), 2):
+        pair = all_fields[i:i + 2]
         field_elements.append({
             "tag": "div",
             "fields": [

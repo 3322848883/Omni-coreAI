@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import json
 import unittest
 
 from omnialpha.monitoring.notify import (
@@ -289,6 +290,74 @@ class TestNoopStepsAreSilent(unittest.TestCase):
         step = dict(LIVE_MODIFY)
         step["detail"] = dict(LIVE_MODIFY["detail"], noop="")
         self.assertEqual(len(format_trade_card("brooks-btc", [step])), 1)
+
+
+class TestTimestampInNotifications(unittest.TestCase):
+    """通知模板必须带时间，且用**事件发生时间**而不是发送时间。
+
+    飞书自己会显示送达时间，但两者可能差很远（LLM 一轮 30-90 秒、或进程重启后补发），
+    所以卡片要显示成交/事件那一刻。带时区偏移是为了无歧义。
+    """
+
+    def test_fmt_ts_basic(self):
+        from omnialpha.monitoring.notify import _fmt_ts
+
+        out = _fmt_ts(1790927063.664)
+        self.assertRegex(out, r"^2026-10-02 \d{2}:44:23 [+-]\d{2}:\d{2}$", out)
+
+    def test_fmt_ts_empty_values(self):
+        from omnialpha.monitoring.notify import _fmt_ts
+
+        for bad in (None, "", 0, "0", -1, "abc"):
+            with self.subTest(v=bad):
+                self.assertEqual(_fmt_ts(bad), "—")
+
+    def test_fmt_ts_accepts_string_number(self):
+        from omnialpha.monitoring.notify import _fmt_ts
+
+        self.assertNotEqual(_fmt_ts("1790927063"), "—")
+
+    def test_open_card_uses_order_time_not_now(self):
+        """开仓卡片的时间应来自订单 create_time，而不是当前时间。"""
+        from omnialpha.monitoring.notify import _fmt_ts
+
+        step = json.loads(json.dumps(LIVE_OPEN))
+        step["detail"]["order"]["create_time"] = 1790927063.664
+        cards = format_trade_card("brooks-btc", [step])
+        f = _fields(cards[0])
+        self.assertIn("时间", f)
+        self.assertEqual(f["时间"], _fmt_ts(1790927063.664))
+
+    def test_modify_card_has_time(self):
+        cards = format_trade_card("brooks-btc", [LIVE_MODIFY])
+        f = _fields(cards[0])
+        self.assertIn("时间", f)
+        self.assertNotEqual(f["时间"], "—")
+
+    def test_process_card_has_time(self):
+        from omnialpha.monitoring.notify import format_process_card
+
+        card = format_process_card("restart", "自动拉起 brooks-btc/plan",
+                                   fields=[("Bot", "brooks-btc")])
+        f = {}
+        for el in card["elements"]:
+            for fd in el.get("fields", []):
+                k, _, v = fd["text"]["content"].partition(":**")
+                f[k.strip("* ")] = v.strip()
+        self.assertIn("时间", f)
+        self.assertRegex(f["时间"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{2}:\d{2}$")
+
+    def test_steps_text_has_time(self):
+        lines = format_trade_steps("brooks-btc", [LIVE_OPEN])
+        self.assertRegex(lines[0], r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{2}:\d{2}\]$",
+                         lines[0])
+
+    def test_noop_still_silent_with_time(self):
+        """加了时间字段后，良性 no-op 仍不推送。"""
+        step = {"action": "modify_tp_sl", "symbol": "BTC_USDT", "ok": True,
+                "detail": {"noop": "nothing to modify"}}
+        self.assertEqual(format_trade_card("brooks-btc", [step]), [])
+        self.assertEqual(format_trade_steps("brooks-btc", [step]), [])
 
 
 if __name__ == "__main__":
