@@ -336,8 +336,14 @@ _AUTO_PROTECT_ALERT_SEC = 3600.0
 def _auto_protect_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict) -> int:
     """定期给裸仓补 SL（`account_risk.auto_protect` 逐 bot 开启，默认关）。
 
-    与 `_orphan_sweep` 是一对：一个撤孤儿、一个补缺失，且都以**同一份持仓/挂单事实**
-    为准（`Executor._has_pending_entry`），避免两处判据漂移。
+    与 `_orphan_sweep` 是一对：一个撤孤儿、一个补缺失。但**判据故意不共用** ——
+    补保护只看「持仓 + owned SL」（`Executor._has_owned_sl`），
+    `Executor._has_pending_entry` **只归孤儿扫描**。
+
+    曾经共用过一版（补保护也拿 `_has_pending_entry` 当闸门），结果是补保护被一个
+    会静默返回 False 的判据挡住 —— 那个判据连着修了两次漏判（`62dce02` 条件单、
+    `b0307ab` 空头 `left` 为负），而漏判的代价是「裸仓一直没人管」，正是这个功能
+    要消灭的状态。`51264d5` 已删掉那道闸门，**别再耦合回去**。
 
     为什么必须在这里、而不是 plan-loop 里：裸仓就是「没人管时静静躺着」的那个状态。
     挂在 LLM 轮次上会被它的 15 分钟节奏绑架，而且 LLM 进程死了就完全不跑。
