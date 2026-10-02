@@ -192,14 +192,29 @@ class TestAutoProtect(unittest.TestCase):
             po["status"] = "cancelled"
             self.assertIn("placed", ex.ensure_protection("BTC_USDT"))
 
-    def test_pending_entry_skips(self):
-        """有待成交入场单 → 执行器已为它预挂保护单，此刻补会重复。"""
+    def test_pending_entry_does_not_block(self):
+        """待成交入场单**不**阻断补保护 —— 它保护的是将来那条仓位，与当前这条无关。
+
+        而 `_has_pending_entry` 会静默返回 False（`62dce02` 漏扫条件单、`b0307ab`
+        漏判空头 `left` 为负，连着修了两次），所以不该给「必须动」的补保护路径当闸门。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            client, ex = self._make(Path(td))
+            client.set_position(10)        # 当前有一条裸仓
+            client.place_entry("t-pt", 5)  # 另有一张待成交入场单
+            out = ex.ensure_protection("BTC_USDT")
+            self.assertIn("placed", out)
+            self.assertEqual(len(client.placed), 1)
+
+    def test_pending_entry_preplaced_sl_still_blocks(self):
+        """但若那张入场单**已经预挂了 owned SL**，`_has_owned_sl` 会挡住 —— 不会双挂。"""
         with tempfile.TemporaryDirectory() as td:
             client, ex = self._make(Path(td))
             client.set_position(10)
             client.place_entry("t-pt", 5)
+            client.place_protector("t-pt-sl", -10, 83000)  # 为待成交单预挂的保护
             out = ex.ensure_protection("BTC_USDT")
-            self.assertEqual(out["skipped"], "pending_entry")
+            self.assertEqual(out["skipped"], "sl_present")
             self.assertEqual(client.placed, [])
 
     def test_dual_position_ambiguous_skips(self):

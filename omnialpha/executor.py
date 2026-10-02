@@ -1631,6 +1631,14 @@ class Executor:
         非法一侧、被交易所直接拒 —— 正是 `_precheck_exit_triggers` 挡的那一类。这里再
         走一次同一个预检，避免两处判据漂移。
 
+        **故意不看「有没有待成交入场单」**（`_has_pending_entry`）。两个理由：
+          ① 那个判据会静默返回 False —— `62dce02`（漏扫条件单）和 `b0307ab`（漏判空头
+             `left` 为负）连着修了两次漏判。而「补保护」是**必须动**的路径：一个可能漏判
+             的判据不该给它当闸门，否则漏判的代价是「裸仓一直没人管」。
+          ② 它多余：未成交入场单的保护单保护的是**将来**那条仓位，与当前这条无关；
+             而能走到下面挂单那一步，就说明 `_has_owned_sl` 已是 False，即账户上不存在
+             任何 owned SL —— 那待成交单自然也没有预挂 SL，不会双挂。
+
         本方法只做「检测 + 挂单」，**不告警**：告警与限流是调用方（watcher 的扫描循环）
         的策略，那里才有跨轮状态。
         """
@@ -1653,11 +1661,6 @@ class Executor:
         if len(positions) > 1:
             # 双向持仓得先定补哪条腿 —— 这不是「兜底」该猜的事，交给 AI
             out["skipped"] = "ambiguous_side"
-            return out
-        if self._has_pending_entry(symbol):
-            # 执行器已为未成交入场单预挂了保护单，此刻再补一张会重复。
-            # 与孤儿扫描共用同一个事实源，避免两处判据漂移。
-            out["skipped"] = "pending_entry"
             return out
 
         pos = positions[0]
