@@ -28,7 +28,7 @@ for line in (ROOT / "logs" / "skill_journal.jsonl").read_text(encoding="utf-8").
     print(" ", line)
 
 # 3) 快照结构（决定 text 里带了什么）
-from gate_bot.strategist.snapshot import collect_snapshot  # noqa: E402
+from omnialpha.strategist.snapshot import collect_snapshot  # noqa: E402
 print("\n=== snapshot 顶层字段（本轮实际会发送的结构）===")
 print("→ build_user_prompt 发送内容 = 品种宇宙 + 策略风控 + 【市场与账户快照】JSON + 指令")
 print("→ snapshot 含 market.<symbol> = candles(60) + indicators + tf 子周期 + account + ...")

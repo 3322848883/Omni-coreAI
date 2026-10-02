@@ -1,4 +1,4 @@
-"""Contract tests: kline.db schema between pa-data-source and gate_bot (read-only)."""
+"""Contract tests: kline.db schema between pa-data-source and omnialpha (read-only)."""
 import sqlite3
 import sys
 import tempfile
@@ -15,7 +15,7 @@ from contracts.kline_schema import (  # noqa: E402
     schema_ok,
     validate_kline_schema,
 )
-from gate_bot.strategist.market import MarketConfig, resolve_db_path, resolve_pa_data_root  # noqa: E402
+from omnialpha.strategist.market import MarketConfig, resolve_db_path, resolve_pa_data_root  # noqa: E402
 
 
 class TestKlineContract(unittest.TestCase):

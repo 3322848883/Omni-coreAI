@@ -1,6 +1,6 @@
 #!/bin/bash
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
-cd /opt/gate-signal-bot
+cd /opt/omnialpha
 
 echo "=== 1) 关掉服务器上的模拟盘（enabled: false）==="
 count=0
@@ -28,9 +28,9 @@ grep -l "enabled: true" config/bots/*.yaml 2>/dev/null | while read -r f; do
 done
 
 echo "=== 3) 重启看门狗（只管实盘）==="
-systemctl restart gate-watchdog
+systemctl restart omnialpha-watchdog
 sleep 5
-systemctl is-active gate-watchdog
+systemctl is-active omnialpha-watchdog
 
 echo "=== 4) 运行中的 bot ==="
 ps -eo args | grep '[g]ate_bot' | grep -E 'plan-loop|paper-run|run --bot' | while read -r line; do

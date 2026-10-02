@@ -8,9 +8,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.gate_client import GateApiError, GateClient
-from gate_bot.executor import Executor
-from gate_bot.schema import parse_signal
+from omnialpha.gate_client import GateApiError, GateClient
+from omnialpha.executor import Executor
+from omnialpha.schema import parse_signal
 
 KEY = os.environ.get("GATE_API_KEY", "")
 SEC = os.environ.get("GATE_API_SECRET", "")

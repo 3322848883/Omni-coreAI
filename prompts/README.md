@@ -1,7 +1,7 @@
 # 策略提示词（策略人格）
 
 这里放的是 **可更换的策略人格**。交易契约、动作枚举、安全规则写死在  
-`gate_bot/strategist/prompt.py`，不要在策略文件里改语义。
+`omnialpha/strategist/prompt.py`，不要在策略文件里改语义。
 
 ## 可换 / 固定
 
@@ -66,7 +66,7 @@ strategist:
 ## 验收
 
 ```powershell
-.venv\Scripts\python.exe -m gate_bot plan --bot <bot_id>
+.venv\Scripts\python.exe -m omnialpha plan --bot <bot_id>
 ```
 
 看 Plan `reasoning` / chips 是否符合你的风格；再跑  

@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# gate-signal-bot 部署流水线（本地/服务器通用）
+# OmniAlpha 部署流水线（本地/服务器通用）
 #
 # 七步：前置检查 → 拉代码 → 依赖 → 同步 skill → 编码自检 → 测试 → 重启+验证
 #
@@ -14,7 +14,7 @@
 # ============================================================================
 set -euo pipefail
 
-ROOT="${GATE_BOT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+ROOT="${OMNIALPHA_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "$ROOT"
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 
@@ -37,7 +37,7 @@ run() {
 }
 
 echo "=============================================="
-echo "gate-signal-bot 部署 · root=$ROOT"
+echo "OmniAlpha 部署 · root=$ROOT"
 echo "=============================================="
 
 # ── 1) 前置检查 ────────────────────────────────
@@ -109,8 +109,8 @@ if [ -d skills-src ]; then
     if [ "$DRY_RUN" = "1" ]; then
       echo "     [dry-run] validate + install $id"
     else
-      "$PY" -m gate_bot skill validate "$d" >/dev/null || { echo "     ⛔ validate 失败，中止"; exit 1; }
-      "$PY" -m gate_bot skill install "$d" --yes >/dev/null
+      "$PY" -m omnialpha skill validate "$d" >/dev/null || { echo "     ⛔ validate 失败，中止"; exit 1; }
+      "$PY" -m omnialpha skill install "$d" --yes >/dev/null
       echo "     installed"
     fi
   done
@@ -124,7 +124,7 @@ echo "[5/7] 编码自检（乱码目录名）"
 if [ "$DRY_RUN" = "1" ]; then
   echo "  [dry-run] skill doctor --fix"
 else
-  "$PY" -m gate_bot skill doctor --fix || echo "  ⚠️  doctor 报告问题（见上）"
+  "$PY" -m omnialpha skill doctor --fix || echo "  ⚠️  doctor 报告问题（见上）"
 fi
 
 # ── 6) 测试（失败即中止，不重启）──────────────
@@ -144,22 +144,22 @@ echo
 echo "[7/7] 重启 + 验证"
 # 用文件检测而非 `systemctl list-unit-files | grep -q`：
 # 后者因 grep -q 提前退出触发 SIGPIPE，配合 set -o pipefail 会误判为失败。
-UNIT=/etc/systemd/system/gate-watchdog.service
+UNIT=/etc/systemd/system/omnialpha-watchdog.service
 if [ "$NO_RESTART" = "1" ]; then
   echo "  (--no-restart：跳过重启)"
 elif [ -f "$UNIT" ] && command -v systemctl >/dev/null 2>&1; then
-  run systemctl restart gate-watchdog
+  run systemctl restart omnialpha-watchdog
   if [ "$DRY_RUN" = "0" ]; then
     sleep 12
-    echo "  service: $(systemctl is-active gate-watchdog)"
+    echo "  service: $(systemctl is-active omnialpha-watchdog)"
   fi
 else
-  echo "  (未发现 $UNIT，跳过重启；如需手动：python -m gate_bot watchdog)"
+  echo "  (未发现 $UNIT，跳过重启；如需手动：python -m omnialpha watchdog)"
 fi
 
 if [ "$DRY_RUN" = "0" ]; then
   echo
-  "$PY" -m gate_bot deploy-check || true
+  "$PY" -m omnialpha deploy-check || true
 fi
 
 echo

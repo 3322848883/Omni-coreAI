@@ -1,4 +1,4 @@
-"""CLI: python -m gate_bot.metrics [score|scan]"""
+"""CLI: python -m omnialpha.metrics [score|scan]"""
 from __future__ import annotations
 
 import argparse
@@ -8,13 +8,13 @@ from pathlib import Path
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(prog="gate_bot.metrics")
+    p = argparse.ArgumentParser(prog="omnialpha.metrics")
     p.add_argument("cmd", nargs="?", default="score", choices=["score", "scan", "json"])
     p.add_argument("--root", default=None)
     args = p.parse_args(argv)
     import os
     root = Path(
-        args.root or os.environ.get("GATE_BOT_ROOT") or Path.cwd()
+        args.root or os.environ.get("OMNIALPHA_ROOT") or Path.cwd()
     ).expanduser().resolve()
     from .scoreboard import build_scoreboard, format_table, write_scoreboard
     from .trials import scan_trials

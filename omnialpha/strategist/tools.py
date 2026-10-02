@@ -163,7 +163,7 @@ def _aux_db(bot_root=None):
 
 
 
-    env = os.environ.get("GATE_BOT_AUX") or os.environ.get("GATE_AUX_DB")
+    env = os.environ.get("OMNIALPHA_AUX") or os.environ.get("GATE_AUX_DB")
 
 
     if env:

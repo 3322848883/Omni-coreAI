@@ -11,12 +11,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.persona import (  # noqa: E402
+from omnialpha.persona import (  # noqa: E402
     PersonaGroup,
     SharedOrderStore,
     PersonaRunner,
 )
-from gate_bot.persona.orders import new_order_id  # noqa: E402
+from omnialpha.persona.orders import new_order_id  # noqa: E402
 
 
 def _group(**kw):
@@ -250,7 +250,7 @@ class TestSignalExecutability(unittest.TestCase):
         return json.loads(inbox[0].read_text(encoding="utf-8"))
 
     def test_open_long_signal_parseable(self):
-        from gate_bot.schema import parse_signal
+        from omnialpha.schema import parse_signal
         with tempfile.TemporaryDirectory() as td:
             payload = self._make_signal(Path(td), "long", "open_long",
                                         size_usd=100, confidence=0.9)
@@ -278,7 +278,7 @@ class TestSignalExecutability(unittest.TestCase):
                 self.assertIn(k, meta, f"meta missing {k}")
 
     def test_close_signal_parseable(self):
-        from gate_bot.schema import parse_signal
+        from omnialpha.schema import parse_signal
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             SharedOrderStore(root).create({"symbol": "BTC_USDT", "side": "long"})
@@ -288,7 +288,7 @@ class TestSignalExecutability(unittest.TestCase):
             self.assertEqual(sig.intents[0].action, "close")
 
     def test_hold_signal_parseable(self):
-        from gate_bot.schema import parse_signal
+        from omnialpha.schema import parse_signal
         with tempfile.TemporaryDirectory() as td:
             payload = self._make_signal(Path(td), "long", "hold", confidence=0.3)
             # hold 不执行，但若写盘也应可解析

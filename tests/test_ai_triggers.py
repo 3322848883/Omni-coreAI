@@ -7,14 +7,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.strategist.trigger_store import (  # noqa: E402
+from omnialpha.strategist.trigger_store import (  # noqa: E402
     AITriggerPolicy,
     AITriggerStore,
     TriggerPolicyError,
     validate_trigger_payload,
 )
-from gate_bot.strategist.schema import parse_plan  # noqa: E402
-from gate_bot.strategist.loop import PlanRunner, StrategistConfig  # noqa: E402
+from omnialpha.strategist.schema import parse_plan  # noqa: E402
+from omnialpha.strategist.loop import PlanRunner, StrategistConfig  # noqa: E402
 
 
 class TestTriggerPolicy(unittest.TestCase):

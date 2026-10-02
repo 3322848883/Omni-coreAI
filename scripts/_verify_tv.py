@@ -27,7 +27,7 @@ print(f"           = {slope_tv}")
 print(f"  TV 公式 intercept = {average} - {slope_tv}*{sum_x}/{length} + {slope_tv}")
 print(f"                  = {intercept_tv}")
 
-from gate_bot.strategist.tv_indicators import calc_slope
+from omnialpha.strategist.tv_indicators import calc_slope
 slope_py, avg_py, intercept_py = calc_slope(values, length)
 print(f"  Python calc_slope: slope={slope_py}, intercept={intercept_py}")
 assert abs(slope_py - slope_tv) < 1e-10, f"slope mismatch: {slope_py} vs {slope_tv}"
@@ -76,7 +76,7 @@ for i in range(len(closes)):
     else:
         rsi_tv[i] = 100 - 100 / (1 + up / dn)
 
-from gate_bot.strategist.tv_indicators import rsi_base
+from omnialpha.strategist.tv_indicators import rsi_base
 rsi_py = rsi_base(closes, rsi_len)
 
 # Compare last non-None values
@@ -115,7 +115,7 @@ g2 = gd_tv([v if v is not None else 0 for v in g1], t3_len, t3_alpha)
 g3 = gd_tv([v if v is not None else 0 for v in g2], t3_len, t3_alpha)
 t3_tv = g3[-1]
 
-from gate_bot.strategist.tv_indicators import t3_moving_average
+from omnialpha.strategist.tv_indicators import t3_moving_average
 t3_py = t3_moving_average(t3_values, t3_len, t3_alpha)
 t3_py_last = t3_py[-1]
 

@@ -2,7 +2,7 @@
 """修复 notify.py 卡片取值与格式。"""
 from pathlib import Path
 
-p = Path(r"C:\Users\w6485\Desktop\测试\gate-signal-bot\gate_bot\monitoring\notify.py")
+p = Path(r"C:\Users\w6485\Desktop\测试\OmniAlpha\omnialpha\monitoring\notify.py")
 c = p.read_text(encoding="utf-8")
 
 # 1) close 分支：px 用 _entry_price，pnl 用 _fmt_num

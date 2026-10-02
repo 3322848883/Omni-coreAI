@@ -23,9 +23,9 @@
 ### 推荐：统一 Supervisor（多 bot 一键托管）
 
 ```powershell
-python -m gate_bot migrate          # 旧目录 → data/bots/<id>/*
-python -m gate_bot supervisor       # 启动所有 enabled bot 的 plan-loop + run
-python -m gate_bot status           # 含 heartbeats / PID
+python -m omnialpha migrate          # 旧目录 → data/bots/<id>/*
+python -m omnialpha supervisor       # 启动所有 enabled bot 的 plan-loop + run
+python -m omnialpha status           # 含 heartbeats / PID
 # 无控制台窗口（pythonw）
 .\scripts\start_brooks_btc_bg.bat
 ```
@@ -40,7 +40,7 @@ Supervisor 只管自己启动的那组；**看门狗**是从全局视角扫「�
 
 ```powershell
 .\scripts\start_watchdog_bg.bat          # 无窗口
-python -m gate_bot watchdog --interval 15
+python -m omnialpha watchdog --interval 15
 ```
 
 | 项 | 行为 |
@@ -91,7 +91,7 @@ Copy-Item "$uv\python314.dll" .venv\Scripts\ -Force   # 依赖 DLL
 Copy-Item "$uv\python3.dll"   .venv\Scripts\ -Force
 ```
 
-**验证**：`Get-Process python | Where-Object { $_.CommandLine -match 'gate_bot' }` 应为 **0**；`pythonw` 数量 = worker 数。
+**验证**：`Get-Process python | Where-Object { $_.CommandLine -match 'omnialpha' }` 应为 **0**；`pythonw` 数量 = worker 数。
 
 **注意**：用 `uv venv` / `uv sync` 重建环境后**会复发**，重建完必须重做这一步。
 
@@ -106,20 +106,20 @@ cscript scripts\run_brooks_bg.vbs
 ### 2.2 任务计划程序（崩溃拉起）
 
 ```powershell
-$wd = "C:\Users\w6485\Desktop\测试\gate-signal-bot"
+$wd = "C:\Users\w6485\Desktop\测试\OmniAlpha"
 $py = "$wd\.venv\Scripts\python.exe"
 
 # 登录时启动 + 失败重试（管理员 PowerShell）
 foreach ($pair in @(
-  @{Name="gate-bot-plan"; Args="-m gate_bot plan-loop --bot brooks-btc"},
-  @{Name="gate-bot-run";  Args="-m gate_bot run --bot brooks-btc"}
+  @{Name="omnialpha-plan"; Args="-m omnialpha plan-loop --bot brooks-btc"},
+  @{Name="omnialpha-run";  Args="-m omnialpha run --bot brooks-btc"}
 )) {
   $act = New-ScheduledTaskAction -Execute $py -Argument $pair.Args -WorkingDirectory $wd
   $trg = New-ScheduledTaskTrigger -AtLogOn
   $set = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
         -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
   Register-ScheduledTask -TaskName $pair.Name -Action $act -Trigger $trg -Settings $set `
-    -Description "gate-signal-bot $($pair.Name)" -Force
+    -Description "OmniAlpha $($pair.Name)" -Force
 }
 ```
 
@@ -131,8 +131,8 @@ foreach ($pair in @(
 ### 2.2 或用服务封装（NSSM / WinSW）
 
 ```powershell
-nssm install GateBotPlan "C:\...\gate-signal-bot\.venv\Scripts\python.exe" "-m" "gate_bot" "plan-loop" "--bot" "brooks-btc"
-nssm install GateBotRun  "C:\...\gate-signal-bot\.venv\Scripts\python.exe" "-m" "gate_bot" "run" "--bot" "brooks-btc"
+nssm install GateBotPlan "C:\...\OmniAlpha\.venv\Scripts\python.exe" "-m" "omnialpha" "plan-loop" "--bot" "brooks-btc"
+nssm install GateBotRun  "C:\...\OmniAlpha\.venv\Scripts\python.exe" "-m" "omnialpha" "run" "--bot" "brooks-btc"
 # AppDirectory 设为仓库根；Environment 里加 OPENAI_* / GATE_*
 nssm start GateBotPlan; nssm start GateBotRun
 ```
@@ -150,21 +150,21 @@ nssm start GateBotPlan; nssm start GateBotRun
 
 ## 3. Linux 服务器（systemd）
 
-`/etc/systemd/system/gate-bot-plan.service`：
+`/etc/systemd/system/omnialpha-plan.service`：
 
 ```ini
 [Unit]
-Description=gate-signal-bot plan-loop
+Description=OmniAlpha plan-loop
 After=network-online.target
 
 [Service]
-WorkingDirectory=/opt/gate-signal-bot
-Environment=GATE_BOT_ROOT=/opt/gate-signal-bot
+WorkingDirectory=/opt/omnialpha
+Environment=OMNIALPHA_ROOT=/opt/omnialpha
 Environment=OPENAI_BASE_URL=https://api.deepseek.com/v1
 Environment=OPENAI_API_KEY=...
 Environment=GATE_API_KEY=...
 Environment=GATE_API_SECRET=...
-ExecStart=/opt/gate-signal-bot/.venv/bin/python -m gate_bot plan-loop --bot brooks-btc
+ExecStart=/opt/omnialpha/.venv/bin/python -m omnialpha plan-loop --bot brooks-btc
 Restart=always
 RestartSec=5
 
@@ -172,12 +172,12 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-`gate-bot-run.service` 把 `ExecStart` 换成 `run --bot brooks-btc`。
+`omnialpha-run.service` 把 `ExecStart` 换成 `run --bot brooks-btc`。
 
 ```bash
 systemctl daemon-reload
-systemctl enable --now gate-bot-plan gate-bot-run
-journalctl -u gate-bot-plan -f
+systemctl enable --now omnialpha-plan omnialpha-run
+journalctl -u omnialpha-plan -f
 ```
 
 ---
@@ -194,7 +194,7 @@ journalctl -u gate-bot-plan -f
 
 ```powershell
 Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
-  Where-Object { $_.CommandLine -match 'gate_bot' } |
+  Where-Object { $_.CommandLine -match 'omnialpha' } |
   Select-Object ProcessId, CommandLine
 ```
 
@@ -206,8 +206,8 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
 |------|------|
 | `GATE_API_KEY` / `GATE_API_SECRET` | 实盘下单 |
 | `OPENAI_BASE_URL` / `OPENAI_API_KEY` | LLM |
-| `GATE_BOT_ROOT` | 仓库根（systemd/cron 用） |
-| `GATE_BOT_PA_DATA` | 行情库目录（可选） |
+| `OMNIALPHA_ROOT` | 仓库根（systemd/cron 用） |
+| `OMNIALPHA_PA_DATA` | 行情库目录（可选） |
 | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` / `FEISHU_USER_OPEN_ID` | 飞书推送（应用机器人） |
 | `FEISHU_WEBHOOK` | 飞书推送（群机器人，二选一） |
 | `TELEGRAM_TOKEN` / `TELEGRAM_CHAT_ID` | Telegram 推送（可选） |
@@ -221,9 +221,9 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
 
 | 频率 | 动作 |
 |------|------|
-| 每天 | `python -m gate_bot status`；看 `logs/*plan.err` / `run.err` |
+| 每天 | `python -m omnialpha status`；看 `logs/*plan.err` / `run.err` |
 | 每天 | 看 `data/bots/*/state/alerts.json` 是否有新告警（权益/重复成交/孤儿） |
-| 有单时 | `python -m gate_bot trades --bot brooks-btc --tail 20` |
+| 有单时 | `python -m omnialpha trades --bot brooks-btc --tail 20` |
 | 失败 | `archive/failed/brooks-btc/*.error.json` |
 | 异常空转 | 确认两进程都在、OPENAI/GATE 余额与权限 |
 | 告警推送 | 飞书是否收到开平仓卡片；没收到先查 `config/alerts.yaml` |
@@ -234,12 +234,12 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
 
 ```powershell
 # 任务计划
-Stop-ScheduledTask -TaskName gate-bot-plan -ErrorAction SilentlyContinue
-Stop-ScheduledTask -TaskName gate-bot-run  -ErrorAction SilentlyContinue
+Stop-ScheduledTask -TaskName omnialpha-plan -ErrorAction SilentlyContinue
+Stop-ScheduledTask -TaskName omnialpha-run  -ErrorAction SilentlyContinue
 # 或 scripts\stop_brooks_btc.bat
 
 # Linux
-systemctl stop gate-bot-plan gate-bot-run
+systemctl stop omnialpha-plan omnialpha-run
 ```
 
 改配置后重启进程才会生效（yaml 启动时加载）。

@@ -17,12 +17,12 @@ for svc in $(systemctl list-units --type=service --all --no-pager --no-legend 2>
   systemctl disable "$svc" 2>/dev/null && echo "    已禁用自启"
 done
 # cron 里的
-crontab -l 2>/dev/null | grep -iE 'ai trader|trader bot|aitrader|llm-test|gate_bot' && echo "  (cron 里有引用，需人工确认)" || echo "  cron 无引用"
+crontab -l 2>/dev/null | grep -iE 'ai trader|trader bot|aitrader|llm-test|omnialpha' && echo "  (cron 里有引用，需人工确认)" || echo "  cron 无引用"
 
 echo "=== 4) 确认残留 ==="
 ps -eo args | grep '[g]ate_bot' | grep -E '/root/ai trader|/root/trader bot|aitrader|llm-test' | head -5 || echo "  (已清空)"
 
 echo "=== 5) 我们的实盘还在吗 ==="
-ps -eo args | grep '[g]ate_bot' | grep '/opt/gate-signal-bot' | grep -E 'plan-loop|run --bot'
+ps -eo args | grep '[g]ate_bot' | grep '/opt/omnialpha' | grep -E 'plan-loop|run --bot'
 
 echo "=== CLEAN_DONE ==="

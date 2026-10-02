@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-28  
 **Mode:** standard（4 angles，1 轮补查）  
-**Project:** gate-signal-bot（Gate 永续 + LLM 策略人格模拟盘赛马）
+**Project:** OmniAlpha（Gate 永续 + LLM 策略人格模拟盘赛马）
 
 ## Question
 在多套交易人格（价格行为/SMC/订单流等）于本地模拟盘并行赛马的场景下：  

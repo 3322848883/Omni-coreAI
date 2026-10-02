@@ -11,13 +11,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.skillkit import (  # noqa: E402
+from omnialpha.skillkit import (  # noqa: E402
     SkillRegistry,
     load_package,
     run_skill_tool,
     validate_package,
 )
-from gate_bot.skillkit.models import SkillError  # noqa: E402
+from omnialpha.skillkit.models import SkillError  # noqa: E402
 
 from tests._skill_fixtures import fixture_root, fixture_skills_dir  # noqa: E402
 
@@ -172,7 +172,7 @@ class TestCliLifecycle(unittest.TestCase):
 
     def _cli(self, *args, cwd=ROOT):
         return subprocess.run(
-            [sys.executable, "-m", "gate_bot", *args],
+            [sys.executable, "-m", "omnialpha", *args],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             cwd=str(cwd), timeout=60,
         )
@@ -215,7 +215,7 @@ class TestSkillRefL3(unittest.TestCase):
     """L3：skill_ref 按需读取捆绑资源。"""
 
     def test_read_reference(self):
-        from gate_bot.strategist.tools import run_tool
+        from omnialpha.strategist.tools import run_tool
         r = run_tool(None, "skill_ref",
                      {"name": "price-action-trading", "path": "references/SOUL.md"},
                      bot_root=str(fixture_root()), bot_id="b", skill_ids=["price-action-trading"])
@@ -223,7 +223,7 @@ class TestSkillRefL3(unittest.TestCase):
         self.assertIn("[skill_ref:price-action-trading:references/SOUL.md]", r["content"])
 
     def test_path_escape_blocked(self):
-        from gate_bot.strategist.tools import run_tool
+        from omnialpha.strategist.tools import run_tool
         r = run_tool(None, "skill_ref",
                      {"name": "price-action-trading", "path": "../../../etc/passwd"},
                      bot_root=str(fixture_root()), bot_id="b", skill_ids=["price-action-trading"])
@@ -231,26 +231,26 @@ class TestSkillRefL3(unittest.TestCase):
         self.assertIn("escapes", r["error"])
 
     def test_missing_file(self):
-        from gate_bot.strategist.tools import run_tool
+        from omnialpha.strategist.tools import run_tool
         r = run_tool(None, "skill_ref",
                      {"name": "price-action-trading", "path": "references/nope.md"},
                      bot_root=str(fixture_root()), bot_id="b", skill_ids=["price-action-trading"])
         self.assertIn("error", r)
 
     def test_whitelist_enforced(self):
-        from gate_bot.strategist.tools import run_tool
+        from omnialpha.strategist.tools import run_tool
         r = run_tool(None, "skill_ref",
                      {"name": "price-action-trading", "path": "SKILL.md"},
                      bot_root=str(fixture_root()), bot_id="b", skill_ids=[])
         self.assertIn("error", r)
 
     def test_skill_ref_in_tool_surface(self):
-        from gate_bot.strategist.tools import NATIVE_TOOLS, TOOL_NAMES
+        from omnialpha.strategist.tools import NATIVE_TOOLS, TOOL_NAMES
         self.assertIn("skill_ref", TOOL_NAMES)
         self.assertEqual(len(NATIVE_TOOLS), 25)  # 22 基础 + 3 TV
 
     def test_ref_truncation(self):
-        from gate_bot.skillkit import SkillRegistry, run_skill_ref
+        from omnialpha.skillkit import SkillRegistry, run_skill_ref
         reg = SkillRegistry()
         reg.scan([SKILLS])
         out = run_skill_ref(reg, {"name": "price-action-trading", "path": "references/SOUL.md"},

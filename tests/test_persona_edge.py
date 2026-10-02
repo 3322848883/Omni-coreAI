@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.persona import (  # noqa: E402
+from omnialpha.persona import (  # noqa: E402
     PersonaError,
     PersonaGroup,
     SharedOrderStore,
@@ -16,8 +16,8 @@ from gate_bot.persona import (  # noqa: E402
     load_persona_groups,
     validate_group,
 )
-from gate_bot.persona.config import member_weight  # noqa: E402
-from gate_bot.persona.fusion import (  # noqa: E402
+from omnialpha.persona.config import member_weight  # noqa: E402
+from omnialpha.persona.fusion import (  # noqa: E402
     DIR_CLOSE,
     DIR_HOLD,
     DIR_LONG,
@@ -27,8 +27,8 @@ from gate_bot.persona.fusion import (  # noqa: E402
     _norm_confidence,
     _norm_dir,
 )
-from gate_bot.persona.orders import new_order_id  # noqa: E402
-from gate_bot.persona.runner import PersonaRunner  # noqa: E402
+from omnialpha.persona.orders import new_order_id  # noqa: E402
+from omnialpha.persona.runner import PersonaRunner  # noqa: E402
 
 
 def _group(**kw):
@@ -644,7 +644,7 @@ class TestFullLifecycle(unittest.TestCase):
 # 8. schema 兼容性：persona action 必须被 parse_signal 接受
 # ─────────────────────────────────────────────────────
 class TestSchemaCompat(unittest.TestCase):
-    """persona 产出的信号必须能被 gate_bot.schema.parse_signal 消费。"""
+    """persona 产出的信号必须能被 omnialpha.schema.parse_signal 消费。"""
 
     def test_normalize_action_close_long(self):
         a, side = PersonaRunner._normalize_action("close_long")
@@ -670,7 +670,7 @@ class TestSchemaCompat(unittest.TestCase):
 
     def _exec_and_parse(self, decision, action, extra_bot_kw=None):
         """执行 persona 一轮，然后用 schema 解析落盘信号。"""
-        from gate_bot.schema import parse_signal
+        from omnialpha.schema import parse_signal
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             store = SharedOrderStore(root)
@@ -724,7 +724,7 @@ class TestSchemaCompat(unittest.TestCase):
 
     def test_all_persona_actions_schema_valid(self):
         """穷举 persona 可能产出的 action，确认全部可被 schema 解析。"""
-        from gate_bot.schema import parse_signal
+        from omnialpha.schema import parse_signal
         actions = ["open_long", "open_short", "close", "close_all", "flatten",
                    "close_long", "close_short", "reduce_long", "reduce_short",
                    "modify_tp_sl", "hold", "add_long", "add_short",

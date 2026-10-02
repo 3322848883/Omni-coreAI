@@ -1,6 +1,6 @@
 import sys
 sys.path.insert(0, ".")
-from gate_bot.strategist.llm_client import LLMClient, LLMConfig
+from omnialpha.strategist.llm_client import LLMClient, LLMConfig
 
 cfg = LLMConfig(model="deepseek-flash", thinking=True, reasoning_effort="max", timeout_sec=180, max_tokens=8192)
 print("eff_max", cfg.effective_max_tokens())

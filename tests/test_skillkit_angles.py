@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.skillkit import (  # noqa: E402
+from omnialpha.skillkit import (  # noqa: E402
     SkillRegistry,
     fit_catalog,
     render_catalog,
@@ -17,8 +17,8 @@ from gate_bot.skillkit import (  # noqa: E402
     validate_package,
     load_package,
 )
-from gate_bot.skillkit.models import SkillError, SkillMeta  # noqa: E402
-from gate_bot.skillkit.budget import CatalogBudget  # noqa: E402
+from omnialpha.skillkit.models import SkillError, SkillMeta  # noqa: E402
+from omnialpha.skillkit.budget import CatalogBudget  # noqa: E402
 
 from tests._skill_fixtures import fixture_root, fixture_skills_dir  # noqa: E402
 
@@ -153,33 +153,33 @@ class TestRunToolWhitelistEnforcement(unittest.TestCase):
     """
 
     def test_skills_empty_rejected(self):
-        from gate_bot.strategist.tools import run_tool
+        from omnialpha.strategist.tools import run_tool
         r = run_tool(None, "skill", {"name": "price-action-trading"},
                      bot_root=str(fixture_root()), bot_id="b", skill_ids=[])
         self.assertIn("error", r)
         self.assertIn("not enabled", r["error"])
 
     def test_whitelist_allows(self):
-        from gate_bot.strategist.tools import run_tool
+        from omnialpha.strategist.tools import run_tool
         r = run_tool(None, "skill", {"name": "price-action-trading"},
                      bot_root=str(fixture_root()), bot_id="b", skill_ids=["price-action-trading"])
         self.assertIn("content", r)
 
     def test_whitelist_other_rejected(self):
-        from gate_bot.strategist.tools import run_tool
+        from omnialpha.strategist.tools import run_tool
         r = run_tool(None, "skill", {"name": "price-action-trading"},
                      bot_root=str(fixture_root()), bot_id="b", skill_ids=["test-helper"])
         self.assertIn("error", r)
 
     def test_none_defaults_all_visible(self):
-        from gate_bot.strategist.tools import run_tool
+        from omnialpha.strategist.tools import run_tool
         r = run_tool(None, "skill", {"name": "price-action-trading"},
                      bot_root=str(fixture_root()), bot_id="b", skill_ids=None)
         self.assertIn("content", r)
 
     def test_llm_cannot_bypass_with_args(self):
         """LLM 在 args 里塞 enabled_skills 也不能绕过 runner 白名单。"""
-        from gate_bot.strategist.tools import run_tool
+        from omnialpha.strategist.tools import run_tool
         r = run_tool(None, "skill",
                      {"name": "price-action-trading", "enabled_skills": ["price-action-trading"]},
                      bot_root=str(fixture_root()), bot_id="b", skill_ids=[])

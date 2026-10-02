@@ -3,7 +3,7 @@
 import shutil
 from pathlib import Path
 
-OV = Path("/opt/gate-signal-bot/config/bots.local/brooks-btc.yaml")
+OV = Path("/opt/omnialpha/config/bots.local/brooks-btc.yaml")
 
 print("=== 改前 ===")
 print(OV.read_text(encoding="utf-8"))
@@ -26,17 +26,17 @@ print(OV.read_text(encoding="utf-8"))
 # 校验生效
 import sys  # noqa: E402
 
-sys.path.insert(0, "/opt/gate-signal-bot")
-from gate_bot.config import load_bot_config  # noqa: E402
-from gate_bot.skillkit import SkillRegistry, render_catalog  # noqa: E402
+sys.path.insert(0, "/opt/omnialpha")
+from omnialpha.config import load_bot_config  # noqa: E402
+from omnialpha.skillkit import SkillRegistry, render_catalog  # noqa: E402
 
-b = load_bot_config(Path("/opt/gate-signal-bot/config/bots/brooks-btc.yaml"))
+b = load_bot_config(Path("/opt/omnialpha/config/bots/brooks-btc.yaml"))
 print("=== 校验 ===")
 print("  bot.enabled:", b.enabled)
 print("  strategist.skills:", (b.strategist or {}).get("skills"))
 
 reg = SkillRegistry()
-reg.scan([Path("/opt/gate-signal-bot/skills")])
+reg.scan([Path("/opt/omnialpha/skills")])
 vis = reg.visible_for(b.bot_id, (b.strategist or {}).get("skills"))
 print("  实盘可见 skill:", [m.id for m in vis])
 print("  catalog 长度:", len(render_catalog(vis)))

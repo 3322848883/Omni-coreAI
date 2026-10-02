@@ -3,10 +3,10 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, "/opt/gate-signal-bot")
-from gate_bot.skillkit import SkillRegistry, run_skill_ref, validate_package  # noqa: E402
+sys.path.insert(0, "/opt/omnialpha")
+from omnialpha.skillkit import SkillRegistry, run_skill_ref, validate_package  # noqa: E402
 
-ROOT = Path("/opt/gate-signal-bot")
+ROOT = Path("/opt/omnialpha")
 SKILL = ROOT / "skills" / "price-action-trading"
 
 print("=== validate ===")

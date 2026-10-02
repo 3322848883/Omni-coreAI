@@ -30,7 +30,7 @@
 
 ### Bug 6.2：单次 `plan` 遇 LLM 网络错误抛裸 traceback
 
-**现象**：`python -m gate_bot plan --bot X` 在 LLM 请求失败（SSL EOF / 超时）时打印完整 traceback 崩溃；而 `plan-loop` 有 `except LLMError` 兜底，两者行为不一致。
+**现象**：`python -m omnialpha plan --bot X` 在 LLM 请求失败（SSL EOF / 超时）时打印完整 traceback 崩溃；而 `plan-loop` 有 `except LLMError` 兜底，两者行为不一致。
 
 **根因**：`run_once`（单次）的 `self._chat_with_tools(...)` 调用**未包裹异常处理**。
 

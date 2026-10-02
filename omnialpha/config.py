@@ -12,7 +12,7 @@ import yaml
 
 from .gate_client import GateApiError, GateClient, load_credentials
 
-log = logging.getLogger("gate_bot.config")
+log = logging.getLogger("omnialpha.config")
 
 
 @dataclass
@@ -74,7 +74,7 @@ class BotConfig:
         feed = create_exchange(feed_name, env=feed_env, api_key=key, api_secret=secret)
         store_path = pc.get("store_path")
         if not store_path:
-            root = _P(os.environ.get("GATE_BOT_ROOT") or _P.cwd())
+            root = _P(os.environ.get("OMNIALPHA_ROOT") or _P.cwd())
             store_path = root / "data" / "bots" / self.bot_id / "paper" / "account.db"
         cfg = {
             "initial_capital": pc.get("initial_capital", 10000),

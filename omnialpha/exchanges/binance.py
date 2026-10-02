@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 from .base import ExchangeClient, ExchangeError, SymbolMapper
 
-# intervals shared with gate_bot.strategist.market
+# intervals shared with omnialpha.strategist.market
 INTERVALS = {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}
 
 
@@ -42,7 +42,7 @@ class BinanceExchange(ExchangeClient):
         params = dict(params or {})
         qs = urllib.parse.urlencode(params)
         url = f"{self.base}{path}"
-        headers = {"User-Agent": "gate-signal-bot"}
+        headers = {"User-Agent": "OmniAlpha"}
         if signed:
             params["timestamp"] = int(time.time() * 1000)
             params["recvWindow"] = 5000

@@ -52,14 +52,14 @@ strategist:
   candles: 120
   market:
     mode: hybrid                 # hybrid | rest_only | local_only
-    pa_data_root: ../pa-data-source-v2.11/data   # 或 env GATE_BOT_PA_DATA
+    pa_data_root: ../pa-data-source-v2.11/data   # 或 env OMNIALPHA_PA_DATA
     db: kline.db                 # testnet 自动改 kline_testnet.db
     stale_factor: 2.0
     health_url: null             # 可选 http://127.0.0.1:18080/health；非 200 视本地不可信
     indicators: [ema20, ema50, atr14, rsi14]
 ```
 
-- 路径解析顺序：`GATE_BOT_PA_DATA` → `market.pa_data_root` → `../pa-data-source-v2.11/data`（相对 bot root）。
+- 路径解析顺序：`OMNIALPHA_PA_DATA` → `market.pa_data_root` → `../pa-data-source-v2.11/data`（相对 bot root）。
 - bot `env: testnet` ⇒ `kline_testnet.db`；`live` ⇒ `kline.db`。**绝不跨库。**
 - bot **只读** pa 库，不写、不迁移。
 

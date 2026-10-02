@@ -1,6 +1,6 @@
 # LLM（DeepSeek）产出的 ETH 价格行为分析
 
-> 生成方式：`gate_bot plan --bot skill-e2e` · skill=price-action-trading · 模型=global:deepseek-v4.1-flash
+> 生成方式：`omnialpha plan --bot skill-e2e` · skill=price-action-trading · 模型=global:deepseek-v4.1-flash
 > cycle_id: pa-h2l2-20251001
 
 ## Plan chips

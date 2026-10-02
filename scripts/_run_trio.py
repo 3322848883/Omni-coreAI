@@ -5,9 +5,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(r"C:\Users\w6485\Desktop\测试\gate-signal-bot")
+ROOT = Path(r"C:\Users\w6485\Desktop\测试\OmniAlpha")
 os.chdir(ROOT)
-os.environ["GATE_BOT_ROOT"] = str(ROOT)
+os.environ["OMNIALPHA_ROOT"] = str(ROOT)
 
 # 密钥
 sb = ROOT / "scripts" / "secrets.bat"
@@ -28,7 +28,7 @@ print()
 
 r = subprocess.run(
     [str(ROOT / ".venv" / "Scripts" / "python.exe"),
-     "-m", "gate_bot", "--root", str(ROOT),
+     "-m", "omnialpha", "--root", str(ROOT),
      "persona-run", "--group", "disc-trio", "--once"],
     cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace",
 )

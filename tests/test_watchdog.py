@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from gate_bot.watchdog import COMPONENT_CMD, Target, Watchdog
+from omnialpha.watchdog import COMPONENT_CMD, Target, Watchdog
 
 YAML = """
 bot_id: {bid}
@@ -90,7 +90,7 @@ class TestAliveProbe(unittest.TestCase):
             self.assertFalse(Watchdog._alive("b1", "plan", root))
 
     def test_held_lock_means_alive(self):
-        from gate_bot.pidlock import PidLock
+        from omnialpha.pidlock import PidLock
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -104,7 +104,7 @@ class TestAliveProbe(unittest.TestCase):
                 holder.release()
 
     def test_released_lock_means_dead(self):
-        from gate_bot.pidlock import PidLock
+        from omnialpha.pidlock import PidLock
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -170,7 +170,7 @@ class TestCheckOnce(unittest.TestCase):
             wd.discover()
             sent = []
             with mock.patch(
-                "gate_bot.monitoring.notify_process_event",
+                "omnialpha.monitoring.notify_process_event",
                 side_effect=lambda **kw: sent.append(kw.get("title", "")) or True,
             ):
                 with mock.patch.object(wd, "_spawn", return_value=True):
@@ -185,7 +185,7 @@ class TestCheckOnce(unittest.TestCase):
             _touch_locks(root, "p1")
             wd = Watchdog(root, notify=False)
             wd.discover()
-            with mock.patch("gate_bot.monitoring.notify_process_event") as m:
+            with mock.patch("omnialpha.monitoring.notify_process_event") as m:
                 with mock.patch.object(wd, "_spawn", return_value=True):
                     with mock.patch.object(Watchdog, "_alive", return_value=False):
                         wd.check_once()
@@ -197,7 +197,7 @@ class TestCheckOnce(unittest.TestCase):
         t = Target("bot-x", "plan")
         calls = []
         with mock.patch(
-            "gate_bot.monitoring.notify_process_event",
+            "omnialpha.monitoring.notify_process_event",
             side_effect=lambda **kw: calls.append(kw) or True,
         ):
             self.assertTrue(wd._allow_restart(t))

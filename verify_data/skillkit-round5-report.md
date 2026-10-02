@@ -33,7 +33,7 @@
 - `open(path, "a")` + `write()` 在 Windows 上非原子
 - 原实现只有无锁 append，进程内线程会交错，跨进程完全无保护
 
-**修复**（`gate_bot/skillkit/journal.py`）：
+**修复**（`omnialpha/skillkit/journal.py`）：
 - 进程内：`threading.Lock` 串行化
 - **跨进程：OS 文件锁**（`msvcrt.locking` / `fcntl.flock`），跟随项目 `pidlock.py` 既有模式
 - 锁内完成 `write + flush + fsync`

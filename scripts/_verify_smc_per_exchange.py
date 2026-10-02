@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import time
 
-from gate_bot.exchanges import list_exchanges
-from gate_bot.exchanges.registry import create_exchange
-from gate_bot.strategist.market import MarketConfig
-from gate_bot.strategist.tools import run_tool
+from omnialpha.exchanges import list_exchanges
+from omnialpha.exchanges.registry import create_exchange
+from omnialpha.strategist.market import MarketConfig
+from omnialpha.strategist.tools import run_tool
 
 
 def main() -> None:

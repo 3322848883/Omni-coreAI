@@ -7,18 +7,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.persona import (  # noqa: E402
+from omnialpha.persona import (  # noqa: E402
     DiscussionConfig,
     PersonaGroup,
     SharedOrderStore,
     PersonaRunner,
 )
-from gate_bot.persona.config import (  # noqa: E402
+from omnialpha.persona.config import (  # noqa: E402
     DISCUSSION_DEFAULT_ROUNDS,
     DISCUSSION_MAX_ROUNDS,
     load_persona_groups,
 )
-from gate_bot.persona.fusion import DIR_HOLD  # noqa: E402
+from omnialpha.persona.fusion import DIR_HOLD  # noqa: E402
 
 
 class FakePlanRunner:

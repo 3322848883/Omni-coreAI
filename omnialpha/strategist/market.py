@@ -98,7 +98,7 @@ def interval_seconds(interval: str) -> int:
 
 
 def resolve_pa_data_root(market_cfg: Optional[MarketConfig] = None, bot_root: Optional[Path] = None) -> Optional[Path]:
-    env = os.environ.get("GATE_BOT_PA_DATA")
+    env = os.environ.get("OMNIALPHA_PA_DATA")
     if env:
         return Path(env).expanduser().resolve()
     if market_cfg and market_cfg.pa_data_root:

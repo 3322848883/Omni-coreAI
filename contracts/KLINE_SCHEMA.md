@@ -1,7 +1,7 @@
 # kline.db 契约（节点1 → 节点2/3 唯一接缝）
 
 **schema_version: 1**  
-约定方：`pa-data-source`（写） / `gate-signal-bot.strategist.market`（只读）
+约定方：`pa-data-source`（写） / `OmniAlpha.strategist.market`（只读）
 
 ## 原则
 

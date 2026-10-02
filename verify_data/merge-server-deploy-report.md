@@ -1,6 +1,6 @@
 # SkillKit 合并 + 服务器同步 + 生产测试报告
 
-> 2026-10-01 · 本地 master → GitHub → 服务器 `/opt/gate-signal-bot`
+> 2026-10-01 · 本地 master → GitHub → 服务器 `/opt/omnialpha`
 
 ## 一、合并（本地 → GitHub）
 
@@ -32,11 +32,11 @@
 
 ## 三、服务器同步
 
-**服务器**：`/opt/gate-signal-bot`（生产部署，origin 同 GitHub）
+**服务器**：`/opt/omnialpha`（生产部署，origin 同 GitHub）
 
 | 步骤 | 结果 |
 |------|------|
-| 备份 | `/opt/backups/gate-bot-skillkit/{config,gate_bot}` |
+| 备份 | `/opt/backups/omnialpha-skillkit/{config,omnialpha}` |
 | stash 服务端本地改动 | 17 个 paper bot 的 `enabled: false` |
 | `git pull origin master` | `d0ba667` → **`5c27985`** ✅ |
 | stash pop | 恢复 paper bot 禁用设置 ✅ |
@@ -49,7 +49,7 @@
 ```
 PASS  errors=0 warnings=1
   WARN  W05 SKILL.md references 'references/knowledge/source/V1_趋势篇' but it does not exist
-installed: /opt/gate-signal-bot/skills/price-action-trading
+installed: /opt/omnialpha/skills/price-action-trading
 ID                           VER    TOK   MODEL  DESC
 price-action-trading         34.2   2480  yes    Al Brooks 价格行为交易辅助…
 ```
@@ -58,7 +58,7 @@ price-action-trading         34.2   2480  yes    Al Brooks 价格行为交易辅
 
 ## 四、重启实盘
 
-`gate-watchdog.service` 管理 brooks-btc（watchdog 拉起 plan-loop + run）。
+`omnialpha-watchdog.service` 管理 brooks-btc（watchdog 拉起 plan-loop + run）。
 
 ```
 重启前: PID 1739456(watchdog) 1739458(plan) 1739459(run)
@@ -151,4 +151,4 @@ skills: []                       # 关闭 skill，实盘不加载任何 skill
 
 ## 八、备份
 
-`/opt/backups/gate-bot-skillkit/{config,gate_bot}`
+`/opt/backups/omnialpha-skillkit/{config,omnialpha}`

@@ -6,7 +6,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.providers import ProviderError, load_providers, resolve_llm_config
+from omnialpha.providers import ProviderError, load_providers, resolve_llm_config
 
 
 class TestProviders(unittest.TestCase):

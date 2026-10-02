@@ -10,12 +10,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.exchanges.registry import create_exchange
-from gate_bot.providers import resolve_llm_config
-from gate_bot.strategist.indicators import attach_indicators, parse_indicator_name
-from gate_bot.strategist.llm_client import LLMClient
-from gate_bot.strategist.market import MarketConfig
-from gate_bot.strategist.tools import NATIVE_TOOLS, TOOL_NAMES, run_tool
+from omnialpha.exchanges.registry import create_exchange
+from omnialpha.providers import resolve_llm_config
+from omnialpha.strategist.indicators import attach_indicators, parse_indicator_name
+from omnialpha.strategist.llm_client import LLMClient
+from omnialpha.strategist.market import MarketConfig
+from omnialpha.strategist.tools import NATIVE_TOOLS, TOOL_NAMES, run_tool
 
 CFG = MarketConfig(mode="rest_only", exchange="gate", indicators=["ema20", "rsi14", "atr14"])
 

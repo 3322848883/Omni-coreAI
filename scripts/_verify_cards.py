@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from gate_bot.monitoring import format_trade_card, format_process_card  # noqa: E402
+from omnialpha.monitoring import format_trade_card, format_process_card  # noqa: E402
 
 
 def extract_fields(card: dict) -> dict:

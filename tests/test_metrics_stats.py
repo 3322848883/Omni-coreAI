@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.metrics.stats import (  # noqa: E402
+from omnialpha.metrics.stats import (  # noqa: E402
     calmar,
     deflated_sharpe,
     expectancy,
@@ -84,7 +84,7 @@ class TestStats(unittest.TestCase):
         import math
         dstd = math.sqrt(sum(min(x, 0.0) ** 2 for x in r) / len(r))
         expected = (sum(r) / len(r)) / dstd * math.sqrt(365.0)
-        from gate_bot.metrics.stats import sortino
+        from omnialpha.metrics.stats import sortino
         self.assertAlmostEqual(sortino(r), expected, places=6)
 
 

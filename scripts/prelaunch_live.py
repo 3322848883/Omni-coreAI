@@ -9,9 +9,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.executor import Executor
-from gate_bot.schema import parse_signal
-from gate_bot.tradelog import TradeLogger, trade_log_path
+from omnialpha.executor import Executor
+from omnialpha.schema import parse_signal
+from omnialpha.tradelog import TradeLogger, trade_log_path
 
 
 def _pick_symbol(client) -> str:

@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.strategist.indicators import (
+from omnialpha.strategist.indicators import (
     ema,
     ema_boll,
     ema_smooth,

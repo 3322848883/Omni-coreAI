@@ -1,5 +1,5 @@
 """列当前可解析的指标族与代表名。"""
-from gate_bot.strategist.indicators import IndicatorNameError, parse_indicator_name
+from omnialpha.strategist.indicators import IndicatorNameError, parse_indicator_name
 
 CANDIDATES = [
     # 均线

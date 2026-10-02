@@ -9,8 +9,8 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from gate_bot.paper.store import PaperStore  # noqa: E402
-from gate_bot.executor import Executor  # noqa: E402
+from omnialpha.paper.store import PaperStore  # noqa: E402
+from omnialpha.executor import Executor  # noqa: E402
 
 
 class PaperClient:

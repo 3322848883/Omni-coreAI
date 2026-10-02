@@ -9,20 +9,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.backtest import (  # noqa: E402
+from omnialpha.backtest import (  # noqa: E402
     BacktestReplayer,
     buy_and_hold_pnl,
     deflated_sharpe,
     sma_crossover_pnl,
     t_test_pvalue,
 )
-from gate_bot.monitoring import DecayDetector, HealthMonitor  # noqa: E402
-from gate_bot.schema import (  # noqa: E402
+from omnialpha.monitoring import DecayDetector, HealthMonitor  # noqa: E402
+from omnialpha.schema import (  # noqa: E402
     MMP_CANCELED,
     ORDER_FINAL_STATES,
     PARTIAL_FILL_STATUSES,
 )
-from gate_bot.sizing import vol_adjust_size  # noqa: E402
+from omnialpha.sizing import vol_adjust_size  # noqa: E402
 
 
 class TestDecayDetector(unittest.TestCase):
@@ -210,56 +210,56 @@ class TestAlertNotifier(unittest.TestCase):
     """可扩展通知渠道测试。"""
 
     def test_no_channel(self):
-        from gate_bot.monitoring import AlertNotifier
+        from omnialpha.monitoring import AlertNotifier
         n = AlertNotifier()
         self.assertFalse(n.has_channel)
 
     def test_register_feishu_webhook(self):
-        from gate_bot.monitoring import AlertNotifier, FeishuChannel
+        from omnialpha.monitoring import AlertNotifier, FeishuChannel
         n = AlertNotifier()
         n.register(FeishuChannel(webhook='https://fake/webhook'))
         self.assertTrue(n.has_channel)
         self.assertIn('FeishuChannel', n.channel_names)
 
     def test_register_feishu_app(self):
-        from gate_bot.monitoring import AlertNotifier, FeishuChannel
+        from omnialpha.monitoring import AlertNotifier, FeishuChannel
         n = AlertNotifier()
         n.register(FeishuChannel(app_id='id', app_secret='secret', user_open_id='ou_xxx'))
         self.assertTrue(n.has_channel)
 
     def test_register_telegram(self):
-        from gate_bot.monitoring import AlertNotifier, TelegramChannel
+        from omnialpha.monitoring import AlertNotifier, TelegramChannel
         n = AlertNotifier()
         n.register(TelegramChannel(bot_token='123:abc', chat_id='456'))
         self.assertTrue(n.has_channel)
 
     def test_register_dingtalk(self):
-        from gate_bot.monitoring import AlertNotifier, DingTalkChannel
+        from omnialpha.monitoring import AlertNotifier, DingTalkChannel
         n = AlertNotifier()
         n.register(DingTalkChannel(webhook='https://fake'))
         self.assertTrue(n.has_channel)
 
     def test_register_multiple_channels(self):
-        from gate_bot.monitoring import AlertNotifier, FeishuChannel, TelegramChannel
+        from omnialpha.monitoring import AlertNotifier, FeishuChannel, TelegramChannel
         n = AlertNotifier()
         n.register(FeishuChannel(webhook='https://fake'))
         n.register(TelegramChannel(bot_token='1:abc', chat_id='2'))
         self.assertEqual(len(n.channel_names), 2)
 
     def test_chaining(self):
-        from gate_bot.monitoring import AlertNotifier, FeishuChannel, TelegramChannel
+        from omnialpha.monitoring import AlertNotifier, FeishuChannel, TelegramChannel
         n = AlertNotifier()
         n.register(FeishuChannel(webhook='https://fake')).register(
             TelegramChannel(bot_token='1:abc', chat_id='2'))
         self.assertEqual(len(n.channel_names), 2)
 
     def test_send_without_channel(self):
-        from gate_bot.monitoring import AlertNotifier
+        from omnialpha.monitoring import AlertNotifier
         self.assertFalse(AlertNotifier().send('test'))
 
     def test_custom_channel(self):
         """自定义渠道可扩展。"""
-        from gate_bot.monitoring import AlertNotifier, NotificationChannel
+        from omnialpha.monitoring import AlertNotifier, NotificationChannel
 
         class MockChannel(NotificationChannel):
             def send(self, text):
@@ -271,7 +271,7 @@ class TestAlertNotifier(unittest.TestCase):
 
     def test_channel_error_doesnt_crash(self):
         """一个渠道出错不影响其他渠道。"""
-        from gate_bot.monitoring import AlertNotifier, NotificationChannel
+        from omnialpha.monitoring import AlertNotifier, NotificationChannel
 
         class BrokenChannel(NotificationChannel):
             def send(self, text):
@@ -287,12 +287,12 @@ class TestAlertNotifier(unittest.TestCase):
         self.assertTrue(n.send('test'))
 
     def test_feishu_webhook_send_invalid(self):
-        from gate_bot.monitoring import FeishuChannel
+        from omnialpha.monitoring import FeishuChannel
         ch = FeishuChannel(webhook='https://invalid.example.com/hook')
         self.assertFalse(ch.send('test'))
 
     def test_feishu_no_config(self):
-        from gate_bot.monitoring import FeishuChannel
+        from omnialpha.monitoring import FeishuChannel
         self.assertFalse(FeishuChannel().send('test'))
 
 

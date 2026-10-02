@@ -9,11 +9,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.gate_client import GateApiError, GateClient
-from gate_bot.config import BotConfig
-from gate_bot.executor import Executor
-from gate_bot.schema import parse_signal
-from gate_bot.watcher import ProjectPaths, process_file, run_bot_once
+from omnialpha.gate_client import GateApiError, GateClient
+from omnialpha.config import BotConfig
+from omnialpha.executor import Executor
+from omnialpha.schema import parse_signal
+from omnialpha.watcher import ProjectPaths, process_file, run_bot_once
 
 KEY = "7b31134e731b10ea859da2e75440d263"
 SEC = "c352fbb46779a1861d2b1facfa33e0d20306785bc1d1bef768e8951a61213b87"

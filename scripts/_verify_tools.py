@@ -1,7 +1,7 @@
 import sys
 sys.path.insert(0, ".")
-from gate_bot.strategist.llm_client import LLMClient, LLMConfig
-from gate_bot.strategist.tools import NATIVE_TOOLS
+from omnialpha.strategist.llm_client import LLMClient, LLMConfig
+from omnialpha.strategist.tools import NATIVE_TOOLS
 
 cfg = LLMConfig(model="deepseek-flash", thinking=True, reasoning_effort="low",
                 timeout_sec=120, max_tokens=4096)

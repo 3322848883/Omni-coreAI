@@ -6,9 +6,9 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(r"C:\Users\w6485\Desktop\测试\gate-signal-bot")
+ROOT = Path(r"C:\Users\w6485\Desktop\测试\OmniAlpha")
 os.chdir(ROOT)
-os.environ["GATE_BOT_ROOT"] = str(ROOT)
+os.environ["OMNIALPHA_ROOT"] = str(ROOT)
 sb = ROOT / "scripts" / "secrets.bat"
 if sb.exists():
     for line in sb.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -20,11 +20,11 @@ if sb.exists():
                 os.environ.setdefault(k.strip(), v.strip())
 
 sys.path.insert(0, str(ROOT))
-from gate_bot.config import load_all_bots  # noqa: E402
-from gate_bot.watcher import ProjectPaths  # noqa: E402
-from gate_bot.persona.config import load_persona_groups  # noqa: E402
-from gate_bot.persona.runner import PersonaRunner  # noqa: E402
-import gate_bot.__main__ as m  # noqa: E402
+from omnialpha.config import load_all_bots  # noqa: E402
+from omnialpha.watcher import ProjectPaths  # noqa: E402
+from omnialpha.persona.config import load_persona_groups  # noqa: E402
+from omnialpha.persona.runner import PersonaRunner  # noqa: E402
+import omnialpha.__main__ as m  # noqa: E402
 
 ROUNDS = 3
 paths = ProjectPaths(ROOT)

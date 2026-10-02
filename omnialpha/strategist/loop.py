@@ -28,7 +28,7 @@ from .tools import NATIVE_TOOLS, TOOL_GUIDE, extract_tool_calls, run_tool
 from .triggers import check_conditions, parse_conditions
 from .trigger_store import AITriggerPolicy, AITriggerStore, TriggerPolicyError, validate_trigger_payload
 
-log = logging.getLogger("gate_bot.strategist")
+log = logging.getLogger("omnialpha.strategist")
 
 
 @dataclass

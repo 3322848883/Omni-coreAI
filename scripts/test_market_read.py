@@ -16,16 +16,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.gate_client import GateApiError, GateClient  # noqa: E402
-from gate_bot.strategist.indicators import attach_indicators, latest_indicators  # noqa: E402
-from gate_bot.strategist.market import (  # noqa: E402
+from omnialpha.gate_client import GateApiError, GateClient  # noqa: E402
+from omnialpha.strategist.indicators import attach_indicators, latest_indicators  # noqa: E402
+from omnialpha.strategist.market import (  # noqa: E402
     MarketConfig,
     is_stale,
     load_local_candles,
     resolve_candles,
     resolve_db_path,
 )
-from gate_bot.strategist.snapshot import collect_snapshot  # noqa: E402
+from omnialpha.strategist.snapshot import collect_snapshot  # noqa: E402
 
 RESULTS: list[tuple[str, str, str]] = []
 

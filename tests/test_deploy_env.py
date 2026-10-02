@@ -10,8 +10,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.config import deep_merge, load_all_bots, load_bot_config, overlay_dir_for  # noqa: E402
-from gate_bot.skillkit.cli import demojibake  # noqa: E402
+from omnialpha.config import deep_merge, load_all_bots, load_bot_config, overlay_dir_for  # noqa: E402
+from omnialpha.skillkit.cli import demojibake  # noqa: E402
 
 BASE_YAML = """\
 bot_id: {bid}
@@ -173,7 +173,7 @@ class TestDemojibake(unittest.TestCase):
 class TestDeployCheckCommand(unittest.TestCase):
     def test_deploy_check_runs(self):
         r = subprocess.run(
-            [sys.executable, "-m", "gate_bot", "deploy-check"],
+            [sys.executable, "-m", "omnialpha", "deploy-check"],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             cwd=str(ROOT), timeout=120,
         )
@@ -187,7 +187,7 @@ class TestDeployCheckCommand(unittest.TestCase):
 class TestSkillDoctorCommand(unittest.TestCase):
     def test_doctor_runs(self):
         r = subprocess.run(
-            [sys.executable, "-m", "gate_bot", "skill", "doctor"],
+            [sys.executable, "-m", "omnialpha", "skill", "doctor"],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             cwd=str(ROOT), timeout=120,
         )

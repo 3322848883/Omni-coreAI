@@ -10,11 +10,11 @@ os.environ.setdefault("OPENAI_BASE_URL", "http://69.12.85.185:7863/v1")
 os.environ.setdefault("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
 os.environ["LLM_MODEL"] = "global:deepseek-v4.1-flash"
 
-from gate_bot.config import load_bot_config
-from gate_bot.gate_client import GateClient
-from gate_bot.strategist.llm_client import LLMClient, LLMConfig
-from gate_bot.strategist.prompt import build_system_prompt, load_strategy_prompt
-from gate_bot.strategist.tools import NATIVE_TOOLS, TOOL_GUIDE, run_tool
+from omnialpha.config import load_bot_config
+from omnialpha.gate_client import GateClient
+from omnialpha.strategist.llm_client import LLMClient, LLMConfig
+from omnialpha.strategist.prompt import build_system_prompt, load_strategy_prompt
+from omnialpha.strategist.tools import NATIVE_TOOLS, TOOL_GUIDE, run_tool
 
 bot = load_bot_config(Path("config/bots/eth-range-gw.yaml"))
 raw = dict(bot.strategist.get("llm") or {})

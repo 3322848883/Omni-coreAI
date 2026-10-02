@@ -35,7 +35,7 @@ gate-cli info markettrend get-indicator-history \
 
 gate-cli Info 域共 **35 个 MCP 工具**；gate-skills 技能 **50+**（含交易/理财/链上/新闻等，指标相关主要是 trendanalysis / coinanalysis / marketanalysis）。
 
-## 2. 本项目（gate-signal-bot）已支持
+## 2. 本项目（OmniAlpha）已支持
 
 | 指标 | 快照 `market.indicators` | 触发 `conditions` | 周期 |
 |------|--------------------------|-------------------|------|

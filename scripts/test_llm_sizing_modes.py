@@ -19,13 +19,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.gate_client import GateClient  # noqa: E402
-from gate_bot.sizing import usd_to_contracts  # noqa: E402
-from gate_bot.strategist.llm_client import LLMClient, LLMConfig, LLMError  # noqa: E402
-from gate_bot.strategist.market import MarketConfig  # noqa: E402
-from gate_bot.strategist.prompt import build_system_prompt, load_strategy_prompt  # noqa: E402
-from gate_bot.strategist.schema import PlanError, parse_plan_text  # noqa: E402
-from gate_bot.strategist.snapshot import collect_snapshot  # noqa: E402
+from omnialpha.gate_client import GateClient  # noqa: E402
+from omnialpha.sizing import usd_to_contracts  # noqa: E402
+from omnialpha.strategist.llm_client import LLMClient, LLMConfig, LLMError  # noqa: E402
+from omnialpha.strategist.market import MarketConfig  # noqa: E402
+from omnialpha.strategist.prompt import build_system_prompt, load_strategy_prompt  # noqa: E402
+from omnialpha.strategist.schema import PlanError, parse_plan_text  # noqa: E402
+from omnialpha.strategist.snapshot import collect_snapshot  # noqa: E402
 
 RESULTS: list[tuple[str, str, str]] = []
 
@@ -78,7 +78,7 @@ def build_snapshot(symbols: list[str]) -> dict:
                         "lowest_ask": "100.1", "total_size": "1"}
 
             def get_contract(self, sym):
-                from gate_bot.gate_client import ContractMeta
+                from omnialpha.gate_client import ContractMeta
                 return ContractMeta(sym, 0.0001, 1.0, 0.1, 100)
 
             def get_last_price(self, sym):
@@ -321,7 +321,7 @@ def main() -> int:
             if not cm or not last:
                 continue
             try:
-                from gate_bot.gate_client import ContractMeta
+                from omnialpha.gate_client import ContractMeta
                 meta = ContractMeta(c.symbol, cm["quanto_multiplier"], cm["order_size_round"],
                                     cm["order_price_round"], cm["leverage_max"])
                 n = usd_to_contracts(float(c.size_usd), float(last), meta)

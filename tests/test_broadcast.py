@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.broadcast import (  # noqa: E402
+from omnialpha.broadcast import (  # noqa: E402
     BroadcastConfig,
     BroadcastError,
     Broadcaster,

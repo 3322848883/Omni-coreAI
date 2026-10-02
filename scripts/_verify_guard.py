@@ -4,9 +4,9 @@ import shutil
 import sys
 from pathlib import Path
 
-ROOT = Path("/opt/gate-signal-bot")
+ROOT = Path("/opt/omnialpha")
 sys.path.insert(0, str(ROOT))
-from gate_bot.config import load_bot_config  # noqa: E402
+from omnialpha.config import load_bot_config  # noqa: E402
 
 target = ROOT / "config" / "bots" / "pa-a.yaml"
 backup = target.read_text(encoding="utf-8")

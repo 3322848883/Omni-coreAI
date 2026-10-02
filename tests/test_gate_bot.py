@@ -8,23 +8,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.gate_client import (
+from omnialpha.gate_client import (
     ContractMeta,
     GateApiError,
     GateClient,
     load_credentials,
     resolve_symbol,
 )  # noqa: E402
-from gate_bot.schema import (  # noqa: E402
+from omnialpha.schema import (  # noqa: E402
     SchemaError,
     expand_signal,
     infer_trigger_rules,
     parse_signal,
 )
-from gate_bot.sizing import default_trigger_limit_price, pct_to_size_usd, usd_to_contracts  # noqa: E402
-from gate_bot.executor import Executor  # noqa: E402
-from gate_bot.watcher import ProjectPaths, process_file  # noqa: E402
-from gate_bot.config import BotConfig  # noqa: E402
+from omnialpha.sizing import default_trigger_limit_price, pct_to_size_usd, usd_to_contracts  # noqa: E402
+from omnialpha.executor import Executor  # noqa: E402
+from omnialpha.watcher import ProjectPaths, process_file  # noqa: E402
+from omnialpha.config import BotConfig  # noqa: E402
 
 
 class TestSchema(unittest.TestCase):

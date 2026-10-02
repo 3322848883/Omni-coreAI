@@ -1,6 +1,6 @@
 # AGENTS.md — 给人 / AI 的系统入口
 
-读完本文件应能独立使用 **gate-signal-bot**（写配置 → 投信号 / 跑 LLM 策略 → 下单）。细节再按「文档地图」下钻。
+读完本文件应能独立使用 **OmniAlpha**（写配置 → 投信号 / 跑 LLM 策略 → 下单）。细节再按「文档地图」下钻。
 
 ---
 
@@ -11,7 +11,7 @@ Gate.io **永续合约**信号执行 + LLM 策略层 monorepo：
 ```text
 pa-data-source（可选，独立进程）──写──► kline.db（只读接缝）
                                             │
-人 / AI 策略 ──JSON──► inbox/<bot_id>/ ──► gate_bot
+人 / AI 策略 ──JSON──► inbox/<bot_id>/ ──► omnialpha
                                             │  解析 → 风控 → Gate 下单
 LLM strategist（可选）──Plan JSON──┘        │
                                             ▼
@@ -20,7 +20,7 @@ LLM strategist（可选）──Plan JSON──┘        │
 
 | 目录 | 职责 |
 |------|------|
-| `gate_bot/` | 信号执行、LLM 策略、风控、日志 |
+| `omnialpha/` | 信号执行、LLM 策略、风控、日志 |
 | `pa-data-source/` | 行情采集（可选；缺库自动 REST） |
 | `contracts/` | `kline.db` schema（两组件唯一接缝） |
 | `config/bots/` | 每个机器人一份 yaml |
@@ -50,19 +50,19 @@ Copy-Item config\bots\_example.yaml config\bots\mybot.yaml
 #    inbox\mybot\20260101-120000-demo.json
 
 # 4) 单次执行
-.venv\Scripts\python.exe -m gate_bot once --bot mybot
+.venv\Scripts\python.exe -m omnialpha once --bot mybot
 
 # 5) 看结果
-.venv\Scripts\python.exe -m gate_bot status --bot mybot
+.venv\Scripts\python.exe -m omnialpha status --bot mybot
 #    成功：archive/done/；失败：archive/failed/*.error.json
 ```
 
 LLM 策略另需 `OPENAI_BASE_URL` / `OPENAI_API_KEY`，然后：
 
 ```powershell
-.venv\Scripts\python.exe -m gate_bot plan --bot mybot     # 单轮 Plan
-.venv\Scripts\python.exe -m gate_bot plan-loop --bot mybot  # 常驻策略
-.venv\Scripts\python.exe -m gate_bot run --bot mybot        # 常驻执行
+.venv\Scripts\python.exe -m omnialpha plan --bot mybot     # 单轮 Plan
+.venv\Scripts\python.exe -m omnialpha plan-loop --bot mybot  # 常驻策略
+.venv\Scripts\python.exe -m omnialpha run --bot mybot        # 常驻执行
 ```
 
 **建议路径**：`testnet` 小信号 → `prelaunch_runner` 全矩阵 → `live` 且 `max_notional_usd ≤ 10`。
@@ -110,20 +110,20 @@ LLM 策略另需 `OPENAI_BASE_URL` / `OPENAI_API_KEY`，然后：
 
 ```powershell
 .venv\Scripts\python.exe -m unittest discover -s tests
-.venv\Scripts\python.exe -m gate_bot status
-.venv\Scripts\python.exe -m gate_bot once --bot <id>
-.venv\Scripts\python.exe -m gate_bot plan --bot <id>
+.venv\Scripts\python.exe -m omnialpha status
+.venv\Scripts\python.exe -m omnialpha once --bot <id>
+.venv\Scripts\python.exe -m omnialpha plan --bot <id>
 # 多 bot 托管 / 迁移
-.venv\Scripts\python.exe -m gate_bot migrate
-.venv\Scripts\python.exe -m gate_bot supervisor --bot brooks-btc
+.venv\Scripts\python.exe -m omnialpha migrate
+.venv\Scripts\python.exe -m omnialpha supervisor --bot brooks-btc
 # 无窗口启动
 .\scripts\start_brooks_btc_bg.bat
 .venv\Scripts\python.exe scripts\prelaunch_runner.py --phase readonly --env testnet
 # 回测（journal 回放，PnL/Sharpe/DSR）
-.venv\Scripts\python.exe -m gate_bot backtest --bot <id> --days 30
+.venv\Scripts\python.exe -m omnialpha backtest --bot <id> --days 30
 # 进程看门狗（挂了自动拉起 + 飞书通知）
 .\scripts\start_watchdog_bg.bat
-.venv\Scripts\python.exe -m gate_bot watchdog --interval 15
+.venv\Scripts\python.exe -m omnialpha watchdog --interval 15
 ```
 
 ---
@@ -134,7 +134,7 @@ LLM 策略另需 `OPENAI_BASE_URL` / `OPENAI_API_KEY`，然后：
 |------|------|------|
 | **告警落盘** | `data/bots/<id>/state/alerts.json` | 权益偏离/重复成交/孤儿保护单，自动写入 |
 | **成交推送** | 飞书彩色卡片 | 开/止盈/止损/平/减仓/改单；`config/alerts.yaml` 或 `FEISHU_*` 环境变量 |
-| **进程看门狗** | `python -m gate_bot watchdog` | 守护 `enabled: true` 的 bot，挂了补拉 |
+| **进程看门狗** | `python -m omnialpha watchdog` | 守护 `enabled: true` 的 bot，挂了补拉 |
 | **单实例锁** | `state/plan.lock` / `run.lock` | OS 文件锁（msvcrt/flock），防 PID 复用/孤儿双开 |
 
 **bot 开关 = 唯一在管判据**：
@@ -145,7 +145,7 @@ enabled: true    # 看门狗守护、supervisor 拉起
 enabled: false   # 一律不管，绝不凭空开
 ```
 
-**告警类型**（`gate_bot.monitoring`）：
+**告警类型**（`omnialpha.monitoring`）：
 
 | type | 触发 | 落盘 |
 |------|------|------|
@@ -163,7 +163,7 @@ enabled: false   # 一律不管，绝不凭空开
 读告警：
 
 ```python
-from gate_bot.monitoring import read_alerts
+from omnialpha.monitoring import read_alerts
 read_alerts(root, "brooks-btc")              # 全部
 read_alerts(root, "brooks-btc", "dup_fill")  # 按类型
 ```
@@ -203,12 +203,12 @@ llm:
 | **L3** | `skill_ref(name, path)` 工具 | 按需读 `references/`/`scripts/`/`assets/`（realpath 遏制） |
 
 ```powershell
-python -m gate_bot skill validate <dir>      # 校验（E01-E10 拒装）
-python -m gate_bot skill install <dir>       # 安装（不自动启用）
-python -m gate_bot skill list [--bot ID]     # 列出 + 启用状态
-python -m gate_bot skill show <id>           # 元数据
-python -m gate_bot skill remove <id> --yes   # 卸载
-python -m gate_bot skill run <id>            # 用户专属 skill 的 CLI 入口
+python -m omnialpha skill validate <dir>      # 校验（E01-E10 拒装）
+python -m omnialpha skill install <dir>       # 安装（不自动启用）
+python -m omnialpha skill list [--bot ID]     # 列出 + 启用状态
+python -m omnialpha skill show <id>           # 元数据
+python -m omnialpha skill remove <id> --yes   # 卸载
+python -m omnialpha skill run <id>            # 用户专属 skill 的 CLI 入口
 ```
 
 启用：bot yaml `skills: [id]`（`[]` = 无 skill；缺省 = 全部可见）。
@@ -249,7 +249,7 @@ skill 可声明 `allowed-tools`（激活后**收窄**工具面）、`model-invoc
 
 **本地模拟盘（paper）**：复刻交易所语义的本地模拟交易。env: paper 即启用，行情/费率/合约元数据委托绑定的真实所，订单/持仓/资金/强平/费率结算全在本地 data/bots/<id>/paper/account.db。
 
-- 命令：python -m gate_bot paper-run --bot <id>（独立进程 + 撮合 tick 线程）
+- 命令：python -m omnialpha paper-run --bot <id>（独立进程 + 撮合 tick 线程）
 - 配置（bot yaml paper: 段）：eed_exchange（绑定行情所）、initial_capital（默认 10000）、leverage（默认 20）、ee_rate、unding_enabled、position_mode、margin_mode、price_band_pct
 - 成交价：**盘口价**（买→ask 卖→bid）；订单全类型（limit/market/stop_entry/TP-SL 触发/GTC/IOC/FOK/PO）
 - 强平：按初始/维持保证金反推强平价，触及即强制平仓
@@ -261,11 +261,11 @@ skill 可声明 `allowed-tools`（激活后**收窄**工具面）、`model-invoc
 - **讨论模式**（3 阶段，可选）：`discussion.enabled: true` + `rounds: 3` → ①相互讨论与反驳 ②深化讨论 ③最终决策；`early_exit_on_agreement` 控制一致即退；改口落盘 `data/shared/discussion_log.jsonl`
 - **稳定性（不掉票）**：LLM 5xx/网络错误**指数退避重试 3 次**；重试仍失败或解析失败 → **降级 hold**（保留投票权）；`analyze_once` 异常也降级；**账户缺失继续行情分析**；无工具调用**强制重试**
 - **工具审计**：每轮 `tool_usage` + `tool_usage_summary` 随 `thinking.json` 落盘（防偷懒）
-- 共同记忆 `data/shared/orders/<order_id>.json`。`python -m gate_bot persona-run --group <name>`
+- 共同记忆 `data/shared/orders/<order_id>.json`。`python -m omnialpha persona-run --group <name>`
 
-**记忆系统**（agent-memory）：四层记忆（Order/Journal/Profile/Working），恒定 ~4k token/轮。订单上下文含 reason/lifecycle/recent_events(top-5)/memory_refs/invalidation。决策日志 append-only 事件溯源（`state/memory_journal.jsonl`）。策略画像确定性统计（`state/memory_profile.json`）。缓存优化（稳定前缀+变化值殿后）。`gate_bot.memory` 模块。
+**记忆系统**（agent-memory）：四层记忆（Order/Journal/Profile/Working），恒定 ~4k token/轮。订单上下文含 reason/lifecycle/recent_events(top-5)/memory_refs/invalidation。决策日志 append-only 事件溯源（`state/memory_journal.jsonl`）。策略画像确定性统计（`state/memory_profile.json`）。缓存优化（稳定前缀+变化值殿后）。`omnialpha.memory` 模块。
 
-**信号广播**：一信号 → 多所，目标在 `config/broadcast.yaml`（AI 碰不到）。`python -m gate_bot broadcast` 常驻分发；可选 1/2/N 个目标；逐个校验写入、失败报错；目标 bot 各自独立执行。信号内 `targets` 字段忽略（防 AI 注入）。
+**信号广播**：一信号 → 多所，目标在 `config/broadcast.yaml`（AI 碰不到）。`python -m omnialpha broadcast` 常驻分发；可选 1/2/N 个目标；逐个校验写入、失败报错；目标 bot 各自独立执行。信号内 `targets` 字段忽略（防 AI 注入）。
 
 **账户信息一律 REST**（全 bot 通用）；`account.db` 仅历史。K 线可 hybrid。
 
@@ -321,7 +321,7 @@ config/alerts.yaml  ③ 密钥（gitignore）
 ```bash
 # 部署（七步：检查→pull→依赖→skill→编码自检→测试→重启验证）
 ./scripts/deploy.sh [--no-restart|--dry-run]
-python -m gate_bot deploy-check      # 部署后验证
+python -m omnialpha deploy-check      # 部署后验证
 ```
 
 ### 8.2 平台差异
@@ -330,35 +330,35 @@ python -m gate_bot deploy-check      # 部署后验证
 |----|---------|----------------|
 | Python | `.venv\Scripts\python.exe` | `python3` 或 `.venv/bin/python` |
 | 装依赖 | `pip install -r requirements.txt` | 同左（建议 venv） |
-| 项目根 | 当前目录或 `--root` | `--root /opt/gate-signal-bot` 或 **`GATE_BOT_ROOT`** |
-| 行情库 | 默认 `<root>/pa-data-source/data` | 可用 **`GATE_BOT_PA_DATA`** 改到数据盘 |
+| 项目根 | 当前目录或 `--root` | `--root /opt/omnialpha` 或 **`OMNIALPHA_ROOT`** |
+| 行情库 | 默认 `<root>/pa-data-source/data` | 可用 **`OMNIALPHA_PA_DATA`** 改到数据盘 |
 | 密钥 | 终端 `$env:...` / 系统环境变量 | systemd `Environment=` 或 `.env` 由外部注入 |
 | skill 打包 | `scripts/pack_skill.py`（UTF-8 安全） | 解压用 Python / `skill doctor --fix` 修乱码 |
 
 > ⚠️ **编码陷阱**：Windows 打的 zip 在 Linux 用 `unzip` 解，UTF-8 文件名会被按 CP866
-> 解读 → 乱码。用 `scripts/pack_skill.py` 打包 + `python -m gate_bot skill doctor --fix` 自检。
+> 解读 → 乱码。用 `scripts/pack_skill.py` 打包 + `python -m omnialpha skill doctor --fix` 自检。
 
 ```bash
 # Linux 服务器示例
-export GATE_BOT_ROOT=/opt/gate-signal-bot
+export OMNIALPHA_ROOT=/opt/omnialpha
 export GATE_API_KEY=...
 export GATE_API_SECRET=...
-export GATE_BOT_PA_DATA=/data/gate-kline   # 可选
+export OMNIALPHA_PA_DATA=/data/gate-kline   # 可选
 
-cd /opt/gate-signal-bot
+cd /opt/omnialpha
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-pip install -e .          # 任意目录都能 python -m gate_bot
-python -m gate_bot status --root "$GATE_BOT_ROOT"
-python -m gate_bot run --root "$GATE_BOT_ROOT"
+pip install -e .          # 任意目录都能 python -m omnialpha
+python -m omnialpha status --root "$OMNIALPHA_ROOT"
+python -m omnialpha run --root "$OMNIALPHA_ROOT"
 ```
 
-systemd 建议：`WorkingDirectory=/opt/gate-signal-bot`，并设 `GATE_BOT_ROOT` 与密钥环境变量；或 `ExecStart=/opt/gate-signal-bot/.venv/bin/python -m gate_bot run --root /opt/gate-signal-bot`。
+systemd 建议：`WorkingDirectory=/opt/omnialpha`，并设 `OMNIALPHA_ROOT` 与密钥环境变量；或 `ExecStart=/opt/omnialpha/.venv/bin/python -m omnialpha run --root /opt/omnialpha`。
 
 **相对路径规则**（代码已按此实现）：
 - 配置：`<root>/config/bots/`
 - 信号：`<root>/inbox/<bot_id>/`
 - 策略人格：`<root>/prompts/`（`prompt_file` 不依赖 cwd）
-- 行情：`GATE_BOT_PA_DATA` 或 yaml `pa_data_root` 或 `<root>/pa-data-source/data`
+- 行情：`OMNIALPHA_PA_DATA` 或 yaml `pa_data_root` 或 `<root>/pa-data-source/data`
 
-自检：**在任意 cwd 下**执行 `python -m gate_bot --root /path/to/repo status` 应正常。
+自检：**在任意 cwd 下**执行 `python -m omnialpha --root /path/to/repo status` 应正常。

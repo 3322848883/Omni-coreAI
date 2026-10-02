@@ -18,19 +18,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.gate_client import GateClient  # noqa: E402
-from gate_bot.strategist.llm_client import LLMClient, LLMConfig, LLMError  # noqa: E402
-from gate_bot.strategist.market import MarketConfig  # noqa: E402
-from gate_bot.strategist.prompt import (  # noqa: E402
+from omnialpha.gate_client import GateClient  # noqa: E402
+from omnialpha.strategist.llm_client import LLMClient, LLMConfig, LLMError  # noqa: E402
+from omnialpha.strategist.market import MarketConfig  # noqa: E402
+from omnialpha.strategist.prompt import (  # noqa: E402
     PLAN_SCHEMA_HINT,
     SYSTEM_PROMPT,
     build_system_prompt,
     build_user_prompt,
     load_strategy_prompt,
 )
-from gate_bot.strategist.risk import RiskConfig, apply_risk  # noqa: E402
-from gate_bot.strategist.schema import PlanError, parse_plan_text  # noqa: E402
-from gate_bot.strategist.snapshot import collect_snapshot  # noqa: E402
+from omnialpha.strategist.risk import RiskConfig, apply_risk  # noqa: E402
+from omnialpha.strategist.schema import PlanError, parse_plan_text  # noqa: E402
+from omnialpha.strategist.snapshot import collect_snapshot  # noqa: E402
 
 RESULTS: list[tuple[str, str, str]] = []
 

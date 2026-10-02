@@ -9,10 +9,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.paper.engine import PaperEngine  # noqa: E402
-from gate_bot.paper.exchange import PaperExchange  # noqa: E402
-from gate_bot.paper.risk import RiskEngine  # noqa: E402
-from gate_bot.paper.store import PaperStore  # noqa: E402
+from omnialpha.paper.engine import PaperEngine  # noqa: E402
+from omnialpha.paper.exchange import PaperExchange  # noqa: E402
+from omnialpha.paper.risk import RiskEngine  # noqa: E402
+from omnialpha.paper.store import PaperStore  # noqa: E402
 
 PASS, FAIL = 0, 0
 RESULTS: list[tuple[str, bool, str]] = []

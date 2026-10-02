@@ -6,8 +6,8 @@ from pathlib import Path
 sys.path.insert(0, ".")
 sys.stdout.reconfigure(encoding="utf-8")
 
-from gate_bot.exchanges import create_exchange, list_exchanges
-from gate_bot.strategist.market import MarketConfig, resolve_db_path
+from omnialpha.exchanges import create_exchange, list_exchanges
+from omnialpha.strategist.market import MarketConfig, resolve_db_path
 
 EX = list_exchanges()
 SYM = "BTC_USDT"
@@ -41,11 +41,11 @@ for n in EX:
     check("contract", lambda: c.get_contract(SYM).quanto_multiplier)
 
 print("=== 3. 符号映射 ===")
-from gate_bot.exchanges.okx import OkxMapper
-from gate_bot.exchanges.bybit import BybitExchange
-from gate_bot.exchanges.bitget import BitgetMapper
-from gate_bot.exchanges.hyperliquid import HyperliquidMapper
-from gate_bot.exchanges.binance import BinanceExchange
+from omnialpha.exchanges.okx import OkxMapper
+from omnialpha.exchanges.bybit import BybitExchange
+from omnialpha.exchanges.bitget import BitgetMapper
+from omnialpha.exchanges.hyperliquid import HyperliquidMapper
+from omnialpha.exchanges.binance import BinanceExchange
 
 assert BinanceExchange().mapper.native("BTC_USDT") == "BTCUSDT"
 assert OkxMapper().native("BTC_USDT") == "BTC-USDT-SWAP"

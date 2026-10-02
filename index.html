@@ -13,7 +13,7 @@
   <div class="wrap">
     <header class="hero">
       <h1>全网交易策略提示词调研报告</h1>
-      <p class="sub">交易所 · AI 交易系统 · 社区 — 精选 19 个可落地模板，供 gate-signal-bot 选型定制</p>
+      <p class="sub">交易所 · AI 交易系统 · 社区 — 精选 19 个可落地模板，供 OmniAlpha 选型定制</p>
       <div class="meta-row">
         <span class="chip">调研日期 <strong>2026-09-26</strong></span>
         <span class="chip">来源 <strong>官方文档 / GitHub / 论文 / 产品博客</strong></span>
@@ -33,7 +33,7 @@
 
     <section id="summary">
       <h2>结论速览</h2>
-      <p class="lede">从交易所官方文档、开源 AI 交易框架、社区提示词库中筛出结构完整、可直接改造成「多品种永续 Plan JSON」的模板。按对 gate-signal-bot 的可移植性排序。</p>
+      <p class="lede">从交易所官方文档、开源 AI 交易框架、社区提示词库中筛出结构完整、可直接改造成「多品种永续 Plan JSON」的模板。按对 OmniAlpha 的可移植性排序。</p>
       <div class="summary-grid">
         <div class="stat"><div class="num">19</div><div class="lbl">主推提示词模板</div></div>
         <div class="stat"><div class="num">3</div><div class="lbl">来源大类</div></div>
@@ -54,7 +54,7 @@
 
     <section id="matrix">
       <h2>对比矩阵</h2>
-      <p class="lede">「移植分」= 对 gate-signal-bot（多品种永续、Plan JSON、程序风控）的直接可用程度（1–5）。</p>
+      <p class="lede">「移植分」= 对 OmniAlpha（多品种永续、Plan JSON、程序风控）的直接可用程度（1–5）。</p>
       <table>
         <thead>
           <tr>
@@ -114,7 +114,7 @@ Evaluation Metrics · Clarification & Output Instructions</blockquote>
             <li>明确「信号确认时刻 vs 执行时刻」，防前视</li>
             <li>「禁止编造绩效」硬约束</li>
           </ul></div>
-          <div class="panel-sm"><h4>如何接入 gate-signal-bot</h4><ul>
+          <div class="panel-sm"><h4>如何接入 OmniAlpha</h4><ul>
             <li>直接当 `prompt_file` 章节骨架</li>
             <li>多品种时循环 Market，共享 Risk</li>
             <li>补 funding / mark_price / 强平距离</li>
@@ -628,7 +628,7 @@ Then predict price movement for next {period}. No data after {curday}.</blockquo
         </thead>
         <tbody>
           <tr><td><span class="badge b-high">P0</span></td><td>用 12 段规格重写策略人格目录结构</td><td>#1 Algorier</td><td><code>prompts/README.md</code></td></tr>
-          <tr><td><span class="badge b-high">P0</span></td><td>系统提示词补「绝对价位 / 禁止编造绩效 / 体制过滤」</td><td>#3 #4 #6</td><td><code>gate_bot/strategist/prompt.py</code></td></tr>
+          <tr><td><span class="badge b-high">P0</span></td><td>系统提示词补「绝对价位 / 禁止编造绩效 / 体制过滤」</td><td>#3 #4 #6</td><td><code>omnialpha/strategist/prompt.py</code></td></tr>
           <tr><td><span class="badge b-high">P0</span></td><td>风险门第二提示（可选 LLM 复核）</td><td>#4 #8</td><td>新 <code>prompts/risk_gate.md</code></td></tr>
           <tr><td><span class="badge b-high">P0</span></td><td>槽位模板批量生成多品种 Plan</td><td>#2</td><td>脚本 / 测试</td></tr>
           <tr><td><span class="badge b-med">P1</span></td><td>按 Tradecraft 补 breakout/meanrev/grid 人格细节</td><td>#6</td><td><code>prompts/multi_*.md</code></td></tr>
@@ -649,9 +649,9 @@ Then predict price movement for next {period}. No data after {curday}.</blockquo
     </section>
 
     <footer>
-      gate-signal-bot 提示词调研 · 生成于 2026-09-26 ·
+      OmniAlpha 提示词调研 · 生成于 2026-09-26 ·
       基线 master <code>b2d37e4</code> ·
-      源码包 <code>gate-signal-bot-master.zip</code>
+      源码包 <code>OmniAlpha-master.zip</code>
     </footer>
   </div>
   <script src="report.js"></script>

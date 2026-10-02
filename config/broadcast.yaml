@@ -1,5 +1,5 @@
 # 信号广播配置 —— 一信号 → 多 bot（目标只在此处配置，AI 碰不到）
-# python -m gate_bot broadcast [--once]
+# python -m omnialpha broadcast [--once]
 
 routes:
   - name: dual-gate-okx

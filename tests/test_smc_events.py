@@ -5,8 +5,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.strategist.smc_map import compute_smc_map, smc_map_summary  # noqa: E402
-from gate_bot.strategist.smc_events import (  # noqa: E402
+from omnialpha.strategist.smc_map import compute_smc_map, smc_map_summary  # noqa: E402
+from omnialpha.strategist.smc_events import (  # noqa: E402
     compute_smc_events,
     pivothigh,
     pivotlow,
@@ -129,7 +129,7 @@ class TestAllFeaturesOn(unittest.TestCase):
             self.assertIn(f.is_raid, (True, False))
 
     def test_smc_map_show_all(self):
-        from gate_bot.strategist.smc_map import SHOW_ALL
+        from omnialpha.strategist.smc_map import SHOW_ALL
         self.assertTrue(all(SHOW_ALL.values()))
 
 

@@ -10,7 +10,7 @@ commits: 0fb7bec..HEAD
 
 ## Report
 
-**What was built** — 一个复刻交易所语义的本地模拟盘：`env: paper` 即启用，行情/合约元数据/资金费率委托绑定的真实交易所，订单/持仓/资金/强平/费率结算全在本地 `data/bots/<id>/paper/account.db`。盘口价成交（买→ask 卖→bid），订单全类型（limit/market/stop_entry/TP-SL 触发/GTC/IOC/FOK/PO/POC），含精度校验（tick/lot/最小名义/价格带/杠杆）、保证金与强平引擎、8h 真实资金费率结算、实时权益估值。默认 10000 USDT / 20x 可配。独立进程 `python -m gate_bot paper-run --bot <id>`（含撮合 tick 线程），复用信号链/风控/LLM 策略/20 工具。
+**What was built** — 一个复刻交易所语义的本地模拟盘：`env: paper` 即启用，行情/合约元数据/资金费率委托绑定的真实交易所，订单/持仓/资金/强平/费率结算全在本地 `data/bots/<id>/paper/account.db`。盘口价成交（买→ask 卖→bid），订单全类型（limit/market/stop_entry/TP-SL 触发/GTC/IOC/FOK/PO/POC），含精度校验（tick/lot/最小名义/价格带/杠杆）、保证金与强平引擎、8h 真实资金费率结算、实时权益估值。默认 10000 USDT / 20x 可配。独立进程 `python -m omnialpha paper-run --bot <id>`（含撮合 tick 线程），复用信号链/风控/LLM 策略/20 工具。
 
 **Verification** — `python -m unittest discover -s tests`：**293 PASS**（含 24 个 paper 测试：精度校验、盘口价撮合、PnL/quanto、强平、资金费率、Executor 契约集成）。`tests.test_paper` + `tests.test_paper_executor` 覆盖 Gate 嵌套 body、`id` 字段、`price=0` 市价语义、`poc` 别名、available 重算、quanto 贯穿。
 
@@ -29,18 +29,18 @@ commits: 0fb7bec..HEAD
 ### 总体结构
 
 ```
-inbox/<bot>/ 信号 ──► executor（复用）──► PaperExchange（gate_bot/paper/）
+inbox/<bot>/ 信号 ──► executor（复用）──► PaperExchange（omnialpha/paper/）
                                               │
       行情/合约元数据/费率/精度 ────────────────┤ 委托给绑定的真实所（feed）
       订单/持仓/资金/成交/强平/费率 ────────────┤ 本地 paper_account.db
       撮合·强平·结算引擎（engine+risk）─────────┘  盘口价成交
 ```
 
-- **独立 paper bot 进程** + **独立账户库**：`python -m gate_bot paper-run --bot <id>`
+- **独立 paper bot 进程** + **独立账户库**：`python -m omnialpha paper-run --bot <id>`
 - 每个 paper bot **绑定一个 feed 交易所**（六所任选），合约元数据（精度/最小名义/杠杆上限）从该所读取并本地执行
 - **不需要交易所 API 密钥**（paper 分支短路 load_credentials）
 
-### [S2.1] PaperExchange adapter（`gate_bot/paper/exchange.py`）
+### [S2.1] PaperExchange adapter（`omnialpha/paper/exchange.py`）
 
 实现 `ExchangeClient` 全接口 + Executor 扩展（`get_available_usdt` / `place_trailing_order` / `stop_trailing_orders`）。`name="paper"`。
 
@@ -59,13 +59,13 @@ inbox/<bot>/ 信号 ──► executor（复用）──► PaperExchange（gate
 - `tif=poc`（post_only 别名）接受；IOC/FOK 未立即成交即撤销（FOK 回滚成交）
 - `close_position(contract, side=long|short)` 按 side 过滤（dual 模式）
 
-### [S2.2] 账户库（`gate_bot/paper/store.py`，八表）
+### [S2.2] 账户库（`omnialpha/paper/store.py`，八表）
 
 `data/bots/<bot_id>/paper/account.db`：config / account / positions / orders / price_orders / fills / funding_log / pnl_snapshot
 
 **默认**：`initial_capital=10000`、`leverage=20`、`fee_rate=0.0005`、`funding_enabled=true`，bot yaml `paper:` 段可覆盖。`available = balance - position_margin - order_margin`，成交后自动重算。
 
-### [S2.3] 合约精度与校验（`gate_bot/paper/validate.py`）
+### [S2.3] 合约精度与校验（`omnialpha/paper/validate.py`）
 
 tick（order_price_round）/ lot（order_size_round）/ 最小名义 / 价格带（默认 ±5%）/ 杠杆上限。拒绝原因对齐交易所风格（`price out of band` / `insufficient available` / `min notional` / `leverage too high`）。
 
@@ -73,7 +73,7 @@ tick（order_price_round）/ lot（order_size_round）/ 最小名义 / 价格带
 
 `placed → open → partially_filled/filled | cancelled | rejected`；触发单 `untriggered → triggered → filled/cancelled`。`tif`：GTC / IOC / FOK / PO(POC)。
 
-### [S2.5] 撮合引擎（`gate_bot/paper/engine.py`）
+### [S2.5] 撮合引擎（`omnialpha/paper/engine.py`）
 
 | 类型 | 触发 | 成交价 |
 |---|---|---|
@@ -81,7 +81,7 @@ tick（order_price_round）/ lot（order_size_round）/ 最小名义 / 价格带
 | `market`（price=0） | 立即 | 同上 |
 | `stop_entry`/TP-SL 触发单 | 触及 trigger_price（latest/mark/index + rule 1/2） | 转限价/市价 |
 
-### [S2.6] 保证金与强平（`gate_bot/paper/risk.py`）
+### [S2.6] 保证金与强平（`omnialpha/paper/risk.py`）
 
 初始保证金 = 名义(含 quanto)/杠杆；维持保证金率（默认 0.5%）反推强平价；mark/last 触及即强制平仓（role=liquidation，单条 fill）。`liquidation_price = entry × (1 ∓ 1/lev ± mmr)`。
 
@@ -110,7 +110,7 @@ paper:
   trigger_price_type: latest
 ```
 
-命令：`python -m gate_bot paper-run --bot <id>`（独立进程 + pid 锁 + 撮合 tick 线程）。
+命令：`python -m omnialpha paper-run --bot <id>`（独立进程 + pid 锁 + 撮合 tick 线程）。
 
 ### [S2.9] 错误码与返回结构对齐
 

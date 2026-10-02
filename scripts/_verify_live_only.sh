@@ -1,6 +1,6 @@
 #!/bin/bash
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
-cd /opt/gate-signal-bot
+cd /opt/omnialpha
 
 echo "=== 顶层 enabled 开关（bot 级）==="
 for f in config/bots/*.yaml; do
@@ -11,7 +11,7 @@ for f in config/bots/*.yaml; do
 done
 
 echo "=== 重启看门狗 ==="
-systemctl restart gate-watchdog
+systemctl restart omnialpha-watchdog
 sleep 6
 
 echo "=== 实际在跑的 bot ==="

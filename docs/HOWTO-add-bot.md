@@ -41,7 +41,7 @@ $env:GATE_TESTNET_API_KEY    = "..."
 $env:GATE_TESTNET_API_SECRET = "..."
 ```
 
-**本地模拟盘（`env: paper`）不需要交易所密钥**——只需 `paper.feed_exchange`（行情来源）与 `paper.initial_capital` / `leverage` 等虚拟账户参数。启动用 `python -m gate_bot paper-run --bot <id>`（自带撮合/强平/费率 tick）。详见 README「本地模拟盘」。
+**本地模拟盘（`env: paper`）不需要交易所密钥**——只需 `paper.feed_exchange`（行情来源）与 `paper.initial_capital` / `leverage` 等虚拟账户参数。启动用 `python -m omnialpha paper-run --bot <id>`（自带撮合/强平/费率 tick）。详见 README「本地模拟盘」。
 
 ### 4) 确认 inbox 目录
 
@@ -78,12 +78,12 @@ strategist:
 
 ```powershell
 # 先只跑这一个 bot
-python -m gate_bot once --bot <bot_id>     # 单次处理 inbox
-python -m gate_bot run --bot <bot_id>      # 常驻执行
-python -m gate_bot plan --bot <bot_id>     # 若启用 LLM，单轮 Plan
+python -m omnialpha once --bot <bot_id>     # 单次处理 inbox
+python -m omnialpha run --bot <bot_id>      # 常驻执行
+python -m omnialpha plan --bot <bot_id>     # 若启用 LLM，单轮 Plan
 
 # 或全部 enabled 一起跑
-python -m gate_bot run
+python -m omnialpha run
 ```
 
 ---
@@ -92,7 +92,7 @@ python -m gate_bot run
 
 | # | 检查 | 命令 / 预期 |
 |---|------|-------------|
-| 1 | 配置被识别 | `python -m gate_bot status` 里出现 `<bot_id>` |
+| 1 | 配置被识别 | `python -m omnialpha status` 里出现 `<bot_id>` |
 | 2 | 环境正确 | `env` 是 testnet/live，与密钥一致 |
 | 3 | 隔离前缀 | `label_prefix` 与其他 bot **不重复** |
 | 4 | 冒烟信号 | 投一个最小 JSON（见下）→ `once --bot <bot_id>` 成功 |
@@ -150,7 +150,7 @@ python -m gate_bot run
 
 1. 建 N 个 bot 配置（各写自己的 `exchange:` + 密钥）
 2. `config/broadcast.yaml` 定路由：`from: 源` → `to: [目标1, 目标2, ...]`（任意子集）
-3. 信号投源 inbox，`python -m gate_bot broadcast` 自动分发到各目标
+3. 信号投源 inbox，`python -m omnialpha broadcast` 自动分发到各目标
 
 目标列表只在配置里写（AI 信号碰不到），详见 README「信号广播」。
 
@@ -161,7 +161,7 @@ N 个策略人格共同决策一笔订单（共识/投票/主人格裁决）：
 
 1. 各成员 bot 配置照常（各自 `strategist` prompt）
 2. `config/persona_groups.yaml` 定组：`members` + `topology` + `fusion`
-3. `python -m gate_bot persona-run --group <name>` 常驻
+3. `python -m omnialpha persona-run --group <name>` 常驻
 
 拓扑：`single_account`（N 人格→1 账户一单）/ `mirror_accounts`（N 人格→N 账户同步）。
 详见 README「多人格共管订单」。

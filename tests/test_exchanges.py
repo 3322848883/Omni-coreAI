@@ -5,14 +5,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.exchanges import create_exchange, list_exchanges
-from gate_bot.exchanges.base import ExchangeClient
-from gate_bot.exchanges.gate import GateExchange
-from gate_bot.exchanges.binance import BinanceExchange
-from gate_bot.exchanges.okx import OkxExchange, OkxMapper
-from gate_bot.exchanges.bybit import BybitExchange
-from gate_bot.exchanges.bitget import BitgetExchange, BitgetMapper
-from gate_bot.exchanges.hyperliquid import HyperliquidExchange, HyperliquidMapper
+from omnialpha.exchanges import create_exchange, list_exchanges
+from omnialpha.exchanges.base import ExchangeClient
+from omnialpha.exchanges.gate import GateExchange
+from omnialpha.exchanges.binance import BinanceExchange
+from omnialpha.exchanges.okx import OkxExchange, OkxMapper
+from omnialpha.exchanges.bybit import BybitExchange
+from omnialpha.exchanges.bitget import BitgetExchange, BitgetMapper
+from omnialpha.exchanges.hyperliquid import HyperliquidExchange, HyperliquidMapper
 
 
 class TestExchangeFactory(unittest.TestCase):
@@ -77,7 +77,7 @@ class TestGateWrap(unittest.TestCase):
 class TestLocalDbPerExchange(unittest.TestCase):
     def test_db_path_per_exchange(self):
         from pathlib import Path
-        from gate_bot.strategist.market import MarketConfig, resolve_db_path
+        from omnialpha.strategist.market import MarketConfig, resolve_db_path
 
         for ex, needle in [
             ("gate", "kline_testnet.db"),
@@ -88,7 +88,7 @@ class TestLocalDbPerExchange(unittest.TestCase):
             self.assertTrue(p.name.endswith(needle), p.name)
 
     def test_tools_use_market_cfg_exchange(self):
-        from gate_bot.strategist.market import MarketConfig
+        from omnialpha.strategist.market import MarketConfig
 
         cfg = MarketConfig(mode="rest_only", exchange="binance", indicators=["ema20", "atr14"])
         self.assertEqual(cfg.exchange, "binance")
@@ -103,7 +103,7 @@ class TestKlineFieldParityWithGate(unittest.TestCase):
     """各所 get_klines 出参必须与 Gate 基线同构（ema20/atr14 可为 None）。"""
 
     def test_gate_rest_candle_fields(self):
-        from gate_bot.strategist.market import fetch_rest_candles
+        from omnialpha.strategist.market import fetch_rest_candles
 
         class FakeGate:
             def public_get(self, path, qs=""):

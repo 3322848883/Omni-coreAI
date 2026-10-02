@@ -10,7 +10,7 @@ commits: 022d536..HEAD
 
 ## Report
 
-**What was built** — 一条信号同时在多个交易所账户执行的广播机制。`config/broadcast.yaml` 定义路由「源 inbox → 目标 bot 列表」，目标可为任意子集（1 个/2 个/N 个）。`python -m gate_bot broadcast` 常驻自动分发（`--once` 单轮）。目标列表**只来自系统配置**，AI 信号里的 `targets`/`exchanges` 字段一律忽略（防乱输入）。目标 bot 各自独立执行（密钥/风控/持仓/盈亏互不影响）。
+**What was built** — 一条信号同时在多个交易所账户执行的广播机制。`config/broadcast.yaml` 定义路由「源 inbox → 目标 bot 列表」，目标可为任意子集（1 个/2 个/N 个）。`python -m omnialpha broadcast` 常驻自动分发（`--once` 单轮）。目标列表**只来自系统配置**，AI 信号里的 `targets`/`exchanges` 字段一律忽略（防乱输入）。目标 bot 各自独立执行（密钥/风控/持仓/盈亏互不影响）。
 
 **Verification** — `python -m unittest discover -s tests`：**308 PASS**（含 15 个 broadcast 测试 + 6 个关键修复回归）。端到端实测：1 信号 → 2 目标全收到；恶意 `targets` 注入被忽略、attacker-bot 未创建；源归档；审计日志留痕。
 
@@ -60,7 +60,7 @@ routes:
 - bot_id 防路径穿越（拒 `/` `\` `..`），走 `paths.BotPaths` 净化
 - 信号 JSON 中 `targets`/`exchanges` 字段**忽略**并在审计日志标注
 
-### [S2.2] 广播进程（`gate_bot/broadcast.py` + `python -m gate_bot broadcast`）
+### [S2.2] 广播进程（`omnialpha/broadcast.py` + `python -m omnialpha broadcast`）
 
 - **常驻**（默认）/ `--once` / `--config <path>`
 - **同源多路由**：按源分组，取件一次、整批分发（不饥饿）

@@ -1,4 +1,4 @@
-"""CLI: python -m gate_bot run|once|process|status"""
+"""CLI: python -m omnialpha run|once|process|status"""
 
 from __future__ import annotations
 
@@ -15,10 +15,10 @@ from .watcher import ProjectPaths, process_file, run_bot_once, run_forever
 
 
 def _root_from_args(args) -> Path:
-    """Project root: --root > GATE_BOT_ROOT > cwd. Works under systemd/cron without cd."""
+    """Project root: --root > OMNIALPHA_ROOT > cwd. Works under systemd/cron without cd."""
     if getattr(args, "root", None):
         return Path(args.root).expanduser().resolve()
-    env = os.environ.get("GATE_BOT_ROOT")
+    env = os.environ.get("OMNIALPHA_ROOT")
     if env:
         return Path(env).expanduser().resolve()
     return Path.cwd().resolve()
@@ -615,7 +615,7 @@ def cmd_migrate(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="gate_bot", description="Gate strategy signal bot")
+    parser = argparse.ArgumentParser(prog="omnialpha", description="Gate strategy signal bot")
     parser.add_argument("--root", default=None, help="project root (default cwd)")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -697,7 +697,7 @@ def build_parser() -> argparse.ArgumentParser:
     _register_skill_parser(sub)
 
     p_dc = sub.add_parser("deploy-check", help="部署后验证（版本/overlay/bot/skill/健康）")
-    p_dc.add_argument("--root", help="project root (default: cwd / GATE_BOT_ROOT)")
+    p_dc.add_argument("--root", help="project root (default: cwd / OMNIALPHA_ROOT)")
     p_dc.set_defaults(func=cmd_deploy_check)
     return parser
 

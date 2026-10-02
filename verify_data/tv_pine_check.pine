@@ -1,6 +1,6 @@
 //@version=5
 // ============================================================================
-// gate-signal-bot ↔ TradingView 数值对照脚本
+// OmniAlpha ↔ TradingView 数值对照脚本
 // 数据：BTC_USDT 1h  2026-09-23 11:00 ~ 2026-09-25 22:00 UTC（Gate kline.db，60 根）
 // 用法：Pine Editor → 粘贴本文件 → Add to chart → 看右上角表格
 // 全部指标从下方固定数组计算，与图表 close 无关，可贴在任意图上。

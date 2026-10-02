@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Testnet smoke: all gate-signal-bot features including position-mode add/reduce."""
+"""Testnet smoke: all OmniAlpha features including position-mode add/reduce."""
 import json
-from gate_bot.gate_client import GateClient
-from gate_bot.executor import Executor
-from gate_bot.schema import parse_signal
+from omnialpha.gate_client import GateClient
+from omnialpha.executor import Executor
+from omnialpha.schema import parse_signal
 
 c = GateClient(
     "7b31134e731b10ea859da2e75440d263",

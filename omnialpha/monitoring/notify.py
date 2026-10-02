@@ -92,7 +92,7 @@ class FeishuChannel(NotificationChannel):
 
     def _send_webhook(self, text: str) -> bool:
         try:
-            data = json.dumps({"msg_type": "text", "content": {"text": f"[gate-bot] {text}"}}).encode()
+            data = json.dumps({"msg_type": "text", "content": {"text": f"[omnialpha] {text}"}}).encode()
             req = urllib.request.Request(self.webhook, data=data,
                                         headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=10) as resp:
@@ -109,7 +109,7 @@ class FeishuChannel(NotificationChannel):
             msg = json.dumps({
                 "receive_id": self.user_open_id,
                 "msg_type": "text",
-                "content": json.dumps({"text": f"[gate-bot] {text}"}),
+                "content": json.dumps({"text": f"[omnialpha] {text}"}),
             }).encode()
             req = urllib.request.Request(
                 "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id",
@@ -144,7 +144,7 @@ class TelegramChannel(NotificationChannel):
         try:
             url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
             data = json.dumps({"chat_id": self.chat_id,
-                               "text": f"[gate-bot] {text}"}).encode()
+                               "text": f"[omnialpha] {text}"}).encode()
             req = urllib.request.Request(url, data=data,
                                         headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=10) as resp:
@@ -164,7 +164,7 @@ class DingTalkChannel(NotificationChannel):
 
     def send(self, text: str) -> bool:
         try:
-            data = json.dumps({"msgtype": "text", "text": {"content": f"[gate-bot] {text}"}}).encode()
+            data = json.dumps({"msgtype": "text", "text": {"content": f"[omnialpha] {text}"}}).encode()
             req = urllib.request.Request(self.webhook, data=data,
                                         headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=10) as resp:

@@ -18,7 +18,7 @@
 
 ```powershell
 Copy-Item examples\signals\01-open-long-tpsl.json inbox\llm-test\
-.venv\Scripts\python.exe -m gate_bot once --bot llm-test
+.venv\Scripts\python.exe -m omnialpha once --bot llm-test
 ```
 
 **必读**：`templates/README.md`（字段全集）；突破用 `stop_entry_*`，止损用 `sl`。

@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.persona import (  # noqa: E402
+from omnialpha.persona import (  # noqa: E402
     PersonaError,
     PersonaGroup,
     SharedOrderStore,
@@ -19,8 +19,8 @@ from gate_bot.persona import (  # noqa: E402
     validate_group,
     PersonaRunner,
 )
-from gate_bot.persona.orders import new_order_id  # noqa: E402
-from gate_bot.persona.runner import PersonaRunner  # noqa: E402
+from omnialpha.persona.orders import new_order_id  # noqa: E402
+from omnialpha.persona.runner import PersonaRunner  # noqa: E402
 
 
 def _group(**kw):
@@ -98,7 +98,7 @@ class TestPathTraversal(unittest.TestCase):
 
     def test_group_name_in_label_sanitized_by_schema(self):
         """group.name 含特殊字符时，schema 的 _safe_label 会清洗。"""
-        from gate_bot.schema import _safe_label
+        from omnialpha.schema import _safe_label
         self.assertEqual(_safe_label("persona-abc/def"), "persona-abcdef")
         self.assertEqual(_safe_label("persona-..\\evil"), "persona-evil")
         self.assertEqual(_safe_label("persona-a\x00b"), "persona-ab")
@@ -126,7 +126,7 @@ class TestPathTraversal(unittest.TestCase):
 class TestInjection(unittest.TestCase):
     def test_symbol_injection_in_signal(self):
         """LLM 输出恶意 symbol，信号写盘后 schema 解析应拒绝或清洗。"""
-        from gate_bot.schema import parse_signal
+        from omnialpha.schema import parse_signal
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             g = _group(target_account="a", topology="single_account")
@@ -183,7 +183,7 @@ class TestInjection(unittest.TestCase):
             r.run_once()
             inbox = list((root / "data" / "bots" / "a" / "inbox").glob("*.json"))
             payload = json.loads(inbox[0].read_text(encoding="utf-8"))
-            from gate_bot.schema import _safe_label
+            from omnialpha.schema import _safe_label
             clean = _safe_label(payload["label"])
             self.assertNotIn(";", clean)
             self.assertNotIn("'", clean)
@@ -207,7 +207,7 @@ class TestInjection(unittest.TestCase):
                 if not inbox:
                     continue
                 payload = json.loads(inbox[-1].read_text(encoding="utf-8"))
-                from gate_bot.schema import parse_signal
+                from omnialpha.schema import parse_signal
                 try:
                     sig = parse_signal(payload)
                     intent = sig.intents[0]
@@ -483,7 +483,7 @@ class TestConfigAttackSurface(unittest.TestCase):
 class TestProcessSafety(unittest.TestCase):
     def test_pidlock_prevents_double_run(self):
         """PidLock 同实例可重入；同进程第二实例（新 handle）会被 OS 锁拒绝。"""
-        from gate_bot.pidlock import PidLock
+        from omnialpha.pidlock import PidLock
         with tempfile.TemporaryDirectory() as td:
             lock_path = Path(td) / "test.lock"
             lock1 = PidLock(lock_path).acquire()
@@ -520,25 +520,25 @@ class TestProcessSafety(unittest.TestCase):
 class TestBoundaryValues(unittest.TestCase):
     def test_confidence_nan(self):
         """confidence=NaN 不应破坏融合。"""
-        from gate_bot.persona.fusion import _norm_confidence
+        from omnialpha.persona.fusion import _norm_confidence
         import math
         c = _norm_confidence({"confidence": float("nan")})
         self.assertIsInstance(c, float)
         self.assertTrue(0.0 <= c <= 1.0 or math.isnan(c))
 
     def test_confidence_infinity(self):
-        from gate_bot.persona.fusion import _norm_confidence
+        from omnialpha.persona.fusion import _norm_confidence
         c = _norm_confidence({"confidence": float("inf")})
         self.assertEqual(c, 1.0)
 
     def test_decision_unicode(self):
         """decision 含 unicode / emoji，安全处理。"""
-        from gate_bot.persona.fusion import _norm_dir
+        from omnialpha.persona.fusion import _norm_dir
         self.assertEqual(_norm_dir({"decision": "🚀🚀🚀"}), "hold")
         self.assertEqual(_norm_dir({"decision": "多头"}), "hold")
 
     def test_empty_string_decision(self):
-        from gate_bot.persona.fusion import _norm_dir
+        from omnialpha.persona.fusion import _norm_dir
         self.assertEqual(_norm_dir({"decision": ""}), "hold")
 
     def test_none_plan_fields(self):
@@ -551,7 +551,7 @@ class TestBoundaryValues(unittest.TestCase):
 
     def test_symbol_empty_string(self):
         """symbol 为空字符串时 schema 应拒绝。"""
-        from gate_bot.schema import parse_signal
+        from omnialpha.schema import parse_signal
         with self.assertRaises(Exception):
             parse_signal({"action": "open_long", "symbol": "", "size_usd": 50})
 

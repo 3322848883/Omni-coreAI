@@ -10,13 +10,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.backtest import BacktestReplayer  # noqa: E402
-from gate_bot.backtest.stats import (  # noqa: E402
+from omnialpha.backtest import BacktestReplayer  # noqa: E402
+from omnialpha.backtest.stats import (  # noqa: E402
     buy_and_hold_pnl, deflated_sharpe, sma_crossover_pnl, t_test_pvalue,
 )
-from gate_bot.monitoring import DecayDetector, HealthMonitor  # noqa: E402
-from gate_bot.sizing import vol_adjust_size  # noqa: E402
-from gate_bot.schema import ORDER_FINAL_STATES, PARTIAL_FILL_STATUSES, MMP_CANCELED  # noqa: E402
+from omnialpha.monitoring import DecayDetector, HealthMonitor  # noqa: E402
+from omnialpha.sizing import vol_adjust_size  # noqa: E402
+from omnialpha.schema import ORDER_FINAL_STATES, PARTIAL_FILL_STATUSES, MMP_CANCELED  # noqa: E402
 
 
 # ─────────────────────────────────────────────────────

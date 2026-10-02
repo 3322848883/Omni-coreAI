@@ -17,11 +17,11 @@ breakout-bot  label=bc  50U  free    multi_breakout
 | 账户总敞口 | `account_risk.max_total_notional_usd`（如 200） |
 
 ```powershell
-.venv\Scripts\python.exe -m gate_bot plan-loop --bot single-trend
-.venv\Scripts\python.exe -m gate_bot plan-loop --bot grid-bot
-.venv\Scripts\python.exe -m gate_bot plan-loop --bot breakout-bot
+.venv\Scripts\python.exe -m omnialpha plan-loop --bot single-trend
+.venv\Scripts\python.exe -m omnialpha plan-loop --bot grid-bot
+.venv\Scripts\python.exe -m omnialpha plan-loop --bot breakout-bot
 # 另开执行
-.venv\Scripts\python.exe -m gate_bot run   # 扫全部 enabled bot
+.venv\Scripts\python.exe -m omnialpha run   # 扫全部 enabled bot
 ```
 
 ## 组合 B：分账户（更安全）

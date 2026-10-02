@@ -21,18 +21,18 @@
 ```bash
 # 2.1 代码
 sudo mkdir -p /opt && cd /opt
-git clone https://github.com/3322848883/Omni-coreAI.git gate-signal-bot
-cd gate-signal-bot
+git clone https://github.com/3322848883/Omni-coreAI.git OmniAlpha
+cd OmniAlpha
 
 # 2.2 Python 虚拟环境
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-pip install -e .          # 让任意目录都能 python -m gate_bot
+pip install -e .          # 让任意目录都能 python -m omnialpha
 
 # 2.3 密钥（**不要**写进代码）
 cat > .env <<'EOF'
-GATE_BOT_ROOT=/opt/gate-signal-bot
+OMNIALPHA_ROOT=/opt/omnialpha
 GATE_API_KEY=xxx
 GATE_API_SECRET=xxx
 OPENAI_BASE_URL=http://69.12.85.185:7863/v1
@@ -51,34 +51,34 @@ chmod 600 .env
 ### 3.1 看门狗（推荐，一键托管全部 enabled bot）
 
 ```ini
-# /etc/systemd/system/gate-watchdog.service
+# /etc/systemd/system/omnialpha-watchdog.service
 [Unit]
-Description=gate-signal-bot watchdog
+Description=OmniAlpha watchdog
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/gate-signal-bot
-EnvironmentFile=/opt/gate-signal-bot/.env
-ExecStart=/opt/gate-signal-bot/.venv/bin/python -m gate_bot watchdog --interval 15
+WorkingDirectory=/opt/omnialpha
+EnvironmentFile=/opt/omnialpha/.env
+ExecStart=/opt/omnialpha/.venv/bin/python -m omnialpha watchdog --interval 15
 Restart=always
 RestartSec=10
 User=gate
 # 无窗口（Linux 本来就没有）+ 防双开
-StandardOutput=append:/opt/gate-signal-bot/data/watchdog.out
-StandardError=append:/opt/gate-signal-bot/data/watchdog.err
+StandardOutput=append:/opt/omnialpha/data/watchdog.out
+StandardError=append:/opt/omnialpha/data/watchdog.err
 
 [Install]
 WantedBy=multi-user.target
 ```
 
 ```bash
-sudo useradd -r -m -d /opt/gate-signal-bot -s /bin/bash gate
-sudo chown -R gate:gate /opt/gate-signal-bot
+sudo useradd -r -m -d /opt/omnialpha -s /bin/bash gate
+sudo chown -R gate:gate /opt/omnialpha
 sudo systemctl daemon-reload
-sudo systemctl enable --now gate-watchdog
-sudo systemctl status gate-watchdog
+sudo systemctl enable --now omnialpha-watchdog
+sudo systemctl status omnialpha-watchdog
 ```
 
 ### 3.2 或单独跑某个实盘 bot
@@ -86,14 +86,14 @@ sudo systemctl status gate-watchdog
 ```ini
 # /etc/systemd/system/gate-brooks.service
 [Unit]
-Description=gate-signal-bot brooks-btc
+Description=OmniAlpha brooks-btc
 After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/gate-signal-bot
-EnvironmentFile=/opt/gate-signal-bot/.env
-ExecStart=/opt/gate-signal-bot/.venv/bin/python -m gate_bot supervisor --bot brooks-btc
+WorkingDirectory=/opt/omnialpha
+EnvironmentFile=/opt/omnialpha/.env
+ExecStart=/opt/omnialpha/.venv/bin/python -m omnialpha supervisor --bot brooks-btc
 Restart=always
 RestartSec=5
 User=gate
@@ -120,25 +120,25 @@ WantedBy=multi-user.target
 ## 5. 部署后自检
 
 ```bash
-cd /opt/gate-signal-bot
+cd /opt/omnialpha
 source .venv/bin/activate
 
 # 5.1 状态
-python -m gate_bot status
+python -m omnialpha status
 
 # 5.2 测试全绿
 python -m unittest discover -s tests
 
 # 5.3 实盘连通（只读）
-python -m gate_bot once --bot brooks-btc
+python -m omnialpha once --bot brooks-btc
 
 # 5.4 回测冒烟
-python -m gate_bot backtest --bot brooks-btc --days 7
+python -m omnialpha backtest --bot brooks-btc --days 7
 
 # 5.5 看门狗接管范围
 python -c "
 from pathlib import Path
-from gate_bot.watchdog import Watchdog
+from omnialpha.watchdog import Watchdog
 wd = Watchdog(Path('.'))
 wd.discover()
 print('targets:', len(wd.targets))
@@ -162,15 +162,15 @@ print('targets:', len(wd.targets))
 
 ```bash
 # 升级
-cd /opt/gate-signal-bot
+cd /opt/omnialpha
 git pull
 .venv/bin/pip install -r requirements.txt
-sudo systemctl restart gate-watchdog
+sudo systemctl restart omnialpha-watchdog
 
 # 回滚
 git log --oneline -5
 git reset --hard <上一个稳定 commit>
-sudo systemctl restart gate-watchdog
+sudo systemctl restart omnialpha-watchdog
 ```
 
 **注意**：升级会触发 `uv venv` 重建的话，Linux 无 pythonw 弹窗问题；Windows 见 OPERATIONS.md §2.0b。

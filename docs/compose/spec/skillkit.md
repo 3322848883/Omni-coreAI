@@ -10,13 +10,13 @@ design_ref: research/agent-skill-systems/REPORT.md
 
 ## Report
 
-**What was built** — `gate_bot/skillkit/`：可安装 skill 引擎，三级渐进披露。
+**What was built** — `omnialpha/skillkit/`：可安装 skill 引擎，三级渐进披露。
 - **L1** catalog：启动只把 `name + description`（含使用提示）注入 system prompt；body 永不预载
 - **L2** `skill(name)` 工具：按需载入 SKILL.md 正文
 - **L3** `skill_ref(name, path)` 工具：按需读 `references/`/`scripts/`/`assets/`（realpath 遏制）
 - 模块：`models / loader（Safe-YAML）/ validate（E01-E10, W01-W05）/ registry / budget / catalog / tool / journal / cli`
 - 集成：`tools.py`（22 工具）、`prompt.py`（catalog 插槽）、`loop.py`（catalog 注入 + 白名单 + allowed-tools 收窄）、`__main__.py`（`skill` 子命令）
-- 安装：`python -m gate_bot skill install <dir>`（fail-closed，不自动启用）；启用 bot yaml `skills: [id]`
+- 安装：`python -m omnialpha skill install <dir>`（fail-closed，不自动启用）；启用 bot yaml `skills: [id]`
 
 **Verification** — 七轮生产测试 + 真实行情全链路：
 - skillkit 单测 **125 PASS**；全量 **859 PASS**
@@ -50,7 +50,7 @@ design_ref: research/agent-skill-systems/REPORT.md
 
 ## [S1] Problem
 
-gate-signal-bot 的 LLM 策略层目前只有两层扩展面：**20 个 function-calling 工具**（确定性数据/动作接口）与 **prompts/ 人格文件**（一次性整包注入）。缺中间层——**可安装、可组合、按需加载的 skill**：
+OmniAlpha 的 LLM 策略层目前只有两层扩展面：**20 个 function-calling 工具**（确定性数据/动作接口）与 **prompts/ 人格文件**（一次性整包注入）。缺中间层——**可安装、可组合、按需加载的 skill**：
 
 - 策略方法论（Brooks 26 步、SMC 框架、风控 checklist）现在要么塞进 prompt 常驻（token 爆炸），要么写死在人格文件里（不可组合、不可单独升级）
 - 没有「安装/校验/启停」生命周期：第三方或自研能力包无法安全落地
@@ -72,7 +72,7 @@ gate-signal-bot 的 LLM 策略层目前只有两层扩展面：**20 个 function
 
         │  scan（plan-loop 启动 + 配置变更）
         ▼
-┌────────────────── gate_bot/skillkit/ ──────────────────┐
+┌────────────────── omnialpha/skillkit/ ──────────────────┐
 │  models.py     SkillMeta / SkillPackage dataclass       │
 │  loader.py     发现 + Safe-YAML frontmatter 解析        │
 │  validate.py   安装期校验（fail-closed）                 │
@@ -123,7 +123,7 @@ skills/<skill-id>/
 ### [S2.3] 数据模型
 
 ```python
-# gate_bot/skillkit/models.py
+# omnialpha/skillkit/models.py
 @dataclass(frozen=True)
 class SkillMeta:
     id: str                    # = name = 目录名
@@ -145,7 +145,7 @@ class SkillPackage:
 ```
 
 ```python
-# gate_bot/skillkit/registry.py
+# omnialpha/skillkit/registry.py
 class SkillRegistry:
     def scan(self, roots: list[Path]) -> list[SkillMeta]: ...
     def visible_for(self, bot_id: str) -> list[SkillMeta]: ...
@@ -218,7 +218,7 @@ skills: []                        # 该 bot 无 skill（不渲染 catalog）
 
 ### [S2.6] 安装期校验（validate.py，fail-closed）
 
-CLI：`python -m gate_bot skill install <src_dir> [--bot <id>]`
+CLI：`python -m omnialpha skill install <src_dir> [--bot <id>]`
 
 ```
 ERROR（拒装，退出码 1）
@@ -246,12 +246,12 @@ WARNING（可装，退出码 0）
 ### [S2.7] CLI 面
 
 ```
-python -m gate_bot skill install <path> [--bot ID]   # 校验+安装（不启用）
-python -m gate_bot skill list [--bot ID]             # 已装 + 启用状态 + body_tokens
-python -m gate_bot skill show <id>                   # meta + 校验摘要
-python -m gate_bot skill validate <path|id>          # 只校验
-python -m gate_bot skill remove <id>                 # 卸载（需 --yes）
-python -m gate_bot skill run <id> --bot ID           # 用户专属 skill 的 CLI 入口
+python -m omnialpha skill install <path> [--bot ID]   # 校验+安装（不启用）
+python -m omnialpha skill list [--bot ID]             # 已装 + 启用状态 + body_tokens
+python -m omnialpha skill show <id>                   # meta + 校验摘要
+python -m omnialpha skill validate <path|id>          # 只校验
+python -m omnialpha skill remove <id>                 # 卸载（需 --yes）
+python -m omnialpha skill run <id> --bot ID           # 用户专属 skill 的 CLI 入口
 ```
 
 ### [S2.8] 配置

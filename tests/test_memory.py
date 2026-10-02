@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.memory import (  # noqa: E402
+from omnialpha.memory import (  # noqa: E402
     CacheGuard,
     MemoryJournal,
     MemoryProfile,
@@ -18,7 +18,7 @@ from gate_bot.memory import (  # noqa: E402
     build_context,
     cleanup_closed_orders,
 )
-from gate_bot.persona.orders import (  # noqa: E402
+from omnialpha.persona.orders import (  # noqa: E402
     ACT_WEIGHTS,
     RECENT_EVENTS_MAX,
     SharedOrderStore,

@@ -22,17 +22,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.config import BotConfig  # noqa: E402
-from gate_bot.gate_client import GateApiError, GateClient  # noqa: E402
-from gate_bot.strategist.bridge import chips_to_signal, write_hold_audit, write_signal_file  # noqa: E402
-from gate_bot.strategist.llm_client import LLMClient, LLMConfig, LLMError  # noqa: E402
-from gate_bot.strategist.loop import PlanRunner, StrategistConfig  # noqa: E402
-from gate_bot.strategist.market import MarketConfig  # noqa: E402
-from gate_bot.strategist.prompt import build_system_prompt, build_user_prompt, load_strategy_prompt  # noqa: E402
-from gate_bot.strategist.risk import RiskConfig, apply_risk  # noqa: E402
-from gate_bot.strategist.schema import Plan, Chip, parse_plan_text  # noqa: E402
-from gate_bot.strategist.snapshot import collect_snapshot  # noqa: E402
-from gate_bot.watcher import ProjectPaths, process_file  # noqa: E402
+from omnialpha.config import BotConfig  # noqa: E402
+from omnialpha.gate_client import GateApiError, GateClient  # noqa: E402
+from omnialpha.strategist.bridge import chips_to_signal, write_hold_audit, write_signal_file  # noqa: E402
+from omnialpha.strategist.llm_client import LLMClient, LLMConfig, LLMError  # noqa: E402
+from omnialpha.strategist.loop import PlanRunner, StrategistConfig  # noqa: E402
+from omnialpha.strategist.market import MarketConfig  # noqa: E402
+from omnialpha.strategist.prompt import build_system_prompt, build_user_prompt, load_strategy_prompt  # noqa: E402
+from omnialpha.strategist.risk import RiskConfig, apply_risk  # noqa: E402
+from omnialpha.strategist.schema import Plan, Chip, parse_plan_text  # noqa: E402
+from omnialpha.strategist.snapshot import collect_snapshot  # noqa: E402
+from omnialpha.watcher import ProjectPaths, process_file  # noqa: E402
 
 RESULTS: list[tuple[str, str, str]] = []
 
@@ -193,15 +193,15 @@ def main() -> int:
 
     # ── hop 8: trade journal ───────────────────────────────
     print("\n[h8] trade journal")
-    from gate_bot.tradelog import TradeLogger, trade_log_path
+    from omnialpha.tradelog import TradeLogger, trade_log_path
     rows = TradeLogger(trade_log_path(paths.root, bot_id)).tail(5)
     rec("h8_tradelog", any(r.get("type") == "execution" for r in rows),
         "rows=%d types=%s" % (len(rows), [r.get("type") for r in rows]))
 
     # ── hop 9: cleanup flatten ─────────────────────────────
     print("\n[h9] cleanup")
-    from gate_bot.executor import Executor
-    from gate_bot.schema import parse_signal
+    from omnialpha.executor import Executor
+    from omnialpha.schema import parse_signal
     ex = Executor(client, symbols_whitelist=["BTC_USDT"], max_notional_usd=25)
     flat = ex.execute_signal(parse_signal({"action": "flatten", "symbol": "BTC_USDT", "label": "chain-fin"}))
     cancel = ex.execute_signal(parse_signal({"action": "cancel_all", "symbol": "BTC_USDT"}))

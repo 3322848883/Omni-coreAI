@@ -69,7 +69,7 @@
 
 | # | 项 | 做法 |
 |---|----|------|
-| P2.1 | 体检 CLI：`python -m gate_bot paper-audit` 定期跑 |
+| P2.1 | 体检 CLI：`python -m omnialpha paper-audit` 定期跑 |
 | P2.2 | 策略评分板：按 bot 输出 Sharpe/回撤/胜率（样本量标注） |
 | P2.3 | 配置模板：`max_notional_pct` / `max_chips` / interval 命名统一 |
 | P2.4 | 历史账本「可信度标记」：含 dup fill 的 bot 打 *，排名只比增量 |
@@ -116,9 +116,9 @@
 - **P1.4 单实例强化**：PidLock 改 OS 文件锁 + worker 自持锁（防 PID 复用/孤儿双开）
 - **P0.4 监控告警落盘**：`monitoring/alerts.py` — 权益偏离/dup fill/orphan → `state/alerts.json`
 - **成交飞书卡片**：开/止盈/止损/平/减仓/改单 彩色卡片推送（`config/alerts.yaml` 或 `FEISHU_*`）
-- **进程看门狗**：`python -m gate_bot watchdog` — 按 `enabled` 开关补拉挂掉组件 + 飞书通知
+- **进程看门狗**：`python -m omnialpha watchdog` — 按 `enabled` 开关补拉挂掉组件 + 飞书通知
 - **波动率仓位挂钩**：`account_risk.vol_target_pct` + `executor._vol_adjust`（ATR 目标缩放）
-- **回测 CLI**：`python -m gate_bot backtest --bot X --days N`（journal 回放 + DSR）
+- **回测 CLI**：`python -m omnialpha backtest --bot X --days N`（journal 回放 + DSR）
 - 全量 665 测试 OK
 
 ### 遗留（非阻塞）

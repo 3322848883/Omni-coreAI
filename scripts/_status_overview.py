@@ -6,11 +6,11 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-ROOT = Path(r"C:\Users\w6485\Desktop\测试\gate-signal-bot")
+ROOT = Path(r"C:\Users\w6485\Desktop\测试\OmniAlpha")
 
 
 def cmd(*args):
-    r = subprocess.run([sys.executable, "-m", "gate_bot", *args],
+    r = subprocess.run([sys.executable, "-m", "omnialpha", *args],
                        capture_output=True, text=True, encoding="utf-8", cwd=str(ROOT))
     return r.stdout
 

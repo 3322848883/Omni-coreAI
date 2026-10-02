@@ -24,7 +24,7 @@ from typing import Any, Optional
 
 from .indicators import atr, boll, ema, macd, rsi, sma
 
-log = logging.getLogger("gate_bot.triggers")
+log = logging.getLogger("omnialpha.triggers")
 
 LEAF_CONDITIONS = frozenset({
     "price_vs_ema", "ema_cross", "atr_spike", "price_break", "rsi",

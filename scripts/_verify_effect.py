@@ -7,11 +7,11 @@ from pathlib import Path
 sys.path.insert(0, ".")
 os.environ.setdefault("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
 
-from gate_bot.config import load_bot_config
-from gate_bot.gate_client import GateClient
-from gate_bot.strategist.llm_client import LLMClient, LLMConfig
-from gate_bot.strategist.prompt import build_system_prompt, load_strategy_prompt
-from gate_bot.strategist.tools import NATIVE_TOOLS, TOOL_GUIDE, run_tool
+from omnialpha.config import load_bot_config
+from omnialpha.gate_client import GateClient
+from omnialpha.strategist.llm_client import LLMClient, LLMConfig
+from omnialpha.strategist.prompt import build_system_prompt, load_strategy_prompt
+from omnialpha.strategist.tools import NATIVE_TOOLS, TOOL_GUIDE, run_tool
 
 bot = load_bot_config(Path("config/bots/brooks-btc.yaml"))
 raw_llm = dict(bot.strategist.get("llm") or {})

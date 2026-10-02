@@ -1,4 +1,4 @@
-﻿"""gate_bot.monitoring — 策略衰减检测 + 健康监控告警 + 告警落盘 + 可扩展通知渠道。"""
+﻿"""omnialpha.monitoring — 策略衰减检测 + 健康监控告警 + 告警落盘 + 可扩展通知渠道。"""
 from .alerts import (
     TYPE_DUP_FILL,
     TYPE_EQUITY_DEVIATION,

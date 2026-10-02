@@ -46,7 +46,7 @@ llm:
 
 | 文件 | 职责 |
 |------|------|
-| `gate_bot/providers.py` | 加载 yaml、`resolve_llm_config(root, bot_id, llm_dict)` |
+| `omnialpha/providers.py` | 加载 yaml、`resolve_llm_config(root, bot_id, llm_dict)` |
 | `__main__` | `_build_plan_runner` 改调 resolve |
 | `config/providers.yaml` | 预设：官方 DeepSeek + 网关 |
 

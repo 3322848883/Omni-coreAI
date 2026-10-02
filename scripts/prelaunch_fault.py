@@ -11,15 +11,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.executor import Executor
-from gate_bot.schema import parse_signal, SchemaError
+from omnialpha.executor import Executor
+from omnialpha.schema import parse_signal, SchemaError
 
 
 def run_fault(REP, gate_client) -> None:
     # ── M15 timeout / no auto-retry ──
     print("\n[M15] timeout & no auto-retry")
     try:
-        from gate_bot.strategist.llm_client import LLMClient, LLMConfig, LLMError
+        from omnialpha.strategist.llm_client import LLMClient, LLMConfig, LLMError
 
         if not os.environ.get("OPENAI_API_KEY"):
             REP.rec("M15", "llm_timeout", False, "SKIP no OPENAI_API_KEY")
@@ -40,7 +40,7 @@ def run_fault(REP, gate_client) -> None:
         REP.rec("M15", "llm_timeout", False, str(e)[:80])
 
     try:
-        from gate_bot.gate_client import GateClient, GateApiError
+        from omnialpha.gate_client import GateClient, GateApiError
 
         bad = GateClient("x", "y", env="testnet")
         # point to unreachable by monkeypatching base
@@ -57,8 +57,8 @@ def run_fault(REP, gate_client) -> None:
 
     # degraded snapshot marks
     try:
-        from gate_bot.strategist.snapshot import collect_snapshot
-        from gate_bot.strategist.market import MarketConfig
+        from omnialpha.strategist.snapshot import collect_snapshot
+        from omnialpha.strategist.market import MarketConfig
 
         class Flaky:
             def __init__(self):
@@ -67,7 +67,7 @@ def run_fault(REP, gate_client) -> None:
             def get_ticker(self, sym):
                 if self.n == 0:
                     self.n += 1
-                    from gate_bot.gate_client import GateApiError
+                    from omnialpha.gate_client import GateApiError
                     raise GateApiError("transient")
                 return {"last": "100"}
 
@@ -75,7 +75,7 @@ def run_fault(REP, gate_client) -> None:
                 return 100.0
 
             def get_contract(self, sym):
-                from gate_bot.gate_client import ContractMeta
+                from omnialpha.gate_client import ContractMeta
                 return ContractMeta(sym, 0.0001, 1, 0.1, 100)
 
             def get_account(self):
@@ -138,7 +138,7 @@ def run_fault(REP, gate_client) -> None:
     # ── M17 interrupt + reconcile ──
     print("\n[M17] reconcile after hang")
     try:
-        from gate_bot.watcher import reconcile_protection
+        from omnialpha.watcher import reconcile_protection
 
         client = gate_client("testnet")
         # place entry without protection, then reconcile should add TP/SL or report

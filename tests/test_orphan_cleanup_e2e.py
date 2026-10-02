@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gate_bot.executor import Executor
+from omnialpha.executor import Executor
 
 
 class PaperClient:
@@ -18,6 +18,7 @@ class PaperClient:
     def __init__(self):
         self.positions = []
         self.price_orders = []
+        self.open_orders = []
         self._seq = 1000
         self.cancelled = []
 
@@ -55,6 +56,23 @@ class PaperClient:
         }
         self.price_orders.append(po)
         return po
+
+    def list_orders(self, symbol=None):
+        return [dict(o) for o in self.open_orders]
+
+    def place_entry(self, text: str, size: float, left=None):
+        """挂一张未成交的入场单（非 reduce-only）。"""
+        self._seq += 1
+        o = {
+            "id": self._seq,
+            "text": text,
+            "size": size,
+            "left": size if left is None else left,
+            "is_reduce_only": False,
+            "status": "open",
+        }
+        self.open_orders.append(o)
+        return o
 
     def set_position(self, size: float):
         if size == 0:
@@ -163,6 +181,37 @@ class TestOrphanCleanupE2E(unittest.TestCase):
             self.assertTrue(ex._is_orphan_protector(smc, []))  # 是孤儿
             cleaned = ex._cleanup_orphan_protectors("BTC_USDT")
             self.assertEqual(cleaned, [])  # 但不在命名空间内 → 不清
+
+    def test_pending_entry_blocks_orphan_sweep(self):
+        """待成交入场单的预挂 TP/SL 不能被当孤儿撤掉（否则成交即裸仓）。"""
+        with tempfile.TemporaryDirectory() as td:
+            client, ex = self._make(Path(td))
+            client.set_position(0)                 # 还没成交 → 无持仓
+            client.place_entry("t-pt", 11)         # 入场限价单
+            client.place_protector("t-pt-tp", -6, 86900)
+            client.place_protector("t-pt-sl", -11, 85300)
+            cleaned = ex._cleanup_orphan_protectors("BTC_USDT")
+            self.assertEqual(cleaned, [])
+            self.assertEqual(len(client.price_orders), 2)   # 保护单保留
+            self.assertEqual(client.cancelled, [])
+
+    def test_entry_fully_filled_does_not_block(self):
+        """入场单已全部成交（left=0）→ 不再豁免，孤儿照常清理。"""
+        with tempfile.TemporaryDirectory() as td:
+            client, ex = self._make(Path(td))
+            client.set_position(0)
+            client.place_entry("t-pt", 11, left=0)
+            client.place_protector("t-pt-sl", -11, 85300)
+            self.assertEqual(len(ex._cleanup_orphan_protectors("BTC_USDT")), 1)
+
+    def test_other_bot_pending_entry_does_not_block(self):
+        """别家命名空间的待成交入场单不豁免本 bot 的清理。"""
+        with tempfile.TemporaryDirectory() as td:
+            client, ex = self._make(Path(td))       # label_prefix=pt
+            client.set_position(0)
+            client.place_entry("t-smc", 11)         # 别家的
+            client.place_protector("t-pt-sl", -11, 85300)
+            self.assertEqual(len(ex._cleanup_orphan_protectors("BTC_USDT")), 1)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # 交易系统设计深度报告（Trading System Deep Review）
 
-**范围**：gate-signal-bot + pa-data-source（monorepo）  
+**范围**：OmniAlpha + pa-data-source（monorepo）  
 **视角**：生产级加密永续策略执行系统（多机器人 / 多策略）  
 **证据**：代码结构、并发测试（29/29）、全链路与订单确认实测  
 **日期**：2026-09-24
@@ -28,7 +28,7 @@
 ```text
 pa-data-source ──write──► kline.db（只读）
                               │
-gate_bot strategist ──hybrid──┘
+omnialpha strategist ──hybrid──┘
   快照(指标/资金费/OI/盘口) → LLM Plan → 风控 → inbox JSON
                                     │
                           watcher / executor

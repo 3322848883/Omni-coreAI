@@ -10,15 +10,15 @@ commits: 98d4fec..HEAD
 
 ## Report
 
-**What was built** — 新增 `gate_bot/metrics/`：从各 paper `account.db` 只读聚合 equity/fills，计算收益、最大回撤、Sharpe/Sortino/Calmar、胜率/盈亏比/期望值、PSR/**DSR**（Bailey–López de Prado，阈值在 SE 单位）、OOS 30d Sharpe、成本拖累；`trials.py` 扫描 `prompts/*.md` + `config/bots/*.yaml` 内容哈希，变更即累计试错次数 N（共享 prompt 分摊到全部 owner bot）；`paper-score` CLI 输出排序表并写 `data/metrics/scoreboard.json`。排序：样本天数&lt;3 时 OOS 优先，否则 DSR 主序。风控按用户决策**不加统一硬闸**（策略自管）。
+**What was built** — 新增 `omnialpha/metrics/`：从各 paper `account.db` 只读聚合 equity/fills，计算收益、最大回撤、Sharpe/Sortino/Calmar、胜率/盈亏比/期望值、PSR/**DSR**（Bailey–López de Prado，阈值在 SE 单位）、OOS 30d Sharpe、成本拖累；`trials.py` 扫描 `prompts/*.md` + `config/bots/*.yaml` 内容哈希，变更即累计试错次数 N（共享 prompt 分摊到全部 owner bot）；`paper-score` CLI 输出排序表并写 `data/metrics/scoreboard.json`。排序：样本天数&lt;3 时 OOS 优先，否则 DSR 主序。风控按用户决策**不加统一硬闸**（策略自管）。
 
-**Verification** — `unittest tests.test_metrics_stats tests.test_metrics_scoreboard` 14 PASS；`unittest discover -s tests` 463 OK（含 PRE-EXISTING 偶发 `test_shared_order_500_votes` 本轮未触发）；`python -m gate_bot --root <repo> paper-score` 对 24 个 paper yaml 出表（17 有账本 + 7 no_data）。
+**Verification** — `unittest tests.test_metrics_stats tests.test_metrics_scoreboard` 14 PASS；`unittest discover -s tests` 463 OK（含 PRE-EXISTING 偶发 `test_shared_order_500_votes` 本轮未触发）；`python -m omnialpha --root <repo> paper-score` 对 24 个 paper yaml 出表（17 有账本 + 7 no_data）。
 
 **Journey log**
 - DSR 阈值必须用 `z = srs/se − E[max N]`（SE 单位）；当成年化 Sharpe 再 `/√365` 会严重低估试错惩罚（Review 抓出）。
 - 共享 prompt（vergex×6、eth_range×3）试错 N 必须 fan-out 到所有 owner，否则 bots 间不可比。
 - worktree 无 .venv，单测需指主仓 python；`--root` 必须放在子命令前。
-- 审查驱动修复：Sortino 下行偏差、low_n、dsr 排序测试、GATE_BOT_ROOT 解析均来自 review 清单。
+- 审查驱动修复：Sortino 下行偏差、low_n、dsr 排序测试、OMNIALPHA_ROOT 解析均来自 review 清单。
 
 ## [S1] Problem
 
@@ -35,13 +35,13 @@ commits: 98d4fec..HEAD
 ### 2.1 组件
 
 ```text
-gate_bot/metrics/
+omnialpha/metrics/
   __init__.py / __main__.py
   series.py      # equity/fills 序列读取（paper account.db 只读）
   stats.py       # 纯函数：return/maxdd/sharpe/sortino/calmar/pf/winrate/expectancy/skew/kurt/psr/dsr
   trials.py      # 试错台账：扫描 prompt/yaml 变更 → data/trials.jsonl，per-bot N
   scoreboard.py  # 聚合 → data/metrics/scoreboard.json + 控制台表
-  cli.py         # python -m gate_bot paper-score | metrics.cli
+  cli.py         # python -m omnialpha paper-score | metrics.cli
 ```
 
 ### 2.2 指标口径（日频，pnl_snapshot.equity）

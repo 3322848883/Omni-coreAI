@@ -1,4 +1,4 @@
-"""kline.db schema contract (pa-data-source write → gate-signal-bot read-only)."""
+"""kline.db schema contract (pa-data-source write → OmniAlpha read-only)."""
 from __future__ import annotations
 
 import sqlite3

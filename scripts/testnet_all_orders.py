@@ -15,9 +15,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.gate_client import GateApiError, GateClient  # noqa: E402
-from gate_bot.executor import Executor  # noqa: E402
-from gate_bot.schema import parse_signal  # noqa: E402
+from omnialpha.gate_client import GateApiError, GateClient  # noqa: E402
+from omnialpha.executor import Executor  # noqa: E402
+from omnialpha.schema import parse_signal  # noqa: E402
 
 RESULTS: list[tuple[str, str, str]] = []
 
@@ -222,8 +222,8 @@ def main() -> int:
     # ── 12 inbox watcher path (end-to-end) ─────────────────
     print("\n[12] watcher process_file end-to-end")
     try:
-        from gate_bot.config import BotConfig
-        from gate_bot.watcher import ProjectPaths, process_file
+        from omnialpha.config import BotConfig
+        from omnialpha.watcher import ProjectPaths, process_file
 
         tmp_root = ROOT / ".order_type_test"
         paths = ProjectPaths(tmp_root)

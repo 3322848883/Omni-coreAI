@@ -7,12 +7,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.persona import (  # noqa: E402
+from omnialpha.persona import (  # noqa: E402
     PersonaGroup,
     SharedOrderStore,
     fuse_plans,
 )
-from gate_bot.persona.fusion import (  # noqa: E402
+from omnialpha.persona.fusion import (  # noqa: E402
     DIR_CLOSE,
     DIR_HOLD,
     DIR_LONG,
@@ -48,7 +48,7 @@ class TestCriticalFixes(unittest.TestCase):
 
     def test_order_id_reused_while_open(self):
         """持仓期（方向决策）复用现有 open 单，不每轮建新单。"""
-        from gate_bot.persona.runner import PersonaRunner
+        from omnialpha.persona.runner import PersonaRunner
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -70,7 +70,7 @@ class TestCriticalFixes(unittest.TestCase):
             self.assertEqual(res["order_id"], oid)
 
     def test_close_marks_order_closed(self):
-        from gate_bot.persona.runner import PersonaRunner
+        from omnialpha.persona.runner import PersonaRunner
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -94,7 +94,7 @@ class TestCriticalFixes(unittest.TestCase):
 
     def test_risk_min_confidence_blocks(self):
         """融合后信号低于 min_confidence → 降级为 hold（不绕过风控）。"""
-        from gate_bot.persona.runner import PersonaRunner
+        from omnialpha.persona.runner import PersonaRunner
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -123,7 +123,7 @@ class TestCriticalFixes(unittest.TestCase):
                 self.assertIn("risk_reject", payload.get("meta", {}))
 
     def test_risk_caps_size(self):
-        from gate_bot.persona.runner import PersonaRunner
+        from omnialpha.persona.runner import PersonaRunner
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -153,7 +153,7 @@ class TestCriticalFixes(unittest.TestCase):
 
     def test_risk_not_gate_manage_actions(self):
         """风控不得拦 close/reduce/modify（减险出场）。"""
-        from gate_bot.persona.runner import PersonaRunner
+        from omnialpha.persona.runner import PersonaRunner
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -181,7 +181,7 @@ class TestCriticalFixes(unittest.TestCase):
 
     def test_risk_zero_confidence_blocked(self):
         """confidence=0 也应被 min_confidence 拦（不能假穿风控）。"""
-        from gate_bot.persona.runner import PersonaRunner
+        from omnialpha.persona.runner import PersonaRunner
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -225,7 +225,7 @@ class TestTypeTriggerTolerance(unittest.TestCase):
         return base
 
     def test_type_trigger_maps_to_market(self):
-        from gate_bot.strategist.schema import parse_plan_text
+        from omnialpha.strategist.schema import parse_plan_text
 
         plan = {
             "cycle_id": "c1", "reasoning": "test",
@@ -236,7 +236,7 @@ class TestTypeTriggerTolerance(unittest.TestCase):
         self.assertEqual(p.chips[0].order_type, "market")
 
     def test_type_stop_maps_to_market(self):
-        from gate_bot.strategist.schema import parse_plan_text
+        from omnialpha.strategist.schema import parse_plan_text
 
         plan = {
             "cycle_id": "c1", "reasoning": "test",
@@ -247,7 +247,7 @@ class TestTypeTriggerTolerance(unittest.TestCase):
         self.assertEqual(p.chips[0].order_type, "market")
 
     def test_valid_type_untouched(self):
-        from gate_bot.strategist.schema import parse_plan_text
+        from omnialpha.strategist.schema import parse_plan_text
 
         plan = {
             "cycle_id": "c1", "reasoning": "test",
@@ -258,7 +258,7 @@ class TestTypeTriggerTolerance(unittest.TestCase):
         self.assertEqual(p.chips[0].order_type, "limit")
 
     def test_unknown_type_still_rejected(self):
-        from gate_bot.strategist.schema import parse_plan_text, PlanError
+        from omnialpha.strategist.schema import parse_plan_text, PlanError
 
         plan = {
             "cycle_id": "c1", "reasoning": "test",
@@ -273,7 +273,7 @@ class TestJsonRepair(unittest.TestCase):
     """LLM 输出常见 JSON 病应自动修复。"""
 
     def _parse(self, text):
-        from gate_bot.strategist.schema import parse_plan_text
+        from omnialpha.strategist.schema import parse_plan_text
 
         return parse_plan_text(text)
 
@@ -345,7 +345,7 @@ class TestMultiObjectExtract(unittest.TestCase):
     """模型先吐 triggers 片段再吐主 Plan —— 应选主 Plan。"""
 
     def test_triggers_fragment_then_plan(self):
-        from gate_bot.strategist.schema import parse_plan_text
+        from omnialpha.strategist.schema import parse_plan_text
 
         raw = '''{type:price_break, symbol, lookback, side:high}
 {"cycle_id":"c1","reasoning":"r","chips":[{"symbol":"BTC_USDT","action":"hold","confidence":0.6}]}'''
@@ -354,7 +354,7 @@ class TestMultiObjectExtract(unittest.TestCase):
         self.assertEqual(p.chips[0].action, "hold")
 
     def test_triggers_array_then_plan(self):
-        from gate_bot.strategist.schema import parse_plan_text
+        from omnialpha.strategist.schema import parse_plan_text
 
         raw = '''思考：先列触发条件 {"type":"price_break","symbol":"BTC_USDT"} 然后给计划：
 {"cycle_id":"c2","reasoning":"r","chips":[]}'''
@@ -362,7 +362,7 @@ class TestMultiObjectExtract(unittest.TestCase):
         self.assertEqual(p.cycle_id, "c2")
 
     def test_only_fragment_no_plan(self):
-        from gate_bot.strategist.schema import parse_plan_text, PlanError
+        from omnialpha.strategist.schema import parse_plan_text, PlanError
 
         raw = "{type:price_break, symbol, lookback, side:high}"
         with self.assertRaises(PlanError):

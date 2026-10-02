@@ -75,7 +75,7 @@
   > "Build an intraday breakout strategy on BTC/USDT 15m candles with a volume surge filter, 2.5x ATR trailing stop, and dynamic profit targets based on recent swing highs."
   >
   > Defense-in-Depth Risk Engine: 9 Invasive Pre-Trade Checks (max order size, leverage caps, price sanity, balance validation), Profit-Activated Trailing Stops, Dynamic TP/SL (Support/Resistance + ATR volatility-based triggers).
-- **Why excellent**: Single-sentence prompt that packs timeframe, entry filter, stop mechanism, and TP logic — ideal template shape for a gate-signal-bot. Risk engine checklist is directly transplantable as a risk-manager prompt.
+- **Why excellent**: Single-sentence prompt that packs timeframe, entry filter, stop mechanism, and TP logic — ideal template shape for a OmniAlpha. Risk engine checklist is directly transplantable as a risk-manager prompt.
 - **Risk notes**: LLM-generated strategies need sandboxed backtesting before live. API keys must never have withdrawal permission. Crypto leverage caps are exchange-specific.
 
 ---

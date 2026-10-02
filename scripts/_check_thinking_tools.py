@@ -4,7 +4,7 @@ import json
 import sys
 from pathlib import Path
 
-ROOT = Path(r"C:\Users\w6485\Desktop\测试\gate-signal-bot")
+ROOT = Path(r"C:\Users\w6485\Desktop\测试\OmniAlpha")
 
 for bot in ["smc-paper", "orderflow-paper", "pa-a"]:
     files = sorted((ROOT / "data" / "bots" / bot / "state").glob("*.thinking.json"),

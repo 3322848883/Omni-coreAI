@@ -15,14 +15,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.gate_client import GateClient  # noqa: E402
-from gate_bot.executor import Executor  # noqa: E402
-from gate_bot.schema import parse_signal  # noqa: E402
-from gate_bot.strategist.indicators import ema, rsi, atr, macd, boll, attach_indicators  # noqa: E402
-from gate_bot.strategist.market import fetch_rest_candles  # noqa: E402
-from gate_bot.strategist.triggers import evaluate_condition  # noqa: E402
-from gate_bot.strategist.trigger_store import AITriggerPolicy, validate_trigger_payload, TriggerPolicyError  # noqa: E402
-from gate_bot.tradelog import TradeLogger, trade_log_path  # noqa: E402
+from omnialpha.gate_client import GateClient  # noqa: E402
+from omnialpha.executor import Executor  # noqa: E402
+from omnialpha.schema import parse_signal  # noqa: E402
+from omnialpha.strategist.indicators import ema, rsi, atr, macd, boll, attach_indicators  # noqa: E402
+from omnialpha.strategist.market import fetch_rest_candles  # noqa: E402
+from omnialpha.strategist.triggers import evaluate_condition  # noqa: E402
+from omnialpha.strategist.trigger_store import AITriggerPolicy, validate_trigger_payload, TriggerPolicyError  # noqa: E402
+from omnialpha.tradelog import TradeLogger, trade_log_path  # noqa: E402
 
 RESULTS = []
 PROBLEMS = []
@@ -102,10 +102,10 @@ def main() -> int:
     print("\n[L4] live LLM plan")
     if os.environ.get("OPENAI_API_KEY"):
         try:
-            from gate_bot.strategist.loop import PlanRunner, StrategistConfig
-            from gate_bot.strategist.llm_client import LLMClient, LLMConfig
-            from gate_bot.strategist.market import MarketConfig
-            from gate_bot.strategist.risk import RiskConfig
+            from omnialpha.strategist.loop import PlanRunner, StrategistConfig
+            from omnialpha.strategist.llm_client import LLMClient, LLMConfig
+            from omnialpha.strategist.market import MarketConfig
+            from omnialpha.strategist.risk import RiskConfig
             import shutil
             root = ROOT / ".live_prod_test"
             if root.exists():

@@ -3,16 +3,16 @@ import json
 import os
 from pathlib import Path
 
-from gate_bot.config import load_bot_config
-from gate_bot.gate_client import GateClient
-from gate_bot.strategist.loop import StrategistConfig
-from gate_bot.strategist.market import MarketConfig
-from gate_bot.strategist.snapshot import collect_snapshot
-from gate_bot.strategist.prompt import build_user_prompt, build_system_prompt, load_strategy_prompt
-from gate_bot.strategist.tools import NATIVE_TOOLS, TOOL_GUIDE
-from gate_bot.strategist.vision import generate_and_encode
-from gate_bot.skillkit import SkillRegistry, render_catalog
-from gate_bot.watcher import ProjectPaths
+from omnialpha.config import load_bot_config
+from omnialpha.gate_client import GateClient
+from omnialpha.strategist.loop import StrategistConfig
+from omnialpha.strategist.market import MarketConfig
+from omnialpha.strategist.snapshot import collect_snapshot
+from omnialpha.strategist.prompt import build_user_prompt, build_system_prompt, load_strategy_prompt
+from omnialpha.strategist.tools import NATIVE_TOOLS, TOOL_GUIDE
+from omnialpha.strategist.vision import generate_and_encode
+from omnialpha.skillkit import SkillRegistry, render_catalog
+from omnialpha.watcher import ProjectPaths
 
 root = Path(".").resolve()
 paths = ProjectPaths(root)

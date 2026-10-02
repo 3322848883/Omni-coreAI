@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import unittest
 
-from gate_bot.executor import Executor
-from gate_bot.sizing import vol_adjust_size
+from omnialpha.executor import Executor
+from omnialpha.sizing import vol_adjust_size
 
 
 class DummyClient:

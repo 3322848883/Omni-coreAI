@@ -9,8 +9,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.strategist.tools import NATIVE_TOOLS, TOOL_NAMES  # noqa: E402
-from gate_bot.strategist.tv_tools import TV_TOOL_DEFS, TV_TOOL_NAMES, run_tv_tool  # noqa: E402
+from omnialpha.strategist.tools import NATIVE_TOOLS, TOOL_NAMES  # noqa: E402
+from omnialpha.strategist.tv_tools import TV_TOOL_DEFS, TV_TOOL_NAMES, run_tv_tool  # noqa: E402
 
 
 def _fake_rows(n=120, base=100.0):
@@ -57,7 +57,7 @@ class TestTvToolRegistration(unittest.TestCase):
 
 class TestTvToolRun(unittest.TestCase):
     def _run(self, name, args):
-        with mock.patch("gate_bot.strategist.tv_tools.resolve_candles",
+        with mock.patch("omnialpha.strategist.tv_tools.resolve_candles",
                         return_value=_FakeRes(_fake_rows())):
             return run_tv_tool(None, name, args, env="testnet", bot_root=ROOT)
 
@@ -100,7 +100,7 @@ class TestTvToolRun(unittest.TestCase):
         self.assertLess(vb["lower_inner"], vb["basis"])
 
     def test_insufficient_candles(self):
-        with mock.patch("gate_bot.strategist.tv_tools.resolve_candles",
+        with mock.patch("omnialpha.strategist.tv_tools.resolve_candles",
                         return_value=_FakeRes(_fake_rows(5))):
             r = run_tv_tool(None, "tv_rsi_yata", {"symbol": "X"}, env="testnet", bot_root=ROOT)
         self.assertIn("error", r)
@@ -114,9 +114,9 @@ class TestTvToolViaRunTool(unittest.TestCase):
     """通过 run_tool 分派（含 tv_ 前缀路由）。"""
 
     def test_dispatch(self):
-        from gate_bot.strategist import tools as T
+        from omnialpha.strategist import tools as T
 
-        with mock.patch("gate_bot.strategist.tv_tools.resolve_candles",
+        with mock.patch("omnialpha.strategist.tv_tools.resolve_candles",
                         return_value=_FakeRes(_fake_rows())):
             r = T.run_tool(None, "tv_lr_ha_candles",
                            {"symbol": "BTC_USDT", "tf": "1h"}, env="testnet", bot_root=ROOT)

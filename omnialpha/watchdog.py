@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-log = logging.getLogger("gate_bot.watchdog")
+log = logging.getLogger("omnialpha.watchdog")
 
 # 组件 → CLI 子命令
 COMPONENT_CMD = {
@@ -127,13 +127,13 @@ class Watchdog:
         if not cmd_name:
             return False
         py = self._windowless_python()
-        args = [py, "-m", "gate_bot", "--root", str(self.root), cmd_name, "--bot", t.bot_id]
+        args = [py, "-m", "omnialpha", "--root", str(self.root), cmd_name, "--bot", t.bot_id]
         log_dir = self.root / "data" / "bots" / t.bot_id / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         out_fh = open(log_dir / f"{t.component}.out", "ab")
         err_fh = open(log_dir / f"{t.component}.err", "ab")
         env = os.environ.copy()
-        env.setdefault("GATE_BOT_ROOT", str(self.root))
+        env.setdefault("OMNIALPHA_ROOT", str(self.root))
         flags = 0
         if os.name == "nt":
             flags = 0x00000008 | 0x00000200 | 0x08000000  # DETACHED|NEW_PROCESS_GROUP|NO_WINDOW

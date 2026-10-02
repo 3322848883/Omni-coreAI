@@ -1,4 +1,4 @@
-# gate-signal-bot 机器人配置样例
+# OmniAlpha 机器人配置样例
 # 复制为 config/bots/<bot_id>.yaml 后修改。以 _ 开头的文件会被忽略。
 
 bot_id: alpha

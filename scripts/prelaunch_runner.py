@@ -64,7 +64,7 @@ REP = Report()
 
 
 def gate_client(env: str):
-    from gate_bot.gate_client import GateClient
+    from omnialpha.gate_client import GateClient
 
     if env == "live":
         key = os.environ.get("GATE_API_KEY") or ""
@@ -95,7 +95,7 @@ def m1_market(client, env: str) -> None:
     except Exception as e:  # noqa: BLE001
         REP.rec("M1", "ticker_fields", False, str(e))
     try:
-        from gate_bot.strategist.market import fetch_rest_candles
+        from omnialpha.strategist.market import fetch_rest_candles
 
         rows = fetch_rest_candles(client, "BTC_USDT", "15m", 80)
         ts = [r["t"] for r in rows]
@@ -129,8 +129,8 @@ def m1_market(client, env: str) -> None:
 
 
 def m2_indicators(client) -> None:
-    from gate_bot.strategist.indicators import ema, rsi, atr, macd, boll
-    from gate_bot.strategist.market import fetch_rest_candles
+    from omnialpha.strategist.indicators import ema, rsi, atr, macd, boll
+    from omnialpha.strategist.market import fetch_rest_candles
 
     try:
         rows = []
@@ -170,8 +170,8 @@ def m2_indicators(client) -> None:
 
 
 def m3_contract(client) -> None:
-    from gate_bot.strategist.snapshot import collect_snapshot
-    from gate_bot.strategist.market import MarketConfig
+    from omnialpha.strategist.snapshot import collect_snapshot
+    from omnialpha.strategist.market import MarketConfig
 
     symbols = ["BTC_USDT", "ETH_USDT", "DOGE_USDT", "PEPE_USDT", "NOPE_USDT"]
     try:
@@ -204,11 +204,11 @@ def m6_llm(client) -> None:
         REP.rec("M6", "llm_sizing", False, "SKIP no OPENAI_API_KEY")
         return
     try:
-        from gate_bot.strategist.llm_client import LLMClient, LLMConfig
-        from gate_bot.strategist.prompt import build_system_prompt, load_strategy_prompt
-        from gate_bot.strategist.snapshot import collect_snapshot
-        from gate_bot.strategist.market import MarketConfig
-        from gate_bot.strategist.schema import parse_plan_text
+        from omnialpha.strategist.llm_client import LLMClient, LLMConfig
+        from omnialpha.strategist.prompt import build_system_prompt, load_strategy_prompt
+        from omnialpha.strategist.snapshot import collect_snapshot
+        from omnialpha.strategist.market import MarketConfig
+        from omnialpha.strategist.schema import parse_plan_text
 
         system = build_system_prompt(load_strategy_prompt(ROOT / "prompts" / "vergex_default.md"))
         snap = collect_snapshot(
@@ -239,7 +239,7 @@ def m6_llm(client) -> None:
 
 
 def m4_conditions(client) -> None:
-    from gate_bot.strategist.triggers import evaluate_condition
+    from omnialpha.strategist.triggers import evaluate_condition
 
     conds = [
         {"type": "price_vs_ema", "symbol": "BTC_USDT", "period": 20, "side": "above"},
@@ -263,7 +263,7 @@ def m4_conditions(client) -> None:
 
 
 def m5_ai_triggers() -> None:
-    from gate_bot.strategist.trigger_store import (
+    from omnialpha.strategist.trigger_store import (
         AITriggerPolicy,
         TriggerPolicyError,
         validate_trigger_payload,
@@ -297,8 +297,8 @@ def m5_ai_triggers() -> None:
 
 
 def m11_risk() -> None:
-    from gate_bot.strategist.schema import parse_plan
-    from gate_bot.strategist.risk import RiskConfig, apply_risk
+    from omnialpha.strategist.schema import parse_plan
+    from omnialpha.strategist.risk import RiskConfig, apply_risk
 
     plan = parse_plan({
         "cycle_id": "prelaunch-m11",
@@ -316,7 +316,7 @@ def m11_risk() -> None:
     REP.rec("M11", "risk_reject_matrix", ok, notes[:120])
     # require_sl at signal schema
     try:
-        from gate_bot.schema import parse_signal, SchemaError
+        from omnialpha.schema import parse_signal, SchemaError
 
         try:
             parse_signal({"action": "open_long", "symbol": "BTC_USDT", "size_usd": 30, "require_sl": True})
@@ -339,9 +339,9 @@ def m11_risk() -> None:
 
 
 def m13_journal() -> None:
-    from gate_bot.tradelog import TradeLogger
-    from gate_bot.strategist.bridge import write_hold_audit
-    from gate_bot.strategist.schema import parse_plan
+    from omnialpha.tradelog import TradeLogger
+    from omnialpha.strategist.bridge import write_hold_audit
+    from omnialpha.strategist.schema import parse_plan
 
     p = ROOT / ".prelaunch_test" / "trades.jsonl"
     p.parent.mkdir(parents=True, exist_ok=True)

@@ -5,7 +5,7 @@ from pathlib import Path
 
 print("=== TV 指标模块（tv_indicators）===")
 for mod in ("linreg_trendlines", "rsi_yata", "lr_ha_candles"):
-    m = importlib.import_module("gate_bot.strategist.tv_indicators." + mod)
+    m = importlib.import_module("omnialpha.strategist.tv_indicators." + mod)
     fns = [n for n, _ in inspect.getmembers(m, inspect.isfunction) if not n.startswith("_")]
     print(f"  {mod}:")
     for f in fns:
@@ -13,7 +13,7 @@ for mod in ("linreg_trendlines", "rsi_yata", "lr_ha_candles"):
 
 print()
 print("=== 已装 skill（skills/）===")
-from gate_bot.skillkit import SkillRegistry  # noqa: E402
+from omnialpha.skillkit import SkillRegistry  # noqa: E402
 
 reg = SkillRegistry()
 reg.scan([Path("skills")])

@@ -1,7 +1,7 @@
 #!/bin/bash
 # 服务器生产测试：用实盘密钥但 allow_actions 仅 hold（保证不下单）
 set -e
-cd /opt/gate-signal-bot
+cd /opt/omnialpha
 
 echo "=== 配置 skill-real 为安全生产测试 ==="
 python3 - <<'PY'
@@ -22,9 +22,9 @@ PY
 
 echo
 echo "=== 运行一次 plan（真实 LLM + skill）==="
-J=/opt/gate-signal-bot/logs/skill_journal.jsonl
+J=/opt/omnialpha/logs/skill_journal.jsonl
 BEFORE=$(wc -l < "$J" 2>/dev/null || echo 0)
-.venv/bin/python -m gate_bot plan --bot skill-real 2>&1 | tail -15
+.venv/bin/python -m omnialpha plan --bot skill-real 2>&1 | tail -15
 AFTER=$(wc -l < "$J" 2>/dev/null || echo 0)
 echo
 echo "journal: $BEFORE -> $AFTER"

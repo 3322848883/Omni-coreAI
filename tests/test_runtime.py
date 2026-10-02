@@ -7,10 +7,10 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.ledger import Ledger, default_ledger_path
-from gate_bot.migrate import migrate_all, migrate_bot
-from gate_bot.paths import BotPaths, bot_paths, detect_legacy_layout, list_bot_ids
-from gate_bot.pidlock import PidLock
+from omnialpha.ledger import Ledger, default_ledger_path
+from omnialpha.migrate import migrate_all, migrate_bot
+from omnialpha.paths import BotPaths, bot_paths, detect_legacy_layout, list_bot_ids
+from omnialpha.pidlock import PidLock
 
 
 class TestPaths(unittest.TestCase):
@@ -105,7 +105,7 @@ class TestMigrate(unittest.TestCase):
             led.close()
 
     def test_project_paths_v2(self):
-        from gate_bot.watcher import ProjectPaths
+        from omnialpha.watcher import ProjectPaths
 
         with tempfile.TemporaryDirectory() as td:
             pp = ProjectPaths(Path(td))
@@ -133,13 +133,13 @@ class TestMigrate(unittest.TestCase):
 class TestSupervisorArgs(unittest.TestCase):
     def test_child_args_place_root_before_subcommand(self):
         """argparse: --root is global and must precede subcommand."""
-        from gate_bot.supervisor import Child, Supervisor
+        from omnialpha.supervisor import Child, Supervisor
 
         sup = Supervisor.__new__(Supervisor)
         sup.root = Path("/proj")
         sup.children = []
         # mimic prepare arg construction
-        args = [sup._py if hasattr(sup, "_py") else "python", "-m", "gate_bot",
+        args = [sup._py if hasattr(sup, "_py") else "python", "-m", "omnialpha",
                 "--root", str(sup.root), "plan-loop", "--bot", "b1"]
         self.assertEqual(args[args.index("--root") + 2], "plan-loop")
         self.assertLess(args.index("--root"), args.index("plan-loop"))
@@ -254,7 +254,7 @@ class TestPidLock(unittest.TestCase):
                     holder.wait(timeout=5)
 
     def test_cli_lock_paths_match_supervisor(self):
-        from gate_bot.paths import bot_paths
+        from omnialpha.paths import bot_paths
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -268,7 +268,7 @@ class TestPidLock(unittest.TestCase):
         import sys as _sys
         import types
 
-        from gate_bot import __main__ as main
+        from omnialpha import __main__ as main
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

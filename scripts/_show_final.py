@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-ROOT = Path(r"C:\Users\w6485\Desktop\测试\gate-signal-bot")
+ROOT = Path(r"C:\Users\w6485\Desktop\测试\OmniAlpha")
 runs = json.loads((ROOT / "scripts" / "_trio_final_3runs.json").read_text(encoding="utf-8"))
 
 for rec in runs:

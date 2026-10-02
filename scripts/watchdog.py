@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Watchdog: keep `python -m gate_bot run` alive (restart on crash)."""
+"""Watchdog: keep `python -m omnialpha run` alive (restart on crash)."""
 from __future__ import annotations
 
 import argparse
@@ -16,14 +16,14 @@ if not PY.exists():
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="gate-signal-bot watchdog")
+    ap = argparse.ArgumentParser(description="OmniAlpha watchdog")
     ap.add_argument("--bot", default=None, help="only this bot id")
     ap.add_argument("--root", default=str(ROOT))
     ap.add_argument("--restart-delay", type=float, default=3.0)
     ap.add_argument("--max-restarts-per-hour", type=int, default=20)
     args = ap.parse_args()
 
-    cmd = [str(PY), "-m", "gate_bot", "run", "--root", args.root]
+    cmd = [str(PY), "-m", "omnialpha", "run", "--root", args.root]
     if args.bot:
         cmd += ["--bot", args.bot]
     env = os.environ.copy()
@@ -42,7 +42,7 @@ def main() -> int:
         except Exception as e:  # noqa: BLE001
             print(f"[watchdog] spawn error: {e}", flush=True)
             code = -1
-        print(f"[watchdog] gate_bot exited code={code} after {time.time()-t0:.1f}s", flush=True)
+        print(f"[watchdog] omnialpha exited code={code} after {time.time()-t0:.1f}s", flush=True)
         now = time.time()
         restarts = [t for t in restarts if now - t < 3600]
         restarts.append(now)

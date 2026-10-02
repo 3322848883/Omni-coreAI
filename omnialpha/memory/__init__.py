@@ -1,4 +1,4 @@
-"""gate_bot.memory — 记忆架构（订单上下文 + 事件溯源 + 策略画像）。"""
+"""omnialpha.memory — 记忆架构（订单上下文 + 事件溯源 + 策略画像）。"""
 from .cache_guard import CacheGuard
 from .context import build_context
 from .forget import archive_journal, cleanup_closed_orders

@@ -5,10 +5,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-os.environ.setdefault("GATE_BOT_ROOT", r"C:\Users\w6485\Desktop\测试\gate-signal-bot")
-from gate_bot.config import load_bot_config  # noqa: E402
+os.environ.setdefault("OMNIALPHA_ROOT", r"C:\Users\w6485\Desktop\测试\OmniAlpha")
+from omnialpha.config import load_bot_config  # noqa: E402
 
-cfg = load_bot_config(Path(r"C:\Users\w6485\Desktop\测试\gate-signal-bot\config\bots\brooks-btc.yaml"))
+cfg = load_bot_config(Path(r"C:\Users\w6485\Desktop\测试\OmniAlpha\config\bots\brooks-btc.yaml"))
 client = cfg.create_client()
 acct = client.get_account() or {}
 print("== 账户 ==")
@@ -36,9 +36,9 @@ for o in (client.list_price_orders("BTC_USDT") or []):
 
 print()
 print("== alerts.json ==")
-from gate_bot.monitoring import read_alerts  # noqa: E402
+from omnialpha.monitoring import read_alerts  # noqa: E402
 
-root = Path(r"C:\Users\w6485\Desktop\测试\gate-signal-bot")
+root = Path(r"C:\Users\w6485\Desktop\测试\OmniAlpha")
 rows = read_alerts(root, "brooks-btc")
 if not rows:
     print("  (无告警)")

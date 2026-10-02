@@ -11,8 +11,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.skillkit import SkillRegistry, load_package  # noqa: E402
-from gate_bot.strategist.tools import NATIVE_TOOLS  # noqa: E402
+from omnialpha.skillkit import SkillRegistry, load_package  # noqa: E402
+from omnialpha.strategist.tools import NATIVE_TOOLS  # noqa: E402
 
 from tests._skill_fixtures import fixture_root, fixture_skills_dir  # noqa: E402
 
@@ -37,7 +37,7 @@ class TestAllowedToolsRuntimeNarrowing(unittest.TestCase):
         self.assertNotIn("orderbook", names)
 
     def test_skill_allowed_tools_helper(self):
-        from gate_bot.strategist.loop import PlanRunner, StrategistConfig
+        from omnialpha.strategist.loop import PlanRunner, StrategistConfig
         cfg = StrategistConfig(bot_root=fixture_root(), skills=["narrow-tools"])
         # 用未初始化实例只测 helper（不碰网络）
         runner = PlanRunner.__new__(PlanRunner)
@@ -46,7 +46,7 @@ class TestAllowedToolsRuntimeNarrowing(unittest.TestCase):
         self.assertEqual(got, {"klines", "indicators", "ticker"})
 
     def test_no_allowed_tools_returns_none(self):
-        from gate_bot.strategist.loop import PlanRunner, StrategistConfig
+        from omnialpha.strategist.loop import PlanRunner, StrategistConfig
         cfg = StrategistConfig(bot_root=fixture_root(), skills=["price-action-trading"])
         runner = PlanRunner.__new__(PlanRunner)
         runner.cfg = cfg
@@ -96,7 +96,7 @@ class TestConcurrentBotsIsolation(unittest.TestCase):
     """并发多 bot：不同白名单互不影响。"""
 
     def test_two_bots_different_whitelists(self):
-        from gate_bot.strategist.tools import run_tool
+        from omnialpha.strategist.tools import run_tool
         # bot A 只启用 test-helper
         ra = run_tool(None, "skill", {"name": "test-helper"},
                       bot_root=str(fixture_root()), bot_id="bot-a", skill_ids=["test-helper"])
@@ -114,7 +114,7 @@ class TestConcurrentBotsIsolation(unittest.TestCase):
         self.assertIn("error", rb2)
 
     def test_catalog_isolation(self):
-        from gate_bot.skillkit import render_catalog
+        from omnialpha.skillkit import render_catalog
         reg = SkillRegistry()
         reg.scan([SKILLS])
         cat_a = render_catalog(reg.visible_for("bot-a", ["test-helper"]))
@@ -129,7 +129,7 @@ class TestJournalGrowth(unittest.TestCase):
     """长跑：journal 只追加，可解析。"""
 
     def test_journal_append_only_and_parsable(self):
-        from gate_bot.skillkit import run_skill_tool
+        from omnialpha.skillkit import run_skill_tool
         reg = SkillRegistry()
         reg.scan([SKILLS])
         jp = fixture_root() / "logs" / "skill_journal.jsonl"

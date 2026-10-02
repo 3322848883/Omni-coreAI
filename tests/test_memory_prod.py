@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.memory import (  # noqa: E402
+from omnialpha.memory import (  # noqa: E402
     CacheGuard,
     MemoryJournal,
     MemoryProfile,
@@ -20,8 +20,8 @@ from gate_bot.memory import (  # noqa: E402
     build_context,
     cleanup_closed_orders,
 )
-from gate_bot.memory.forget import archive_journal as _archive  # noqa: E402
-from gate_bot.persona.orders import (  # noqa: E402
+from omnialpha.memory.forget import archive_journal as _archive  # noqa: E402
+from omnialpha.persona.orders import (  # noqa: E402
     RECENT_EVENTS_MAX,
     SharedOrderStore,
     new_order_id,
@@ -162,7 +162,7 @@ class TestCrashRecovery(unittest.TestCase):
 class TestPersonaIntegration(unittest.TestCase):
     def test_runner_creates_order_context_fields(self):
         """PersonaRunner 开仓后订单有 lifecycle + reason。"""
-        from gate_bot.persona import PersonaGroup, PersonaRunner
+        from omnialpha.persona import PersonaGroup, PersonaRunner
 
         class FakeRunner:
             def analyze_once(self, trigger="manual"):
@@ -195,7 +195,7 @@ class TestPersonaIntegration(unittest.TestCase):
 
     def test_runner_close_updates_lifecycle(self):
         """平仓后 lifecycle 有 close 事件。"""
-        from gate_bot.persona import PersonaGroup, PersonaRunner, SharedOrderStore
+        from omnialpha.persona import PersonaGroup, PersonaRunner, SharedOrderStore
 
         class FakeRunner:
             def __init__(self, d, a):
@@ -228,7 +228,7 @@ class TestPersonaIntegration(unittest.TestCase):
 
     def test_journal_has_memory_refs(self):
         """journal 记录包含 memory_refs。"""
-        from gate_bot.persona import PersonaGroup, PersonaRunner
+        from omnialpha.persona import PersonaGroup, PersonaRunner
 
         class FakeRunner:
             def analyze_once(self, trigger="manual"):

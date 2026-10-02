@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.skillkit import (  # noqa: E402
+from omnialpha.skillkit import (  # noqa: E402
     SkillRegistry,
     load_package,
     parse_frontmatter,
@@ -22,7 +22,7 @@ from gate_bot.skillkit import (  # noqa: E402
     scan_skill_dirs,
     validate_package,
 )
-from gate_bot.skillkit.models import SkillError  # noqa: E402
+from omnialpha.skillkit.models import SkillError  # noqa: E402
 
 from tests._skill_fixtures import fixture_root, fixture_skills_dir  # noqa: E402
 
@@ -284,7 +284,7 @@ class TestCrossProcessJournal(unittest.TestCase):
                 "import sys\n"
                 "from pathlib import Path\n"
                 f"sys.path.insert(0, r'{ROOT}')\n"
-                "from gate_bot.skillkit.journal import append_journal\n"
+                "from omnialpha.skillkit.journal import append_journal\n"
                 "root = Path(sys.argv[1]); n = int(sys.argv[2])\n"
                 "for i in range(n):\n"
                 "    append_journal(root, {'kind': 'proc', 'skill_id': 'x', 'i': i})\n",

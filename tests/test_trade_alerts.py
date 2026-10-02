@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from gate_bot.monitoring import format_trade_steps, notify_trade_events
-from gate_bot.monitoring.notify import build_notifier
+from omnialpha.monitoring import format_trade_steps, notify_trade_events
+from omnialpha.monitoring.notify import build_notifier
 
 
 class TestFormatTradeSteps(unittest.TestCase):
@@ -95,7 +95,7 @@ class TestNotifyTradeEvents(unittest.TestCase):
         with mock.patch.dict("os.environ", {"FEISHU_WEBHOOK": "https://x"}, clear=True):
             # hold 不推送 → 即使有渠道也不应调 send
             with mock.patch.object(
-                __import__("gate_bot.monitoring.notify", fromlist=["AlertNotifier"]),
+                __import__("omnialpha.monitoring.notify", fromlist=["AlertNotifier"]),
                 "AlertNotifier"
             ) as MockN:
                 notify_trade_events("bb", [{"action": "hold", "ok": True}])
@@ -106,7 +106,7 @@ class TestNotifyTradeEvents(unittest.TestCase):
         with mock.patch.dict("os.environ", env, clear=True):
             sent = []
             with mock.patch(
-                "gate_bot.monitoring.notify.AlertNotifier.send_card",
+                "omnialpha.monitoring.notify.AlertNotifier.send_card",
                 lambda self, card: sent.append(card) or True,
             ):
                 ok = notify_trade_events("bb", [
@@ -121,12 +121,12 @@ class TestNotifyTradeEvents(unittest.TestCase):
 
 class TestTradeLogHooks(unittest.TestCase):
     def test_log_execution_calls_notify(self):
-        from gate_bot.tradelog import TradeLogger
+        from omnialpha.tradelog import TradeLogger
 
         with tempfile.TemporaryDirectory() as td:
             log = TradeLogger(Path(td) / "trades.jsonl")
             with mock.patch(
-                "gate_bot.monitoring.notify_trade_events"
+                "omnialpha.monitoring.notify_trade_events"
             ) as m:
                 log.log_execution(
                     "bb",

@@ -14,12 +14,12 @@ related: docs/compose/spec/skillkit.md
 
 | 组件 | 文件 | 作用 |
 |------|------|------|
-| overlay 合并 | `gate_bot/config.py`（`deep_merge` / `overlay_dir_for`） | `config/bots.local/` 覆盖基线，gitignore 不冲突 |
+| overlay 合并 | `omnialpha/config.py`（`deep_merge` / `overlay_dir_for`） | `config/bots.local/` 覆盖基线，gitignore 不冲突 |
 | 基线归一 | `config/bots/*.yaml` 全部 `enabled: false` | 安全默认；启用集进 overlay |
 | 部署流水线 | `scripts/deploy.sh` | 七步：检查→pull→依赖→skill→编码自检→测试→重启验证 |
 | skill 源 | `skills-src/` + `scripts/pack_skill.py` | git 跟踪源 + UTF-8 安全打包 |
-| 乱码自检 | `gate_bot skill doctor [--fix]` | 检出并修复 Linux unzip 乱码目录名 |
-| 部署验证 | `gate_bot deploy-check` | 版本/overlay/bot/skill/健康 一览 |
+| 乱码自检 | `omnialpha skill doctor [--fix]` | 检出并修复 Linux unzip 乱码目录名 |
+| 部署验证 | `omnialpha deploy-check` | 版本/overlay/bot/skill/健康 一览 |
 | 文档 | `docs/DEPLOY.md` + `AGENTS.md` §8 | 新机器上线 + 常见问题 |
 
 **Verification** — `tests/test_deploy_env.py` 17 PASS（deep_merge 6 / overlay 5 / demojibake 4 / 命令 2）；全量 **884 PASS**。
@@ -43,7 +43,7 @@ related: docs/compose/spec/skillkit.md
 | 1 | 服务器有 **23 个未提交的 bot 配置改动**（本地禁用了 paper bot），`git pull` 前必须手工 `stash`/`pop` | `config/bots/*.yaml` 在 git 里**共享**，无环境 overlay |
 | 2 | skill 不在 git（`skills/*` 被 gitignore），部署脚本不装 skill，需手工上传 zip + `skill install` | skill 分发无约定 |
 | 3 | 服务器 `skill validate` 报 W05：`references/knowledge/source/V1_趋势篇` 不存在 —— 实为 **目录名乱码**（UTF-8 被 Linux `unzip` 按 CP866 解读） | 打包/解压无编码约定 |
-| 4 | 部署脚本不重启 systemd，需手工 `systemctl restart gate-watchdog` | 部署流水线不完整 |
+| 4 | 部署脚本不重启 systemd，需手工 `systemctl restart omnialpha-watchdog` | 部署流水线不完整 |
 
 ### 现状：`_update_server.sh` 只做三件事
 
@@ -88,7 +88,7 @@ config/
 ### [S2.2] 加载逻辑改动
 
 ```python
-# gate_bot/config.py
+# omnialpha/config.py
 def load_bot_config(path: Path, overlay_dir: Path | None = None) -> BotConfig:
     data = _yaml(path)
     if overlay_dir:
@@ -123,7 +123,7 @@ def bots_overlay_dir(self) -> Path:
 4) 同步 skill   从 skills-src/ 安装（见 S2.4）
 5) 编码自检     检测 mojibake 目录名并修复（见 S2.5）
 6) 测试         unittest discover（失败即中止，不重启）
-7) 重启 + 验证  systemctl restart gate-watchdog → 等 15s → 健康检查
+7) 重启 + 验证  systemctl restart omnialpha-watchdog → 等 15s → 健康检查
 ```
 
 **关键**：第 6 步失败**不重启**（保留旧进程继续跑），避免部署事故。
@@ -143,8 +143,8 @@ skills/                        # 运行时安装目录（gitignore）
 ```bash
 for d in skills-src/*/; do
   id=$(basename "$d")
-  .venv/bin/python -m gate_bot skill validate "$d" || exit 1
-  .venv/bin/python -m gate_bot skill install "$d" --yes
+  .venv/bin/python -m omnialpha skill validate "$d" || exit 1
+  .venv/bin/python -m omnialpha skill install "$d" --yes
 done
 ```
 
@@ -163,30 +163,30 @@ done
 
 1. **打包侧**：统一用 Python 打包（`scripts/pack_skill.py`），确保 zip 条目带 UTF-8 标志位（`zipfile` 默认行为）
 2. **部署侧**：用 **Python 解压**而非 `unzip`（`zipfile` 正确处理 UTF-8）
-3. **自检侧**：部署脚本第 5 步跑 mojibake 检测（`gate_bot skill doctor`），发现乱码目录名即修复
+3. **自检侧**：部署脚本第 5 步跑 mojibake 检测（`omnialpha skill doctor`），发现乱码目录名即修复
 
 ```python
 # 检测：非 ASCII 目录名尝试 cp866→utf-8 还原，成功即视为 mojibake
 def demojibake(name): return name.encode('cp866').decode('utf-8')
 ```
 
-**新增 CLI**：`python -m gate_bot skill doctor [--fix]`（扫描 skills/ 下乱码名，报告或修复）
+**新增 CLI**：`python -m omnialpha skill doctor [--fix]`（扫描 skills/ 下乱码名，报告或修复）
 
 ### [S2.6] 部署后验证
 
 ```bash
 # 7a) 进程
-systemctl is-active gate-watchdog
-ps aux | grep -c 'gate_bot --root'
+systemctl is-active omnialpha-watchdog
+ps aux | grep -c 'omnialpha --root'
 
 # 7b) 健康
 cat data/bots/brooks-btc/state/health.json   # error_streak 应为 0
 
 # 7c) 部署报告
-python -m gate_bot deploy-check
+python -m omnialpha deploy-check
 ```
 
-新增 `gate_bot deploy-check` 子命令，输出：
+新增 `omnialpha deploy-check` 子命令，输出：
 ```
 代码版本:    5c27985
 配置 overlay: 12 个（bots.local/）
@@ -202,7 +202,7 @@ python -m gate_bot deploy-check
 | 启用 bot | 测试 bot | 仅 brooks-btc | `config/bots.local/*.yaml` |
 | skill 启用 | 多个测试 skill | price-action-trading | 同上 `skills:` 键 |
 | 密钥 | testnet | live | `.env`（已有） |
-| 数据目录 | 本地 | `/opt/.../data` | `.env` GATE_BOT_ROOT（已有） |
+| 数据目录 | 本地 | `/opt/.../data` | `.env` OMNIALPHA_ROOT（已有） |
 | skill 包 | 同源 | 同源 | `skills-src/` → install |
 
 ## [S3] Tasks
@@ -210,12 +210,12 @@ python -m gate_bot deploy-check
 | # | 任务 | 验收 | 覆盖 |
 |---|------|------|------|
 | T1 | `config.py`：`load_bot_config/load_all_bots` 支持 overlay 深度合并 | 有 overlay 时覆盖、无 overlay 时行为不变；deep merge 单测 | S2.1 S2.2 |
-| T2 | `ProjectPaths.bots_overlay_dir` + 调用点接线 | `gate_bot status` 读到 overlay | S2.2 |
+| T2 | `ProjectPaths.bots_overlay_dir` + 调用点接线 | `omnialpha status` 读到 overlay | S2.2 |
 | T3 | `.gitignore` 加 `config/bots.local/`；基线 `enabled: false` 归一 | git 里无 enabled:true 的基线 bot | S2.1 |
 | T4 | `skills-src/` 建立 + `scripts/pack_skill.py`（UTF-8 打包） | 打包→解压→validate PASS 0 warning | S2.4 S2.5 |
-| T5 | `gate_bot skill doctor [--fix]` 乱码检测修复 | 构造乱码名 → 检出并修复 | S2.5 |
+| T5 | `omnialpha skill doctor [--fix]` 乱码检测修复 | 构造乱码名 → 检出并修复 | S2.5 |
 | T6 | `scripts/deploy.sh` 七步流水线 | 幂等、失败不重启、可 dry-run | S2.3 |
-| T7 | `gate_bot deploy-check` 部署后验证 | 输出代码版本/overlay/bot/skill/健康 | S2.6 |
+| T7 | `omnialpha deploy-check` 部署后验证 | 输出代码版本/overlay/bot/skill/健康 | S2.6 |
 | T8 | 文档：`docs/DEPLOY.md` + AGENTS.md 部署章节 | 照文档可完成一次部署 | 全部 |
 | T9 | 端到端演练：本地造 overlay → 部署到服务器 → 验证差异生效 | 服务器状态与本地隔离、pull 不冲突 | 全部 |
 
@@ -224,7 +224,7 @@ python -m gate_bot deploy-check
 | 阶段 | 内容 | 退出门槛 |
 |------|------|----------|
 | **P1（本 spec）** | 配置 overlay + 部署脚本 + skill doctor + deploy-check | T1–T9 全绿；服务器 pull 不再冲突 |
-| **P2** | 多环境 profile（`bots.local` 按 `GATE_BOT_ENV` 分目录） | 需要 staging 时再做 |
+| **P2** | 多环境 profile（`bots.local` 按 `OMNIALPHA_ENV` 分目录） | 需要 staging 时再做 |
 | **P3** | 配置漂移检测（部署后对比 overlay 与运行时） | 按需 |
 
 ## [S5] 风险与回滚

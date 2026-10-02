@@ -10,7 +10,7 @@ commits: 5299312..6766b2a
 
 ## Report
 
-**What was built** — `gate_bot/exchanges/` 统一适配层：`base.ExchangeClient` 契约 + `registry.create_exchange`；六所实现（gate 复用 GateClient；binance/okx/bybit/bitget/hyperliquid 各自签名与符号映射）。bot yaml 新增 `exchange: gate|binance|…`，`create_client()` 走工厂。市场库命名 `kline_<exchange>.db`。公共行情六所 live 实测 OK。
+**What was built** — `omnialpha/exchanges/` 统一适配层：`base.ExchangeClient` 契约 + `registry.create_exchange`；六所实现（gate 复用 GateClient；binance/okx/bybit/bitget/hyperliquid 各自签名与符号映射）。bot yaml 新增 `exchange: gate|binance|…`，`create_client()` 走工厂。市场库命名 `kline_<exchange>.db`。公共行情六所 live 实测 OK。
 
 **Verification** —
 - `unittest` → **181 OK**
@@ -50,7 +50,7 @@ commits: 5299312..6766b2a
 ### 2.2 架构：交易所适配层
 
 ```text
-gate_bot/
+omnialpha/
   exchanges/
     __init__.py      ExchangeClient 工厂 create_exchange(name, env, keys)
     base.py          抽象基类（市场+交易契约）

@@ -41,7 +41,7 @@ def cmd_skill(args: Any) -> int:
         return _run(args, root)
     if sub == "doctor":
         return _doctor(args, root)
-    print("usage: gate_bot skill {install,list,show,validate,remove,run,doctor}", file=sys.stderr)
+    print("usage: omnialpha skill {install,list,show,validate,remove,run,doctor}", file=sys.stderr)
     return 2
 
 
@@ -245,7 +245,7 @@ def _bot_skills(root: Path, bot_id: str) -> Optional[list[str]]:
 def register_parser(sub: Any) -> None:
     """挂到 argparse 子命令（供 __main__ 调用）。"""
     p = sub.add_parser("skill", help="manage installable skills (skillkit)")
-    p.add_argument("--root", help="project root (default: cwd / GATE_BOT_ROOT)")
+    p.add_argument("--root", help="project root (default: cwd / OMNIALPHA_ROOT)")
     ssub = p.add_subparsers(dest="skill_cmd", required=True)
 
     pi = ssub.add_parser("install", help="validate + install a skill dir (NOT auto-enabled)")

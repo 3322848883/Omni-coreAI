@@ -3,9 +3,9 @@
 import sys
 from pathlib import Path
 
-ROOT = Path("/opt/gate-signal-bot")
+ROOT = Path("/opt/omnialpha")
 sys.path.insert(0, str(ROOT))
-from gate_bot.skillkit import SkillRegistry, render_catalog  # noqa: E402
+from omnialpha.skillkit import SkillRegistry, render_catalog  # noqa: E402
 
 reg = SkillRegistry()
 reg.scan([ROOT / ".mimocode" / "skills", ROOT / "skills"])

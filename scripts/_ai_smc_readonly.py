@@ -14,11 +14,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.exchanges.gate import GateExchange
-from gate_bot.providers import resolve_llm_config
-from gate_bot.strategist.llm_client import LLMClient
-from gate_bot.strategist.market import MarketConfig
-from gate_bot.strategist.tools import TOOL_GUIDE, run_tool
+from omnialpha.exchanges.gate import GateExchange
+from omnialpha.providers import resolve_llm_config
+from omnialpha.strategist.llm_client import LLMClient
+from omnialpha.strategist.market import MarketConfig
+from omnialpha.strategist.tools import TOOL_GUIDE, run_tool
 
 
 def main() -> int:

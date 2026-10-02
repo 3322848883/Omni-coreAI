@@ -18,7 +18,7 @@ slope_tv = (length * sum_xy - sum_x * sum_y) / (length * sum_xx - sum_x * sum_x)
 average = sum_y / length
 intercept_tv = average - slope_tv * sum_x / length + slope_tv
 
-from gate_bot.strategist.tv_indicators import calc_slope
+from omnialpha.strategist.tv_indicators import calc_slope
 slope_py, avg_py, intercept_py = calc_slope(values, length)
 print(f"  TV slope={slope_tv}, intercept={intercept_tv}")
 print(f"  Py  slope={slope_py}, intercept={intercept_py}")
@@ -53,7 +53,7 @@ for i in range(len(changes)):
         val = 100 if d == 0 else (0 if u == 0 else 100 - 100 / (1 + u/d))
         tv_rsi_vals.append(val)
 
-from gate_bot.strategist.tv_indicators import rsi_base
+from omnialpha.strategist.tv_indicators import rsi_base
 py_rsi = rsi_base(closes, 14)
 py_rsi_vals = [v for v in py_rsi if v is not None]
 
@@ -92,7 +92,7 @@ g2 = gd([v if v is not None else 0 for v in g1], t3_len, t3_alpha)
 g3 = gd([v if v is not None else 0 for v in g2], t3_len, t3_alpha)
 t3_tv = g3[-1]
 
-from gate_bot.strategist.tv_indicators import t3_moving_average
+from omnialpha.strategist.tv_indicators import t3_moving_average
 t3_py = t3_moving_average(t3_values, t3_len, t3_alpha)
 t3_py_last = t3_py[-1]
 
@@ -125,7 +125,7 @@ def kama_tv(values, period):
 
 kama_tv_last = kama_tv(kama_values, kama_period)[-1]
 
-from gate_bot.strategist.tv_indicators import kama
+from omnialpha.strategist.tv_indicators import kama
 kama_py_last = kama(kama_values, kama_period)[-1]
 
 print(f"  TV KAMA = {kama_tv_last:.6f}")
@@ -149,7 +149,7 @@ for i in range(1, 4):
 ha_high_tv = [max(ha_highs[i], ha_open_tv[i], ha_close_tv[i]) for i in range(4)]
 ha_low_tv = [min(ha_lows[i], ha_open_tv[i], ha_close_tv[i]) for i in range(4)]
 
-from gate_bot.strategist.tv_indicators import heikin_ashi
+from omnialpha.strategist.tv_indicators import heikin_ashi
 ha_py = heikin_ashi(ha_opens, ha_highs, ha_lows, ha_closes)
 
 for i in range(4):
@@ -165,7 +165,7 @@ vb_highs = [11.0, 12.0, 13.0, 14.0, 15.0] * 4
 vb_lows = [9.0, 10.0, 11.0, 12.0, 13.0] * 4
 vb_closes = [10.0, 11.0, 12.0, 13.0, 14.0] * 4
 
-from gate_bot.strategist.tv_indicators import volatility_bands
+from omnialpha.strategist.tv_indicators import volatility_bands
 vb = volatility_bands(vb_highs, vb_lows, vb_closes, length=5)
 # TV: basis + upper_mult * atr
 last_basis = vb["basis"][-1]

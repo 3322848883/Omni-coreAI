@@ -1,9 +1,9 @@
 #!/bin/bash
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
-cd /opt/gate-signal-bot
+cd /opt/omnialpha
 
 echo "=== 1) 服务/进程 ==="
-systemctl is-active gate-watchdog
+systemctl is-active omnialpha-watchdog
 ps -eo args | grep '[g]ate_bot' | grep -cE 'plan-loop|paper-run|run --bot|supervisor'
 
 echo "=== 2) 账户/持仓/挂单 ==="
@@ -15,7 +15,7 @@ for line in Path(".env").read_text().splitlines():
     if "=" in line and not line.strip().startswith("#"):
         k, v = line.split("=", 1)
         os.environ.setdefault(k.strip(), v.strip())
-from gate_bot.config import load_bot_config
+from omnialpha.config import load_bot_config
 cfg = load_bot_config(Path("config/bots/brooks-btc.yaml"))
 c = cfg.create_client()
 acct = c.get_account() or {}

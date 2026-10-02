@@ -15,12 +15,12 @@ PYTHON = sys.executable
 ENV = dict(os.environ)
 ENV["PYTHONPATH"] = str(ROOT)
 
-from gate_bot.strategist.vision import generate_and_encode
-from gate_bot.strategist.indicators import ema
-from gate_bot.strategist.llm_client import LLMClient, LLMConfig
-from gate_bot.strategist.prompt import build_system_prompt, build_messages, load_strategy_prompt
-from gate_bot.strategist.snapshot import collect_snapshot
-from gate_bot.gate_client import GateClient
+from omnialpha.strategist.vision import generate_and_encode
+from omnialpha.strategist.indicators import ema
+from omnialpha.strategist.llm_client import LLMClient, LLMConfig
+from omnialpha.strategist.prompt import build_system_prompt, build_messages, load_strategy_prompt
+from omnialpha.strategist.snapshot import collect_snapshot
+from omnialpha.gate_client import GateClient
 
 
 def fetch_klines(interval="1h", limit=100):

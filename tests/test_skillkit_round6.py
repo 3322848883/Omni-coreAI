@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.skillkit import (  # noqa: E402
+from omnialpha.skillkit import (  # noqa: E402
     SkillRegistry,
     fit_catalog,
     load_package,
@@ -20,8 +20,8 @@ from gate_bot.skillkit import (  # noqa: E402
     run_skill_ref,
     validate_package,
 )
-from gate_bot.skillkit.budget import CatalogBudget, estimate_catalog_tokens  # noqa: E402
-from gate_bot.skillkit.models import SkillError  # noqa: E402
+from omnialpha.skillkit.budget import CatalogBudget, estimate_catalog_tokens  # noqa: E402
+from omnialpha.skillkit.models import SkillError  # noqa: E402
 
 from tests._skill_fixtures import fixture_root, fixture_skills_dir  # noqa: E402
 
@@ -45,7 +45,7 @@ class TestNarrowingStateIsolation(unittest.TestCase):
         """active_tools 是 _chat_native_tools 的局部变量 → 每次调用重置。"""
         import inspect
 
-        from gate_bot.strategist.loop import PlanRunner
+        from omnialpha.strategist.loop import PlanRunner
 
         src = inspect.getsource(PlanRunner._chat_native_tools)
         # 局部初始化（非 self.xxx）证明不跨调用残留
@@ -54,8 +54,8 @@ class TestNarrowingStateIsolation(unittest.TestCase):
 
     def test_two_sequential_calls_independent(self):
         """同一 runner 连续两次调用，第二次仍是全工具面。"""
-        from gate_bot.strategist.loop import PlanRunner, StrategistConfig
-        from gate_bot.strategist.tools import NATIVE_TOOLS
+        from omnialpha.strategist.loop import PlanRunner, StrategistConfig
+        from omnialpha.strategist.tools import NATIVE_TOOLS
 
         calls = []
 
@@ -208,8 +208,8 @@ class TestJournalGrowth(unittest.TestCase):
     """journal 增长与可读性。"""
 
     def test_large_journal_still_readable(self):
-        from gate_bot.skillkit import run_skill_tool
-        from gate_bot.skillkit.journal import read_activation_freq
+        from omnialpha.skillkit import run_skill_tool
+        from omnialpha.skillkit.journal import read_activation_freq
 
         with tempfile.TemporaryDirectory() as td:
             t = Path(td)
@@ -239,7 +239,7 @@ class TestConcurrentPlanProcesses(unittest.TestCase):
                 "import sys\n"
                 "from pathlib import Path\n"
                 f"sys.path.insert(0, r'{ROOT}')\n"
-                "from gate_bot.skillkit import SkillRegistry, render_catalog\n"
+                "from omnialpha.skillkit import SkillRegistry, render_catalog\n"
                 "reg = SkillRegistry()\n"
                 "reg.scan([Path(sys.argv[1])])\n"
                 "cat = render_catalog(reg.visible_for('b'))\n"

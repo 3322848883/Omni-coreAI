@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.strategist.indicators import (  # noqa: E402
+from omnialpha.strategist.indicators import (  # noqa: E402
     IndicatorNameError,
     attach_indicators,
     atr,
@@ -20,15 +20,15 @@ from gate_bot.strategist.indicators import (  # noqa: E402
     rsi,
     sma,
 )
-from gate_bot.strategist.market import (  # noqa: E402
+from omnialpha.strategist.market import (  # noqa: E402
     MarketConfig,
     is_stale,
     load_local_candles,
     resolve_db_path,
     resolve_candles,
 )
-from gate_bot.strategist.snapshot import collect_snapshot  # noqa: E402
-from gate_bot.gate_client import GateApiError  # noqa: E402
+from omnialpha.strategist.snapshot import collect_snapshot  # noqa: E402
+from omnialpha.gate_client import GateApiError  # noqa: E402
 
 
 class TestIndicators(unittest.TestCase):
@@ -269,7 +269,7 @@ class FakeClient:
         return self.last
 
     def get_contract(self, symbol):
-        from gate_bot.gate_client import ContractMeta
+        from omnialpha.gate_client import ContractMeta
         return ContractMeta(symbol, 0.0001, 1.0, 0.1, 100)
 
     def get_ticker(self, symbol):
@@ -506,7 +506,7 @@ class TestSnapshot(unittest.TestCase):
         now = int(time.time())
         rows = [[now - (30 - i) * 900, "1", str(1 + i * 0.01), "2", "0.5", "1", "0"] for i in range(30)]
         client = FakeClient(rest_rows=rows)
-        from gate_bot.strategist.market import MarketConfig
+        from omnialpha.strategist.market import MarketConfig
 
         snap = collect_snapshot(
             client,
@@ -530,7 +530,7 @@ class TestSnapshot(unittest.TestCase):
         now = int(time.time())
         rows = [[now - (40 - i) * 900, "1", str(1 + i * 0.01), "2", "0.5", "1", "0"] for i in range(40)]
         client = FakeClient(rest_rows=rows)
-        from gate_bot.strategist.market import ALL_TIMEFRAMES, MarketConfig
+        from omnialpha.strategist.market import ALL_TIMEFRAMES, MarketConfig
 
         cfg = MarketConfig(mode="rest_only", extra_timeframes=["all"], indicators=["all"])
         self.assertEqual(set(cfg.extra_timeframes), set(ALL_TIMEFRAMES))
@@ -622,7 +622,7 @@ class TestPlanRunnerAccountAbort(unittest.TestCase):
         """账户取不到 → 不中止，继续行情分析（新行为）。"""
         import tempfile
 
-        from gate_bot.strategist.loop import PlanRunner, StrategistConfig
+        from omnialpha.strategist.loop import PlanRunner, StrategistConfig
 
         class BoomClient(FakeClient):
             def __init__(self):

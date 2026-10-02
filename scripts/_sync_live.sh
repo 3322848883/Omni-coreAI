@@ -1,6 +1,6 @@
 #!/bin/bash
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
-cd /opt/gate-signal-bot
+cd /opt/omnialpha
 
 echo "=== 1) 合并密钥到 .env ==="
 if [ -f /tmp/gate_env ]; then
@@ -29,7 +29,7 @@ for line in Path(".env").read_text(encoding="utf-8").splitlines():
     if "=" in line and not line.strip().startswith("#"):
         k, v = line.split("=", 1)
         os.environ.setdefault(k.strip(), v.strip())
-from gate_bot.config import load_bot_config
+from omnialpha.config import load_bot_config
 cfg = load_bot_config(Path("config/bots/brooks-btc.yaml"))
 client = cfg.create_client()
 acct = client.get_account() or {}
@@ -46,8 +46,8 @@ print("  GATE_OK")
 PY
 
 echo "=== 4) 重启看门狗加载密钥 ==="
-systemctl restart gate-watchdog
+systemctl restart omnialpha-watchdog
 sleep 6
-systemctl is-active gate-watchdog
+systemctl is-active omnialpha-watchdog
 
 echo "=== SYNC_DONE ==="

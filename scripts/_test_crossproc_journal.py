@@ -12,7 +12,7 @@ WORKER = f'''
 import sys
 from pathlib import Path
 sys.path.insert(0, r"{ROOT}")
-from gate_bot.skillkit.journal import append_journal
+from omnialpha.skillkit.journal import append_journal
 root = Path(sys.argv[1])
 n = int(sys.argv[2])
 for i in range(n):

@@ -4,7 +4,7 @@ import json
 from collections import Counter
 from pathlib import Path
 
-ROOT = Path(r"C:\Users\w6485\Desktop\测试\gate-signal-bot")
+ROOT = Path(r"C:\Users\w6485\Desktop\测试\OmniAlpha")
 
 
 def top_errors(label, rows, n=8):
@@ -44,7 +44,7 @@ print("==" + "=" * 60)
 try:
     import subprocess, sys
 
-    r = subprocess.run([sys.executable, "-m", "gate_bot", "status"],
+    r = subprocess.run([sys.executable, "-m", "omnialpha", "status"],
                        capture_output=True, text=True, encoding="utf-8", cwd=str(ROOT))
     d = json.loads(r.stdout)
     rows = []

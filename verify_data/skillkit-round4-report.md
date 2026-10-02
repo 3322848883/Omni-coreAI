@@ -16,7 +16,7 @@
 
 **问题**：`allowed-tools` 字段能正确解析为 `frozenset`，但 **运行时从未收窄工具面**——声明形同虚设（grep 全代码库无任何执行点）。
 
-**修复**（`gate_bot/strategist/loop.py`）：
+**修复**（`omnialpha/strategist/loop.py`）：
 - `_skill_allowed_tools(skill_id)` 读取 skill 声明的白名单
 - `_chat_native_tools` 在 skill 成功加载后，把后续轮次的 `tools=` 收窄为 `allowed ∪ {skill, skill_ref}`
 - 元工具（skill / skill_ref）始终保留，否则 L3 会断

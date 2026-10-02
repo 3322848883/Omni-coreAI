@@ -6,12 +6,12 @@ from typing import Optional
 from .base import ExchangeClient
 
 _EXCHANGES = {
-    "gate": "gate_bot.exchanges.gate:GateExchange",
-    "binance": "gate_bot.exchanges.binance:BinanceExchange",
-    "okx": "gate_bot.exchanges.okx:OkxExchange",
-    "bybit": "gate_bot.exchanges.bybit:BybitExchange",
-    "bitget": "gate_bot.exchanges.bitget:BitgetExchange",
-    "hyperliquid": "gate_bot.exchanges.hyperliquid:HyperliquidExchange",
+    "gate": "omnialpha.exchanges.gate:GateExchange",
+    "binance": "omnialpha.exchanges.binance:BinanceExchange",
+    "okx": "omnialpha.exchanges.okx:OkxExchange",
+    "bybit": "omnialpha.exchanges.bybit:BybitExchange",
+    "bitget": "omnialpha.exchanges.bitget:BitgetExchange",
+    "hyperliquid": "omnialpha.exchanges.hyperliquid:HyperliquidExchange",
 }
 
 

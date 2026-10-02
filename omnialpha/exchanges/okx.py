@@ -43,7 +43,7 @@ class OkxExchange(ExchangeClient):
              json_body: bool = True) -> Any:
         params = dict(params or {})
         body_s = json.dumps(params) if (params and method != "GET") else ""
-        headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 gate-signal-bot"}
+        headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 OmniAlpha"}
         url = path if path.startswith("http") else f"{self.base}{path}"
         if signed:
             ts = str(int(time.time() * 1000))  # ms

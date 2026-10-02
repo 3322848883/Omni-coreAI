@@ -6,7 +6,7 @@
 
 ## 一、升级总览
 
-本次升级为 gate-signal-bot 引入**多 AI 人格共管订单**与**四层记忆架构**，从"单 bot 独立决策"升级为"多策略合议决策 + 全生命周期记忆"。
+本次升级为 OmniAlpha 引入**多 AI 人格共管订单**与**四层记忆架构**，从"单 bot 独立决策"升级为"多策略合议决策 + 全生命周期记忆"。
 
 | 功能 | 状态 | 测试 |
 |------|------|------|
@@ -35,7 +35,7 @@ N 个策略人格共同管理订单，独立分析后融合执行。
 | `mirror_accounts` | N 人格 → N 账户同步 |
 
 **配置**：`config/persona_groups.yaml`
-**运行**：`python -m gate_bot persona-run --group <name>`
+**运行**：`python -m omnialpha persona-run --group <name>`
 
 ### 2.2 讨论模式（可选）
 

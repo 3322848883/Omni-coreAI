@@ -1,6 +1,6 @@
 # 策略评估与模拟盘体系 — 深度调研报告
 
-> 2026-09-28 · gate-signal-bot · 中文  
+> 2026-09-28 · OmniAlpha · 中文  
 > 范围：多策略人格模拟盘赛马的**可信评估、风控、排行、运维、上实盘交接**  
 > 证据：`findings/F1–F4.md`（行业/学术）+ 代码盘点（本仓库）  
 > 模式：standard（4 角度 × ≤6 检索）+ 1 轮代码侧核查
@@ -155,7 +155,7 @@ L4 扩权    实盘 30 日对账偏差<阈值且 MaxDD 达标 → 加额
 
 | 阶段 | 内容 | 产出 |
 |------|------|------|
-| **R1 本周** | 指标引擎 + scoreboard JSON/CLI；trials 台账 | `gate_bot paper-score` |
+| **R1 本周** | 指标引擎 + scoreboard JSON/CLI；trials 台账 | `omnialpha paper-score` |
 | **R2** | 持续风控（日亏/回撤阶梯/Heat）+ 告警 | tick 级熔断 |
 | **R3** | 成本后收益与 DSR 列；样本量徽章 | 可信排行 |
 | **R4** | 晋级门 L0–L4 + 与实盘对账脚本 | 上实盘 checklist |

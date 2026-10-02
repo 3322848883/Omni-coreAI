@@ -10,7 +10,7 @@ commits: dccce59..HEAD
 
 ## Report
 
-**What was built** — `data/bots/<id>/{inbox,archive,logs,state}` 新布局 + `data/bots.db` SQLite 台账（trades/plans/signals/heartbeats）+ `python -m gate_bot supervisor` 多 bot 托管（PID 锁、限频重启）+ `migrate` 一键迁移。执行/Plan 路径已接到 v2 布局；CLI 与 supervisor 锁一致（`GATE_LOCK_HELD`）。
+**What was built** — `data/bots/<id>/{inbox,archive,logs,state}` 新布局 + `data/bots.db` SQLite 台账（trades/plans/signals/heartbeats）+ `python -m omnialpha supervisor` 多 bot 托管（PID 锁、限频重启）+ `migrate` 一键迁移。执行/Plan 路径已接到 v2 布局；CLI 与 supervisor 锁一致（`OMNIALPHA_LOCK_HELD`）。
 
 **Verification** —
 - `unittest discover -s tests` → **161 OK**（含 migrate 幂等、v2 paths、锁互斥）
@@ -19,7 +19,7 @@ commits: dccce59..HEAD
 **Journey log** —
 1. 首版只建了 paths/ledger/migrate，未改 `ProjectPaths` 运行时 → review 抓出「迁移后 run 不读新 inbox」。
 2. migrate 重复导入 jsonl → `.jsonl_imported` 标记一次。
-3. supervisor 与 CLI 抢同一 lock 文件导致子进程秒退 → `GATE_LOCK_HELD` + 统一 `lock_run` 路径。
+3. supervisor 与 CLI 抢同一 lock 文件导致子进程秒退 → `OMNIALPHA_LOCK_HELD` + 统一 `lock_run` 路径。
 4. PidLock 改 `O_EXCL` 原子创建，防 TOCTOU 双开。
 
 ## [S1] Problem
@@ -70,7 +70,7 @@ commits: dccce59..HEAD
 
 约定：
 - **写路径**：执行器/plan-loop 写库为**主**台账；jsonl 仍可写作 append 审计（可配置 `ledger: sqlite|jsonl|both`）。
-- **读路径**：`trades`/`plans` 查询 CLI（后续 `gate_bot report`），不阻断交易链路。
+- **读路径**：`trades`/`plans` 查询 CLI（后续 `omnialpha report`），不阻断交易链路。
 - **迁移**：一次性把现有 `logs/trades/*.jsonl` 与 `history/**` 导入 `bots.db`（见 2.5）。
 
 ### 2.3 按 bot 目录树
@@ -93,7 +93,7 @@ data/bots/<bot_id>/
 
 ### 2.4 统一 Supervisor（稳定运行）
 
-新入口：`python -m gate_bot supervisor`（或 `gate-bot-supervisor`）。
+新入口：`python -m omnialpha supervisor`（或 `omnialpha-supervisor`）。
 
 职责（借鉴 `pa-data-source/watchdog.py`）：
 1. 启动时 `migrate`（若检测旧布局）→ 扫描 `config/bots/*.yaml` 中 `enabled: true`。
@@ -101,7 +101,7 @@ data/bots/<bot_id>/
 3. **单实例锁**：`data/bots/<id>/state/plan.lock`、`run.lock`（PID 存活检测；孤儿锁接管）。
 4. **崩溃拉起**：退出后约 5s 重启；**≤5 次/小时**/组件，超限记 fault 并停该组件（防重启风暴）。
 5. **心跳**：子进程或 supervisor 写 `heartbeats` 表。
-6. **status**：`gate_bot status` 扩展为：每 bot 进程/PID/最近 plan_cycle/inbox 深度/心跳年龄。
+6. **status**：`omnialpha status` 扩展为：每 bot 进程/PID/最近 plan_cycle/inbox 深度/心跳年龄。
 7. **日志**：`data/bots/<id>/logs/`，建议按日切割或大小上限。
 8. **独立性**：bot A 崩溃不影响 bot B；supervisor 本身可由 systemd/任务计划托管**单实例**。
 
@@ -117,7 +117,7 @@ runtime:
 
 ### 2.5 自动迁移
 
-`python -m gate_bot migrate [--bot id] [--dry-run]`：
+`python -m omnialpha migrate [--bot id] [--dry-run]`：
 1. 创建 `data/bots/<id>/{inbox,archive,logs,state}`。
 2. 移动/复制：`inbox/<id>/*` → `data/bots/<id>/inbox`；`archive/{done,failed}/<id>` → 对应树；`history/<id>/*` → `state/`；`logs/trades/<id>.jsonl` → `logs/trades.jsonl`。
 3. 导入 jsonl → `bots.db.trades`。
@@ -127,11 +127,11 @@ runtime:
 
 | 模块 | 职责 |
 |------|------|
-| `gate_bot/paths.py` | 统一解析 bot 目录（新布局；兼容只读旧路径直到迁移） |
-| `gate_bot/ledger.py` | bots.db 读写（trades/plans/signals/heartbeats） |
-| `gate_bot/supervisor.py` | 进程托管、锁、限频重启 |
-| `gate_bot/migrate.py` | 目录 + jsonl 迁移 |
-| `gate_bot/__main__.py` | `supervisor` / `migrate` 子命令；`status` 扩展 |
+| `omnialpha/paths.py` | 统一解析 bot 目录（新布局；兼容只读旧路径直到迁移） |
+| `omnialpha/ledger.py` | bots.db 读写（trades/plans/signals/heartbeats） |
+| `omnialpha/supervisor.py` | 进程托管、锁、限频重启 |
+| `omnialpha/migrate.py` | 目录 + jsonl 迁移 |
+| `omnialpha/__main__.py` | `supervisor` / `migrate` 子命令；`status` 扩展 |
 
 ### 2.7 测试边界
 

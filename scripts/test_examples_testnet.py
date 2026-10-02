@@ -14,9 +14,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.gate_client import GateClient  # noqa: E402
-from gate_bot.executor import Executor  # noqa: E402
-from gate_bot.schema import parse_signal, expand_signal  # noqa: E402
+from omnialpha.gate_client import GateClient  # noqa: E402
+from omnialpha.executor import Executor  # noqa: E402
+from omnialpha.schema import parse_signal, expand_signal  # noqa: E402
 
 RESULTS = []
 
@@ -122,7 +122,7 @@ def main() -> int:
     # cleanup
     print("\n[cleanup]")
     for sym in ("BTC_USDT", "ETH_USDT", "SOL_USDT"):
-        from gate_bot.schema import parse_signal as ps
+        from omnialpha.schema import parse_signal as ps
         ex.execute_signal(ps({"action": "flatten", "symbol": sym}))
         ex.execute_signal(ps({"action": "cancel_all", "symbol": sym}))
         ex.execute_signal(ps({"action": "cancel_price_all", "symbol": sym}))

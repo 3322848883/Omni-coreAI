@@ -44,7 +44,7 @@
 
 **怎么做**：
 ```
-gate_bot/backtest/
+omnialpha/backtest/
 ├── llm_snapshot.py     # 每轮 Plan 结果存快照（decision + reasoning + snapshot_digest）
 ├── replay.py           # 回放历史快照→逐 bar 模拟→出绩效
 ├── stats.py            # DSR / p-value / Sharpe / MaxDD

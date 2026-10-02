@@ -4,7 +4,7 @@
   - linreg：独立最小二乘（x=0..n-1 时序）作金标准
   - RSI：Wilder《New Concepts》经典数据集公开值 + 独立 RMA
   - HA/T3/KAMA：按 Pine 文档公式独立重算
-  - 另与 gate_bot.strategist.indicators 交叉对账
+  - 另与 omnialpha.strategist.indicators 交叉对账
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.strategist.tv_indicators import (  # noqa: E402
+from omnialpha.strategist.tv_indicators import (  # noqa: E402
     calc_dev,
     calc_slope,
     heikin_ashi,
@@ -35,9 +35,9 @@ from gate_bot.strategist.tv_indicators import (  # noqa: E402
     trendlines,
     volatility_bands,
 )
-from gate_bot.strategist.tv_indicators.lr_ha_candles import _linreg_val  # noqa: E402
-from gate_bot.strategist.indicators import linreg as ind_linreg  # noqa: E402
-from gate_bot.strategist.indicators import rsi as ind_rsi  # noqa: E402
+from omnialpha.strategist.tv_indicators.lr_ha_candles import _linreg_val  # noqa: E402
+from omnialpha.strategist.indicators import linreg as ind_linreg  # noqa: E402
+from omnialpha.strategist.indicators import rsi as ind_rsi  # noqa: E402
 
 
 # ── 独立金标准 ─────────────────────────────────────

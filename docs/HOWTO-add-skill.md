@@ -40,21 +40,21 @@ compatibility: 需要 Python 3.10+
 
 ```powershell
 # 校验（fail-closed，有 ERROR 拒绝）
-python -m gate_bot skill validate path/to/my-strategy
+python -m omnialpha skill validate path/to/my-strategy
 
 # 安装到 <root>/skills/（不会自动启用）
-python -m gate_bot skill install path/to/my-strategy
+python -m omnialpha skill install path/to/my-strategy
 
 # 查看
-python -m gate_bot skill list
-python -m gate_bot skill show my-strategy
+python -m omnialpha skill list
+python -m omnialpha skill show my-strategy
 
 # 启用：编辑 config/bots/<bot>.yaml
 #   skills: [my-strategy]
 # 空列表 skills: [] = 该 bot 无 skill
 
 # 卸载
-python -m gate_bot skill remove my-strategy --yes
+python -m omnialpha skill remove my-strategy --yes
 ```
 
 ## 4. 运行时行为

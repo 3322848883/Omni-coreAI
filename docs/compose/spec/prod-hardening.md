@@ -35,7 +35,7 @@ commits:
 
 **数据源**：`memory_journal.jsonl`（已有 `decision`/`executed`/`exec_result`）。
 
-**新增文件**：`gate_bot/monitoring/decay.py`
+**新增文件**：`omnialpha/monitoring/decay.py`
 
 ```python
 class DecayDetector:
@@ -64,7 +64,7 @@ class DecayDetector:
 
 ### [S2.2] 订单状态机补全（order-state）
 
-**修改文件**：`gate_bot/schema.py` + `gate_bot/executor.py`
+**修改文件**：`omnialpha/schema.py` + `omnialpha/executor.py`
 
 ```python
 # schema.py 新增
@@ -85,7 +85,7 @@ if order_state == "partially_filled" and order_type == "ioc":
 
 ### [S2.3] 监控告警（monitor）
 
-**新增文件**：`gate_bot/monitoring/health.py`
+**新增文件**：`omnialpha/monitoring/health.py`
 
 ```python
 class HealthMonitor:
@@ -107,7 +107,7 @@ class HealthMonitor:
 
 ### [S2.4] 波动率仓位管理（vol-sizing）
 
-**修改文件**：`gate_bot/sizing.py` + `gate_bot/strategist/risk.py`
+**修改文件**：`omnialpha/sizing.py` + `omnialpha/strategist/risk.py`
 
 ```python
 # sizing.py 新增
@@ -126,7 +126,7 @@ def vol_adjust_size(base_size_usd: float, atr_pct: float,
 
 ### [S2.5] 回测验证体系（backtest）
 
-**新增文件**：`gate_bot/backtest/`（3 个模块）
+**新增文件**：`omnialpha/backtest/`（3 个模块）
 
 ```python
 # replay.py
@@ -158,7 +158,7 @@ def buy_and_hold_pnl(closes: list[float]) -> float
 def sma_crossover_pnl(closes: list[float], fast: int = 50, slow: int = 200) -> float
 ```
 
-**CLI**：`python -m gate_bot backtest --bot brooks-btc --days 30`
+**CLI**：`python -m omnialpha backtest --bot brooks-btc --days 30`
 
 ## [S3] Out of Scope
 
@@ -175,6 +175,6 @@ def sma_crossover_pnl(closes: list[float], fast: int = 50, slow: int = 200) -> f
 - [x] T5: vol-sizing — `sizing.py` vol_adjust_size + risk 配置 + 挂钩 (covers: S2.4)
 - [x] T6: backtest replay — journal 回放 → trades/pnl_curve (covers: S2.5)
 - [x] T7: backtest stats — DSR / p-value / B&H / sma 基准 (covers: S2.5; depends: T6)
-- [x] T8: backtest CLI — `gate_bot backtest` 子命令 (covers: S2.5; depends: T6,T7)
+- [x] T8: backtest CLI — `omnialpha backtest` 子命令 (covers: S2.5; depends: T6,T7)
 - [x] T9: 测试 — 各模块单元 + 集成 (covers: S2.1–S2.5)
 - [x] T10: 文档 — README 使用指南 (covers: S2.1–S2.5)

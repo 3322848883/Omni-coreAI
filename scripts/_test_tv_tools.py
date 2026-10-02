@@ -8,8 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.gate_client import GateClient  # noqa: E402
-from gate_bot.strategist.tools import run_tool  # noqa: E402
+from omnialpha.gate_client import GateClient  # noqa: E402
+from omnialpha.strategist.tools import run_tool  # noqa: E402
 
 c = GateClient(api_key=os.environ.get("GATE_TESTNET_API_KEY", ""),
                api_secret=os.environ.get("GATE_TESTNET_API_SECRET", ""),

@@ -14,7 +14,7 @@ from typing import Any, Optional
 from .models import SkillError, SkillMeta, SkillPackage
 
 KEBAB_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
-RESERVED_NAMES = ("gate", "gbot", "gate-bot", "skill", "system", "admin")
+RESERVED_NAMES = ("gate", "gbot", "omnialpha", "skill", "system", "admin")
 SKILL_FILENAME = "SKILL.md"
 BUNDLED_DIRS = ("references", "scripts", "assets")
 MAX_DESCRIPTION = 1024

@@ -14,11 +14,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.executor import Executor
-from gate_bot.paper.exchange import PaperExchange
-from gate_bot.paper.engine import PaperEngine
-from gate_bot.paper.store import PaperStore
-from gate_bot.schema import parse_signal
+from omnialpha.executor import Executor
+from omnialpha.paper.exchange import PaperExchange
+from omnialpha.paper.engine import PaperEngine
+from omnialpha.paper.store import PaperStore
+from omnialpha.schema import parse_signal
 
 PASS, FAIL = [], []
 

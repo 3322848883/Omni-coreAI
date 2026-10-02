@@ -14,7 +14,7 @@ sum_xx = sum((i + 1) ** 2 for i in range(length))
 slope_tv = (length * sum_xy - sum_x * sum_y) / (length * sum_xx - sum_x * sum_x)
 average = sum_y / length
 intercept_tv = average - slope_tv * sum_x / length + slope_tv
-from gate_bot.strategist.tv_indicators import calc_slope
+from omnialpha.strategist.tv_indicators import calc_slope
 slope_py, avg_py, intercept_py = calc_slope(values, length)
 results.append(("Linear Regression", abs(slope_py - slope_tv) < 1e-10 and abs(intercept_py - intercept_tv) < 1e-10))
 
@@ -38,7 +38,7 @@ for i in range(len(changes)):
     if up_rma[i] is not None and dn_rma[i] is not None:
         u, d = up_rma[i], dn_rma[i]
         tv_rsi[i+1] = 100 if d == 0 else (0 if u == 0 else 100 - 100 / (1 + u/d))
-from gate_bot.strategist.tv_indicators import rsi_base
+from omnialpha.strategist.tv_indicators import rsi_base
 py_rsi = {i: v for i, v in enumerate(rsi_base(closes, 14)) if v is not None}
 rsi_match = all(abs(tv_rsi[k] - py_rsi.get(k+1, 0)) < 0.01 for k in tv_rsi)
 results.append(("RSI (ta.rma)", rsi_match))
@@ -59,7 +59,7 @@ g1 = gd(t3_vals, 3, 0.7)
 g2 = gd([v if v is not None else 0 for v in g1], 3, 0.7)
 g3 = gd([v if v is not None else 0 for v in g2], 3, 0.7)
 t3_tv = g3[-1]
-from gate_bot.strategist.tv_indicators import t3_moving_average
+from omnialpha.strategist.tv_indicators import t3_moving_average
 t3_py = t3_moving_average(t3_vals, 3, 0.7)[-1]
 results.append(("T3 Moving Average", abs(t3_tv - t3_py) < 0.01))
 
@@ -80,7 +80,7 @@ def kama_tv(values, period):
         out[i] = prev
     return out
 kama_tv_val = kama_tv(kama_vals, 10)[-1]
-from gate_bot.strategist.tv_indicators import kama
+from omnialpha.strategist.tv_indicators import kama
 kama_py_val = kama(kama_vals, 10)[-1]
 results.append(("KAMA", abs(kama_tv_val - kama_py_val) < 0.01))
 
@@ -93,7 +93,7 @@ ha_close = [(o[i]+h[i]+l[i]+c[i])/4 for i in range(4)]
 ha_open = [None]*4
 ha_open[0] = (o[0]+c[0])/2
 for i in range(1,4): ha_open[i] = (ha_open[i-1]+ha_close[i-1])/2
-from gate_bot.strategist.tv_indicators import heikin_ashi
+from omnialpha.strategist.tv_indicators import heikin_ashi
 ha_py = heikin_ashi(o, h, l, c)
 ha_match = all(abs(ha_open[i] - ha_py["open"][i]) < 0.01 for i in range(4))
 results.append(("Heikin Ashi", ha_match))
@@ -102,7 +102,7 @@ results.append(("Heikin Ashi", ha_match))
 vb_h = [11.0, 12.0, 13.0, 14.0, 15.0] * 4
 vb_l = [9.0, 10.0, 11.0, 12.0, 13.0] * 4
 vb_c = [10.0, 11.0, 12.0, 13.0, 14.0] * 4
-from gate_bot.strategist.tv_indicators import volatility_bands
+from omnialpha.strategist.tv_indicators import volatility_bands
 vb = volatility_bands(vb_h, vb_l, vb_c, length=5)
 tv_upper = vb["basis"][-1] + 2.0 * vb["atr"][-1]
 vb_match = abs(vb["upper_inner"][-1] - tv_upper) < 0.01

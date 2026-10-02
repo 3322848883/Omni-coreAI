@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.strategist.tv_indicators import (
+from omnialpha.strategist.tv_indicators import (
     calc_slope,
     heikin_ashi,
     kama,
@@ -27,7 +27,7 @@ from gate_bot.strategist.tv_indicators import (
     trendlines,
     volatility_bands,
 )
-from gate_bot.strategist.tv_indicators.lr_ha_candles import _linreg_val
+from omnialpha.strategist.tv_indicators.lr_ha_candles import _linreg_val
 
 DB = ROOT / "pa-data-source" / "data" / "kline.db"
 OUT = ROOT / "verify_data"
@@ -232,7 +232,7 @@ def main() -> None:
 
     pine = f"""//@version=5
 // ============================================================================
-// gate-signal-bot ↔ TradingView 数值对照脚本
+// OmniAlpha ↔ TradingView 数值对照脚本
 // 数据：{SYMBOL} {INTERVAL}  {tsh[0]} ~ {tsh[-1]} UTC（Gate kline.db，{len(closes)} 根）
 // 用法：Pine Editor → 粘贴本文件 → Add to chart → 看右上角表格
 // 全部指标从下方固定数组计算，与图表 close 无关，可贴在任意图上。

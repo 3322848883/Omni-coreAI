@@ -2,7 +2,7 @@
 
 - 契约：contracts/KLINE_SCHEMA.md（t/symbol/interval/o,h,l,c,v,sum,ema20,atr14）
 - 库文件：data/kline_<ex>.db（live） / data/kline_<ex>_testnet.db（testnet）
-- 取数：gate_bot.exchanges 各所公开 REST get_klines（与 bot 工具同一数据源）
+- 取数：omnialpha.exchanges 各所公开 REST get_klines（与 bot 工具同一数据源）
 - 实时：ws_venues 公开 WS candle 推送（对齐 Gate 模式：WS 主通道 + REST 兜底/补全）
 - 指标：compute_ema / compute_atr 与 kline_watcher.py 同算法
 
@@ -176,16 +176,16 @@ def merge_and_write(conn: sqlite3.Connection, symbol: str, interval: str, fetche
     return n
 
 
-# ── 取数（gate_bot.exchanges，与 bot 工具同一数据源）─────────────────
+# ── 取数（omnialpha.exchanges，与 bot 工具同一数据源）─────────────────
 def _import_create_exchange():
     if ROOT not in sys.path:
         sys.path.insert(0, ROOT)
     try:
-        from gate_bot.exchanges.registry import create_exchange  # noqa: PLC0415
+        from omnialpha.exchanges.registry import create_exchange  # noqa: PLC0415
     except ImportError as e:
         raise SystemExit(
-            f"需要 monorepo 中的 gate_bot.exchanges（ROOT={ROOT}）。\n"
-            f"请从 gate-signal-bot 仓库内运行本脚本，或设 PYTHONPATH 指向仓库根。原始错误: {e}"
+            f"需要 monorepo 中的 omnialpha.exchanges（ROOT={ROOT}）。\n"
+            f"请从 OmniAlpha 仓库内运行本脚本，或设 PYTHONPATH 指向仓库根。原始错误: {e}"
         ) from e
     return create_exchange
 

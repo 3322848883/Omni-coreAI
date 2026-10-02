@@ -9,8 +9,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.metrics.scoreboard import build_scoreboard, format_table  # noqa: E402
-from gate_bot.metrics.trials import global_trial_n, scan_trials, trial_counts  # noqa: E402
+from omnialpha.metrics.scoreboard import build_scoreboard, format_table  # noqa: E402
+from omnialpha.metrics.trials import global_trial_n, scan_trials, trial_counts  # noqa: E402
 
 DDL = """
 CREATE TABLE IF NOT EXISTS pnl_snapshot (

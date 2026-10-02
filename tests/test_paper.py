@@ -8,16 +8,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.paper.engine import PaperEngine  # noqa: E402
-from gate_bot.paper.exchange import PaperExchange  # noqa: E402
-from gate_bot.paper.risk import RiskEngine, liquidation_price  # noqa: E402
-from gate_bot.paper.store import (  # noqa: E402
+from omnialpha.paper.engine import PaperEngine  # noqa: E402
+from omnialpha.paper.exchange import PaperExchange  # noqa: E402
+from omnialpha.paper.risk import RiskEngine, liquidation_price  # noqa: E402
+from omnialpha.paper.store import (  # noqa: E402
     ORDER_CANCELLED,
     ORDER_FILLED,
     ORDER_OPEN,
     PaperStore,
 )
-from gate_bot.paper.validate import PaperReject, validate_and_round_order  # noqa: E402
+from omnialpha.paper.validate import PaperReject, validate_and_round_order  # noqa: E402
 
 
 class FakeMeta:

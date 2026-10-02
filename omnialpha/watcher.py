@@ -15,7 +15,7 @@ from .executor import ExecReport, Executor
 from .gate_client import GateApiError
 from .schema import SchemaError, parse_signal
 
-log = logging.getLogger("gate_bot.watcher")
+log = logging.getLogger("omnialpha.watcher")
 
 
 def _alert_store(paths: "ProjectPaths", bot_id: str):

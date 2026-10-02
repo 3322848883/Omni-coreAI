@@ -10,9 +10,9 @@ commits: 58d5281..27b5e82
 
 ## Report
 
-**What was built** — `gate_bot/strategist`：OpenAI 兼容 LLM 客户端、VergeX 式 Plan/chips 解析、行情+账户快照、策略 prompt（`prompts/vergex_default.md`）、**每 bot 独立风控**（min_confidence / max_notional / allow_actions / max_chips）、chips→现有 SignalFile 写 `inbox`、`plan` / `plan-loop` CLI（interval + K 线收盘触发、cycle 去重）。执行仍走 watcher/executor，复用 position_policy / replace。
+**What was built** — `omnialpha/strategist`：OpenAI 兼容 LLM 客户端、VergeX 式 Plan/chips 解析、行情+账户快照、策略 prompt（`prompts/vergex_default.md`）、**每 bot 独立风控**（min_confidence / max_notional / allow_actions / max_chips）、chips→现有 SignalFile 写 `inbox`、`plan` / `plan-loop` CLI（interval + K 线收盘触发、cycle 去重）。执行仍走 watcher/executor，复用 position_policy / replace。
 
-**Verification** — `python -m unittest discover -s tests`：**59 PASS**（含 plan 解析、风控矩阵、bridge→parse_signal、LLM mock）。`python -m gate_bot --help` 含 plan/plan-loop；`from gate_bot.strategist import write_hold_audit` 可导入；独立复审确认 critical 全部关闭。
+**Verification** — `python -m unittest discover -s tests`：**59 PASS**（含 plan 解析、风控矩阵、bridge→parse_signal、LLM mock）。`python -m omnialpha --help` 含 plan/plan-loop；`from omnialpha.strategist import write_hold_audit` 可导入；独立复审确认 critical 全部关闭。
 
 **Journey log** —
 1. 先落地 chips 契约再写执行桥，保证输出可被 `parse_signal` 消费。
@@ -31,7 +31,7 @@ commits: 58d5281..27b5e82
 - [x] T7: CLI `plan` / `plan-loop`（interval + kline close） — acceptance: once 写文件；loop 可启动停止 (covers: S2)
 - [x] T8: README 策略层文档 + 全量单测 — acceptance: unittest 全绿；README 含 Plan schema (covers: S2)
 
-`gate-signal-bot` 只能执行**外部**写入的 JSON 信号。需要内置 LLM 策略层：按周期/事件采集行情与账户快照，由 AI 生成 **VergeX 式多品种决策**，经**每 bot 独立风控**后转成现有 signal JSON，交给执行器下单，形成完整策略交易闭环。
+`OmniAlpha` 只能执行**外部**写入的 JSON 信号。需要内置 LLM 策略层：按周期/事件采集行情与账户快照，由 AI 生成 **VergeX 式多品种决策**，经**每 bot 独立风控**后转成现有 signal JSON，交给执行器下单，形成完整策略交易闭环。
 
 ## [S2] Design
 
@@ -132,8 +132,8 @@ strategist:
 ### CLI / 进程
 
 ```text
-python -m gate_bot plan --bot <id>            # 跑一轮：采集→LLM→写 inbox
-python -m gate_bot plan-loop --bot <id>       # 常驻：interval + kline-close
+python -m omnialpha plan --bot <id>            # 跑一轮：采集→LLM→写 inbox
+python -m omnialpha plan-loop --bot <id>       # 常驻：interval + kline-close
 ```
 
 与 `run`（watcher）可同机分进程：planner 只写文件，watcher 只执行。

@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.strategist.triggers import (  # noqa: E402
+from omnialpha.strategist.triggers import (  # noqa: E402
     ConditionError,
     check_conditions,
     evaluate_condition,

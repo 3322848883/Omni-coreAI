@@ -7,9 +7,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.paper.engine import PaperEngine  # noqa: E402
-from gate_bot.paper.store import ORDER_FILLED, PaperStore  # noqa: E402
-from gate_bot.paper.validate import PaperReject  # noqa: E402
+from omnialpha.paper.engine import PaperEngine  # noqa: E402
+from omnialpha.paper.store import ORDER_FILLED, PaperStore  # noqa: E402
+from omnialpha.paper.validate import PaperReject  # noqa: E402
 
 
 class FakeMeta:

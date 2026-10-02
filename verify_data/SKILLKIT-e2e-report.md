@@ -14,7 +14,7 @@
 | prompt | `prompts/skill_e2e_test.md`（本轮任务=行情分析，强制先调 skill 工具） |
 | 模型 | `global:deepseek-v4.1-flash`（OPENAI_BASE_URL 网关） |
 | skill | `skills/price-action-trading`（v34.2，从 zip 安装） |
-| 命令 | `python -m gate_bot plan --bot skill-e2e` |
+| 命令 | `python -m omnialpha plan --bot skill-e2e` |
 
 ## 执行过程与修复
 
@@ -24,7 +24,7 @@
 | R2 | 开工具后 LLM 调了 smc/sqzmom，仍不调 skill | catalog 有清单但**缺使用提示**，模型不知道要先 load |
 | R3 | 修复 `render_catalog` 注入使用提示 + persona 明确分析任务 | **LLM 调用 `skill(price-action-trading)`** ✅ |
 
-修复内容：`gate_bot/skillkit/catalog.py` 的 catalog 段加入
+修复内容：`omnialpha/skillkit/catalog.py` 的 catalog 段加入
 「任务匹配某个 skill 时，**先调用 skill(name) 加载其完整指令再作答**」。
 
 ## 关键证据

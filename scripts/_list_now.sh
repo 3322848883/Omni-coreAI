@@ -24,7 +24,7 @@ echo "=== 3) 按项目归类（进程数 + 内存）==="
 ps -eo rss,args --no-headers | awk '{
   cmd=substr($0,index($0,$2));
   proj="其他";
-  if (cmd ~ /gate-signal-bot|gate_bot/) proj="gate-signal-bot(我们的)";
+  if (cmd ~ /OmniAlpha|omnialpha/) proj="OmniAlpha(我们的)";
   else if (cmd ~ /hermes-studio|agent-browser|ms-playwright/) proj="hermes-studio+浏览器";
   else if (cmd ~ /chrome|chromium/) proj="hermes-studio+浏览器";
   else if (cmd ~ /hermes-agent/) proj="hermes-agent";

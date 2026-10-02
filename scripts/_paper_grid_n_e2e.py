@@ -7,9 +7,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.executor import Executor
-from gate_bot.paper.exchange import PaperExchange
-from gate_bot.schema import parse_signal
+from omnialpha.executor import Executor
+from omnialpha.paper.exchange import PaperExchange
+from omnialpha.schema import parse_signal
 
 
 class FakeMeta:

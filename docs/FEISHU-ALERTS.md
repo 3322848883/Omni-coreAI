@@ -55,7 +55,7 @@ $env:FEISHU_USER_OPEN_ID = "ou_xxx"
 ### 验证连通
 
 ```python
-from gate_bot.monitoring.notify import build_notifier
+from omnialpha.monitoring.notify import build_notifier
 n = build_notifier(root=Path('.'))
 print(n.has_channel, n.channel_names)
 n.send('测试消息')

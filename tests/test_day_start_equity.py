@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gate_bot.executor import Executor
+from omnialpha.executor import Executor
 
 
 class DummyClient:

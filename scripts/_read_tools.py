@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-ROOT = Path(r"C:\Users\w6485\Desktop\测试\gate-signal-bot")
+ROOT = Path(r"C:\Users\w6485\Desktop\测试\OmniAlpha")
 for bot in ["pa-a", "smc-paper", "orderflow-paper"]:
     st = ROOT / "data" / "bots" / bot / "state"
     files = sorted(st.glob("*.thinking.json"), key=lambda p: p.stat().st_mtime, reverse=True)

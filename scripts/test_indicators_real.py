@@ -13,8 +13,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.gate_client import GateClient  # noqa: E402
-from gate_bot.strategist.indicators import (  # noqa: E402
+from omnialpha.gate_client import GateClient  # noqa: E402
+from omnialpha.strategist.indicators import (  # noqa: E402
     atr,
     attach_indicators,
     boll,
@@ -24,8 +24,8 @@ from gate_bot.strategist.indicators import (  # noqa: E402
     rsi,
     sma,
 )
-from gate_bot.strategist.market import fetch_rest_candles  # noqa: E402
-from gate_bot.strategist.triggers import evaluate_condition  # noqa: E402
+from omnialpha.strategist.market import fetch_rest_candles  # noqa: E402
+from omnialpha.strategist.triggers import evaluate_condition  # noqa: E402
 
 RESULTS = []
 

@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.strategist.smc_map import BULL, BEAR, compute_smc_map, smc_map_summary
+from omnialpha.strategist.smc_map import BULL, BEAR, compute_smc_map, smc_map_summary
 
 
 def synth_rows():

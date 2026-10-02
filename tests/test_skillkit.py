@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.skillkit import (  # noqa: E402
+from omnialpha.skillkit import (  # noqa: E402
     SkillError,
     SkillRegistry,
     fit_catalog,
@@ -19,7 +19,7 @@ from gate_bot.skillkit import (  # noqa: E402
     run_skill_tool,
     validate_package,
 )
-from gate_bot.skillkit.models import SkillMeta  # noqa: E402
+from omnialpha.skillkit.models import SkillMeta  # noqa: E402
 
 
 def _write_skill(root: Path, name: str, desc: str, body: str = "# Body\n\nDo the thing.\n",
@@ -256,13 +256,13 @@ class TestSkillTool(unittest.TestCase):
 
 class TestToolsIntegration(unittest.TestCase):
     def test_native_tools_has_skill(self):
-        from gate_bot.strategist.tools import NATIVE_TOOLS, TOOL_NAMES
+        from omnialpha.strategist.tools import NATIVE_TOOLS, TOOL_NAMES
         self.assertIn("skill", TOOL_NAMES)
         self.assertIn("skill_ref", TOOL_NAMES)
         self.assertEqual(len(NATIVE_TOOLS), 25)  # 22 基础 + 3 TV
 
     def test_prompt_catalog_slot(self):
-        from gate_bot.strategist.prompt import build_system_prompt
+        from omnialpha.strategist.prompt import build_system_prompt
         sys_prompt = build_system_prompt("persona", skill_catalog="<skill_catalog>\n- x: y\n</skill_catalog>")
         self.assertIn("<skill_catalog>", sys_prompt)
         self.assertIn("persona", sys_prompt)

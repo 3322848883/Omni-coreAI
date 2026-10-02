@@ -4,7 +4,7 @@ import json
 import re
 from pathlib import Path
 
-ROOT = Path("/opt/gate-signal-bot")
+ROOT = Path("/opt/omnialpha")
 STATE = ROOT / "data" / "bots" / "brooks-btc" / "state"
 
 th = sorted(STATE.glob("*.thinking.json"), key=lambda p: p.stat().st_mtime)

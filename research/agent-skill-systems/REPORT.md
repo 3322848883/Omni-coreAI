@@ -1,10 +1,10 @@
-# AI 智能体 Skill / 插件 / MCP 体系设计调研 —— gate-signal-bot 落地参考
+# AI 智能体 Skill / 插件 / MCP 体系设计调研 —— OmniAlpha 落地参考
 
 > Generated 2026-09-30 · depth: deep · 50 sources · workspace: research/agent-skill-systems/
 
 ## Executive summary
 
-1. **SKILL.md 已是跨厂商事实标准**：Anthropic 于 2025-10-16 发布 Agent Skills，2025-12-18 开放为 agentskills.io 标准，被 Claude Code、Cursor、Gemini CLI、GitHub Copilot、VS Code、OpenClaw、Hermes、ChatGPT/Codex 等数十客户端采纳；OpenAI GPT 退役迁移与 Microsoft 365 Copilot 也都落到「plugin 内的 SKILL.md」同一形态 [1][2][3][18][25]。gate-signal-bot 应直接对齐该格式，而非自创 manifest。
+1. **SKILL.md 已是跨厂商事实标准**：Anthropic 于 2025-10-16 发布 Agent Skills，2025-12-18 开放为 agentskills.io 标准，被 Claude Code、Cursor、Gemini CLI、GitHub Copilot、VS Code、OpenClaw、Hermes、ChatGPT/Codex 等数十客户端采纳；OpenAI GPT 退役迁移与 Microsoft 365 Copilot 也都落到「plugin 内的 SKILL.md」同一形态 [1][2][3][18][25]。OmniAlpha 应直接对齐该格式，而非自创 manifest。
 2. **渐进式披露（progressive disclosure）是稳定性的核心**：启动只预载 name+description（约 100 token/skill），触发才读 SKILL.md 正文（建议 <5000 token、<500 行），bundled 脚本/参考资料按需加载；listing 预算约为 context window 的 1% [2][4][12]。这是 skill 能「打包大量方法论却不炸上下文」的根本机制。
 3. **Skill ≠ MCP ≠ Plugin ≠ Subagent，分工明确**：Skill 打包「程序性工作流/方法论」，MCP 暴露「外部工具与数据接口」，Plugin 是「分发单元」（skills+agents+hooks+MCP 打包），Subagent 买「上下文隔离」；官方定位是互补而非替代 [1][7][15][29][43]。交易场景：下单/撤单/查仓走 MCP tool 形态，策略 playbook/风控 checklist 走 SKILL.md。
 4. **可靠性靠契约与闸门，不靠模型自觉**：OpenAI/Microsoft 用 OpenAPI schema、域名白名单、审批弹层、风险分级（Always ask→Allow low-risk→Allow all）、Elevated Risk 标签、Lockdown Mode 做故障域隔离 [21][22][23][24]；MCP 把 human-in-the-loop、annotations 不可信、超时/审计/限流写成 MUST/SHOULD 规范义务 [9][10]。
@@ -18,7 +18,7 @@
 
 ## Background & scope
 
-gate-signal-bot 是 Gate 永续合约信号执行 + LLM 策略 monorepo，已有 20 个 function-calling 工具、prompts/ 人格体系、多人格共管、25 族指标。本次目标是为「可安装 skill」做设计决策依据，方向是向「AI 交易全方位智能体」（tools / plugins / skills / MCP）演进，本次主目标是 skill。时间框 2025-01 ~ 2026-09，受众是要落地实现的开发者/架构师。假设：skill 不得绕过 yaml 风控与 executor 约束；安装面必须人工可审计。
+OmniAlpha 是 Gate 永续合约信号执行 + LLM 策略 monorepo，已有 20 个 function-calling 工具、prompts/ 人格体系、多人格共管、25 族指标。本次目标是为「可安装 skill」做设计决策依据，方向是向「AI 交易全方位智能体」（tools / plugins / skills / MCP）演进，本次主目标是 skill。时间框 2025-01 ~ 2026-09，受众是要落地实现的开发者/架构师。假设：skill 不得绕过 yaml 风控与 executor 约束；安装面必须人工可审计。
 
 ---
 
@@ -31,7 +31,7 @@ gate-signal-bot 是 Gate 永续合约信号执行 + LLM 策略 monorepo，已有
 - `description`：1–1024 字符（Claude Code listing 侧与 `when_to_use` 合计截断到 1536 字符）
 - `license` / `compatibility`（≤500 字符）/ `metadata`（string→string map）/ `allowed-tools`（Experimental）
 
-**关键约束**：Claude Code 私有扩展字段（`context: fork`、`hooks`、`paths`、`argument-hint` 等）在跨产品打包（claude.ai 上传、Skills API、package_skill.py）时会 **hard error** [6][12]。因此 gate-signal-bot 的 skill 若想可移植/可分享，manifest 必须只用六字段，交易专属 gating 放 `metadata` 命名空间（如 `metadata.gate`）。
+**关键约束**：Claude Code 私有扩展字段（`context: fork`、`hooks`、`paths`、`argument-hint` 等）在跨产品打包（claude.ai 上传、Skills API、package_skill.py）时会 **hard error** [6][12]。因此 OmniAlpha 的 skill 若想可移植/可分享，manifest 必须只用六字段，交易专属 gating 放 `metadata` 命名空间（如 `metadata.gate`）。
 
 **已被多方实现验证**：OpenClaw 严格遵循 AgentSkills 规范，frontmatter 至少 name+description，正文用 `{baseDir}` 引用技能目录 [33]；Microsoft 365 Copilot 把 skill 定义为「directory with required SKILL.md + supporting resources/scripts」，并把 skill 定义为 plugin 的一种 capability [25]；OpenAI 迁移映射是「GPT instructions → plugin 内的一个 skill」[2][18]。
 
@@ -70,7 +70,7 @@ gate-signal-bot 是 Gate 永续合约信号执行 + LLM 策略 monorepo，已有
 
 **双向组合**：Claude Code `context: fork` 让 skill 在独立 subagent 里以 SKILL.md 为 prompt、无对话历史执行（指令必须自洽）；反过来 subagent 的 `skills` 字段可把 skill 全文预载为参考材料 [4][10]。前者隔离任务，后者隔离知识。
 
-**Skill 声明依赖工具**：MCP 侧建议 skill 文件声明所需 MCP server，仅在 skill 被调用时懒连接 [15]——这正好对应 gate-signal-bot 里「skill 只在需要下单时才启用 Gate API 权限」。
+**Skill 声明依赖工具**：MCP 侧建议 skill 文件声明所需 MCP server，仅在 skill 被调用时懒连接 [15]——这正好对应 OmniAlpha 里「skill 只在需要下单时才启用 Gate API 权限」。
 
 **官方互补定位**：「Skills 通过教会 agent 更复杂的工作流来 complement MCP servers」[1][3]。交易场景映射（F7 建议亦如此）：下单/撤单/查仓 → MCP tool 形态（强 schema、权限边界）；策略 playbook/风控 checklist/复盘 → SKILL.md（渐进披露、可捆绑回测脚本）[12]。
 
@@ -133,7 +133,7 @@ Claude Code 的安装层级类似：enterprise managed > personal `~/.claude/ski
 
 **FinAgent**（arXiv:2402.18485）[40]：把经典交易策略与专家规则作为 tool-augmented 可复用组件注入，dual-level reflection + diversified memory retrieval。
 
-**跨框架共识**（可直接写进 gate-signal-bot 的 skill 红线）：
+**跨框架共识**（可直接写进 OmniAlpha 的 skill 红线）：
 1. LLM 只产出观点/叙述；sizing、下单、硬限额必须是模型外的确定性代码
 2. point-in-time 诚实 + backtest/live 单一代码路径是策略模块可信的前提
 3. 策略打包成文件（YAML/SKILL.md），不改 Python
@@ -165,7 +165,7 @@ Claude Code 的安装层级类似：enterprise managed > personal `~/.claude/ski
 | `metadata` | 可选 | 任意 string→string（可放交易 gating） |
 | `disable-model-invocation` | 可选 | `true` = 用户专属：模型看不到（不进 catalog、skill_search 不返回、skill 工具拒绝），但 `/skill-name` 仍可由用户触发 |
 
-**安全设计**（可直接借鉴到 gate-signal-bot）：
+**安全设计**（可直接借鉴到 OmniAlpha）：
 1. **Safe-YAML 解析，无代码执行**——frontmatter 解析器只取 key:value，不 eval
 2. **frontmatter 禁 XML 尖括号**——因为它被注入 system prompt，防 prompt injection 伪装标签
 3. **保留字命名禁令**——防冒充官方 skill
@@ -203,7 +203,7 @@ Claude Code 的安装层级类似：enterprise managed > personal `~/.claude/ski
 
 ### 6.5.6 生产级交易 skill 样本：price-action-trading v34.2 [S4]
 
-本机 `~/.config/mimocode/skills/price-action-trading/` 是一个**已在实盘分析中使用的 Al Brooks 价格行为 skill**，对 gate-signal-bot 极有参考价值：
+本机 `~/.config/mimocode/skills/price-action-trading/` 是一个**已在实盘分析中使用的 Al Brooks 价格行为 skill**，对 OmniAlpha 极有参考价值：
 
 ```
 price-action-trading/
@@ -223,7 +223,7 @@ price-action-trading/
 ├── logs/
 │   ├── analyses/            # 带时间戳的分析产物
 │   └── reports/             # market_state 报告
-└── memory/                  # ★ 分层记忆（与 gate-signal-bot 四层记忆同构）
+└── memory/                  # ★ 分层记忆（与 OmniAlpha 四层记忆同构）
     ├── L2_daily/  L3_weekly/  L4_monthly/  archive/
     ├── market_state.md  market_wisdom.md  pattern_effectiveness.md
     ├── error_patterns.md  strategy_hypotheses.md  trader_profile.md
@@ -235,7 +235,7 @@ price-action-trading/
 1. **description 含正触发 + 负触发**：「Use when 用户要求分析 BTC/ETH/SOL/XAU 等 K 线或图表截图、制定或检查交易计划…或提到 Al Brooks、price action…；**Do not use for** 基本面选股、荐币、新闻面交易、量化回测或非 K 线策略」——负触发显著降低误触发
 2. **强制顺序入口**：body 开头规定「先读 references/SOUL.md → 同时用 knowledge/workflow.md（走到哪一步）+ strategy_workflow.md（这一步怎么做）」——用文档路由替代把所有知识塞进 body
 3. **六层结构分层**：知识（references）/ 确定性代码（scripts）/ 模板（assets）/ 输入数据（data）/ 产物（logs）/ 记忆（memory）各归其位
-4. **记忆分层 L2/L3/L4**（日/周/月）+ archive——与 gate-signal-bot 的 agent-memory 四层（Order/Journal/Profile/Working）理念一致，可互操作
+4. **记忆分层 L2/L3/L4**（日/周/月）+ archive——与 OmniAlpha 的 agent-memory 四层（Order/Journal/Profile/Working）理念一致，可互操作
 5. **模板化产物**：trade_plan、trade_review、trading_journal 等 14 个模板保证输出结构一致（便于机器校验与回测对齐）
 6. **版本化**：frontmatter `version: "34.2"` + `references/history/` 归档升级计划——可回滚、可审计
 7. **脚本与文档分离**：`analyze_market_state.py`（确定性计算）与叙述分离，呼应 FinRobot「Numbers are code-calculated」[37]
@@ -257,9 +257,9 @@ price-action-trading/
 | 用户专属开关 | Claude Code `disable-model-invocation` [6] | ✅ 同名 | 一致 |
 | 校验器 | package_skill.py（打包侧） | ✅ validate_skill.py（独立） | 互补 |
 
-**结论**：MiMo 的实现是 Agent Skills 标准的一个**严格超集**（多了安全约束、展示分离、独立校验器），可移植面仍是标准六字段。gate-signal-bot 采用该形态即可同时兼容两端。
+**结论**：MiMo 的实现是 Agent Skills 标准的一个**严格超集**（多了安全约束、展示分离、独立校验器），可移植面仍是标准六字段。OmniAlpha 采用该形态即可同时兼容两端。
 
-## 7. 对 gate-signal-bot 的设计建议 —— **skill 工具功能（引擎）**
+## 7. 对 OmniAlpha 的设计建议 —— **skill 工具功能（引擎）**
 
 > 目标是实现「可安装 skill 的运行时能力」：发现 → 校验 → catalog 注入 → 按需加载 → 启停治理。skill 内容（策略 playbook）是后续填充物，不是本次交付物。
 
@@ -269,7 +269,7 @@ price-action-trading/
 config/skills/ 或 <root>/skills/          ← skill 安装根
         │  scan（会话启动 + 配置变更）
         ▼
-┌─────────────────── gate_bot/skillkit/ ───────────────────┐
+┌─────────────────── omnialpha/skillkit/ ───────────────────┐
 │  loader.py      发现 + frontmatter 解析（Safe-YAML）       │
 │  registry.py    SkillRegistry：id → meta + 本 bot 可见集    │
 │  budget.py      listing token 预算（硬上限 + 溢出降级）      │
@@ -354,12 +354,12 @@ Frontmatter（loader 只认这些，其余丢弃）：
 
 - **ERROR（拒装）**：非 kebab-case；SKILL.md 缺失/大小写不对；目录内 README.md；frontmatter 缺失/畸形；含 `<` `>`；缺 name/description；name 含保留字；description >1024
 - **WARNING（可装）**：name≠目录名；description <40 字符；无 "Use when" 触发句；body >5000 词；引用文件不存在
-- **安装流程**：`python -m gate_bot skill install <path>` → 校验 → 复制进 `skills/` → **不自动启用**（发布≠可用 [26]）→ bot yaml 手动加 id
+- **安装流程**：`python -m omnialpha skill install <path>` → 校验 → 复制进 `skills/` → **不自动启用**（发布≠可用 [26]）→ bot yaml 手动加 id
 
 ### 7.5 启停与权限治理
 
 1. **模型可达性与授权正交** [S2]：
-   - `disable-model-invocation: true` → 模型不可自主触发（catalog 不列、skill 工具拒绝），但 CLI/用户可跑（`gate_bot skill run <id>`）
+   - `disable-model-invocation: true` → 模型不可自主触发（catalog 不列、skill 工具拒绝），但 CLI/用户可跑（`omnialpha skill run <id>`）
    - `permission.skill: deny`（配置层）→ 对所有人不可用
    - bot yaml `skills: []` → 该 bot 无 skill
 2. **skill 一律 advisory**：body 只能影响 Plan JSON 的观点/指标选择，**无任何工具权限扩张**；`allowed-tools` 只能收窄 [S2]。executor + yaml 风控是唯一执行闸门（"LLM never touches the trade" [35]）
@@ -378,7 +378,7 @@ Frontmatter（loader 只认这些，其余丢弃）：
 
 | 阶段 | 交付物 | 退出门槛 |
 |------|--------|----------|
-| **P1 skill 引擎** | `gate_bot/skillkit/`（loader/registry/budget/validate/tool）+ bot yaml `skills:` + `skill` 工具进 NATIVE_TOOLS + 审计日志 | 装 1 个测试 skill：catalog 只见 name+desc、skill 工具能载入 body、token 在预算内、validate 拦住坏包 |
+| **P1 skill 引擎** | `omnialpha/skillkit/`（loader/registry/budget/validate/tool）+ bot yaml `skills:` + `skill` 工具进 NATIVE_TOOLS + 审计日志 | 装 1 个测试 skill：catalog 只见 name+desc、skill 工具能载入 body、token 在预算内、validate 拦住坏包 |
 | **P2 内容与脚本** | 第一个真实策略 skill；scripts/ 执行（超时+审计） | 触发准确（正/负触发）；数字可溯源 |
 | **P3 工具绑定** | `metadata.tools` + allowed-tools 收窄；懒连接 | 权限分级；逐 skill 批准 |
 | **P4 分发** | 打包、SHA-256 manifest、信任封 | fail-closed 安装；发布≠可用 |

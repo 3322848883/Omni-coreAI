@@ -6,7 +6,7 @@ from pathlib import Path
 
 ROOT = Path(".").resolve()
 sys.path.insert(0, str(ROOT))
-from gate_bot.skillkit import SkillRegistry, render_catalog  # noqa: E402
+from omnialpha.skillkit import SkillRegistry, render_catalog  # noqa: E402
 
 # 造一个临时 skills 目录：现有 skill + 一个"新装的"
 td = Path(tempfile.mkdtemp())

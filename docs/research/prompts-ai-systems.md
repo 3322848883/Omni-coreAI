@@ -309,4 +309,4 @@ Parsed via custom XML parser; invalid action defaults to HOLD.
 5. https://arxiv.org/html/2407.06567v1 — FinCon manager/analyst roles, risk-control
 6. https://github.com/effective-p/FinAgent — decision_making.py, pipeline README
 
-Local contract: `C:/Users/w6485/Desktop/测试/gate-signal-bot/templates/standard-signal.json`
+Local contract: `C:/Users/w6485/Desktop/测试/OmniAlpha/templates/standard-signal.json`

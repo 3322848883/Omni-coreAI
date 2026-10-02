@@ -146,7 +146,7 @@ def run_skill_tool(
     if not pkg.meta.model_invocation:
         raise SkillError(
             f"skill {name!r} is user-invocation-only "
-            f"(model-invocation=false); ask the user to run: gate_bot skill run {name}"
+            f"(model-invocation=false); ask the user to run: omnialpha skill run {name}"
         )
 
     if enabled_ids is not None:

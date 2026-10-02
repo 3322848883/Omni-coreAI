@@ -120,8 +120,8 @@ groups:
 ### [S2.9] 进程
 
 ```bash
-python -m gate_bot persona-run --group btc-trio   # 常驻
-python -m gate_bot persona-run --once             # 单轮
+python -m omnialpha persona-run --group btc-trio   # 常驻
+python -m omnialpha persona-run --once             # 单轮
 ```
 
 ## [S3] Out of Scope

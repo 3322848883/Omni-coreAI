@@ -1,17 +1,17 @@
 # 环境区分部署 — 实施与服务器验证报告
 
-> 2026-10-01 · 本地 master → GitHub → 服务器 `/opt/gate-signal-bot`
+> 2026-10-01 · 本地 master → GitHub → 服务器 `/opt/omnialpha`
 
 ## 一、交付内容
 
 | 组件 | 文件 | 作用 |
 |------|------|------|
-| **overlay 合并** | `gate_bot/config.py`（`deep_merge` / `overlay_dir_for`） | `config/bots.local/` 覆盖基线 |
+| **overlay 合并** | `omnialpha/config.py`（`deep_merge` / `overlay_dir_for`） | `config/bots.local/` 覆盖基线 |
 | **基线归一** | `config/bots/*.yaml` 全 `enabled: false` | 安全默认 |
 | **部署流水线** | `scripts/deploy.sh` | 七步：检查→pull→依赖→skill→编码自检→测试→重启验证 |
 | **skill 源** | `skills-src/` + `scripts/pack_skill.py` | git 跟踪 + UTF-8 安全打包 |
-| **乱码自检** | `gate_bot skill doctor [--fix]` | 检出并修复 CP866 乱码目录名 |
-| **部署验证** | `gate_bot deploy-check` | 版本/overlay/bot/skill/健康 一览 |
+| **乱码自检** | `omnialpha skill doctor [--fix]` | 检出并修复 CP866 乱码目录名 |
+| **部署验证** | `omnialpha deploy-check` | 版本/overlay/bot/skill/健康 一览 |
 | **文档** | `docs/DEPLOY.md` + `AGENTS.md §8` | 新机上线 + 常见问题 |
 
 ## 二、提交
@@ -84,7 +84,7 @@ skill 使用:  实盘 bot 已 3 次激活（13:52 / 14:07 / 14:17）
 ./scripts/deploy.sh              # 完整部署（含重启）
 ./scripts/deploy.sh --no-restart # 只同步不重启
 ./scripts/deploy.sh --dry-run    # 预览
-python -m gate_bot deploy-check  # 部署后验证
+python -m omnialpha deploy-check  # 部署后验证
 ```
 
 **改环境差异**（不改代码）：
@@ -107,7 +107,7 @@ pull 到生产会让本不该跑的 bot 启动。
 **修法**：`enabled` **只认 overlay**，基线值一律忽略。
 
 ```python
-# gate_bot/config.py
+# omnialpha/config.py
 baseline_enabled = bool(data.get("enabled", False))
 if baseline_enabled:
     log.warning("baseline %s has enabled: true — IGNORED (enable via %s/%s instead)", ...)

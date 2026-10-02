@@ -10,17 +10,17 @@
     python scripts/deploy_remote.py --dry-run      # 预览将执行的动作
 
 凭据（按优先级）：
-    1) 环境变量 GATE_DEPLOY_HOST / PORT / USER / PASSWORD / KEY
+    1) 环境变量 OMNIALPHA_DEPLOY_HOST / PORT / USER / PASSWORD / KEY
     2) scripts/.deploy.env（gitignore，KEY=VALUE 每行一条）
     3) ~/.gate-deploy.env
 
 示例 scripts/.deploy.env：
-    GATE_DEPLOY_HOST=69.12.85.185
-    GATE_DEPLOY_PORT=2222
-    GATE_DEPLOY_USER=root
-    GATE_DEPLOY_PASSWORD=...
-    GATE_DEPLOY_ROOT=/opt/gate-signal-bot
-    GATE_DEPLOY_HOSTKEY=SHA256:...
+    OMNIALPHA_DEPLOY_HOST=69.12.85.185
+    OMNIALPHA_DEPLOY_PORT=2222
+    OMNIALPHA_DEPLOY_USER=root
+    OMNIALPHA_DEPLOY_PASSWORD=...
+    OMNIALPHA_DEPLOY_ROOT=/opt/omnialpha
+    OMNIALPHA_DEPLOY_HOSTKEY=SHA256:...
 """
 from __future__ import annotations
 
@@ -34,10 +34,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 DEFAULTS = {
-    "GATE_DEPLOY_PORT": "22",
-    "GATE_DEPLOY_USER": "root",
-    "GATE_DEPLOY_ROOT": "/opt/gate-signal-bot",
-    "GATE_DEPLOY_HOSTKEY": "",
+    "OMNIALPHA_DEPLOY_PORT": "22",
+    "OMNIALPHA_DEPLOY_USER": "root",
+    "OMNIALPHA_DEPLOY_ROOT": "/opt/omnialpha",
+    "OMNIALPHA_DEPLOY_HOSTKEY": "",
 }
 
 
@@ -52,7 +52,7 @@ def load_config() -> dict:
                 k, _, v = line.partition("=")
                 cfg[k.strip()] = v.strip()
     # 环境变量覆盖
-    for k in list(cfg) + ["GATE_DEPLOY_HOST", "GATE_DEPLOY_PASSWORD", "GATE_DEPLOY_KEY"]:
+    for k in list(cfg) + ["OMNIALPHA_DEPLOY_HOST", "OMNIALPHA_DEPLOY_PASSWORD", "OMNIALPHA_DEPLOY_KEY"]:
         if os.environ.get(k):
             cfg[k] = os.environ[k]
     return cfg
@@ -65,15 +65,15 @@ def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
 
 def ssh_exec(cfg: dict, remote_cmd: str, timeout: int = 900) -> tuple[int, str]:
     """在服务器执行命令（自动重试网络抖动）。"""
-    host = cfg.get("GATE_DEPLOY_HOST", "")
+    host = cfg.get("OMNIALPHA_DEPLOY_HOST", "")
     if not host:
-        return 2, "缺少 GATE_DEPLOY_HOST（见脚本 docstring 的凭据配置）"
-    keyfile = cfg.get("GATE_DEPLOY_KEY", "")
+        return 2, "缺少 OMNIALPHA_DEPLOY_HOST（见脚本 docstring 的凭据配置）"
+    keyfile = cfg.get("OMNIALPHA_DEPLOY_KEY", "")
     base = ["ssh", "-o", "StrictHostKeyChecking=accept-new",
-            "-o", f"ConnectTimeout=20", "-p", cfg["GATE_DEPLOY_PORT"]]
+            "-o", f"ConnectTimeout=20", "-p", cfg["OMNIALPHA_DEPLOY_PORT"]]
     if keyfile:
         base += ["-i", keyfile]
-    target = f"{cfg['GATE_DEPLOY_USER']}@{host}"
+    target = f"{cfg['OMNIALPHA_DEPLOY_USER']}@{host}"
 
     for i in range(4):
         try:
@@ -83,12 +83,12 @@ def ssh_exec(cfg: dict, remote_cmd: str, timeout: int = 900) -> tuple[int, str]:
                 # 无 key 时用 plink（支持 -pw 密码）
                 plink = r"C:\Program Files\PuTTY\plink.exe"
                 if not Path(plink).is_file():
-                    return 2, "无 SSH key 且找不到 plink.exe；请配 GATE_DEPLOY_KEY 或装 PuTTY"
+                    return 2, "无 SSH key 且找不到 plink.exe；请配 OMNIALPHA_DEPLOY_KEY 或装 PuTTY"
                 cmd = [plink, "-batch", "-ssh"]
-                if cfg.get("GATE_DEPLOY_HOSTKEY"):
-                    cmd += ["-hostkey", cfg["GATE_DEPLOY_HOSTKEY"]]
-                cmd += ["-pw", cfg.get("GATE_DEPLOY_PASSWORD", ""),
-                        "-P", cfg["GATE_DEPLOY_PORT"], target, remote_cmd]
+                if cfg.get("OMNIALPHA_DEPLOY_HOSTKEY"):
+                    cmd += ["-hostkey", cfg["OMNIALPHA_DEPLOY_HOSTKEY"]]
+                cmd += ["-pw", cfg.get("OMNIALPHA_DEPLOY_PASSWORD", ""),
+                        "-P", cfg["OMNIALPHA_DEPLOY_PORT"], target, remote_cmd]
                 r = _run(cmd, timeout=timeout)
         except subprocess.TimeoutExpired:
             print(f"    (远程执行超时，重试 {i + 1}/4)")
@@ -105,14 +105,14 @@ def ssh_exec(cfg: dict, remote_cmd: str, timeout: int = 900) -> tuple[int, str]:
 
 def scp_to(cfg: dict, local: Path, remote_dir: str) -> bool:
     """上传文件到服务器（自动重试）。无 key 时直接用 pscp，避免 scp 卡密码提示。"""
-    host = cfg["GATE_DEPLOY_HOST"]
-    target = f"{cfg['GATE_DEPLOY_USER']}@{host}:{remote_dir}"
-    keyfile = cfg.get("GATE_DEPLOY_KEY", "")
+    host = cfg["OMNIALPHA_DEPLOY_HOST"]
+    target = f"{cfg['OMNIALPHA_DEPLOY_USER']}@{host}:{remote_dir}"
+    keyfile = cfg.get("OMNIALPHA_DEPLOY_KEY", "")
     for i in range(4):
         try:
             if keyfile:
                 r = _run(["scp", "-o", "StrictHostKeyChecking=accept-new",
-                          "-i", keyfile, "-P", cfg["GATE_DEPLOY_PORT"],
+                          "-i", keyfile, "-P", cfg["OMNIALPHA_DEPLOY_PORT"],
                           str(local), target], timeout=180)
             else:
                 pscp = r"C:\Program Files\PuTTY\pscp.exe"
@@ -120,10 +120,10 @@ def scp_to(cfg: dict, local: Path, remote_dir: str) -> bool:
                     print("  ⛔ 无 SSH key 且找不到 pscp.exe")
                     return False
                 cmd = [pscp, "-batch"]
-                if cfg.get("GATE_DEPLOY_HOSTKEY"):
-                    cmd += ["-hostkey", cfg["GATE_DEPLOY_HOSTKEY"]]
-                cmd += ["-pw", cfg.get("GATE_DEPLOY_PASSWORD", ""),
-                        "-P", cfg["GATE_DEPLOY_PORT"], str(local), target]
+                if cfg.get("OMNIALPHA_DEPLOY_HOSTKEY"):
+                    cmd += ["-hostkey", cfg["OMNIALPHA_DEPLOY_HOSTKEY"]]
+                cmd += ["-pw", cfg.get("OMNIALPHA_DEPLOY_PASSWORD", ""),
+                        "-P", cfg["OMNIALPHA_DEPLOY_PORT"], str(local), target]
                 r = _run(cmd, timeout=180)
         except subprocess.TimeoutExpired:
             print(f"    (上传超时，重试 {i + 1}/4)")
@@ -156,7 +156,7 @@ def push_or_bundle(cfg: dict, branch: str, dry_run: bool) -> bool:
     print("  → 回退 bundle 直传")
     # 找服务器当前 HEAD 作为 bundle 基线
     try:
-        rc, remote_head = ssh_exec(cfg, f"cd {cfg['GATE_DEPLOY_ROOT']} && git rev-parse HEAD", timeout=60)
+        rc, remote_head = ssh_exec(cfg, f"cd {cfg['OMNIALPHA_DEPLOY_ROOT']} && git rev-parse HEAD", timeout=60)
     except subprocess.TimeoutExpired:
         rc, remote_head = 1, ""
     remote_head = remote_head.strip().splitlines()[-1] if rc == 0 else ""
@@ -183,7 +183,7 @@ def push_or_bundle(cfg: dict, branch: str, dry_run: bool) -> bool:
         return False
 
     remote = (
-        f"cd {cfg['GATE_DEPLOY_ROOT']} && "
+        f"cd {cfg['OMNIALPHA_DEPLOY_ROOT']} && "
         "git fetch /tmp/tmp_deploy.bundle "
         f"{branch}:refs/heads/_incoming && "
         "git merge --ff-only _incoming && git branch -D _incoming && "
@@ -209,10 +209,10 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = load_config()
-    host = cfg.get("GATE_DEPLOY_HOST", "")
+    host = cfg.get("OMNIALPHA_DEPLOY_HOST", "")
     print("=" * 56)
-    print(f"远程部署 → {cfg['GATE_DEPLOY_USER']}@{host or '<未配置>'}:{cfg['GATE_DEPLOY_PORT']}")
-    print(f"远程目录: {cfg['GATE_DEPLOY_ROOT']}")
+    print(f"远程部署 → {cfg['OMNIALPHA_DEPLOY_USER']}@{host or '<未配置>'}:{cfg['OMNIALPHA_DEPLOY_PORT']}")
+    print(f"远程目录: {cfg['OMNIALPHA_DEPLOY_ROOT']}")
     print("=" * 56)
 
     # 1) 本地检查 + push
@@ -254,7 +254,7 @@ def main() -> int:
         flags += " --no-restart"
     if args.dry_run:
         flags += " --dry-run"
-    remote = f"cd {cfg['GATE_DEPLOY_ROOT']} && bash scripts/deploy.sh{flags}"
+    remote = f"cd {cfg['OMNIALPHA_DEPLOY_ROOT']} && bash scripts/deploy.sh{flags}"
     code, out = ssh_exec(cfg, remote)
     print(out.rstrip())
     if code != 0:

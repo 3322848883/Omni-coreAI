@@ -1,7 +1,7 @@
 #!/bin/bash
 # 服务器迁移到 overlay 模型：把本地配置差异转成 config/bots.local/
 set -e
-cd /opt/gate-signal-bot
+cd /opt/omnialpha
 
 echo "=== 1) 备份 ==="
 mkdir -p /opt/backups/overlay-migrate
@@ -33,4 +33,4 @@ git pull --ff-only origin master 2>&1 | tail -5
 
 echo
 echo "=== 6) 校验 overlay 生效 ==="
-.venv/bin/python -m gate_bot deploy-check 2>&1 | head -12
+.venv/bin/python -m omnialpha deploy-check 2>&1 | head -12

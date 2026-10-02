@@ -15,7 +15,7 @@ flowchart LR
     C[config/bots/mybot.yaml]
     J[inbox/mybot/xxx.json]
   end
-  subgraph gate_bot
+  subgraph omnialpha
     P[解析 JSON] --> R[程序风控]
     R --> E[执行器下单]
     E --> L[trades 日志]
@@ -56,7 +56,7 @@ $env:GATE_TESTNET_API_SECRET = "你的测试网Secret"
 ## 2. 复制一份机器人配置
 
 ```powershell
-cd <你的仓库目录>    # 例如 /opt/gate-signal-bot 或任意克隆路径
+cd <你的仓库目录>    # 例如 /opt/omnialpha 或任意克隆路径
 Copy-Item config\bots\_example.yaml config\bots\mybot.yaml
 notepad config\bots\mybot.yaml    # Linux 用 vim/nano
 ```
@@ -125,10 +125,10 @@ order_scope: own           # 只撤自己的单
 
 ```powershell
 # 看机器人是否加载正常
-.venv\Scripts\python.exe -m gate_bot status
+.venv\Scripts\python.exe -m omnialpha status
 
 # 只跑一轮：吃掉 inbox 里新文件并下单
-.venv\Scripts\python.exe -m gate_bot once --bot mybot
+.venv\Scripts\python.exe -m omnialpha once --bot mybot
 ```
 
 ```text
@@ -146,7 +146,7 @@ order_scope: own           # 只撤自己的单
 ## 5. 看结果放哪了
 
 ```text
-gate-signal-bot/
+OmniAlpha/
 ├── inbox/mybot/          ← 空了（文件被吃掉）
 ├── archive/done/mybot/   ← 成功：原信号 + result.json
 ├── archive/failed/mybot/ ← 失败：*.error.json（看原因）
@@ -192,11 +192,11 @@ $env:OPENAI_BASE_URL = "http://<你的网关>/v1"
 $env:OPENAI_API_KEY  = "..."
 
 # 生成一轮 Plan → 写入 inbox（仍受程序风控）
-.venv\Scripts\python.exe -m gate_bot plan --bot mybot
+.venv\Scripts\python.exe -m omnialpha plan --bot mybot
 
 # 策略常驻、执行常驻（两个终端）
-.venv\Scripts\python.exe -m gate_bot plan-loop --bot mybot
-.venv\Scripts\python.exe -m gate_bot run --bot mybot
+.venv\Scripts\python.exe -m omnialpha plan-loop --bot mybot
+.venv\Scripts\python.exe -m omnialpha run --bot mybot
 ```
 
 策略人格在 `prompts/`，配置里 `prompt_file` 指定；改人格见 `prompts/README.md`。
@@ -234,7 +234,7 @@ $env:OPENAI_API_KEY  = "..."
 ## 附录：目录一览图
 
 ```text
-gate-signal-bot/
+OmniAlpha/
 ├── AGENTS.md            ← 总入口（先读）
 ├── README.md            ← 手册
 ├── config/bots/mybot.yaml
@@ -242,7 +242,7 @@ gate-signal-bot/
 ├── examples/signals/    ← 12 个可抄例子
 ├── templates/           ← 字段字典
 ├── prompts/             ← 策略人格
-├── gate_bot/            ← 机器人源码
+├── omnialpha/            ← 机器人源码
 ├── logs/trades/         ← 流水
 └── scripts/prelaunch_runner.py
 ```

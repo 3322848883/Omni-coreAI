@@ -1,6 +1,6 @@
 """临时：实盘验证 SQZMOM。"""
-from gate_bot.exchanges.registry import create_exchange
-from gate_bot.strategist.indicators import attach_indicators, latest_indicators
+from omnialpha.exchanges.registry import create_exchange
+from omnialpha.strategist.indicators import attach_indicators, latest_indicators
 
 
 def main() -> None:

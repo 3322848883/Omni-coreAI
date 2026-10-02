@@ -50,7 +50,7 @@ def set_prompt(prompt_file: str) -> None:
 def run_plan() -> tuple[int, str]:
     env = {"PYTHONPATH": str(ROOT)}
     r = subprocess.run(
-        [sys.executable, "-m", "gate_bot", "plan", "--bot", "skill-e2e"],
+        [sys.executable, "-m", "omnialpha", "plan", "--bot", "skill-e2e"],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         cwd=str(ROOT), timeout=180,
     )

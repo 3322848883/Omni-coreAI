@@ -1,8 +1,8 @@
 ﻿import sys, json, urllib.request
 sys.path.insert(0, ".")
 from pathlib import Path
-from gate_bot.strategist.vision import generate_candlestick_chart
-from gate_bot.strategist.indicators import ema
+from omnialpha.strategist.vision import generate_candlestick_chart
+from omnialpha.strategist.indicators import ema
 
 def fetch(interval, limit):
     url = f"https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=BTC_USDT&interval={interval}&limit={limit}"

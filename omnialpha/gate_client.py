@@ -89,7 +89,7 @@ class GateClient:
             "Timestamp": timestamp,
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "gate-signal-bot/0.1",
+            "User-Agent": "OmniAlpha/0.1",
         }
         data = body_str.encode("utf8") if body_str else None
         req = urllib.request.Request(url, data=data, headers=headers, method=method)

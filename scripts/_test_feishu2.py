@@ -3,10 +3,10 @@
 import sys
 from pathlib import Path
 
-ROOT = Path("/opt/gate-signal-bot")
+ROOT = Path("/opt/omnialpha")
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.monitoring.notify import build_notifier, notify_process_event  # noqa: E402
+from omnialpha.monitoring.notify import build_notifier, notify_process_event  # noqa: E402
 
 n = build_notifier(ROOT)
 print("渠道数:", len(n.channel_names))
@@ -19,7 +19,7 @@ ok = notify_process_event(
     root=ROOT, kind="info",
     title="✅ 服务器通知链路测试",
     fields=[
-        ("来源", "gate-signal-bot 部署自检"),
+        ("来源", "OmniAlpha 部署自检"),
         ("bot", "brooks-btc"),
         ("env", "live"),
         ("结论", "飞书通知已启用"),

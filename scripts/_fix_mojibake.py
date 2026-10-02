@@ -6,7 +6,7 @@
 """
 from pathlib import Path
 
-ROOT = Path("/opt/gate-signal-bot/skills/price-action-trading/references/knowledge/source")
+ROOT = Path("/opt/omnialpha/skills/price-action-trading/references/knowledge/source")
 ENCODINGS = ("cp866", "cp437", "cp850")
 
 

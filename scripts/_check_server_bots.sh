@@ -8,7 +8,7 @@ ps -eo args | grep '[g]ate_bot' | grep -E 'plan-loop|paper-run|run --bot' | whil
 done | sort | uniq
 
 echo "=== enabled=true 的 bot ==="
-cd /opt/gate-signal-bot
+cd /opt/omnialpha
 grep -l "enabled: true" config/bots/*.yaml 2>/dev/null | while read -r f; do
   n=$(basename "$f" .yaml)
   case "$n" in _*) continue;; esac

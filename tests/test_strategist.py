@@ -7,11 +7,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.strategist.schema import PlanError, parse_plan, parse_plan_text  # noqa: E402
-from gate_bot.strategist.risk import RiskConfig, apply_risk  # noqa: E402
-from gate_bot.strategist.bridge import chips_to_signal, write_signal_file  # noqa: E402
-from gate_bot.strategist.llm_client import LLMClient, LLMConfig, LLMError  # noqa: E402
-from gate_bot.schema import parse_signal  # noqa: E402
+from omnialpha.strategist.schema import PlanError, parse_plan, parse_plan_text  # noqa: E402
+from omnialpha.strategist.risk import RiskConfig, apply_risk  # noqa: E402
+from omnialpha.strategist.bridge import chips_to_signal, write_signal_file  # noqa: E402
+from omnialpha.strategist.llm_client import LLMClient, LLMConfig, LLMError  # noqa: E402
+from omnialpha.schema import parse_signal  # noqa: E402
 
 
 class TestPlanSchema(unittest.TestCase):
@@ -262,7 +262,7 @@ class TestPlanTriggers(unittest.TestCase):
     """plan-loop 定时 / K 线收盘触发与 cycle 去重。"""
 
     def _runner(self, client, **kw):
-        from gate_bot.strategist.loop import PlanRunner, StrategistConfig
+        from omnialpha.strategist.loop import PlanRunner, StrategistConfig
 
         cfg = StrategistConfig(
             symbols=["BTC_USDT"],
@@ -289,7 +289,7 @@ class TestPlanTriggers(unittest.TestCase):
             def get_positions(self):
                 return []
 
-        from gate_bot.strategist.loop import PlanRunner, StrategistConfig
+        from omnialpha.strategist.loop import PlanRunner, StrategistConfig
 
         c = KClient()
         runner = self._runner(c)
@@ -301,8 +301,8 @@ class TestPlanTriggers(unittest.TestCase):
         self.assertFalse(runner._kline_closed())
 
     def test_duplicate_cycle_skips_orders(self):
-        from gate_bot.strategist.loop import PlanRunner, StrategistConfig
-        from gate_bot.strategist.schema import parse_plan
+        from omnialpha.strategist.loop import PlanRunner, StrategistConfig
+        from omnialpha.strategist.schema import parse_plan
 
         class FixedLLM:
             def __init__(self):
@@ -337,7 +337,7 @@ class TestPlanTriggers(unittest.TestCase):
             def get_positions(self):
                 return []
 
-        from gate_bot.strategist.loop import PlanRunner, StrategistConfig
+        from omnialpha.strategist.loop import PlanRunner, StrategistConfig
 
         cfg = StrategistConfig(symbols=["BTC_USDT"], candles=3, timeframe="15m")
         runner = PlanRunner(C(), cfg, Path("inbox/x"), Path("hist/x"), llm=FixedLLM())
@@ -381,7 +381,7 @@ class TestPlanTriggers(unittest.TestCase):
                 called["n"] += 1
                 return '{"cycle_id":"c","reasoning":"行情分析","chips":[{"symbol":"BTC_USDT","action":"hold","confidence":0.5}]}'
 
-        from gate_bot.strategist.loop import PlanRunner, StrategistConfig
+        from omnialpha.strategist.loop import PlanRunner, StrategistConfig
 
         cfg = StrategistConfig(symbols=["BTC_USDT"], candles=3, timeframe="15m")
         runner = PlanRunner(Boom(), cfg, Path("inbox/x"), Path("hist/x"), llm=StubLLM())
@@ -392,12 +392,12 @@ class TestPlanTriggers(unittest.TestCase):
 
 class TestPromptSandbox(unittest.TestCase):
     def test_prompt_limited_to_prompts_dir(self):
-        from gate_bot.strategist.prompt import load_strategy_prompt
+        from omnialpha.strategist.prompt import load_strategy_prompt
 
         root = Path(__file__).resolve().parents[1] / "prompts"
         self.assertIn("策略", load_strategy_prompt("vergex_default.md", prompts_root=root))
         self.assertIn("策略", load_strategy_prompt(root / "vergex_default.md", prompts_root=root))
-        for bad in ("C:/Windows/win.ini", "../gate_bot/executor.py", "/etc/passwd"):
+        for bad in ("C:/Windows/win.ini", "../omnialpha/executor.py", "/etc/passwd"):
             with self.assertRaises(PermissionError):
                 load_strategy_prompt(bad, prompts_root=root)
 
@@ -405,7 +405,7 @@ class TestPromptSandbox(unittest.TestCase):
         """Server/cron: prompt_file must load from bot_root even if cwd is elsewhere."""
         import os
         import tempfile
-        from gate_bot.strategist.prompt import load_strategy_prompt
+        from omnialpha.strategist.prompt import load_strategy_prompt
 
         with tempfile.TemporaryDirectory() as td:
             bot_root = Path(td)
@@ -422,7 +422,7 @@ class TestPromptSandbox(unittest.TestCase):
         self.assertEqual(text2.strip(), "策略人格X")
 
     def test_llm_plan_cannot_escape_inbox(self):
-        from gate_bot.strategist.bridge import write_signal_file
+        from omnialpha.strategist.bridge import write_signal_file
         import tempfile
 
         with tempfile.TemporaryDirectory() as td:
@@ -439,7 +439,7 @@ class _HoldLLM:
 
 class TestTradeLogger(unittest.TestCase):
     def test_write_and_tail(self):
-        from gate_bot.tradelog import TradeLogger
+        from omnialpha.tradelog import TradeLogger
 
         with tempfile.TemporaryDirectory() as td:
             log = TradeLogger(Path(td) / "t.jsonl")

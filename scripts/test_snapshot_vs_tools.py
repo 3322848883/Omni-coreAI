@@ -14,15 +14,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.gate_client import GateClient
-from gate_bot.strategist.llm_client import LLMClient, LLMConfig
-from gate_bot.strategist.market import MarketConfig
-from gate_bot.strategist.prompt import build_system_prompt, load_strategy_prompt
-from gate_bot.strategist.risk import RiskConfig, apply_risk
-from gate_bot.strategist.schema import PlanError, parse_plan_text
-from gate_bot.strategist.snapshot import collect_snapshot
-from gate_bot.strategist.tools import TOOL_GUIDE, extract_tool_calls, run_tool
-from gate_bot.strategist.prompt import build_user_prompt
+from omnialpha.gate_client import GateClient
+from omnialpha.strategist.llm_client import LLMClient, LLMConfig
+from omnialpha.strategist.market import MarketConfig
+from omnialpha.strategist.prompt import build_system_prompt, load_strategy_prompt
+from omnialpha.strategist.risk import RiskConfig, apply_risk
+from omnialpha.strategist.schema import PlanError, parse_plan_text
+from omnialpha.strategist.snapshot import collect_snapshot
+from omnialpha.strategist.tools import TOOL_GUIDE, extract_tool_calls, run_tool
+from omnialpha.strategist.prompt import build_user_prompt
 
 
 def make_client():

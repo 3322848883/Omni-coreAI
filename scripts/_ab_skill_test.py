@@ -30,7 +30,7 @@ def run(tag):
     j0 = journal_count()
     t0 = time.time()
     r = subprocess.run(
-        [sys.executable, "-m", "gate_bot", "plan", "--bot", "skill-ab"],
+        [sys.executable, "-m", "omnialpha", "plan", "--bot", "skill-ab"],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         cwd=str(ROOT), timeout=300,
     )

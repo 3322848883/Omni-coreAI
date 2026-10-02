@@ -2,11 +2,11 @@
 # 配置 .env + systemd 服务
 set -e
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
-cd /opt/gate-signal-bot
+cd /opt/omnialpha
 
 echo "=== 1) .env ==="
 cat > .env <<'EOF'
-GATE_BOT_ROOT=/opt/gate-signal-bot
+OMNIALPHA_ROOT=/opt/omnialpha
 # LLM 网关（本机）
 OPENAI_BASE_URL=http://127.0.0.1:7863/v1
 OPENAI_API_KEY=sk-wb-Sm2NXyLm2rylSEQ7I_8HzNu_4pxmNfpoVtjcfyc9chM
@@ -22,22 +22,22 @@ chmod 600 .env
 echo "ENV_OK"
 
 echo "=== 2) systemd unit ==="
-cat > /etc/systemd/system/gate-watchdog.service <<'EOF'
+cat > /etc/systemd/system/omnialpha-watchdog.service <<'EOF'
 [Unit]
-Description=gate-signal-bot watchdog (auto-restart + notify)
+Description=OmniAlpha watchdog (auto-restart + notify)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/gate-signal-bot
-EnvironmentFile=/opt/gate-signal-bot/.env
-ExecStart=/opt/gate-signal-bot/.venv/bin/python -m gate_bot watchdog --interval 15
+WorkingDirectory=/opt/omnialpha
+EnvironmentFile=/opt/omnialpha/.env
+ExecStart=/opt/omnialpha/.venv/bin/python -m omnialpha watchdog --interval 15
 Restart=always
 RestartSec=10
 User=root
-StandardOutput=append:/opt/gate-signal-bot/data/watchdog.out
-StandardError=append:/opt/gate-signal-bot/data/watchdog.err
+StandardOutput=append:/opt/omnialpha/data/watchdog.out
+StandardError=append:/opt/omnialpha/data/watchdog.err
 
 [Install]
 WantedBy=multi-user.target

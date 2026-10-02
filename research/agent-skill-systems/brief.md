@@ -2,7 +2,7 @@
 
 ## Refined question
 
-各大厂商与开源项目（Anthropic、OpenAI、MCP 生态、OpenClaw、Hermes、LangChain/LangGraph、AutoGPT、CrewAI 等）如何设计 **AI 智能体 Skill / 插件 / 工具扩展体系**？其架构约定、加载与调用机制、可靠性与稳定性保障（沙箱、权限、版本、故障隔离、评测）是什么？这些模式如何映射到 **gate-signal-bot**（Gate 永续合约信号执行 + LLM 策略 monorepo）——一个已有 20 个原生 function-calling 工具、prompts/ 人格体系、多人格共管、25 族指标的量化交易智能体——以支持可安装、可组合的 **skill**，向「AI 交易全方位智能体」（tools / plugins / skills / MCP）演进？
+各大厂商与开源项目（Anthropic、OpenAI、MCP 生态、OpenClaw、Hermes、LangChain/LangGraph、AutoGPT、CrewAI 等）如何设计 **AI 智能体 Skill / 插件 / 工具扩展体系**？其架构约定、加载与调用机制、可靠性与稳定性保障（沙箱、权限、版本、故障隔离、评测）是什么？这些模式如何映射到 **OmniAlpha**（Gate 永续合约信号执行 + LLM 策略 monorepo）——一个已有 20 个原生 function-calling 工具、prompts/ 人格体系、多人格共管、25 族指标的量化交易智能体——以支持可安装、可组合的 **skill**，向「AI 交易全方位智能体」（tools / plugins / skills / MCP）演进？
 
 ## Scope
 
@@ -21,7 +21,7 @@
 - 纯 UI 插件（浏览器扩展、编辑器插件）除非其架构对 agent skill 有直接借鉴
 
 ## Assumptions
-- 受众：gate-signal-bot 的开发者/架构师，要落地实现而非纯学术
+- 受众：OmniAlpha 的开发者/架构师，要落地实现而非纯学术
 - 决策：选定 skill 格式、加载协议、与现有 tools/prompts 的集成方式、可靠性红线
 - 时间框：2025-01 ~ 2026-09，兼顾仍在服役的经典设计
 - "OpenClaw"、"Hermes" 按用户提法检索，若对应多个项目则都覆盖并注明
@@ -40,5 +40,5 @@
 7. **格式对比与选型**：SKILL.md vs MCP tool vs plugin vs prompt-template vs subagent 的适用边界、上下文成本、组合性对比
 
 ## Notes for orchestrator
-- 用户明确要求报告要「方便我们做这个功能」，结论要能落到 gate-signal-bot 的设计决策
+- 用户明确要求报告要「方便我们做这个功能」，结论要能落到 OmniAlpha 的设计决策
 - 工作区：research/agent-skill-systems/

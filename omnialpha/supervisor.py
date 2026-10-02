@@ -73,17 +73,17 @@ class Supervisor:
 
                     self._log(f"migrate {bid}: {migrate_bot(self.root, bid)}")
                 else:
-                    self._log(f"WARNING {bid}: legacy layout detected — run: python -m gate_bot migrate")
+                    self._log(f"WARNING {bid}: legacy layout detected — run: python -m omnialpha migrate")
             bp = bot_paths(self.root, bid, create=True)
             runtime = dict(getattr(cfg, "strategist", {}) or {}).get("runtime") or {}
             if runtime.get("plan_loop", True):
                 self.children.append(Child(bid, "plan", [
-                    self._py, "-m", "gate_bot", "--root", str(self.root),
+                    self._py, "-m", "omnialpha", "--root", str(self.root),
                     "plan-loop", "--bot", bid,
                 ]))
             if runtime.get("run", True):
                 self.children.append(Child(bid, "run", [
-                    self._py, "-m", "gate_bot", "--root", str(self.root),
+                    self._py, "-m", "omnialpha", "--root", str(self.root),
                     "run", "--bot", bid,
                 ]))
             self._log(f"armed {bid} → {bp.base}")

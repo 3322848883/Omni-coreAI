@@ -18,16 +18,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.config import BotConfig  # noqa: E402
-from gate_bot.gate_client import GateClient  # noqa: E402
-from gate_bot.strategist.bridge import chips_to_signal, write_signal_file  # noqa: E402
-from gate_bot.strategist.llm_client import LLMClient, LLMConfig  # noqa: E402
-from gate_bot.strategist.loop import PlanRunner, StrategistConfig  # noqa: E402
-from gate_bot.strategist.market import MarketConfig  # noqa: E402
-from gate_bot.strategist.risk import RiskConfig  # noqa: E402
-from gate_bot.strategist.schema import Chip, Plan, parse_plan_text  # noqa: E402
-from gate_bot.strategist.triggers import check_conditions, parse_conditions  # noqa: E402
-from gate_bot.watcher import ProjectPaths, process_file  # noqa: E402
+from omnialpha.config import BotConfig  # noqa: E402
+from omnialpha.gate_client import GateClient  # noqa: E402
+from omnialpha.strategist.bridge import chips_to_signal, write_signal_file  # noqa: E402
+from omnialpha.strategist.llm_client import LLMClient, LLMConfig  # noqa: E402
+from omnialpha.strategist.loop import PlanRunner, StrategistConfig  # noqa: E402
+from omnialpha.strategist.market import MarketConfig  # noqa: E402
+from omnialpha.strategist.risk import RiskConfig  # noqa: E402
+from omnialpha.strategist.schema import Chip, Plan, parse_plan_text  # noqa: E402
+from omnialpha.strategist.triggers import check_conditions, parse_conditions  # noqa: E402
+from omnialpha.watcher import ProjectPaths, process_file  # noqa: E402
 
 RESULTS: list[tuple[str, str, str]] = []
 
@@ -112,7 +112,7 @@ def main() -> int:
                                   size_usd=20, order_type="market",
                                   tp=round(client.get_last_price("BTC_USDT") * 1.01, 1),
                                   sl=round(client.get_last_price("BTC_USDT") * 0.99, 1))])
-        from gate_bot.strategist.risk import apply_risk
+        from omnialpha.strategist.risk import apply_risk
         risk = apply_risk(forced, cfg.risk)
         payload = chips_to_signal(forced, risk, bot_id="prod")
         p = write_signal_file(inbox, payload, cycle_id=forced.cycle_id)
@@ -141,8 +141,8 @@ def main() -> int:
 
     # ── 5 order types smoke (post AI exec) ────────────────
     print("\n[5] order types (testnet)")
-    from gate_bot.executor import Executor
-    from gate_bot.schema import parse_signal
+    from omnialpha.executor import Executor
+    from omnialpha.schema import parse_signal
     ex = Executor(client, symbols_whitelist=symbols, max_notional_usd=25)
     last = client.get_last_price("BTC_USDT")
 

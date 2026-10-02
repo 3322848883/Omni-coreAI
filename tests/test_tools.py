@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT))
 
 
 
-from gate_bot.strategist.tools import NATIVE_TOOLS, TOOL_NAMES, extract_tool_calls, run_tool  # noqa: E402
+from omnialpha.strategist.tools import NATIVE_TOOLS, TOOL_NAMES, extract_tool_calls, run_tool  # noqa: E402
 
 
 
@@ -43,7 +43,7 @@ class FakeClient:
     def get_contract(self, sym):
 
 
-        from gate_bot.gate_client import ContractMeta
+        from omnialpha.gate_client import ContractMeta
 
 
         return ContractMeta(sym, 0.01, 1, 0.01, 50)
@@ -259,7 +259,7 @@ class TestTools(unittest.TestCase):
     def test_smc_events_tool(self):
 
 
-        from gate_bot.strategist.market import MarketConfig
+        from omnialpha.strategist.market import MarketConfig
 
 
 
@@ -313,7 +313,7 @@ class TestTools(unittest.TestCase):
     def test_sqzmom_tool(self):
 
 
-        from gate_bot.strategist.market import MarketConfig
+        from omnialpha.strategist.market import MarketConfig
 
 
 
@@ -367,7 +367,7 @@ class TestTools(unittest.TestCase):
     def test_smc_tool_uses_venue_klines(self):
 
 
-        from gate_bot.strategist.market import MarketConfig
+        from omnialpha.strategist.market import MarketConfig
 
 
 
@@ -427,7 +427,7 @@ class TestTools(unittest.TestCase):
     def test_smc_tool_reports_source_and_n(self):
 
 
-        from gate_bot.strategist.market import MarketConfig
+        from omnialpha.strategist.market import MarketConfig
 
 
 

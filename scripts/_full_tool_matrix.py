@@ -13,8 +13,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.gate_client import GateClient  # noqa: E402
-from gate_bot.strategist.tools import NATIVE_TOOLS, TOOL_NAMES, run_tool  # noqa: E402
+from omnialpha.gate_client import GateClient  # noqa: E402
+from omnialpha.strategist.tools import NATIVE_TOOLS, TOOL_NAMES, run_tool  # noqa: E402
 
 SYM = "BTC_USDT"
 TF = "1h"

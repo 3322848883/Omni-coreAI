@@ -17,7 +17,7 @@ from .sizing import (
     vol_adjust_size,
 )
 
-log = logging.getLogger("gate_bot.executor")
+log = logging.getLogger("omnialpha.executor")
 
 
 def _is_flat_error(e: Exception) -> bool:
@@ -1220,6 +1220,25 @@ class Executor:
             or po.get("reduce_only")
         )
 
+    def _has_pending_entry(self, symbol: str) -> bool:
+        """该 symbol 上是否还有本 bot 未成交的入场单（非 reduce-only）。
+
+        入场单挂出后 1-3 秒，执行器就把它的 TP/SL 一起挂上了 —— 此时账户还没有持仓。
+        若按「无持仓」把这些保护单当孤儿撤掉，委托一成交就是**裸仓**（无 SL/TP）。
+        所以只要有待成交入场单，本 symbol 的保护单一律保留；真孤儿留到下一轮扫描再清。
+        """
+        try:
+            rows = self._owned_open_orders(symbol, self.label_prefix)
+        except Exception:  # noqa: BLE001 — 取不到就当没有，保持原行为
+            return False
+        for o in rows:
+            if o.get("is_reduce_only"):
+                continue
+            if int(o.get("left") or 0) <= 0:
+                continue
+            return True
+        return False
+
     def _is_orphan_protector(self, po: dict, positions: list) -> bool:
         """判断保护单是否孤儿（无对应持仓）。
 
@@ -1250,11 +1269,14 @@ class Executor:
     def _cleanup_orphan_protectors(self, symbol: str, keep_ids: Optional[set] = None) -> list:
         """回收孤儿保护单（有对应持仓的保留）。
 
-        安全闸：reduce_only + tp/sl 后缀 + 本 bot 命名空间 + 非 keep + **无对应持仓**。
+        安全闸：reduce_only + tp/sl 后缀 + 本 bot 命名空间 + 非 keep + **无对应持仓** + **无待成交入场单**。
         """
         if not symbol:
             return []
         keep = {str(x) for x in (keep_ids or set())}
+        # 有待成交入场单 → 预挂的 TP/SL 不是孤儿，撤了会裸仓（symbol 级判定）
+        if self._has_pending_entry(symbol):
+            return []
         try:
             positions = self._symbol_positions(symbol)
             rows = self.client.list_price_orders(symbol) or []

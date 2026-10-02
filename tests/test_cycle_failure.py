@@ -13,9 +13,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from gate_bot.monitoring import TYPE_PLAN_FAIL, HealthMonitor, read_alerts
-from gate_bot.strategist.llm_client import LLMError
-from gate_bot.strategist.loop import PlanRunner, StrategistConfig
+from omnialpha.monitoring import TYPE_PLAN_FAIL, HealthMonitor, read_alerts
+from omnialpha.strategist.llm_client import LLMError
+from omnialpha.strategist.loop import PlanRunner, StrategistConfig
 
 GOOD_PLAN = (
     '{"cycle_id":"c1","reasoning":"r",'
@@ -114,7 +114,7 @@ class TestRunOnceDegrade(unittest.TestCase):
         return r
 
     def _run(self, td: str, chat):
-        from gate_bot.strategist import loop as loopmod
+        from omnialpha.strategist import loop as loopmod
 
         r = self._runner(td, chat)
         with mock.patch.object(loopmod, "collect_snapshot", return_value={}), \
@@ -158,7 +158,7 @@ class TestRunOnceDegrade(unittest.TestCase):
         """paper 环境不得推真实飞书（测试泄漏防护）。"""
         with tempfile.TemporaryDirectory() as td:
             r = self._runner(td, lambda *_a, **_kw: GOOD_PLAN)
-            with mock.patch("gate_bot.monitoring.notify_process_event") as notify:
+            with mock.patch("omnialpha.monitoring.notify_process_event") as notify:
                 for _ in range(5):
                     r._record_cycle_failure(Path(td), "bot-a", "llm_failed: x")
                 notify.assert_not_called()
@@ -167,7 +167,7 @@ class TestRunOnceDegrade(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             r = self._runner(td, lambda *_a, **_kw: GOOD_PLAN)
             r.cfg.env = "live"
-            with mock.patch("gate_bot.monitoring.notify_process_event") as notify:
+            with mock.patch("omnialpha.monitoring.notify_process_event") as notify:
                 for _ in range(5):
                     r._record_cycle_failure(Path(td), "bot-a", "llm_failed: x")
                 self.assertEqual(notify.call_count, 1)

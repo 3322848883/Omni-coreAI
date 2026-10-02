@@ -6,7 +6,7 @@ import unittest
 import urllib.error
 from unittest import mock
 
-from gate_bot.strategist.llm_client import LLMClient, LLMConfig, LLMError
+from omnialpha.strategist.llm_client import LLMClient, LLMConfig, LLMError
 
 
 class TestLLMRetry(unittest.TestCase):
@@ -84,7 +84,7 @@ class TestLLMRetry(unittest.TestCase):
 
 class TestHoldFallback(unittest.TestCase):
     def test_fallback_returns_hold_ok(self):
-        from gate_bot.strategist.loop import PlanRunner, StrategistConfig
+        from omnialpha.strategist.loop import PlanRunner, StrategistConfig
 
         cfg = StrategistConfig(symbols=["BTC_USDT"])
         r = PlanRunner.__new__(PlanRunner)

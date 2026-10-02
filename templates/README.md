@@ -1,4 +1,4 @@
-# gate-signal-bot 标准 JSON 模板（上线版）
+# OmniAlpha 标准 JSON 模板（上线版）
 
 AI/策略把信号写成 **一个 JSON 文件**，放入 `inbox/<bot_id>/`。
 

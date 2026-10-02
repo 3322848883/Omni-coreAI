@@ -1,6 +1,6 @@
 #!/bin/bash
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
-cd /opt/gate-signal-bot
+cd /opt/omnialpha
 .venv/bin/python - <<'PY'
 import os, sys
 sys.path.insert(0, ".")
@@ -9,7 +9,7 @@ for line in Path(".env").read_text().splitlines():
     if "=" in line and not line.strip().startswith("#"):
         k, v = line.split("=", 1)
         os.environ.setdefault(k.strip(), v.strip())
-from gate_bot.config import load_bot_config
+from omnialpha.config import load_bot_config
 
 cfg = load_bot_config(Path("config/bots/brooks-btc.yaml"))
 c = cfg.create_client()
@@ -29,7 +29,7 @@ for o in (c.list_price_orders("BTC_USDT") or []):
           f"status={o.get('status')} reduce_only={ro}")
 
 print("--- 用 executor 做孤儿检测 ---")
-from gate_bot.executor import Executor
+from omnialpha.executor import Executor
 ex = Executor(c, label_prefix="brk", root=Path("."), bot_id="brooks-btc")
 rows = c.list_price_orders("BTC_USDT") or []
 positions = c.get_positions() or []

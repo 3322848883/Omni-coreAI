@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from gate_bot.executor import Executor
-from gate_bot.schema import parse_signal
+from omnialpha.executor import Executor
+from omnialpha.schema import parse_signal
 
 
 def _cleanup(ex: Executor, symbol: str) -> None:
@@ -172,8 +172,8 @@ def run_orders(REP, gate_client, env: str = "testnet") -> None:
 
     # ── M10 sizing ──
     print("\n[M10] sizing modes")
-    from gate_bot.sizing import usd_to_contracts
-    from gate_bot.gate_client import GateApiError
+    from omnialpha.sizing import usd_to_contracts
+    from omnialpha.gate_client import GateApiError
 
     cm = client.get_contract(symbol)
     last = client.get_last_price(symbol)
@@ -242,9 +242,9 @@ def run_orders(REP, gate_client, env: str = "testnet") -> None:
     # ── M14 idempotent duplicate delivery ──
     print("\n[M14] duplicate cycle idempotent")
     try:
-        from gate_bot.strategist.bridge import chips_to_signal, write_signal_file
-        from gate_bot.strategist.schema import parse_plan
-        from gate_bot.strategist.risk import RiskConfig, apply_risk
+        from omnialpha.strategist.bridge import chips_to_signal, write_signal_file
+        from omnialpha.strategist.schema import parse_plan
+        from omnialpha.strategist.risk import RiskConfig, apply_risk
         import json
 
         root = ROOT / ".prelaunch_test" / "m14"

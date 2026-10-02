@@ -13,13 +13,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.skillkit import (  # noqa: E402
+from omnialpha.skillkit import (  # noqa: E402
     SkillRegistry,
     render_catalog,
     run_skill_tool,
     validate_package,
 )
-from gate_bot.strategist.tools import NATIVE_TOOLS, TOOL_NAMES, run_tool  # noqa: E402
+from omnialpha.strategist.tools import NATIVE_TOOLS, TOOL_NAMES, run_tool  # noqa: E402
 
 ZIP = Path(r"C:\Users\w6485\Desktop\price-action-trading-v34.2.zip")
 WORK = ROOT / "tmp_prod_test"
@@ -56,7 +56,7 @@ def main() -> int:
 
     def cli(*args: str) -> subprocess.CompletedProcess:
         return subprocess.run(
-            [py, "-m", "gate_bot", *args],
+            [py, "-m", "omnialpha", *args],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             cwd=str(ROOT),
         )

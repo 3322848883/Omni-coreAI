@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from gate_bot.monitoring import (
+from omnialpha.monitoring import (
     TYPE_DUP_FILL,
     TYPE_EQUITY_DEVIATION,
     TYPE_ORPHAN,
@@ -71,7 +71,7 @@ class TestAlertStore(unittest.TestCase):
         self.assertEqual(len(self.store.list(TYPE_EQUITY_DEVIATION)), 1)
 
     def test_cap_at_max(self):
-        from gate_bot.monitoring.alerts import MAX_ALERTS
+        from omnialpha.monitoring.alerts import MAX_ALERTS
 
         for i in range(MAX_ALERTS + 20):
             self.store.raise_alert("t", f"n{i}")
@@ -94,7 +94,7 @@ class TestAlertStore(unittest.TestCase):
 
 class TestExecutorAlertHooks(unittest.TestCase):
     def test_executor_accepts_alert_store(self):
-        from gate_bot.executor import Executor
+        from omnialpha.executor import Executor
 
         class DummyClient:
             def get_account(self):
@@ -105,7 +105,7 @@ class TestExecutorAlertHooks(unittest.TestCase):
         self.assertIs(ex.alert_store, store)
 
     def test_orphan_cleanup_raises_alert(self):
-        from gate_bot.executor import Executor
+        from omnialpha.executor import Executor
 
         class DummyClient:
             def list_price_orders(self, symbol):
@@ -142,7 +142,7 @@ class TestOrphanFieldName(unittest.TestCase):
     """Gate 返回 is_reduce_only —— 字段名不匹配会导致孤儿永不被识别。"""
 
     def _ex(self):
-        from gate_bot.executor import Executor
+        from omnialpha.executor import Executor
 
         class DummyClient:
             def list_price_orders(self, symbol):
@@ -208,7 +208,7 @@ class TestNotifySwitch(unittest.TestCase):
     """模拟盘/实盘通知开关：模拟盘默认关。"""
 
     def test_paper_default_off(self):
-        from gate_bot.monitoring import should_notify
+        from omnialpha.monitoring import should_notify
 
         with tempfile.TemporaryDirectory() as td:
             # 无配置 → 实盘开、模拟盘关（安全默认）
@@ -216,7 +216,7 @@ class TestNotifySwitch(unittest.TestCase):
             self.assertFalse(should_notify(Path(td), "paper"))
 
     def test_yaml_switch(self):
-        from gate_bot.monitoring import should_notify
+        from omnialpha.monitoring import should_notify
 
         with tempfile.TemporaryDirectory() as td:
             (Path(td) / "config").mkdir()
@@ -227,7 +227,7 @@ class TestNotifySwitch(unittest.TestCase):
             self.assertTrue(should_notify(Path(td), "paper"))
 
     def test_live_can_be_disabled(self):
-        from gate_bot.monitoring import should_notify
+        from omnialpha.monitoring import should_notify
 
         with tempfile.TemporaryDirectory() as td:
             (Path(td) / "config").mkdir()
@@ -237,25 +237,25 @@ class TestNotifySwitch(unittest.TestCase):
             self.assertFalse(should_notify(Path(td), "live"))
 
     def test_trade_events_gated_by_env(self):
-        from gate_bot.monitoring import notify_trade_events
+        from omnialpha.monitoring import notify_trade_events
 
         steps = [{"action": "open_long", "ok": True, "symbol": "BTC_USDT",
                   "detail": {"price": 83000, "sl": 82800, "tp": 83500, "size_usd": 100}}]
         with tempfile.TemporaryDirectory() as td:
-            with mock.patch("gate_bot.monitoring.notify_process_event") as _:
+            with mock.patch("omnialpha.monitoring.notify_process_event") as _:
                 # paper 默认关 → 不发
-                with mock.patch("gate_bot.monitoring.notify.build_notifier") as bn:
+                with mock.patch("omnialpha.monitoring.notify.build_notifier") as bn:
                     notify_trade_events("bot-x", steps, root=Path(td), env="paper")
                     bn.assert_not_called()
                 # live → 会尝试发
-                with mock.patch("gate_bot.monitoring.notify.build_notifier") as bn:
+                with mock.patch("omnialpha.monitoring.notify.build_notifier") as bn:
                     bn.return_value.has_channel = False
                     notify_trade_events("bot-x", steps, root=Path(td), env="live")
                     bn.assert_called()
 
     def test_open_card_has_tp_sl(self):
         """开仓卡片必须含止损/止盈（不能是空模板）。"""
-        from gate_bot.monitoring import format_trade_card
+        from omnialpha.monitoring import format_trade_card
 
         steps = [{
             "action": "open_short", "ok": True, "symbol": "BTC_USDT",
@@ -274,7 +274,7 @@ class TestNotifySwitch(unittest.TestCase):
 
     def test_open_card_no_empty_fields(self):
         """关键字段不能是空字符串。"""
-        from gate_bot.monitoring import format_trade_card
+        from omnialpha.monitoring import format_trade_card
 
         steps = [{
             "action": "open_long", "ok": True, "symbol": "BTC_USDT",

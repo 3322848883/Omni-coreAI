@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gate_bot.persona import (  # noqa: E402
+from omnialpha.persona import (  # noqa: E402
     PersonaError,
     PersonaGroup,
     SharedOrderStore,
@@ -16,8 +16,8 @@ from gate_bot.persona import (  # noqa: E402
     load_persona_groups,
     validate_group,
 )
-from gate_bot.persona.config import member_weight  # noqa: E402
-from gate_bot.persona.fusion import DIR_HOLD, DIR_LONG, DIR_SHORT  # noqa: E402
+from omnialpha.persona.config import member_weight  # noqa: E402
+from omnialpha.persona.fusion import DIR_HOLD, DIR_LONG, DIR_SHORT  # noqa: E402
 
 
 class TestConfig(unittest.TestCase):
@@ -118,7 +118,7 @@ class TestSharedOrders(unittest.TestCase):
 class TestRunnerExec(unittest.TestCase):
     def test_single_account_dedup(self):
         """single_account 只写 target 的 inbox（去重）。"""
-        from gate_bot.persona.runner import PersonaRunner
+        from omnialpha.persona.runner import PersonaRunner
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -152,7 +152,7 @@ class TestRunnerExec(unittest.TestCase):
 
     def test_mirror_broadcast(self):
         """mirror_accounts 广播到各成员。"""
-        from gate_bot.persona.runner import PersonaRunner
+        from omnialpha.persona.runner import PersonaRunner
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -178,7 +178,7 @@ class TestRunnerExec(unittest.TestCase):
                 self.assertTrue(list((root / "data" / "bots" / b / "inbox").glob("*.json")), b)
 
     def test_conflict_hold_no_execute(self):
-        from gate_bot.persona.runner import PersonaRunner
+        from omnialpha.persona.runner import PersonaRunner
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

@@ -16,7 +16,7 @@ print(reasoning)
 out = Path("verify_data/LLM-eth-analysis-raw.md")
 out.write_text(
     f"# LLM（DeepSeek）产出的 ETH 价格行为分析\n\n"
-    f"> 生成方式：`gate_bot plan --bot skill-e2e` · skill=price-action-trading · 模型=global:deepseek-v4.1-flash\n"
+    f"> 生成方式：`omnialpha plan --bot skill-e2e` · skill=price-action-trading · 模型=global:deepseek-v4.1-flash\n"
     f"> cycle_id: {doc.get('cycle_id')}\n\n"
     f"## Plan chips\n\n```json\n{json.dumps(chips, ensure_ascii=False, indent=2)}\n```\n\n"
     f"## reasoning 全文（LLM 原文）\n\n{reasoning}\n",
