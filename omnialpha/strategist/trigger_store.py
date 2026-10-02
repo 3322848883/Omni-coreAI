@@ -172,10 +172,29 @@ class AITriggerStore:
         self._purge_expired(now)
         return list(self._items)
 
+    def _find_same(self, norm: dict) -> Optional["AITrigger"]:
+        """按 (type, symbol, params) 找已存在的同质条件。"""
+        want_type = str(norm.get("type") or "")
+        want_sym = str(norm.get("symbol") or "")
+        want = dict(norm.get("params") or {})
+        for t in self._items:
+            if t.type == want_type and t.symbol == want_sym and dict(t.params or {}) == want:
+                return t
+        return None
+
     def add(self, norm: dict, bot_symbols: Optional[list] = None) -> AITrigger:
         if not self.policy.enabled:
             raise TriggerPolicyError("ai_triggers.enabled=false")
         self._purge_expired()
+        # 幂等去重：同 (type, symbol, params) 已存在 → 直接返回它，不新建。
+        # 为什么必须去重：同质条件**不占新槽位、也不叠加唤醒频率**。
+        # 实测实盘 5 个条件里 4 个是同质 price_break(BTC_USDT)，每个各按自己的
+        # cooldown 唤醒一次，聚合起来把节奏从 15 分钟压到约 1 分钟 —— 每轮一次
+        # LLM 调用。AI 侧已给它可见性（prompt 里列出生效触发器），这里是兜底。
+        # 注意：不刷新 TTL —— 否则条件永不失效，TTL 就失去清理意义。
+        dup = self._find_same(norm)
+        if dup is not None:
+            return dup
         if len(self._items) >= int(self.policy.max_active):
             raise TriggerPolicyError(f"trigger_limit: max_active={self.policy.max_active}")
         now = time.time()

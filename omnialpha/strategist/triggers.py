@@ -34,6 +34,12 @@ COMBINATORS = frozenset({"all", "any"})
 KNOWN_CONDITIONS = LEAF_CONDITIONS | COMBINATORS
 MAX_COND_DEPTH = 2
 
+# 条件未显式声明 `cooldown_sec` 时的默认冷却。
+# 注意：这只对 **bot yaml 里声明的 conditions** 生效 —— AI 自设触发器由
+# `AITrigger.to_condition()` 显式带上自己的 `cooldown_sec`（来自 policy），
+# 走不到这个兜底。所以这里不该去读 AI policy 的默认值：两者语义不同。
+DEFAULT_CONDITION_COOLDOWN_SEC = 60.0
+
 
 class ConditionError(ValueError):
     pass
@@ -299,7 +305,7 @@ def check_conditions(
     for i, cond in enumerate(conditions):
         key = cond.get("key") or f"{cond.get('type')}:{cond.get('symbol')}:{i}"
         st: ConditionState = states.setdefault(key, ConditionState())
-        cooldown = float(cond.get("cooldown_sec") or 60)
+        cooldown = float(cond.get("cooldown_sec") or DEFAULT_CONDITION_COOLDOWN_SEC)
         if ts - st.last_fire < cooldown:
             continue
         ok, reason = evaluate_condition(client, cond, timeframe, now=ts)
