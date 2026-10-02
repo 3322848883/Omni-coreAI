@@ -53,6 +53,12 @@ class Watchdog:
         self.targets: list[Target] = []
         self._stop = False
         self._notifier = None
+        # 健康体检：HealthMonitor.check() 此前全仓库无人调用 → 心跳/延迟/错误阈值
+        # 全部形同虚设。看门狗是天然的周期监控点，在这里接上（带去重防刷屏）。
+        self.health_interval_sec = 300.0
+        self.health_realert_sec = 1800.0
+        self._last_health_check = 0.0
+        self._health_alerted: dict[str, float] = {}
 
     # ── 目标发现 ──────────────────────────────────
     def discover(self) -> list[Target]:
@@ -149,6 +155,15 @@ class Watchdog:
         except Exception as e:  # noqa: BLE001
             log.warning("spawn %s/%s failed: %s", t.bot_id, t.component, e)
             return False
+        finally:
+            # Popen 已把 fd dup 给子进程，父进程必须关掉自己这两个句柄：
+            # 不关会每次拉起泄漏 2 个 fd；Windows 上还会锁住日志文件，
+            # 导致日志轮转/目录清理失败（PermissionError）。
+            for fh in (out_fh, err_fh):
+                try:
+                    fh.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
     @staticmethod
     def _windowless_python() -> str:
@@ -176,6 +191,39 @@ class Watchdog:
         except Exception:  # noqa: BLE001
             pass
 
+    def _check_health(self) -> list[str]:
+        """周期体检各 bot 的 health 记录，把 check() 的告警推出去（带去重）。
+
+        同一告警在 health_realert_sec 内只推一次，避免每 15s 刷屏。
+        """
+        now = time.time()
+        if now - self._last_health_check < self.health_interval_sec:
+            return []
+        self._last_health_check = now
+        try:
+            from .monitoring import HealthMonitor
+        except Exception:  # noqa: BLE001
+            return []
+        sent: list[str] = []
+        for bid in sorted({t.bot_id for t in self.targets}):
+            try:
+                alerts = HealthMonitor(self.root, bid).check()
+            except Exception:  # noqa: BLE001
+                continue
+            for msg in alerts:
+                if "no heartbeat yet" in msg:
+                    continue  # 刚启动还没跑过一轮，不算异常
+                if now - self._health_alerted.get(msg, 0.0) < self.health_realert_sec:
+                    continue
+                self._health_alerted[msg] = now
+                sent.append(msg)
+                self._alert(
+                    f"[health] {bid}: {msg}",
+                    kind="health", color="orange",
+                    fields=[("Bot", bid), ("健康告警", msg)],
+                )
+        return sent
+
     # ── 主循环 ────────────────────────────────────
     def check_once(self) -> dict:
         missing = []
@@ -200,7 +248,9 @@ class Watchdog:
                     )
                 else:
                     t.skip_until = time.time() + 30.0
-        return {"held": held, "missing": missing, "restarted": restarted}
+        health = self._check_health()
+        return {"held": held, "missing": missing, "restarted": restarted,
+                "health_alerts": health}
 
     def run_forever(self) -> None:
         self.discover()

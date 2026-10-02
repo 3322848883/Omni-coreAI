@@ -246,6 +246,7 @@ def reconcile_protection(client, symbols: list[str], prefix: str = "") -> list[s
 
 
 def run_bot_once(bot: BotConfig, paths: ProjectPaths) -> dict:
+    t0 = time.time()
     inbox = paths.bot_inbox(bot.bot_id)
     files = _pick_inbox_files(inbox, bot.max_files_per_run)
     processed = {"picked": len(files), "ok": 0, "failed": 0}
@@ -278,7 +279,27 @@ def run_bot_once(bot: BotConfig, paths: ProjectPaths) -> dict:
             processed["ok"] += 1
         else:
             processed["failed"] += 1
+    if processed["picked"]:
+        _record_exec_latency(bot, paths, round(time.time() - t0, 2),
+                             failed=processed["failed"])
     return processed
+
+
+def _record_exec_latency(bot: BotConfig, paths: ProjectPaths, seconds: float,
+                         failed: int = 0) -> None:
+    """把本批执行耗时与失败数写到 run 侧记录（health.run.json）。
+
+    plan-loop 与 run 是两个进程，而 heartbeat() 是整体覆盖语义 —— 共用 health.json
+    会互相抹掉字段，所以 run 侧单独写，由 HealthMonitor.check() 合并读。
+    """
+    try:
+        from .monitoring import HealthMonitor
+
+        hm = HealthMonitor(paths.root, bot.bot_id, role="run")
+        hm.heartbeat(exec_latency=seconds)
+        hm.record_exec_result(failed)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _orphan_sweep(bot: BotConfig, paths: ProjectPaths) -> int:
