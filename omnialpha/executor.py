@@ -528,8 +528,14 @@ class Executor:
                     f"MAX_LEVERAGE: {intent.leverage} > account max_leverage={max_lev}"
                 )
             # total notional: sum open positions + this order
+            # 两个闸门取更小者：绝对值 max_total_notional_usd 与**按比例**的
+            # max_total_notional_pct（权益 × pct）。后者权益变化时自动跟随 —— 绝对值
+            # 做不到这点（实测实盘 max_total_notional_usd=10000 相当于 113× 权益，永不触发，
+            # 真正 bind 的只有杠杆上限 50×；加了 open_*→add_* 映射后仓位会单调增长，
+            # 所以必须有一道**随权益收紧**的总量闸门）。
             max_total = ar.get("max_total_notional_usd")
-            if max_total is not None:
+            max_total_pct = ar.get("max_total_notional_pct")
+            if max_total is not None or max_total_pct is not None:
                 try:
                     pos_notional = 0.0
                     for p in self.client.get_positions() or []:
@@ -551,10 +557,23 @@ class Executor:
                         except Exception:  # noqa: BLE001
                             mult = 1.0
                         this_usd = abs(intent.size) * float(px) * mult
-                    if this_usd is not None and pos_notional + float(this_usd) > float(max_total):
+                    cap = float(max_total) if max_total is not None else None
+                    pct_note = ""
+                    if max_total_pct is not None:
+                        eq = float((self.client.get_account() or {}).get("total") or 0)
+                        if eq <= 0:
+                            raise GateApiError(
+                                "MAX_TOTAL_NOTIONAL: cannot read equity for max_total_notional_pct"
+                            )
+                        pc = eq * float(max_total_pct)
+                        cap = pc if cap is None else min(cap, pc)
+                        pct_note = f" (权益×{float(max_total_pct):g})"
+                    if cap is None:
+                        raise GateApiError("MAX_TOTAL_NOTIONAL: no cap configured")
+                    if this_usd is not None and pos_notional + float(this_usd) > cap:
                         raise GateApiError(
                             f"MAX_TOTAL_NOTIONAL: open={pos_notional:.2f} + this={this_usd:.2f} "
-                            f"> {max_total}"
+                            f"> {cap:.0f}{pct_note}"
                         )
                 except GateApiError:
                     raise
