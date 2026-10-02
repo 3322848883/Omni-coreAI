@@ -365,6 +365,11 @@ def _auto_protect_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict) -> i
             log.warning("auto protect %s %s raised: %s", bot.bot_id, sym, e)
             continue
         if out.get("skipped") or out.get("auto_protect") == "off":
+            if out.get("skipped") and out.get("auto_protect") == "dry":
+                # dry 模式下必须把「为什么没动手」也记下来 —— 否则「没有日志」既可能是
+                # 「已有保护」也可能是「扫描根本没跑」，dry 观察期就验证不了任何东西
+                # （这正是本项目反复出现的「静默失效」形态）。
+                log.info("auto protect[dry] %s %s: 跳过（%s）", bot.bot_id, sym, out["skipped"])
             continue
         if out.get("placed"):
             done += 1

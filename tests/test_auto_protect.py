@@ -366,5 +366,24 @@ class TestAutoProtectSweep(unittest.TestCase):
             self.assertIn("AUTO_TRIGGER_PRICE_LESS_MARK", alerts[0]["detail"])
 
 
+    def test_sweep_dry_logs_skip_reason(self):
+        """dry 模式跳过时也要记下原因 —— 否则「没有日志」既可能是「已有保护」，
+        也可能是「扫描根本没跑」，dry 观察期就无法验证任何东西。"""
+        from omnialpha.watcher import _auto_protect_sweep
+
+        with tempfile.TemporaryDirectory() as td:
+            bot = self._bot(auto_protect="dry", auto_protect_sl_pct=2.0)
+            client = FakeClient()
+            client.set_position(10)
+            client.place_protector("t-pt-sl", -10, 83000)  # 已有 SL → 应跳过
+            bot.create_client = lambda: client
+            with self.assertLogs("omnialpha.watcher", level="INFO") as cm:
+                _auto_protect_sweep(bot, self._paths(td), {})
+            self.assertTrue(
+                any("auto protect[dry]" in m and "sl_present" in m for m in cm.output), cm.output
+            )
+            self.assertEqual(client.placed, [])
+
+
 if __name__ == "__main__":
     unittest.main()
