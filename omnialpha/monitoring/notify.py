@@ -312,24 +312,28 @@ def format_trade_steps(bot_id: str, steps: list) -> list[str]:
         mark = "✓" if ok else "✗"
         if action in _OPEN_ACTIONS:
             side = "多" if "long" in action else "空"
-            px = detail.get("price") or detail.get("avg_price") or ""
-            sz = detail.get("size_usd") or detail.get("filled_size") or ""
-            lines.append(f"{mark} 开仓 {sym} {side} @{px} size={sz}")
+            px = _entry_price(detail, s)
+            sz, unit = _resolve_size(detail, s)
+            lines.append(f"{mark} 开仓 {sym} {side} @{px} size={sz}{unit}")
         elif action in _CLOSE_ACTIONS:
             px = _entry_price(detail, s)
-            pnl = detail.get("realized_pnl") or detail.get("pnl") or detail.get("pnl_usd") or ""
-            pnl_val = float(pnl) if pnl else 0
+            pnl = _resolve_pnl(detail, s)
+            pnl_val = 0.0
+            try:
+                pnl_val = float(pnl) if pnl is not None else 0.0
+            except (TypeError, ValueError):
+                pnl_val = 0.0
             label = "止盈" if pnl_val > 0 else ("止损" if pnl_val < 0 else "平仓")
             icon = "✅" if pnl_val > 0 else ("🔴" if pnl_val < 0 else "📉")
-            lines.append(f"{mark} {icon} {label} {sym} @{px} pnl={pnl}")
+            lines.append(f"{mark} {icon} {label} {sym} @{px} pnl={_fmt_num(pnl)}")
         elif action in _REDUCE_ACTIONS:
             px = _entry_price(detail, s)
-            sz = detail.get("size") or detail.get("size_usd") or ""
-            lines.append(f"{mark} 减仓 {sym} @{px} size={sz}")
+            sz, unit = _resolve_size(detail, s)
+            lines.append(f"{mark} 减仓 {sym} @{px} size={sz}{unit}")
         elif action == "modify_tp_sl":
-            tp = detail.get("tp") or s.get("tp") or ""
-            sl = detail.get("sl") or s.get("sl") or ""
-            lines.append(f"{mark} 改保护 {sym} TP={tp} SL={sl}")
+            tp = _resolve_tp(detail, s)
+            sl = _resolve_sl(detail, s)
+            lines.append(f"{mark} 改保护 {sym} TP={_fmt_num(tp)} SL={_fmt_num(sl)}")
     return lines
 
 
@@ -361,6 +365,87 @@ def _entry_price(detail: dict, s: dict) -> str:
     return "—"
 
 
+def _first_val(*vals):
+    """取第一个「有内容」的值（None / 空串 / 0 都算无）。"""
+    for v in vals:
+        if v is None or v == "" or str(v) == "0":
+            continue
+        return v
+    return None
+
+
+def _leg_price(legs):
+    """tp_orders / sl_orders 形如 [{trigger_price|price|trigger}]，取第一腿。"""
+    if not isinstance(legs, (list, tuple)):
+        return None
+    for leg in legs:
+        if isinstance(leg, dict):
+            v = _first_val(leg.get("trigger_price"), leg.get("price"), leg.get("trigger"))
+            if v is not None:
+                return v
+    return None
+
+
+def _resolve_tp(detail: dict, s: dict):
+    """止盈价：detail.tp → step.tp → tp_placed.price → tp_orders[].trigger_price。
+
+    不同 action 的 detail 形状不同（open_* 用 detail.tp；modify_tp_sl 用
+    detail.tp_placed.price；stop_entry_* 只给 tp_orders[]），所以必须逐层兜底。
+    """
+    return _first_val(
+        detail.get("tp"),
+        s.get("tp"),
+        (detail.get("tp_placed") or {}).get("price"),
+        _leg_price(detail.get("tp_orders")),
+    )
+
+
+def _resolve_sl(detail: dict, s: dict):
+    """止损价：detail.sl → step.sl → sl_placed.price → sl_orders[].trigger_price。"""
+    return _first_val(
+        detail.get("sl"),
+        s.get("sl"),
+        (detail.get("sl_placed") or {}).get("price"),
+        _leg_price(detail.get("sl_orders")),
+    )
+
+
+def _resolve_pnl(detail: dict, s: dict):
+    """已实现盈亏：0 也是有效值（保本平仓），所以不走 _first_val。"""
+    for src in (
+        detail.get("realized_pnl"),
+        detail.get("pnl"),
+        detail.get("pnl_usd"),
+        (detail.get("order") or {}).get("pnl"),
+        s.get("pnl"),
+    ):
+        if src is not None and src != "":
+            return src
+    return None
+
+
+def _resolve_size(detail: dict, s: dict):
+    """仓位数量 → (显示值, 单位)。优先 USD 名义；拿不到就退化成合约张数。"""
+    usd = _first_val(detail.get("size_usd"))
+    if usd is not None:
+        return _fmt_num(usd), "USDT"
+    order = detail.get("order") or {}
+    qty = _first_val(
+        order.get("size"),
+        order.get("filled_size"),
+        detail.get("size"),
+        detail.get("contracts"),
+        s.get("size"),
+    )
+    if qty is None:
+        return "—", ""
+    try:
+        q = abs(float(qty))
+    except (TypeError, ValueError):
+        return _fmt_num(qty), "张"
+    return (_fmt_num(q, 0) if q == int(q) else _fmt_num(q)), "张"
+
+
 def format_trade_card(bot_id: str, steps: list) -> list[dict]:
     """把成交事件格式化成飞书卡片元素（彩色标题+字段布局）。"""
     cards = []
@@ -377,23 +462,23 @@ def format_trade_card(bot_id: str, steps: list) -> list[dict]:
         if action in _OPEN_ACTIONS:
             side = "多" if "long" in action else "空"
             px = _entry_price(detail, s)
-            sz = detail.get("size_usd") or detail.get("filled_size") or ""
-            sl = detail.get("sl") or s.get("sl") or ""
-            tp = detail.get("tp") or s.get("tp") or ""
+            sz, unit = _resolve_size(detail, s)
+            sl = _resolve_sl(detail, s)
+            tp = _resolve_tp(detail, s)
             color = "green"
             title = f"📈 开仓告警"
             fields = [
                 ("Bot", bot_id), ("币种", sym),
                 ("方向", f"开{side}"), ("入场价", px),
-                ("仓位", f"{_fmt_num(sz)} USDT"), ("止损", _fmt_num(sl)),
+                ("仓位", f"{sz} {unit}".strip()), ("止损", _fmt_num(sl)),
                 ("止盈", _fmt_num(tp)),
             ]
         elif action in _CLOSE_ACTIONS:
             px = _entry_price(detail, s)
-            pnl = detail.get("realized_pnl") or detail.get("pnl") or detail.get("pnl_usd") or ""
+            pnl = _resolve_pnl(detail, s)
             pnl_val = 0
             try:
-                pnl_val = float(pnl) if pnl else 0
+                pnl_val = float(pnl) if pnl is not None else 0
             except (TypeError, ValueError):
                 pass
             if pnl_val > 0:
@@ -409,16 +494,16 @@ def format_trade_card(bot_id: str, steps: list) -> list[dict]:
             ]
         elif action in _REDUCE_ACTIONS:
             px = _entry_price(detail, s)
-            sz = detail.get("size") or detail.get("size_usd") or ""
+            sz, unit = _resolve_size(detail, s)
             color = "blue"
             title = f"📊 减仓告警"
             fields = [
                 ("Bot", bot_id), ("币种", sym),
-                ("减仓价", px), ("减仓量", f"{_fmt_num(sz)} USDT"),
+                ("减仓价", px), ("减仓量", f"{sz} {unit}".strip()),
             ]
         elif action == "modify_tp_sl":
-            tp = detail.get("tp") or s.get("tp") or ""
-            sl = detail.get("sl") or s.get("sl") or ""
+            tp = _resolve_tp(detail, s)
+            sl = _resolve_sl(detail, s)
             color = "blue"
             title = f"✏️ 改单告警"
             fields = [

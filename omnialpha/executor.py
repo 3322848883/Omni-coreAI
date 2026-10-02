@@ -964,6 +964,8 @@ class Executor:
                 if oid:
                     new_ids.add(oid)
                 detail[f"{kind}_placed"] = {"id": oid, "price": price, "check": rec_.get("check")}
+                # 统一字段名：与 open_* 的 detail.tp/detail.sl 对齐，供卡片/日志等消费者直读
+                detail[kind] = price
             else:
                 errors.append(f"{kind}: {err_}")
                 detail[f"{kind}_error"] = str(err_)
@@ -1497,21 +1499,30 @@ class Executor:
         # 平/减仓后：先撤孤儿，再把剩余保护单张数对齐持仓
         cleaned = self._cleanup_orphan_protectors(intent.symbol)
         resized = self._resync_protectors(intent.symbol)
+        # 统一字段名：与 open_* 的 detail 对齐，供卡片/日志等消费者直读
+        _o = order or {}
+        _px = _o.get("fill_price") or _o.get("avg_price") or _o.get("price")
+        _pnl = _o.get("pnl")
+        detail: dict[str, Any] = {
+            "order": order,
+            "side": side,
+            "position_mode": self.client.get_position_mode(),
+            "executed_as": "close",
+            "cleaned_protectors": cleaned,
+            "resized_protectors": resized,
+            "mode_note": (
+                "dual: close this side only" if dual else "single: one book, side is advisory"
+            ),
+        }
+        if _px not in (None, "", "0"):
+            detail["entry_price"] = _px
+        if _pnl is not None:
+            detail["realized_pnl"] = _pnl
         return StepResult(
             requested,
             intent.symbol,
             True,
-            detail={
-                "order": order,
-                "side": side,
-                "position_mode": self.client.get_position_mode(),
-                "executed_as": "close",
-                "cleaned_protectors": cleaned,
-                "resized_protectors": resized,
-                "mode_note": (
-                    "dual: close this side only" if dual else "single: one book, side is advisory"
-                ),
-            },
+            detail=detail,
         )
 
     def _close_all(self, symbol: str) -> StepResult:

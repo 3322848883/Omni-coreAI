@@ -10,7 +10,7 @@ api_secret_env: GATE_API_SECRET
 symbols:
   - BTC_USDT
 
-max_notional_usd: 400
+max_notional_usd: 10000
 max_orders_per_file: 5
 max_files_per_run: 20
 poll_interval_sec: 2
@@ -25,9 +25,10 @@ account_risk:
   max_leverage: 50
   max_total_notional_usd: 10000
   # 权益比例硬顶（executor._check_notional）：单笔名义 ≤ 权益 × 此倍数。
-  # 实测生效值：权益 ~90 → 约 450。所以本文件的 max_notional_usd 与
-  # strategist.risk.max_notional_usd 都必须 ≤ 它，否则 AI 按更大预算报量、
-  # 然后被闸门拒掉（实测实盘 7 笔失败里 1 笔：size_usd=476 > equity×500%=448）。
+  # **这是预算的唯一真源**：strategist 的 _prompt_risk() 会把给 AI 的预算收敛成
+  # min(max_notional_usd, 权益 × 此倍数)，所以权益变化时 AI 的预算自动跟上，
+  # 不会再出现「AI 按旧预算报量、被闸门拒掉」（实测曾占实盘失败的 1/7）。
+  # 因此上面的 max_notional_usd 只当宽松的绝对兜底 —— 不要拿它去「对齐闸门」。
   max_notional_pct: 5.0
   # daily_loss_limit：按要求不启用熔断
 
@@ -59,7 +60,7 @@ strategist:
   risk:
     min_confidence: 0.6
     max_chips: 1
-    max_notional_usd: 400
+    max_notional_usd: 10000
   llm:
     provider: gw-flash
     reasoning_effort: high
