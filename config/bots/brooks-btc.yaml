@@ -36,6 +36,16 @@ account_risk:
   # 50×。加了 open_*→add_* 映射后仓位会单调增长（重复/过期计划每轮加仓），
   # 所以必须有一道**随权益收紧**的总量闸门，否则「单调增长 + 无回撤熔断 + 50 倍杠杆」会叠加。
   max_total_notional_pct: 10.0
+  # 裸仓自动补保护（watcher 每 300s 一次扫描，与孤儿回收同一个节拍）。
+  # 持仓在、本 bot 的 SL 不在时，按 mark 的百分比补一张 reduce_only 的**市价触发** SL。
+  # 生产里此前**没有任何代码会补** —— reconcile_protection() 只返回警告、且生产无人调用，
+  # _orphan_sweep 只撤孤儿不补。于是「入场成交但保护单没挂上」「SL 被触发而仓位还在」
+  # 这两条路径都会留下裸仓，只能等 AI 下一轮自己发现。
+  # 只补 SL、不补 TP：SL 是风控，TP 是策略 —— 自动塞一个 TP 等于替 AI 做了它没做的决策。
+  # 价格锚 mark（不锚入场价）：仓位已很赚时按入场价算出的价会落在 mark 非法一侧被交易所拒。
+  # 先跑 "dry"：只记录「本来会挂什么」、不下单，观察一轮再改 true。
+  auto_protect: "dry"
+  auto_protect_sl_pct: 2.0
   # daily_loss_limit：按要求不启用熔断
 
 strategist:

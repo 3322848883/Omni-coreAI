@@ -1562,6 +1562,133 @@ class Executor:
                 notes.append({"resized_error": str(e), "text": text})
         return notes
 
+    def _has_owned_sl(self, symbol: str, prefix: str) -> bool:
+        """是否已有本 bot 的**未终结** SL 保护单。
+
+        只看 SL、不看 TP —— `watcher.reconcile_protection()` 的判据是
+        `"-sl" in text or "-tp" in text`，也就是「只有 TP 没有 SL」会被判成已受保护。
+        补保护这条路必须按 SL 单独判，不能沿用那个判据。
+        """
+        for po in self._owned_price_orders(symbol, prefix):
+            text = str((po.get("initial") or {}).get("text") or po.get("text") or "")
+            tail = text.rsplit("-", 1)[-1].lower() if text else ""
+            if tail not in ("sl", "ls"):
+                continue
+            if str(po.get("status") or "").lower() in (
+                "cancelled", "finished", "filled", "triggered", "failed", "closed"
+            ):
+                continue
+            return True
+        return False
+
+    def ensure_protection(self, symbol: str) -> dict:
+        """裸仓兜底：持仓在、owned SL 不在时，按配置补一张 reduce_only SL。
+
+        生产里此前**没有任何代码会补** —— `watcher.reconcile_protection()` 只返回警告
+        （且全仓唯一调用者是上线前测试脚本），`_orphan_sweep` 只撤孤儿不补。于是两条
+        路径都会留下裸仓，只能等 AI 下一轮自己发现：
+          ① 入场成交了但保护单没挂上（`_rollback_unprotected_entry` 只告警不平仓）
+          ② SL 被触发/被撤销，而仓位还在
+
+        只补 SL，**绝不补 TP**：SL 是风控，TP 是策略 —— 自动塞一个 TP 等于替 AI 做了
+        它没做的决策，还会和它下一轮的意图打架。
+
+        由 `account_risk` 逐 bot 开启（默认关）：
+          auto_protect: false（默认）→ 只回报检测结果，不下单
+          auto_protect: "dry"        → 记录「本来会挂什么」，不下单
+          auto_protect: true         → 真挂
+          auto_protect_sl_pct: 2.0   → SL 距 mark 的百分比；≤0 视为未启用
+
+        价格锚 **mark**（不锚入场价）：仓位已经很赚时按入场价算出来的价会落在 mark 的
+        非法一侧、被交易所直接拒 —— 正是 `_precheck_exit_triggers` 挡的那一类。这里再
+        走一次同一个预检，避免两处判据漂移。
+
+        本方法只做「检测 + 挂单」，**不告警**：告警与限流是调用方（watcher 的扫描循环）
+        的策略，那里才有跨轮状态。
+        """
+        out: dict[str, Any] = {"symbol": symbol, "auto_protect": "off"}
+        ar = self.account_risk or {}
+        mode = ar.get("auto_protect", False)
+        try:
+            pct = float(ar.get("auto_protect_sl_pct") or 0)
+        except (TypeError, ValueError):
+            pct = 0.0
+        if not mode or pct <= 0:
+            return out
+        dry = str(mode).lower() == "dry"
+        out["auto_protect"] = "dry" if dry else "live"
+
+        positions = self._symbol_positions(symbol)
+        if not positions:
+            out["skipped"] = "no_position"
+            return out
+        if len(positions) > 1:
+            # 双向持仓得先定补哪条腿 —— 这不是「兜底」该猜的事，交给 AI
+            out["skipped"] = "ambiguous_side"
+            return out
+        if self._has_pending_entry(symbol):
+            # 执行器已为未成交入场单预挂了保护单，此刻再补一张会重复。
+            # 与孤儿扫描共用同一个事实源，避免两处判据漂移。
+            out["skipped"] = "pending_entry"
+            return out
+
+        pos = positions[0]
+        pos_side = pos["side"]
+        size = abs(int(pos["size"]))
+        if self._has_owned_sl(symbol, self._own_prefix("")):
+            out["skipped"] = "sl_present"
+            return out
+
+        try:
+            ticker = self.client.get_ticker(symbol) or {}
+            mark = float(ticker.get("mark_price") or ticker.get("last") or 0)
+        except Exception as e:  # noqa: BLE001
+            out["error"] = f"no mark price: {e}"
+            return out
+        if mark <= 0:
+            out["error"] = "no mark price"
+            return out
+
+        meta = self.client.get_contract(symbol)
+        raw = mark * (1 - pct / 100.0) if pos_side == "long" else mark * (1 + pct / 100.0)
+        sl = float(round_price(raw, meta))
+        out.update({
+            "position_side": pos_side, "position_size": size,
+            "mark": mark, "sl": sl, "sl_pct": pct,
+        })
+        if dry:
+            return out
+
+        intent = Intent(
+            action="open_long" if pos_side == "long" else "open_short",
+            symbol=symbol, side=pos_side, sl=sl,
+            sl_type="market",  # 触发即市价：兜底止损要的是「一定出得来」
+            label=self.label_prefix or "auto",
+        )
+        intent.trigger_rule_sl = infer_trigger_rules(intent.action, False)
+        side_err = self._precheck_exit_triggers(intent)
+        if side_err:
+            out["error"] = side_err
+            return out
+
+        trigger_side = "short" if pos_side == "long" else "long"
+        try:
+            rec, err = self._place_exit_leg(
+                lambda: self._place_trigger(
+                    intent, trigger_side, sl, is_tp=False, meta=meta, size=size
+                ),
+                kind="sl",
+                price_order=True,
+            )
+        except Exception as e:  # noqa: BLE001 — boundary
+            rec, err = None, str(e)
+        if not rec:
+            out["error"] = f"place failed: {err}"
+            return out
+        order = rec.get("order") or {}
+        out["placed"] = {"id": str(order.get("id") or ""), "price": sl, "check": rec.get("check")}
+        return out
+
     def _close(self, intent: Intent) -> StepResult:
         self._check_symbol(intent.symbol)
         dual = self.client.is_dual_position_mode()

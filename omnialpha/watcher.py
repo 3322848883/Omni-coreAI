@@ -330,6 +330,76 @@ def _orphan_sweep(bot: BotConfig, paths: ProjectPaths) -> int:
     return total
 
 
+_AUTO_PROTECT_ALERT_SEC = 3600.0
+
+
+def _auto_protect_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict) -> int:
+    """定期给裸仓补 SL（`account_risk.auto_protect` 逐 bot 开启，默认关）。
+
+    与 `_orphan_sweep` 是一对：一个撤孤儿、一个补缺失，且都以**同一份持仓/挂单事实**
+    为准（`Executor._has_pending_entry`），避免两处判据漂移。
+
+    为什么必须在这里、而不是 plan-loop 里：裸仓就是「没人管时静静躺着」的那个状态。
+    挂在 LLM 轮次上会被它的 15 分钟节奏绑架，而且 LLM 进程死了就完全不跑。
+
+    `alerted` 是跨轮共享的限流表：同一 (bot, symbol) 的失败告警按
+    `_AUTO_PROTECT_ALERT_SEC` 节流，否则每轮扫描都刷一条。
+    """
+    try:
+        client = bot.create_client()
+    except Exception:  # noqa: BLE001
+        return 0
+    executor = Executor(
+        client,
+        label_prefix=getattr(bot, "label_prefix", "") or bot.bot_id,
+        root=paths.root,
+        bot_id=bot.bot_id,
+        account_risk=getattr(bot, "account_risk", None),
+        alert_store=_alert_store(paths, bot.bot_id),
+    )
+    done = 0
+    for sym in (bot.symbols or []):
+        try:
+            out = executor.ensure_protection(sym)
+        except Exception as e:  # noqa: BLE001 — 单个 symbol 失败不拖垮整轮扫描
+            log.warning("auto protect %s %s raised: %s", bot.bot_id, sym, e)
+            continue
+        if out.get("skipped") or out.get("auto_protect") == "off":
+            continue
+        if out.get("placed"):
+            done += 1
+            log.warning(
+                "auto protect %s %s: 裸仓补 SL id=%s price=%s size=%s",
+                bot.bot_id, sym, out["placed"].get("id"), out.get("sl"), out.get("position_size"),
+            )
+            continue
+        if out.get("auto_protect") == "dry":
+            log.info(
+                "auto protect[dry] %s %s: 会挂 SL %s (mark=%s pct=%s side=%s size=%s)",
+                bot.bot_id, sym, out.get("sl"), out.get("mark"), out.get("sl_pct"),
+                out.get("position_side"), out.get("position_size"),
+            )
+            continue
+        if out.get("error"):
+            key = f"{bot.bot_id}:{sym}"
+            now = time.time()
+            if now - float(alerted.get(key) or 0) < _AUTO_PROTECT_ALERT_SEC:
+                continue
+            alerted[key] = now
+            log.error("auto protect %s %s: 补保护失败 %s", bot.bot_id, sym, out["error"])
+            try:
+                if executor.alert_store is not None:
+                    executor.alert_store.raise_alert(
+                        "unprotected_position",
+                        f"{sym} 裸仓补 SL 失败：{out['error']}"
+                        f"（只告警、未自动平仓，需人工或下一轮 plan 处理）",
+                        symbol=sym, auto_protect_error=str(out["error"]),
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+    return done
+
+
 def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[str] = None,
                 orphan_sweep_sec: float = 300.0) -> None:
     paths.ensure()
@@ -340,6 +410,7 @@ def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[
     interval = min((b.poll_interval_sec for b in selected.values()), default=2.0)
     log.info("watching bots: %s (orphan sweep every %.0fs)", sorted(selected), orphan_sweep_sec)
     last_sweep = 0.0
+    auto_protect_alerted: dict = {}
     while True:
         now = time.time()
         do_sweep = (now - last_sweep) >= orphan_sweep_sec
@@ -351,10 +422,15 @@ def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[
             except Exception as e:  # noqa: BLE001 — keep loop alive
                 log.exception("bot %s crashed: %s", bot.bot_id, e)
             if do_sweep:
+                # 先撤孤儿、再补缺失：顺序固定，免得刚变 flat 的 symbol 被抢跑
                 try:
                     _orphan_sweep(bot, paths)
                 except Exception as e:  # noqa: BLE001
                     log.warning("orphan sweep %s failed: %s", bot.bot_id, e)
+                try:
+                    _auto_protect_sweep(bot, paths, auto_protect_alerted)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("auto protect sweep %s failed: %s", bot.bot_id, e)
         if do_sweep:
             last_sweep = now
         time.sleep(max(0.2, interval))
