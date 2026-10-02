@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import unittest
+import unittest.mock
 
 from omnialpha.monitoring.notify import (
     format_trade_card,
@@ -299,11 +300,53 @@ class TestTimestampInNotifications(unittest.TestCase):
     所以卡片要显示成交/事件那一刻。带时区偏移是为了无歧义。
     """
 
-    def test_fmt_ts_basic(self):
+    def test_fmt_ts_is_beijing(self):
+        """统一北京时间：UTC 07:44 → 北京 15:44。"""
         from omnialpha.monitoring.notify import _fmt_ts
 
         out = _fmt_ts(1790927063.664)
-        self.assertRegex(out, r"^2026-10-02 \d{2}:44:23 [+-]\d{2}:\d{2}$", out)
+        self.assertEqual(out, "2026-10-02 15:44:23 北京时间", out)
+
+    def test_fmt_ts_uses_notify_tz_override(self):
+        """NOTIFY_TZ 支持固定偏移写法（不依赖 tzdata）：+00:00 → 显示偏移而非北京时间。"""
+        import omnialpha.monitoring.notify as nm
+
+        saved = dict(nm._TZ_CACHE)
+        try:
+            nm._TZ_CACHE.clear()
+            with unittest.mock.patch.dict("os.environ", {"NOTIFY_TZ": "+00:00"}):
+                out = nm._fmt_ts(1790927063.664)
+            self.assertEqual(out, "2026-10-02 07:44:23 +00:00", out)
+        finally:
+            nm._TZ_CACHE.clear()
+            nm._TZ_CACHE.update(saved)
+
+    def test_fmt_ts_negative_offset(self):
+        import omnialpha.monitoring.notify as nm
+
+        saved = dict(nm._TZ_CACHE)
+        try:
+            nm._TZ_CACHE.clear()
+            with unittest.mock.patch.dict("os.environ", {"NOTIFY_TZ": "-05:00"}):
+                out = nm._fmt_ts(1790927063.664)
+            self.assertEqual(out, "2026-10-02 02:44:23 -05:00", out)
+        finally:
+            nm._TZ_CACHE.clear()
+            nm._TZ_CACHE.update(saved)
+
+    def test_fmt_ts_bad_tz_falls_back_to_plus8(self):
+        """时区名非法 → 退回固定 +8，不抛异常。"""
+        import omnialpha.monitoring.notify as nm
+
+        saved = dict(nm._TZ_CACHE)
+        try:
+            nm._TZ_CACHE.clear()
+            with unittest.mock.patch.dict("os.environ", {"NOTIFY_TZ": "Not/AZone"}):
+                out = nm._fmt_ts(1790927063.664)
+            self.assertEqual(out, "2026-10-02 15:44:23 北京时间", out)
+        finally:
+            nm._TZ_CACHE.clear()
+            nm._TZ_CACHE.update(saved)
 
     def test_fmt_ts_empty_values(self):
         from omnialpha.monitoring.notify import _fmt_ts
@@ -345,11 +388,11 @@ class TestTimestampInNotifications(unittest.TestCase):
                 k, _, v = fd["text"]["content"].partition(":**")
                 f[k.strip("* ")] = v.strip()
         self.assertIn("时间", f)
-        self.assertRegex(f["时间"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{2}:\d{2}$")
+        self.assertRegex(f["时间"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} 北京时间$")
 
     def test_steps_text_has_time(self):
         lines = format_trade_steps("brooks-btc", [LIVE_OPEN])
-        self.assertRegex(lines[0], r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{2}:\d{2}\]$",
+        self.assertRegex(lines[0], r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} 北京时间\]$",
                          lines[0])
 
     def test_noop_still_silent_with_time(self):

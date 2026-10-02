@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import urllib.request
 from abc import ABC, abstractmethod
@@ -344,12 +346,48 @@ def format_trade_steps(bot_id: str, steps: list) -> list[str]:
     return lines
 
 
+# 通知时间统一用北京时间（用户要求）。
+# 可用环境变量 `NOTIFY_TZ` 覆盖（如 "UTC" / "America/New_York"）；
+# 取不到时区数据（Windows 缺 tzdata / 名字非法）时退回固定 UTC+8。
+DEFAULT_NOTIFY_TZ = "Asia/Shanghai"
+_TZ_FALLBACK = timezone(timedelta(hours=8))
+_TZ_CACHE: dict = {}
+
+
+def _notify_tzinfo():
+    """通知用哪个时区。
+
+    优先 env `NOTIFY_TZ`：既接受 IANA 名（"Asia/Shanghai"，需 tzdata），
+    也接受固定偏移写法（"+08:00" / "-05:00"，不依赖 tzdata）。
+    都拿不到就退回固定 UTC+8。
+    """
+    if "tz" not in _TZ_CACHE:
+        name = (os.environ.get("NOTIFY_TZ") or DEFAULT_NOTIFY_TZ).strip()
+        tz = _TZ_FALLBACK
+        if name:
+            m = re.fullmatch(r"([+-])(\d{1,2}):?(\d{2})", name)
+            if m:
+                sign = 1 if m.group(1) == "+" else -1
+                tz = timezone(sign * timedelta(hours=int(m.group(2)),
+                                               minutes=int(m.group(3))))
+            else:
+                try:
+                    from zoneinfo import ZoneInfo
+
+                    tz = ZoneInfo(name)
+                except Exception:  # noqa: BLE001 — 缺 tzdata / 名字非法 → 固定 +8
+                    tz = _TZ_FALLBACK
+        _TZ_CACHE["tz"] = tz
+    return _TZ_CACHE["tz"]
+
+
 def _fmt_ts(v) -> str:
-    """把 Unix 时间戳格式化成「本地时间 + 时区偏移」。
+    """把 Unix 时间戳格式化成**北京时间**（可经 NOTIFY_TZ 覆盖）。
 
     用**事件发生时间**而不是发送时间：飞书自己会显示送达时间，但两者可能差很远
-    （LLM 一轮 30-90 秒、或进程重启后补发）。带偏移是为了无歧义 —— 服务器是 UTC
-    而读卡片的人在 UTC+8 时，光看「22:17」会误判。
+    （LLM 一轮 30-90 秒、或进程重启后补发）。
+    统一北京时间是因为服务器跑 UTC 而读卡片的人在 UTC+8 —— 光看「15:15」会误判成
+    下午三点，实际是晚上十一点。
     """
     if v is None or v == "":
         return "—"
@@ -359,13 +397,15 @@ def _fmt_ts(v) -> str:
         return "—"
     if ts <= 0:
         return "—"
+    tz = _notify_tzinfo()
     try:
-        dt = datetime.fromtimestamp(ts).astimezone()
+        dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(tz)
     except (OverflowError, OSError, ValueError):
         return "—"
     off = dt.strftime("%z") or ""
     off = f"{off[:3]}:{off[3:]}" if len(off) == 5 else off
-    return dt.strftime("%Y-%m-%d %H:%M:%S") + (f" {off}" if off else "")
+    zone = "北京时间" if off == "+08:00" else off
+    return dt.strftime("%Y-%m-%d %H:%M:%S") + (f" {zone}" if zone else "")
 
 
 def _step_time(detail: dict, s: dict) -> str:
