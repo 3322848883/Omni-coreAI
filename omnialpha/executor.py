@@ -113,10 +113,18 @@ class Executor:
         for intent in intents:
             gate = self._entry_gate(intent)
             if gate:
+                # 位置不匹配（POSITION_EXISTS / POSITION_POLICY_STRICT）→ **良性跳过**：
+                #  · 算整轮失败会白烧一个周期并污染失败归档（模拟盘历史 73 笔）
+                #  · 原来这里还 `break`，会让同一信号里**后面的 intent 全不执行** ——
+                #    例如 [stop_entry_long, modify_tp_sl] 里第一个被拒，合法的「改保护」也丢了
+                # 注意：**不把它映射成 add_***。`_entry_gate` 拒绝 open_* 是刻意的
+                # （注释写明防「new plan pile-up」）；映射成 add 会让重复/过期的计划
+                # 每轮都加仓，在 50 倍杠杆的实盘上会造成仓位膨胀。
                 report.results.append(
-                    StepResult(intent.action, intent.symbol, False, error=gate)
+                    StepResult(intent.action, intent.symbol, True,
+                               detail={"gate_skipped": gate})
                 )
-                break
+                continue
             try:
                 step = self._execute_intent(intent)
             except GateApiError as e:

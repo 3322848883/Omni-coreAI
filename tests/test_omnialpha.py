@@ -148,14 +148,38 @@ class TestSchema(unittest.TestCase):
         client.get_positions = lambda: [{"contract": "BTC_USDT", "size": 2, "mode": "single"}]
         ex = Executor(client, position_policy="strict")
         rep = ex.execute_signal(parse_signal({"action": "open_long", "symbol": "BTC_USDT", "size": 1}))
-        self.assertFalse(rep.ok)
-        self.assertIn("POSITION_EXISTS", rep.results[0].error)
+        # 被门挡住 = **良性跳过**（不再算整轮失败，否则白烧周期 + 污染失败归档）
+        # 但必须留可观测标记：否则「被门挡住」与「AI 本来就想 hold」在报告里分不出来
+        self.assertTrue(rep.ok, "被门挡住不应算整轮失败")
+        self.assertIn("POSITION_EXISTS", rep.results[0].detail.get("gate_skipped", ""))
         # same-side add allowed
         rep2 = ex.execute_signal(parse_signal({"action": "add_long", "symbol": "BTC_USDT", "size": 1}))
         self.assertTrue(rep2.ok)
         # reduce allowed
         rep3 = ex.execute_signal(parse_signal({"action": "reduce_long", "symbol": "BTC_USDT", "size": 1}))
         self.assertTrue(rep3.ok)
+
+    def test_gate_skip_does_not_abort_rest_of_signal(self):
+        """被门挡住的 intent 不再 `break` —— 同一信号里后面的合法 intent 仍要执行。
+
+        原来 `_entry_gate` 拒绝后直接 `break`，于是 `[stop_entry_long, modify_tp_sl]`
+        里第一个被拒，合法的「改保护」也一起丢了（模拟盘与实盘都踩过）。
+        """
+        client = FakeClient()
+        client.get_positions = lambda: [{"contract": "BTC_USDT", "size": 2, "mode": "single"}]
+        client.price_orders = [
+            {"initial": {"text": "t-brk-sl", "contract": "BTC_USDT", "size": -2},
+             "trigger": {"price": "84230", "rule": 2}},
+        ]
+        ex = Executor(client, position_policy="strict", symbols_whitelist=["BTC_USDT"],
+                      order_scope="own", label_prefix="brk")
+        rep = ex.execute_signal(parse_signal({"orders": [
+            {"action": "open_long", "symbol": "BTC_USDT", "size": 1},
+            {"action": "modify_tp_sl", "symbol": "BTC_USDT", "sl": 84000},
+        ]}))
+        self.assertEqual(len(rep.results), 2, "后面的 intent 不应被 break 掉")
+        self.assertIn("gate_skipped", rep.results[0].detail)
+        self.assertEqual(rep.results[1].action, "modify_tp_sl")
 
     def test_position_policy_free_allows_entry(self):
         client = FakeClient()
