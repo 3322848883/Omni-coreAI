@@ -260,5 +260,36 @@ class TestTriggerSpecDictNotPrinted(unittest.TestCase):
             self.assertNotIn(bad, lines[0], lines[0])
 
 
+class TestNoopStepsAreSilent(unittest.TestCase):
+    """良性 no-op 不该推送 —— 否则「改单告警 止盈:— 止损:—」看起来像失败。
+
+    来源：cba9d05 让无持仓的 modify_tp_sl 变成 ok=True 的良性 no-op，
+    detail 只有 {'noop': 'no position on BTC_USDT; nothing to modify'}。
+    """
+
+    NOOP = {
+        "action": "modify_tp_sl", "symbol": "BTC_USDT", "ok": True, "error": "",
+        "detail": {"noop": "no position on BTC_USDT; nothing to modify"},
+    }
+
+    def test_card_skips_noop(self):
+        self.assertEqual(format_trade_card("brooks-btc", [self.NOOP]), [])
+
+    def test_steps_skip_noop(self):
+        self.assertEqual(format_trade_steps("brooks-btc", [self.NOOP]), [])
+
+    def test_real_event_alongside_noop_still_pushed(self):
+        cards = format_trade_card("brooks-btc", [self.NOOP, LIVE_MODIFY])
+        self.assertEqual(len(cards), 1, "no-op 被跳过，真实事件仍要推")
+        f = _fields(cards[0])
+        self.assertEqual(f["止盈"], "86800")
+
+    def test_noop_with_falsy_value_not_skipped(self):
+        """noop 为假值（None/空串）时不算 no-op，照常处理。"""
+        step = dict(LIVE_MODIFY)
+        step["detail"] = dict(LIVE_MODIFY["detail"], noop="")
+        self.assertEqual(len(format_trade_card("brooks-btc", [step])), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

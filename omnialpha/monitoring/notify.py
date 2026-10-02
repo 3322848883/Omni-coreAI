@@ -309,6 +309,10 @@ def format_trade_steps(bot_id: str, steps: list) -> list[str]:
         ok = bool(s.get("ok"))
         sym = s.get("symbol") or ""
         detail = s.get("detail") or {}
+        if detail.get("noop"):
+            # 良性 no-op（如无持仓的 modify_tp_sl）：什么都没发生。
+            # 推送「改单告警 止盈:— 止损:—」只会让人以为失败了 —— 静默。
+            continue
         mark = "✓" if ok else "✗"
         if action in _OPEN_ACTIONS:
             side = "多" if "long" in action else "空"
@@ -498,6 +502,8 @@ def format_trade_card(bot_id: str, steps: list) -> list[dict]:
         ok = bool(s.get("ok"))
         sym = s.get("symbol") or ""
         detail = s.get("detail") or {}
+        if detail.get("noop"):
+            continue  # 良性 no-op：什么都没发生，不推送（同 format_trade_steps）
 
         if action in _OPEN_ACTIONS:
             side = "多" if "long" in action else "空"
