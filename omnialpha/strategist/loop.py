@@ -172,6 +172,27 @@ class PlanRunner:
             else None,
         }
 
+    def _active_triggers_block(self) -> str:
+        """把已生效的自设触发器列给 AI（空则返回 ""）。
+
+        此前生效触发器从未注入 prompt/snapshot，AI 看不见自己的触发状态 →
+        既无法避免重复、也无法用 trigger_ops 删旧的 → 5 个槽位填满后每次 add
+        都被拒（线上实测 115 次 trigger_rejected，且 5 个触发器全是同质 price_break）。
+        """
+        try:
+            items = self._ai_store.active() if getattr(self, "_ai_store", None) else []
+        except Exception:  # noqa: BLE001
+            return ""
+        if not items:
+            return ""
+        cap = int(getattr(self._ai_policy, "max_active", 5) or 5)
+        lines = [f"- {t.id} {t.type} {t.symbol} {t.params}" for t in items]
+        return (
+            f"\n【已生效的自设触发器】（{len(items)}/{cap}）\n"
+            + "\n".join(lines)
+            + "\n换条件请用 trigger_ops remove 旧的再 add；已满就别再 add（会被拒）。"
+        )
+
     def run_once(self, trigger: str = "manual") -> dict[str, Any]:
         cycle_id = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         snapshot = collect_snapshot(
@@ -211,6 +232,7 @@ class PlanRunner:
                 user = user + "\n【近期决策】\n" + "\n".join(recent)
         except Exception:  # noqa: BLE001
             pass
+        user = user + self._active_triggers_block()
         # vision：多周期 K 线图（可选配置）
         charts: list = []
         if self.cfg.vision:
@@ -435,6 +457,7 @@ class PlanRunner:
             self._prompt_risk(snapshot),
             self.cfg.symbols,
         )
+        user = user + self._active_triggers_block()
         # vision：从 snapshot 生成 K 线图（可配置多周期）
         charts: list = []
         if self.cfg.vision:
