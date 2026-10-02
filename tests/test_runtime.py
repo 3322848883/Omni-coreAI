@@ -1,5 +1,6 @@
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -161,6 +162,23 @@ class TestPidLock(unittest.TestCase):
         "time.sleep(30)\n"
     )
 
+    @staticmethod
+    def _acquire_within(path, timeout: float = 5.0):
+        """带超时的 acquire —— 只用于**持锁进程刚被杀**的那一步。
+
+        进程被杀 ≠ OS 锁立刻释放：句柄是内核异步回收的，实测 Windows 上
+        最长约 3ms 才真正可锁（20 轮量测里 2 轮 >3ms）。直接断言「立刻能拿」
+        会把一个正确的实现偶发判成 bug（本地 30 轮跑出 4 次）。
+        断言的本意是「持锁者死了 → 锁最终会释放」，所以这里等到 deadline；
+        真拿不到仍然返回 None，断言照旧会失败，只是不再受回收时序影响。
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            lk = PidLock(path).acquire()
+            if lk is not None or time.monotonic() >= deadline:
+                return lk
+            time.sleep(0.002)
+
     def test_exclusive(self):
         import subprocess
         import sys as _sys
@@ -179,7 +197,7 @@ class TestPidLock(unittest.TestCase):
                 dummy.kill()
                 dummy.wait(timeout=5)
             # holder dead → OS released the lock → we can acquire
-            l1 = PidLock(p).acquire()
+            l1 = self._acquire_within(p)
             self.assertIsNotNone(l1)
             l1.release()
             self.assertIsNotNone(PidLock(p).acquire())
