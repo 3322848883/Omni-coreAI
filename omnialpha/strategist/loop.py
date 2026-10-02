@@ -900,20 +900,23 @@ class PlanRunner:
         return msg.get("content") or ""
 
     def _kline_closed(self) -> bool:
-        """True when latest candle timestamp for first symbol advances."""
+        """True when latest candle timestamp for first symbol advances.
+
+        取数走 fetch_rest_candles（新旧客户端都兼容）。此前直接调
+        client.public_get，而客户端重构成 ExchangeClient 后没有该方法 →
+        异常被吞、永远返回 False → kline_close 事件从未触发过。
+        """
         if not self.cfg.symbols:
             return False
         sym = self.cfg.symbols[0]
         interval = self.cfg.event_timeframe or self.cfg.timeframe
         try:
-            raw = self.client.public_get(
-                "/api/v4/futures/usdt/candlesticks",
-                f"contract={sym}&interval={interval}&limit=1",
-            )
-            if not raw:
+            from .market import fetch_rest_candles
+
+            rows = fetch_rest_candles(self.client, sym, interval, 2)
+            if not rows:
                 return False
-            row = raw[-1]
-            ts = int(row[0]) if isinstance(row, (list, tuple)) else int(row.get("t") or 0)
+            ts = int((rows[-1] or {}).get("t") or 0)
             closed = self._last_kline_t is not None and ts > self._last_kline_t
             self._last_kline_t = ts
             return closed

@@ -76,26 +76,31 @@ def parse_conditions(raw: Optional[list], _depth: int = 0) -> list[dict]:
 
 
 def _load_candles(client, symbol: str, interval: str, limit: int) -> list[dict]:
-    raw = client.public_get(
-        "/api/v4/futures/usdt/candlesticks",
-        f"contract={symbol}&interval={interval}&limit={limit}",
-    )
-    rows = []
-    for r in raw or []:
-        if isinstance(r, (list, tuple)) and len(r) >= 6:
-            rows.append({
-                "t": int(r[0]), "v": float(r[1]), "c": float(r[2]),
-                "h": float(r[3]), "l": float(r[4]), "o": float(r[5]),
-            })
-        elif isinstance(r, dict):
-            rows.append({
-                "t": int(r.get("t") or 0),
-                "o": float(r.get("o") or 0), "h": float(r.get("h") or 0),
-                "l": float(r.get("l") or 0), "c": float(r.get("c") or 0),
-                "v": float(r.get("v") or 0),
-            })
-    rows.sort(key=lambda x: x["t"])
-    return rows
+    """取 K 线（升序）。
+
+    必须走 fetch_rest_candles：它对新旧客户端都兼容（有 get_klines 用 get_klines，
+    否则回退 public_get）。此前这里直接调 client.public_get，而客户端重构成
+    ExchangeClient 后**没有该方法** → 每次条件求值都抛 AttributeError、被上层
+    兜底成 False，导致 AI 自设触发器与条件事件**永远不会触发**（线上实测：
+    178 个周期全部是 interval，cond[...] 出现 0 次）。
+    """
+    from .market import fetch_rest_candles
+
+    rows = fetch_rest_candles(client, symbol, interval, limit)
+    out: list[dict] = []
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        out.append({
+            "t": int(r.get("t") or 0),
+            "v": float(r.get("v") or 0),
+            "c": float(r.get("c") or 0),
+            "h": float(r.get("h") or 0),
+            "l": float(r.get("l") or 0),
+            "o": float(r.get("o") or 0),
+        })
+    out.sort(key=lambda x: x["t"])
+    return out
 
 
 def evaluate_condition(client, cond: dict, timeframe: str, now: Optional[float] = None) -> tuple[bool, str]:
