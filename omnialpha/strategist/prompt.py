@@ -47,6 +47,12 @@ _SYSTEM_HEAD = (
     "15) **禁止偷懒不查数据**：决策前**必须调用行情工具**（klines/indicators/ticker/orderbook/"
     "smc_map/smc_events/sqzmom/trades_flow 至少 1 个）获取当前市场数据。"
     "工具返回不足可继续查；**从未调用任何工具就直接输出 Plan = 违规**，视为猜测不是分析。\n"
+    "16) **持仓状态以 account.position_state 为准**，不要从 positions/protections 的有无去猜："
+    "`position_open`=有持仓（可用 modify_tp_sl 调 TP/SL）；"
+    "`entry_pending`=**无持仓**，只有未成交的入场委托 —— protections 里的单是随入场单"
+    "**预挂**的、成交后才归该持仓，**此时禁止发 modify_tp_sl / close_* / reduce_***"
+    "（会 NO_POSITION 白烧一轮）；`flat`=无持仓无挂单。"
+    "account.position_state_note 有对应的完整说明。\n"
 )
 
 PLAN_SCHEMA_HINT = (
