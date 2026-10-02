@@ -1410,7 +1410,17 @@ class Executor:
         for o in rows:
             if o.get("is_reduce_only"):
                 continue
-            if int(o.get("left") or 0) <= 0:
+            # `left` 是**带符号**的剩余量：Gate 对卖单返回负的 size/left
+            # （实测 sell 15 张 → size=-15 left=-15）。所以这里只能判 `== 0`
+            # （已全部成交），**不能写 `<= 0`** —— 那会把**所有空头入场单**误判成
+            # 「没有待成交入场单」，孤儿扫描随即失去豁免、撤掉预挂保护单，
+            # 委托一成交就是裸仓。
+            # 线上实测 2026-10-02 17:35:03：17:31 `open_short` 挂出 85300 空单
+            # （left=-15）+ 3 张保护单，4 分钟后 3 张保护单被孤儿扫描全部撤掉，
+            # 而入场单仍在挂。
+            # 同文件 :830 / :902 早已用 abs() 处理同一个符号问题，只有这里漏了。
+            left = o.get("left")
+            if left is not None and int(left) == 0:
                 continue
             return True
         # 2) 条件单（stop_entry_* 突破进场，未触发）

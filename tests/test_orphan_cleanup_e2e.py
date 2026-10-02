@@ -213,6 +213,49 @@ class TestOrphanCleanupE2E(unittest.TestCase):
             client.place_protector("t-pt-sl", -11, 85300)
             self.assertEqual(len(ex._cleanup_orphan_protectors("BTC_USDT")), 1)
 
+    def test_short_limit_entry_blocks_sweep(self):
+        """普通限价**空头**入场单（`left` 为负）也必须算「待成交入场」。
+
+        `left` 是**带符号**的剩余量：Gate 对卖单返回负值（sell 15 张 → size=-15
+        left=-15）。判据曾写成 `left <= 0 → 跳过`，于是**所有空头入场单**都识别不到
+        → 孤儿扫描失去豁免、把预挂保护单当孤儿撤掉 → 委托一成交即裸仓。
+
+        线上实测 2026-10-02 17:35:03：17:31 `open_short` 挂出 85300 空单（left=-15）
+        + 3 张保护单，4 分钟后 3 张保护单被孤儿扫描全部撤掉，而入场单仍在挂。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            client, ex = self._make(Path(td))
+            client.set_position(0)                  # 还没成交 → 无持仓
+            client.place_entry("t-pt", -15)         # 空头限价入场单：left=-15
+            client.place_protector("t-pt-sl", 15, 85500)
+            client.place_protector("t-pt-tp", 7, 84800)
+            self.assertTrue(ex._has_pending_entry("BTC_USDT"),
+                            "空头入场单（left 为负）必须被识别")
+            self.assertEqual(ex._cleanup_orphan_protectors("BTC_USDT"), [],
+                             "有待成交空头入场单时不该撤保护单")
+            self.assertEqual(len(client.price_orders), 2, "两张保护单都该保留")
+
+    def test_long_limit_entry_blocks_sweep(self):
+        """多头限价入场单（`left` 为正）—— 同一条判据的另一个符号分支。"""
+        with tempfile.TemporaryDirectory() as td:
+            client, ex = self._make(Path(td))
+            client.set_position(0)
+            client.place_entry("t-pt", 15)          # 多头限价入场单：left=15
+            client.place_protector("t-pt-sl", -15, 84150)
+            self.assertTrue(ex._has_pending_entry("BTC_USDT"),
+                            "多头入场单必须被识别")
+            self.assertEqual(ex._cleanup_orphan_protectors("BTC_USDT"), [],
+                             "有待成交多头入场单时不该撤保护单")
+            self.assertEqual(len(client.price_orders), 1, "保护单该保留")
+
+    def test_fully_filled_entry_does_not_block(self):
+        """`left == 0`（已全部成交、无剩余）不算待成交。"""
+        with tempfile.TemporaryDirectory() as td:
+            client, ex = self._make(Path(td))
+            client.set_position(0)
+            client.place_entry("t-pt", -15, left=0)
+            self.assertFalse(ex._has_pending_entry("BTC_USDT"))
+
 
     def test_pending_stop_entry_blocks_sweep(self):
         """`stop_entry_*` 是**条件单**（挂在 price_orders），也必须算「待成交入场」。
