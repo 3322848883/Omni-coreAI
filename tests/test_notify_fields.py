@@ -360,5 +360,44 @@ class TestTimestampInNotifications(unittest.TestCase):
         self.assertEqual(format_trade_steps("brooks-btc", [step]), [])
 
 
+LIVE_CLOSE_ALL = {
+    # 2026-10-02 线上真实形状：close_all 的 detail **只有 closed_order_ids**，
+    # 没有 order/价格/盈亏 —— 卡片不该留一个空的价格字段。
+    "action": "close_all", "symbol": "BTC_USDT", "ok": True, "error": "",
+    "detail": {"closed_order_ids": ["36028837218455628"]},
+}
+
+
+class TestUnknownFieldsOmitted(unittest.TestCase):
+    """拿不到值的字段不渲染 —— 显示「平仓价: —」看起来像失败，实际只是没这个数据。"""
+
+    def test_close_all_omits_price_and_shows_count(self):
+        cards = format_trade_card("brooks-btc", [LIVE_CLOSE_ALL])
+        self.assertEqual(len(cards), 1)
+        f = _fields(cards[0])
+        self.assertNotIn("平仓价", f, f"取不到价格就不该渲染这个字段: {f}")
+        self.assertNotIn("盈亏", f)
+        self.assertEqual(f["已平订单"], "1")
+        self.assertEqual(f["币种"], "BTC_USDT")
+        self.assertIn("时间", f)
+
+    def test_no_field_renders_as_dash(self):
+        for step in (LIVE_CLOSE_ALL, LIVE_MODIFY, LIVE_OPEN,
+                     LIVE_STOP_ENTRY_DICT, LIVE_REDUCE, LIVE_CLOSE):
+            with self.subTest(action=step["action"]):
+                cards = format_trade_card("brooks-btc", [step])
+                if not cards:
+                    continue
+                f = _fields(cards[0])
+                dashes = {k: v for k, v in f.items() if v in ("—", "", "USDT", "张")}
+                self.assertEqual(dashes, {}, f"{step['action']} 仍有空字段: {dashes}")
+
+    def test_known_fields_still_rendered(self):
+        """过滤只针对空值，有值的字段必须保留。"""
+        f = _fields(format_trade_card("brooks-btc", [LIVE_OPEN])[0])
+        for k in ("Bot", "币种", "方向", "入场价", "仓位", "止损", "止盈", "时间"):
+            self.assertIn(k, f, f"{k} 不该被过滤掉")
+
+
 if __name__ == "__main__":
     unittest.main()

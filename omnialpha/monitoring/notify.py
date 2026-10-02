@@ -579,6 +579,11 @@ def format_trade_card(bot_id: str, steps: list) -> list[dict]:
                 ("平仓价", px), ("盈亏", f"{_fmt_num(pnl)} USDT"),
                 ("时间", tstamp),
             ]
+            # close_all/flatten 的 detail 只有 closed_order_ids（没有 order/价格），
+            # 那就报「已平订单数」而不是留一个空的价格字段
+            closed_ids = detail.get("closed_order_ids")
+            if px == "—" and isinstance(closed_ids, list) and closed_ids:
+                fields.append(("已平订单", str(len(closed_ids))))
         elif action in _REDUCE_ACTIONS:
             px = _entry_price(detail, s)
             sz, unit = _resolve_size(detail, s)
@@ -603,6 +608,14 @@ def format_trade_card(bot_id: str, steps: list) -> list[dict]:
             continue
 
         # 构建飞书卡片
+        # 拿不到值的字段**不渲染** —— 显示「平仓价: —」看起来像失败，实际只是这个
+        # action 的 detail 里没有该数据（如 close_all 只给 closed_order_ids）。
+        # 注意要连「— USDT」「— 张」这种「空值 + 单位」也一起滤掉。
+        def _blank(v) -> bool:
+            s = str(v).strip()
+            return s == "" or s.startswith("—")
+
+        fields = [(k, v) for k, v in fields if not _blank(v)]
         field_elements = []
         for i in range(0, len(fields), 2):
             pair = fields[i:i+2]
