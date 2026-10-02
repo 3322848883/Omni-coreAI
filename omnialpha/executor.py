@@ -636,6 +636,42 @@ class Executor:
         return adjusted, note
 
     # ── actions ──────────────────────────────────────────
+    def _precheck_exit_triggers(self, intent: Intent) -> Optional[str]:
+        """校验 TP/SL 触发价是否落在参考价（mark）的合法一侧。
+
+        Gate 条件单硬规则：rule=1（涨破触发）要求触发价 > mark，rule=2（跌破触发）
+        要求触发价 < mark；否则会立即触发，交易所直接拒（AUTO_TRIGGER_PRICE_GREATE_MARK
+        / _LESS_MARK）。而 TP/SL 价位是从**入场价**推出来的：入场价离市价较远时，
+        推出来的价位就落在 mark 的非法一侧 —— 那时保护单挂不上，但入场单已经挂在
+        交易所上了，等于留下一张**无保护的待成交委托**（一旦成交就是裸仓）。
+
+        所以宁可不交易：任一腿触发价非法就整笔中止，连入场单也不下。
+        """
+        legs: list[tuple[str, float, int]] = []
+        if intent.tp is not None and intent.tp_mode != "limit_order":
+            rule_tp = int(intent.trigger_rule_tp or 1)
+            for px in (intent.tp, intent.tp2, intent.tp3):
+                if px is not None:
+                    legs.append(("tp", float(px), rule_tp))
+        if intent.sl is not None and intent.sl_mode != "limit_order":
+            legs.append(("sl", float(intent.sl), int(intent.trigger_rule_sl or 2)))
+        if not legs:
+            return None
+        try:
+            ticker = self.client.get_ticker(intent.symbol) or {}
+            ref = float(ticker.get("mark_price") or ticker.get("last") or 0)
+        except Exception:  # noqa: BLE001 — 取不到参考价就不拦，保持原行为
+            return None
+        if ref <= 0:
+            return None
+        bad = []
+        for kind, px, rule in legs:
+            if rule == 1 and px <= ref:
+                bad.append(f"{kind}={px:g} 需 > mark {ref:g}（rule=1 涨破触发）")
+            elif rule == 2 and px >= ref:
+                bad.append(f"{kind}={px:g} 需 < mark {ref:g}（rule=2 跌破触发）")
+        return ("TRIGGER_PRICE_SIDE: " + "; ".join(bad)) if bad else None
+
     def _open(self, intent: Intent) -> StepResult:
         self._check_symbol(intent.symbol)
         self._check_open_sl(intent)
@@ -650,6 +686,11 @@ class Executor:
             if vol_note:
                 size_note = f"{size_note}; {vol_note}" if size_note else vol_note
         self._check_notional(intent.size_usd)
+        # 挂入场单前先验触发价合法性：保护单挂不上时入场单已挂出 = 无保护挂单
+        side_err = self._precheck_exit_triggers(intent)
+        if side_err:
+            return StepResult(intent.action, intent.symbol, False,
+                              detail={"precheck": side_err}, error=side_err)
 
         if intent.leverage:
             self.client.set_leverage(intent.symbol, int(intent.leverage))
@@ -749,6 +790,7 @@ class Executor:
         detail["all_legs_ok"] = detail["leg_entry_ok"] and detail["exits_ok"]
         if exit_errors or not detail["exits_ok"]:
             # entry landed but exits missing — do NOT pretend full success
+            detail["rollback"] = self._rollback_unprotected_entry(intent, entry_order, exit_size)
             return StepResult(
                 intent.action,
                 intent.symbol,
@@ -757,6 +799,34 @@ class Executor:
                 error="exit_not_placed: " + "; ".join(str(x) for x in exit_errors or ["tp/sl missing"]),
             )
         return StepResult(intent.action, intent.symbol, True, detail=detail)
+
+    def _rollback_unprotected_entry(self, intent: Intent, entry_order: dict, exit_size: int) -> str:
+        """exits 挂失败后的兜底：不留无保护敞口。
+
+        - 入场单未成交 → 撤掉它，回到「什么都没挂」的干净状态
+        - 已成交 → 计划的保护价既然挂不上，就市价平掉这一笔，不留裸仓
+
+        注：预检 `_precheck_exit_triggers` 已挡掉绝大多数情况，这里是兜底 ——
+        比如预检与挂单之间 mark 移动了、或交易所因别的原因拒绝。
+        """
+        oid = str(entry_order.get("id") or "")
+        size = abs(int(entry_order.get("size") or 0))
+        left = abs(int(entry_order.get("left") or 0))
+        filled = size if entry_order.get("finish_as") == "filled" else size - left
+        if not oid:
+            return "skip: 入场单无 id"
+        if filled <= 0:
+            try:
+                self.client.cancel_order(oid)
+                return f"cancelled_entry:{oid}"
+            except Exception as e:  # noqa: BLE001
+                return f"cancel_failed:{oid}:{str(e)[:90]}"
+        pos_side = "long" if intent.action == "open_long" else "short"
+        try:
+            self.client.close_position(intent.symbol, side=pos_side, size=int(exit_size))
+            return f"closed_position:{intent.symbol} size={int(exit_size)}"
+        except Exception as e:  # noqa: BLE001
+            return f"close_failed:{intent.symbol}:{str(e)[:90]}"
 
     def _tp_legs(self, intent: Intent, exit_size: int) -> list[tuple[float, int]]:
         """多级止盈腿：tp/tp2/tp3 → [(price, size)]。份额缺省 1/N。"""

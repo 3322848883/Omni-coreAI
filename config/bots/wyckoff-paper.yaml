@@ -19,7 +19,7 @@ account_risk:
   halt: false
   max_leverage: 50
   max_total_notional_usd: 150000
-  daily_loss_limit_usd: 300
+  daily_loss_limit_usd: 1000
 
 paper:
   feed_exchange: gate

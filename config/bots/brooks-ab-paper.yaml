@@ -21,7 +21,7 @@ account_risk:
   halt: false
   max_leverage: 50
   max_total_notional_usd: 150000
-  daily_loss_limit_usd: 400
+  daily_loss_limit_usd: 1000
 
 # 本地模拟盘：行情走 gate，资金虚拟
 paper:
