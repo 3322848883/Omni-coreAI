@@ -181,11 +181,13 @@ class TestCardNoMissingFields(unittest.TestCase):
         self.assertEqual(f["入场价"], "85650")
         self.assertEqual(f["仓位"], "167.61 USDT")
         self.assertEqual(f["止损"], "85200")
-        self.assertEqual(f["止盈"], "86150")
+        # LIVE_OPEN 有 tp=86150 + tp_orders 两腿 → 两档都要显示
+        self.assertEqual(f["止盈"], "86150 / 86800")
 
     def test_stop_entry_shows_all(self):
         f = self._assert_no_dash(LIVE_STOP_ENTRY)
-        self.assertEqual(f["止盈"], "84150")
+        # tp_orders 两腿 84150/84600
+        self.assertEqual(f["止盈"], "84150 / 84600")
         self.assertEqual(f["止损"], "83400")
 
     def test_reduce_shows_contracts(self):
@@ -228,8 +230,9 @@ class TestTriggerSpecDictNotPrinted(unittest.TestCase):
 
     def test_resolvers_unwrap_dicts(self):
         d = LIVE_STOP_ENTRY_DICT["detail"]
-        self.assertEqual(_resolve_sl(d, LIVE_STOP_ENTRY_DICT), "86080.0")
-        self.assertEqual(_resolve_tp(d, LIVE_STOP_ENTRY_DICT), "87280.0")
+        # 有多腿时以实际挂出的腿为准（sl_orders[0].trigger.price）
+        self.assertEqual(float(_resolve_sl(d, LIVE_STOP_ENTRY_DICT)), 86080.0)
+        self.assertEqual(float(_resolve_tp(d, LIVE_STOP_ENTRY_DICT)), 88100.0)
 
     def test_entry_price_from_order_trigger(self):
         from omnialpha.monitoring.notify import _entry_price
@@ -252,7 +255,8 @@ class TestTriggerSpecDictNotPrinted(unittest.TestCase):
                 self.assertNotIn(bad, blob, f"卡片里出现了原始代码: {blob}")
         self.assertEqual(f["入场价"], "86900")
         self.assertEqual(f["止损"], "86080")
-        self.assertEqual(f["止盈"], "87280")
+        # 以实际挂出的腿为准（tp_orders[0].trigger.price = 88100）
+        self.assertEqual(f["止盈"], "88100")
         self.assertEqual(f["仓位"], "14 张")
 
     def test_steps_text_contains_no_raw_code(self):
@@ -440,6 +444,99 @@ class TestUnknownFieldsOmitted(unittest.TestCase):
         f = _fields(format_trade_card("brooks-btc", [LIVE_OPEN])[0])
         for k in ("Bot", "币种", "方向", "入场价", "仓位", "止损", "止盈", "时间"):
             self.assertIn(k, f, f"{k} 不该被过滤掉")
+
+
+LIVE_MULTI_TP = {
+    # 2026-10-02 线上真实形状（archive/done/20261002-144327-...）：
+    # 多级止盈挂成**多腿**条件单（tp_orders 两腿，各带张数），卡片必须全部显示。
+    "action": "open_long", "symbol": "BTC_USDT", "ok": True, "error": "",
+    "detail": {
+        "order": {"id": 36028837218455628, "price": "86450", "size": 22,
+                  "fill_price": 0, "status": "open", "text": "t-brk"},
+        "size_usd": 190.0, "entry_price": 86450.0,
+        "tp": 86300.0, "tp2": 86800.0, "sl": 85300.0,
+        "tp_orders": [
+            {"trigger": {"price": 86300.0}, "initial": {"size": -8, "text": "t-brk-tp"}},
+            {"trigger": {"price": 86800.0}, "initial": {"size": -9, "text": "t-brk-tp"}},
+        ],
+        "sl_orders": [
+            {"trigger": {"price": 85300.0}, "initial": {"size": -17, "text": "t-brk-sl"}},
+        ],
+    },
+}
+
+
+class TestMultiLevelTakeProfit(unittest.TestCase):
+    """多级止盈（tp/tp2/tp3 → 多腿条件单）必须全部通知，不能只报第一档。"""
+
+    def test_exit_levels_collects_all_tp_legs(self):
+        from omnialpha.monitoring.notify import _exit_levels
+
+        lv = _exit_levels(LIVE_MULTI_TP["detail"], LIVE_MULTI_TP, "tp")
+        self.assertEqual([p for p, _ in lv], [86300.0, 86800.0])
+        self.assertEqual([s for _, s in lv], [-8, -9])
+
+    def test_exit_levels_collects_sl(self):
+        from omnialpha.monitoring.notify import _exit_levels
+
+        lv = _exit_levels(LIVE_MULTI_TP["detail"], LIVE_MULTI_TP, "sl")
+        self.assertEqual([p for p, _ in lv], [85300.0])
+
+    def test_fmt_levels_single(self):
+        from omnialpha.monitoring.notify import _fmt_levels
+
+        self.assertEqual(_fmt_levels([(86800.0, -51)]), "86800")
+
+    def test_fmt_levels_multi_with_sizes(self):
+        from omnialpha.monitoring.notify import _fmt_levels
+
+        self.assertEqual(_fmt_levels([(86300.0, -8), (86800.0, -9)]),
+                         "86300 / 86800（8/9 张）")
+
+    def test_fmt_levels_multi_without_sizes(self):
+        from omnialpha.monitoring.notify import _fmt_levels
+
+        self.assertEqual(_fmt_levels([(86300.0, None), (86800.0, None)]),
+                         "86300 / 86800")
+
+    def test_fmt_levels_empty(self):
+        from omnialpha.monitoring.notify import _fmt_levels
+
+        self.assertEqual(_fmt_levels([]), "—")
+
+    def test_card_shows_all_tp_levels(self):
+        f = _fields(format_trade_card("brooks-btc", [LIVE_MULTI_TP])[0])
+        self.assertEqual(f["止盈"], "86300 / 86800（8/9 张）")
+        self.assertEqual(f["止损"], "85300")
+
+    def test_steps_text_shows_all_tp_levels(self):
+        line = format_trade_steps("brooks-btc", [LIVE_MULTI_TP])[0]
+        self.assertIn("86300 / 86800", line)
+        self.assertIn("85300", line)
+
+    def test_falls_back_to_tp_tp2_when_no_orders(self):
+        """没有 tp_orders（如纯 AI 意图）时，用 tp/tp2/tp3 兜底。"""
+        from omnialpha.monitoring.notify import _exit_levels
+
+        d = {"tp": 100.0, "tp2": 110.0, "tp3": 120.0, "sl": 90.0}
+        self.assertEqual([p for p, _ in _exit_levels(d, {}, "tp")], [100.0, 110.0, 120.0])
+        self.assertEqual([p for p, _ in _exit_levels(d, {}, "sl")], [90.0])
+
+    def test_modify_multi_levels(self):
+        """modify_tp_sl 也支持多腿（tp_placed 是单腿，但 tp_orders 可能是多腿）。"""
+        step = {
+            "action": "modify_tp_sl", "symbol": "BTC_USDT", "ok": True,
+            "detail": {
+                "tp_orders": [
+                    {"trigger": {"price": 86000.0}, "initial": {"size": -5}},
+                    {"trigger": {"price": 87000.0}, "initial": {"size": -5}},
+                ],
+                "sl_orders": [{"trigger": {"price": 85000.0}, "initial": {"size": -10}}],
+            },
+        }
+        f = _fields(format_trade_card("brooks-btc", [step])[0])
+        self.assertEqual(f["止盈"], "86000 / 87000（5/5 张）")
+        self.assertEqual(f["止损"], "85000")
 
 
 if __name__ == "__main__":

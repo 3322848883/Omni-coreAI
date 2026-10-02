@@ -323,7 +323,10 @@ def format_trade_steps(bot_id: str, steps: list) -> list[str]:
             side = "多" if "long" in action else "空"
             px = _entry_price(detail, s)
             sz, unit = _resolve_size(detail, s)
-            lines.append(f"{mark} 开仓 {sym} {side} @{px} size={sz}{unit}  [{tstamp}]")
+            sl_txt = _fmt_levels(_exit_levels(detail, s, "sl"))
+            tp_txt = _fmt_levels(_exit_levels(detail, s, "tp"))
+            lines.append(f"{mark} 开仓 {sym} {side} @{px} size={sz}{unit} "
+                         f"SL={sl_txt} TP={tp_txt}  [{tstamp}]")
         elif action in _CLOSE_ACTIONS:
             px = _entry_price(detail, s)
             pnl = _resolve_pnl(detail, s)
@@ -340,9 +343,9 @@ def format_trade_steps(bot_id: str, steps: list) -> list[str]:
             sz, unit = _resolve_size(detail, s)
             lines.append(f"{mark} 减仓 {sym} @{px} size={sz}{unit}  [{tstamp}]")
         elif action == "modify_tp_sl":
-            tp = _resolve_tp(detail, s)
-            sl = _resolve_sl(detail, s)
-            lines.append(f"{mark} 改保护 {sym} TP={_fmt_num(tp)} SL={_fmt_num(sl)}  [{tstamp}]")
+            tp_txt = _fmt_levels(_exit_levels(detail, s, "tp"))
+            sl_txt = _fmt_levels(_exit_levels(detail, s, "sl"))
+            lines.append(f"{mark} 改保护 {sym} TP={tp_txt} SL={sl_txt}  [{tstamp}]")
     return lines
 
 
@@ -486,42 +489,80 @@ def _first_val(*vals):
     return None
 
 
-def _leg_price(legs):
-    """tp_orders / sl_orders 形如 [{trigger:{price:...}}] 或 [{trigger_price:...}]。"""
-    if not isinstance(legs, (list, tuple)):
-        return None
-    for leg in legs:
-        if isinstance(leg, dict):
-            v = _first_val(leg.get("trigger_price"), leg.get("price"), leg.get("trigger"))
-            v = _unwrap_price(v)
+def _exit_levels(detail: dict, s: dict, kind: str) -> list:
+    """收集 tp / sl 的**所有**价位 → [(price, size)]，按触发顺序。
+
+    多级止盈（tp/tp2/tp3）会挂成**多腿**条件单，所以必须全部渲染 ——
+    只显示第一腿会丢掉其余档位（线上实测 40 个执行里 6 个是多腿）。
+
+    数据来源（各 action 形状不同，逐层兜底）：
+      1) `{kind}_orders[]`  ← 实际挂出的多腿（含每腿张数），最可靠
+      2) `{kind}_placed.price`  ← modify_tp_sl 的单腿
+      3) `detail.tp/tp2/tp3`、`detail.sl`  ← AI 意图（open_* 有）
+      4) `step.tp / step.sl`
+    """
+    out: list = []
+    orders = detail.get(f"{kind}_orders")
+    if isinstance(orders, list):
+        for leg in orders:
+            if not isinstance(leg, dict):
+                continue
+            tr = leg.get("trigger") or {}
+            px = _unwrap_price(_first_val(
+                tr.get("price"), leg.get("trigger_price"), leg.get("price"),
+            ))
+            if px is None:
+                continue
+            out.append((px, (leg.get("initial") or {}).get("size")))
+    if out:
+        return out
+    placed = (detail.get(f"{kind}_placed") or {}).get("price")
+    if placed is not None:
+        return [(placed, None)]
+    if kind == "tp":
+        for key in ("tp", "tp2", "tp3"):
+            v = _unwrap_price(_first_val(detail.get(key)))
             if v is not None:
-                return v
-    return None
+                out.append((v, None))
+    else:
+        v = _unwrap_price(_first_val(detail.get("sl")))
+        if v is not None:
+            out.append((v, None))
+    if out:
+        return out
+    v = _unwrap_price(_first_val(s.get(kind)))
+    return [(v, None)] if v is not None else []
+
+
+def _fmt_levels(levels: list) -> str:
+    """[(price, size)] → `86150 / 86800（8/9 张）`；单档就是 `86150`。"""
+    if not levels:
+        return "—"
+    text = " / ".join(_fmt_num(p) for p, _ in levels)
+    if len(levels) > 1:
+        sizes = []
+        for _, sz in levels:
+            try:
+                q = abs(float(sz))
+                sizes.append(str(int(q)) if q == int(q) else f"{q:g}")
+            except (TypeError, ValueError):
+                sizes = []
+                break
+        if sizes:
+            text += f"（{'/'.join(sizes)} 张）"
+    return text
 
 
 def _resolve_tp(detail: dict, s: dict):
-    """止盈价：detail.tp → step.tp → tp_placed.price → tp_orders[].trigger.price。
-
-    不同 action 的 detail 形状不同（open_* 用 detail.tp；modify_tp_sl 用
-    detail.tp_placed.price；stop_entry_* 只给 tp_orders[]），所以必须逐层兜底。
-    且 detail.tp 可能是 Gate 的触发单规格 dict —— 用 _unwrap_price 取出真价格。
-    """
-    return _unwrap_price(_first_val(
-        detail.get("tp"),
-        s.get("tp"),
-        (detail.get("tp_placed") or {}).get("price"),
-        _leg_price(detail.get("tp_orders")),
-    ))
+    """止盈价（首档，兼容旧调用方）。多档请用 `_exit_levels`。"""
+    lv = _exit_levels(detail, s, "tp")
+    return lv[0][0] if lv else None
 
 
 def _resolve_sl(detail: dict, s: dict):
-    """止损价：detail.sl → step.sl → sl_placed.price → sl_orders[].trigger.price。"""
-    return _unwrap_price(_first_val(
-        detail.get("sl"),
-        s.get("sl"),
-        (detail.get("sl_placed") or {}).get("price"),
-        _leg_price(detail.get("sl_orders")),
-    ))
+    """止损价（首档，兼容旧调用方）。多档请用 `_exit_levels`。"""
+    lv = _exit_levels(detail, s, "sl")
+    return lv[0][0] if lv else None
 
 
 def _resolve_pnl(detail: dict, s: dict):
@@ -589,15 +630,15 @@ def format_trade_card(bot_id: str, steps: list) -> list[dict]:
             side = "多" if "long" in action else "空"
             px = _entry_price(detail, s)
             sz, unit = _resolve_size(detail, s)
-            sl = _resolve_sl(detail, s)
-            tp = _resolve_tp(detail, s)
+            sl_txt = _fmt_levels(_exit_levels(detail, s, "sl"))
+            tp_txt = _fmt_levels(_exit_levels(detail, s, "tp"))
             color = "green"
             title = f"📈 开仓告警"
             fields = [
                 ("Bot", bot_id), ("币种", sym),
                 ("方向", f"开{side}"), ("入场价", px),
-                ("仓位", f"{sz} {unit}".strip()), ("止损", _fmt_num(sl)),
-                ("止盈", _fmt_num(tp)), ("时间", tstamp),
+                ("仓位", f"{sz} {unit}".strip()), ("止损", sl_txt),
+                ("止盈", tp_txt), ("时间", tstamp),
             ]
         elif action in _CLOSE_ACTIONS:
             px = _entry_price(detail, s)
@@ -635,13 +676,13 @@ def format_trade_card(bot_id: str, steps: list) -> list[dict]:
                 ("时间", tstamp),
             ]
         elif action == "modify_tp_sl":
-            tp = _resolve_tp(detail, s)
-            sl = _resolve_sl(detail, s)
+            tp_txt = _fmt_levels(_exit_levels(detail, s, "tp"))
+            sl_txt = _fmt_levels(_exit_levels(detail, s, "sl"))
             color = "blue"
             title = f"✏️ 改单告警"
             fields = [
                 ("Bot", bot_id), ("币种", sym),
-                ("止盈", _fmt_num(tp)), ("止损", _fmt_num(sl)),
+                ("止盈", tp_txt), ("止损", sl_txt),
                 ("时间", tstamp),
             ]
         else:
