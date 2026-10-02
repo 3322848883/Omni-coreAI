@@ -325,7 +325,7 @@ class PlanRunner:
                               notes=risk_result.notes + rejected_triggers,
                               reasoning=plan.reasoning)
             # monitoring: decay（hold 不计盈亏）
-            self._record_decay(plan, executed=False, pnl_usd=0.0)
+            self._record_decay(plan, executed=False, equity=self._snapshot_equity(snapshot))
             return {
                 "ok": True,
                 "cycle_id": plan.cycle_id,
@@ -339,7 +339,7 @@ class PlanRunner:
         self._record_plan(cycle_id=plan.cycle_id, trigger=trigger, orders=len(orders),
                           notes=risk_result.notes + rejected_triggers, reasoning=plan.reasoning)
         # monitoring: decay（执行后按方向记 PnL）
-        self._record_decay(plan, executed=True, pnl_usd=0.0)
+        self._record_decay(plan, executed=True, equity=self._snapshot_equity(snapshot))
         return {
             "ok": True,
             "cycle_id": plan.cycle_id,
@@ -505,8 +505,22 @@ class PlanRunner:
             },
         }
 
-    def _record_decay(self, plan: Any, executed: bool, pnl_usd: float = 0.0) -> None:
-        """monitoring: 每轮记录到 decay detector。"""
+    @staticmethod
+    def _snapshot_equity(snapshot: Any) -> Optional[float]:
+        """从 snapshot 取账户权益（decay 用权益差推算每轮盈亏）。"""
+        try:
+            acct = (snapshot or {}).get("account") or {}
+            v = acct.get("total") or acct.get("balance")
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _record_decay(self, plan: Any, executed: bool, equity: Optional[float] = None) -> None:
+        """monitoring: 每轮记录到 decay detector。
+
+        盈亏不在这里硬编码 —— 由 detector 用**权益差**推算（见 DecayDetector.record_cycle）。
+        此前两个调用点都传 `pnl_usd=0.0`，导致滚动盈亏/胜率/Sharpe 恒为 0、衰减告警永不触发。
+        """
         try:
             from ..monitoring import DecayDetector
             root = self.cfg.bot_root or Path.cwd()
@@ -516,7 +530,7 @@ class PlanRunner:
             det.record_cycle(
                 cycle_id=plan.cycle_id or '',
                 decision=','.join(acts) or 'hold',
-                executed=executed, pnl_usd=pnl_usd,
+                executed=executed, equity=equity,
             )
             alert = det.check()
             if alert:

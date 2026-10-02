@@ -26,16 +26,65 @@ class DecayDetector:
         self.path = self.root / "data" / "bots" / bot_id / "state" / "perf_metrics.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._history: list[float] = []  # pnl 序列
+        self._last_equity: Optional[float] = None
         key = str(self.path)
         with self._locks_guard:
             if key not in self._locks:
                 self._locks[key] = threading.Lock()
             self._lock = self._locks[key]
+        self._load()
+
+    def _load(self) -> None:
+        """从 perf_metrics.jsonl 恢复滚动窗口与上次权益。
+
+        **必须跨实例恢复**：`PlanRunner._record_decay()` 每轮都 new 一个 DecayDetector，
+        实例内累积永远只有 1 条，而 `check()` 要求 `len(self._history) >= window`(默认 20)
+        —— 于是 `check()` 永远返回 None、衰减告警永远不可能触发（与 HealthMonitor 当初
+        `error_streak` 实例内计数、每轮新建实例而失效是同一类问题）。
+        """
+        try:
+            if not self.path.is_file():
+                return
+            lines = self.path.read_text(encoding="utf-8", errors="replace").splitlines()
+            for line in lines[-500:]:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:  # noqa: BLE001
+                    continue
+                if "pnl_usd" in rec:
+                    try:
+                        self._history.append(float(rec.get("pnl_usd") or 0.0))
+                    except (TypeError, ValueError):
+                        pass
+                if rec.get("equity") is not None:
+                    try:
+                        self._last_equity = float(rec["equity"])
+                    except (TypeError, ValueError):
+                        pass
+        except Exception:  # noqa: BLE001
+            pass
 
     def record_cycle(self, cycle_id: str, decision: str,
-                     executed: bool, pnl_usd: float = 0.0) -> dict:
-        """每轮追加指标，返回当前滚动指标。"""
+                     executed: bool, pnl_usd: Optional[float] = None,
+                     equity: Optional[float] = None) -> dict:
+        """每轮追加指标，返回当前滚动指标。
+
+        `pnl_usd` 缺省时用**权益差**推算（`equity − 上次 equity`）：plan-loop 不执行
+        订单、拿不到已实现盈亏，而权益差是它手边可得、且能反映策略是否在失血的代理。
+        注意它含未实现盈亏 / 手续费 / 资金费，是**近似**而非精确已实现盈亏。
+        """
         with self._lock:
+            if pnl_usd is None:
+                if equity is not None and self._last_equity is not None:
+                    pnl_usd = float(equity) - float(self._last_equity)
+                else:
+                    pnl_usd = 0.0
+            if equity is not None:
+                self._last_equity = float(equity)
+            pnl_usd = float(pnl_usd)
             self._history.append(pnl_usd)
             metrics = self._compute()
             rec = {
@@ -46,6 +95,8 @@ class DecayDetector:
                 "pnl_usd": pnl_usd,
                 **metrics,
             }
+            if equity is not None:
+                rec["equity"] = float(equity)
             with self.path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         return rec
