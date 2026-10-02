@@ -113,18 +113,18 @@ class Executor:
         for intent in intents:
             gate = self._entry_gate(intent)
             if gate:
-                # 位置不匹配（POSITION_EXISTS / POSITION_POLICY_STRICT）→ **良性跳过**：
-                #  · 算整轮失败会白烧一个周期并污染失败归档（模拟盘历史 73 笔）
-                #  · 原来这里还 `break`，会让同一信号里**后面的 intent 全不执行** ——
-                #    例如 [stop_entry_long, modify_tp_sl] 里第一个被拒，合法的「改保护」也丢了
-                # 注意：**不把它映射成 add_***。`_entry_gate` 拒绝 open_* 是刻意的
-                # （注释写明防「new plan pile-up」）；映射成 add 会让重复/过期的计划
-                # 每轮都加仓，在 50 倍杠杆的实盘上会造成仓位膨胀。
-                report.results.append(
-                    StepResult(intent.action, intent.symbol, True,
-                               detail={"gate_skipped": gate})
-                )
-                continue
+                map_note = self._map_open_to_add(intent)
+                if map_note:
+                    # 不能映射（超暴露上限 / 不同侧 / 无持仓）→ **良性跳过**，不再 break：
+                    #  · 算整轮失败会白烧周期并污染失败归档（模拟盘历史 73 笔 POSITION_EXISTS）
+                    #  · break 会让同一信号里**后面的 intent 全不执行** —— 例如
+                    #    [stop_entry_long, modify_tp_sl] 里第一个被拒，合法的「改保护」也丢了
+                    report.results.append(
+                        StepResult(intent.action, intent.symbol, True,
+                                   detail={"gate_skipped": gate, "map_skipped": map_note})
+                    )
+                    continue
+                # 已映射成同侧 add_*（_entry_gate 对 add_* 放行）→ 继续执行
             try:
                 step = self._execute_intent(intent)
             except GateApiError as e:
@@ -133,11 +133,16 @@ class Executor:
                 step = StepResult(intent.action, intent.symbol, False, error=repr(e))
             requested = (intent.meta or {}).get("requested_action")
             if requested and requested != step.action:
+                extra = {"executed_as": step.action}
+                if (intent.meta or {}).get("mapped_from"):
+                    # 显式留痕：这条原本是 open_*，被映射成 add_* 执行了
+                    # （复盘「为什么这轮加了仓」时要看得到）
+                    extra["mapped_from"] = intent.meta["mapped_from"]
                 step = StepResult(
                     action=requested,
                     symbol=step.symbol,
                     ok=step.ok,
-                    detail={**step.detail, "executed_as": step.action},
+                    detail={**step.detail, **extra},
                     error=step.error,
                 )
             report.results.append(step)
@@ -336,6 +341,56 @@ class Executor:
             f"({'/'.join(sorted({p['side'] for p in pos}))}); "
             f"policy={policy} only allows add/reduce/close/tp-sl"
         )
+
+    def _map_open_to_add(self, intent: Intent) -> str:
+        """有持仓时的**同侧** `open_*` → 视为 `add_*`。返回 '' 表示已映射，否则返回不映射的原因。
+
+        动机：AI 说 `open_long` 而已有同侧持仓时，`_entry_gate` 会拒（注释写明防
+        「new plan pile-up」），但 AI 的意图往往是「想更长」—— 拒掉等于白烧一轮
+        （实测 `POSITION_EXISTS` 占修复后残留失败的 28%）。
+
+        **必须带暴露上限**：映射成 add 意味着重复/过期计划会**每轮都加仓**，在杠杆下就是
+        仓位膨胀（而且单调累积、不会自己回退）。所以只在「当前持仓名义 + 本单名义 ≤
+        权益 × `max_notional_pct`」时才映射 —— 用账户自己的暴露策略当上限；超出就退回拒绝，
+        防堆积保护重新生效。
+        """
+        requested = (intent.meta or {}).get("requested_action") or intent.action
+        try:
+            pos = self._symbol_positions(intent.symbol)
+        except Exception:  # noqa: BLE001
+            return "无法读取持仓"
+        if not pos:
+            return "无持仓"
+        sides = {p["side"] for p in pos}
+        if len(sides) != 1:
+            return f"持仓方向不唯一 {sorted(sides)}"
+        side = next(iter(sides))
+        if requested == f"add_{side}":
+            return ""                                   # 本来就是 add
+        if requested != f"open_{side}":
+            return f"与持仓不同侧（{requested} vs {side}）—— 应先 close/reduce"
+        try:
+            pct = float((self.account_risk or {}).get("max_notional_pct") or 5.0)
+            acct = self.client.get_account() or {}
+            equity = float(acct.get("total") or acct.get("balance") or 0)
+            meta = self.client.get_contract(intent.symbol)
+            quanto = float(getattr(meta, "quanto_multiplier", 0) or 0)
+            px = float(self.client.get_last_price(intent.symbol) or 0)
+            cur = abs(sum(float(p["size"]) for p in pos)) * quanto * px
+            add = intent.size_usd
+            if add is None and intent.size is not None:
+                add = abs(float(intent.size)) * quanto * px
+            add = float(add or 0)
+            if equity > 0 and pct > 0 and quanto > 0 and px > 0:
+                if (cur + add) > equity * pct:
+                    return (f"加仓后名义 {cur + add:.0f} > 权益×{pct:g}={equity * pct:.0f}"
+                            "（防仓位膨胀）")
+        except Exception:  # noqa: BLE001 — 算不出上限就不映射（保守）
+            return "暴露上限无法计算"
+        intent.meta = {**(intent.meta or {}),
+                       "requested_action": f"add_{side}",
+                       "mapped_from": intent.action}
+        return ""
 
     def _symbol_positions(self, symbol: str) -> list[dict]:
         try:

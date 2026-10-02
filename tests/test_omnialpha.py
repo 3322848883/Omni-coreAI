@@ -181,6 +181,18 @@ class TestSchema(unittest.TestCase):
         self.assertIn("gate_skipped", rep.results[0].detail)
         self.assertEqual(rep.results[1].action, "modify_tp_sl")
 
+    def test_open_long_with_position_maps_to_add(self):
+        """有同侧持仓时 open_long 映射成 add_long（带暴露上限）→ 真正下单，而不是被拒。"""
+        client = FakeClient()
+        client.get_positions = lambda: [{"contract": "BTC_USDT", "size": 2, "mode": "single"}]
+        client.get_account = lambda: {"total": 10000, "available": 10000}
+        ex = Executor(client, position_policy="manage_only", symbols_whitelist=["BTC_USDT"],
+                      order_scope="own", label_prefix="brk")
+        rep = ex.execute_signal(parse_signal(
+            {"action": "open_long", "symbol": "BTC_USDT", "size": 1, "sl": 1}))
+        self.assertTrue(rep.ok, rep.to_dict())
+        self.assertNotIn("gate_skipped", rep.results[0].detail, "应被映射而不是跳过")
+
     def test_position_policy_free_allows_entry(self):
         client = FakeClient()
         client.get_positions = lambda: [{"contract": "BTC_USDT", "size": 2, "mode": "single"}]
