@@ -401,7 +401,7 @@ class PersonaRunner:
             else:
                 action = decision or "hold"
 
-        # 归一化为 schema 合法 action（close_long/close_short/modify_tp_sl 不在 ACTIONS）
+        # 归一化为 schema 合法 action（close_long/close_short 不在 ACTIONS，需拆成 close+side）
         action, side_override = self._normalize_action(action)
 
         payload = {
@@ -422,6 +422,11 @@ class PersonaRunner:
         }
         if side_override:
             payload["side"] = side_override
+        # modify_tp_sl 至少要有一个目标价：两个都没有就退回 hold，
+        # 否则 executor 必然报 "requires tp and/or sl"、白烧一轮
+        if action == "modify_tp_sl" and payload.get("tp") is None and payload.get("sl") is None:
+            payload["action"] = "hold"
+            payload.setdefault("meta", {})["modify_skipped"] = "no tp/sl provided"
         # 风控：用 source_bot 的 strategist 风险配置（不能绕过）
         payload = self._apply_risk(source_bot, payload)
 
@@ -433,9 +438,13 @@ class PersonaRunner:
     def _normalize_action(action: str) -> tuple[str, Optional[str]]:
         """将 persona 决策动作归一化为 schema 合法 action。
 
-        close_long  → close + side=long
-        close_short → close + side=short
-        modify_tp_sl → hold（schema 暂不支持改单，降级为不动作）
+        close_long   → close + side=long
+        close_short  → close + side=short
+        modify_tp_sl → modify_tp_sl（**原样透传**）
+
+        注：`modify_tp_sl` 一直是 schema 合法动作（`schema.ACTIONS` 里有，
+        `executor` 会分发给 `_modify_tp_sl`），此前把它降级成 `hold` 是错的 ——
+        人格想调整止盈止损时会**静默什么都不做**。payload 里本就带 `tp`/`sl`。
         返回 (schema_action, side_override|None)。
         """
         a = (action or "").lower()
@@ -443,8 +452,8 @@ class PersonaRunner:
             return "close", "long"
         if a == "close_short":
             return "close", "short"
-        if a == "modify_tp_sl":
-            return "hold", None
+        if a in ("modify_tp_sl", "modify", "modify_tp"):
+            return "modify_tp_sl", None
         return action, None
 
     @staticmethod

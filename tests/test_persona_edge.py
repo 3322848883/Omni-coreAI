@@ -656,9 +656,13 @@ class TestSchemaCompat(unittest.TestCase):
         self.assertEqual(a, "close")
         self.assertEqual(side, "short")
 
-    def test_normalize_action_modify_tp_sl_degrades_to_hold(self):
+    def test_normalize_action_modify_tp_sl_passthrough(self):
+        """modify_tp_sl 是 schema 合法动作，不再降级成 hold（2026-10-02 修）。
+
+        此前它被映射成 hold，导致人格想调整止盈止损时**静默什么都不做**。
+        """
         a, side = PersonaRunner._normalize_action("modify_tp_sl")
-        self.assertEqual(a, "hold")
+        self.assertEqual(a, "modify_tp_sl")
         self.assertIsNone(side)
 
     def test_normalize_action_passthrough(self):
@@ -737,6 +741,9 @@ class TestSchemaCompat(unittest.TestCase):
                 payload["side"] = side
             if norm in ("stop_entry_long", "stop_entry_short"):
                 payload["trigger_price"] = 50000.0
+            if norm == "modify_tp_sl":
+                # modify_tp_sl 按设计要求至少一个目标价（executor 会校验）
+                payload["tp"] = 60000.0
             try:
                 sig = parse_signal(payload, default_label="t")
                 self.assertTrue(sig.intents, f"no intents for {act}")
