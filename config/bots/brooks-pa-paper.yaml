@@ -6,7 +6,7 @@ env: paper
 symbols:
   - BTC_USDT
 # 2% 紧止损时名义可达 10 万+，护栏给足
-max_notional_usd: 150000
+max_notional_usd: 50000
 max_orders_per_file: 10
 max_files_per_run: 20
 poll_interval_sec: 2
@@ -58,7 +58,7 @@ strategist:
   risk:
     min_confidence: 0.55
     max_chips: 2
-    max_notional_usd: 150000
+    max_notional_usd: 50000
   llm:
     provider: gw-flash
     reasoning_effort: high

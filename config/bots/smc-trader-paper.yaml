@@ -6,7 +6,7 @@ env: paper
 symbols:
   - BTC_USDT
   - ETH_USDT
-max_notional_usd: 150000
+max_notional_usd: 50000
 max_orders_per_file: 10
 max_files_per_run: 20
 poll_interval_sec: 2
@@ -59,7 +59,7 @@ strategist:
   risk:
     min_confidence: 0.55
     max_chips: 3
-    max_notional_usd: 150000
+    max_notional_usd: 50000
   llm:
     provider: gw-flash
     reasoning_effort: high
