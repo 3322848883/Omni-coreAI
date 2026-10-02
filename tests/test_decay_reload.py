@@ -86,16 +86,26 @@ class TestEquityDeltaPnl(unittest.TestCase):
             self.assertEqual(r["pnl_usd"], 0.0)
 
 
-class TestSnapshotEquity(unittest.TestCase):
-    def test_extracts_total_then_balance(self):
-        self.assertAlmostEqual(PlanRunner._snapshot_equity({"account": {"total": "88.06"}}), 88.06)
-        self.assertAlmostEqual(PlanRunner._snapshot_equity({"account": {"balance": 12.5}}), 12.5)
+class TestDecayEquity(unittest.TestCase):
+    def test_flat_returns_equity(self):
+        self.assertAlmostEqual(
+            PlanRunner._decay_equity({"account": {"total": "88.06", "positions": []}}), 88.06)
+        # 老 snapshot 没有 positions 键 → 视为空仓
+        self.assertAlmostEqual(PlanRunner._decay_equity({"account": {"balance": 12.5}}), 12.5)
 
-    def test_missing_is_none(self):
-        self.assertIsNone(PlanRunner._snapshot_equity({}))
-        self.assertIsNone(PlanRunner._snapshot_equity({"account": {}}))
-        self.assertIsNone(PlanRunner._snapshot_equity(None))
-        self.assertIsNone(PlanRunner._snapshot_equity({"account": {"total": "n/a"}}))
+    def test_open_position_returns_none(self):
+        """持仓中不给权益：否则未实现盈亏会被当成已实现、让衰减提前触发。"""
+        snap = {"account": {"total": "88.06",
+                            "positions": [{"contract": "BTC_USDT", "size": 19}]}}
+        self.assertIsNone(PlanRunner._decay_equity(snap))
+
+    def test_missing_or_error_is_none(self):
+        self.assertIsNone(PlanRunner._decay_equity({}))
+        self.assertIsNone(PlanRunner._decay_equity({"account": {}}))
+        self.assertIsNone(PlanRunner._decay_equity(None))
+        self.assertIsNone(PlanRunner._decay_equity({"account": {"total": "n/a"}}))
+        self.assertIsNone(PlanRunner._decay_equity(
+            {"account": {"total": "88.06", "error": "account: down"}}))
 
 
 if __name__ == "__main__":

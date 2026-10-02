@@ -325,7 +325,7 @@ class PlanRunner:
                               notes=risk_result.notes + rejected_triggers,
                               reasoning=plan.reasoning)
             # monitoring: decay（hold 不计盈亏）
-            self._record_decay(plan, executed=False, equity=self._snapshot_equity(snapshot))
+            self._record_decay(plan, executed=False, equity=self._decay_equity(snapshot))
             return {
                 "ok": True,
                 "cycle_id": plan.cycle_id,
@@ -339,7 +339,7 @@ class PlanRunner:
         self._record_plan(cycle_id=plan.cycle_id, trigger=trigger, orders=len(orders),
                           notes=risk_result.notes + rejected_triggers, reasoning=plan.reasoning)
         # monitoring: decay（执行后按方向记 PnL）
-        self._record_decay(plan, executed=True, equity=self._snapshot_equity(snapshot))
+        self._record_decay(plan, executed=True, equity=self._decay_equity(snapshot))
         return {
             "ok": True,
             "cycle_id": plan.cycle_id,
@@ -506,10 +506,23 @@ class PlanRunner:
         }
 
     @staticmethod
-    def _snapshot_equity(snapshot: Any) -> Optional[float]:
-        """从 snapshot 取账户权益（decay 用权益差推算每轮盈亏）。"""
+    def _decay_equity(snapshot: Any) -> Optional[float]:
+        """取给 decay 用的权益 —— **只在空仓时给**。
+
+        权益差是 plan-loop 手边唯一可得的盈亏代理（它不执行订单、拿不到已实现盈亏，
+        journal 的 `exec_result` 里也没有 pnl）。但权益差含**未实现盈亏**：持仓浮亏 5U
+        而没平仓时权益差就是 −5，会让「衰减」比真实情况更早触发。
+
+        所以只在**空仓**时给出权益：每笔记录的差值 = 「自上次空仓以来的权益变化」
+        ≈ 该笔持仓平掉后的已实现盈亏（含手续费/资金费），持仓期间记 0。
+        等价于「按笔记已实现盈亏」，而不是「按周期记浮动的权益」。
+        """
         try:
             acct = (snapshot or {}).get("account") or {}
+            if acct.get("error"):
+                return None
+            if acct.get("positions"):
+                return None          # 持仓中 → 不记，避免未实现盈亏污染
             v = acct.get("total") or acct.get("balance")
             return float(v) if v is not None else None
         except (TypeError, ValueError):
