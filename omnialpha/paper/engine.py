@@ -50,6 +50,8 @@ class PaperEngine:
         self.store = store
         self.feed = feed
         self.alert_store = alert_store
+        # 合约乘数缓存：取值成功即缓存，供 feed 临时不可用时回退（**绝不兜底成 1.0**）
+        self._quanto_cache: dict[str, float] = {}
 
     # ── 行情便捷 ─────────────────────────────────────────
     def _book(self, symbol: str) -> tuple[float, float]:
@@ -67,11 +69,33 @@ class PaperEngine:
     def _last(self, symbol: str) -> float:
         return float(self.feed.get_last_price(symbol) or 0)
 
-    def _quanto(self, symbol: str) -> float:
+    def _quanto(self, symbol: str, *, strict: bool = True) -> Optional[float]:
+        """合约乘数（quanto_multiplier）—— **绝不静默兜底成 1.0**。
+
+        它贯穿 notional / fee / margin / realised PnL：BTC_USDT 真实乘数是 0.0001，
+        一旦退化成 1.0，上面四项**全部错 10,000 倍**。实测 `wyckoff-paper` 就因一次
+        强平时取不到乘数，单笔手续费被记成 80,121（正确约 8 元），账户被打爆到 -70,573。
+
+        策略：先取真值并缓存 → 取不到用缓存 → 从未取到过时：
+        - `strict=True`（会计路径）抛 `PaperReject`，让这笔成交失败（宁可不成交，不算错账）
+        - `strict=False`（展示路径）返回 None，由调用方按「未知」处理
+        """
         try:
-            return float(getattr(self.feed.get_contract(symbol), "quanto_multiplier", 1) or 1)
-        except Exception:  # noqa: BLE001
-            return 1.0
+            q = float(getattr(self.feed.get_contract(symbol), "quanto_multiplier", 0) or 0)
+            if q > 0:
+                self._quanto_cache[symbol] = q
+                return q
+        except Exception:  # noqa: BLE001 — 交给下面的缓存/严格分支
+            pass
+        cached = self._quanto_cache.get(symbol)
+        if cached:
+            return cached
+        if strict:
+            raise PaperReject(
+                f"quanto_multiplier unavailable for {symbol}; "
+                "refuse to account with 1.0 (would be 10000x off)"
+            )
+        return None
 
     def _recompute_available(self) -> None:
         """available = balance - position_margin - order_margin（+ 未实现盈亏不占用）。"""
@@ -469,8 +493,8 @@ class PaperEngine:
             last = self._last(symbol)
             size = float(p["size"] or 0)
             entry = float(p["entry_price"] or 0)
-            quanto = self._quanto(symbol)
-            if size and last:
+            quanto = self._quanto(symbol, strict=False)
+            if size and last and quanto:
                 unrealised += (last - entry) * size * quanto
             pos_margin += abs(float(p.get("margin") or 0))
         equity = balance + unrealised
@@ -512,8 +536,8 @@ class PaperEngine:
             last = self._last(p["contract"])
             size = float(p["size"] or 0)
             entry = float(p["entry_price"] or 0)
-            quanto = self._quanto(p["contract"])
-            upnl = (last - entry) * size * quanto if last else 0.0
+            quanto = self._quanto(p["contract"], strict=False)
+            upnl = (last - entry) * size * quanto if (last and quanto) else 0.0
             out.append({
                 "contract": p["contract"],
                 "size": size,

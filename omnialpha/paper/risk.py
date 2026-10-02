@@ -7,11 +7,15 @@
 """
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, Optional
 
 from .engine import PaperEngine
 from .store import PaperStore
+from .validate import PaperReject
+
+log = logging.getLogger(__name__)
 
 FUNDING_INTERVAL_SEC = 8 * 3600
 
@@ -72,17 +76,23 @@ class RiskEngine:
                 continue
             # 强制平仓：反向市价单，role=liquidation（只写一条 fill）
             side_size = -size
-            self.engine._apply_fill(
-                {
-                    "order_id": f"liq-{symbol}-{int(time.time())}",
-                    "contract": symbol,
-                    "size": side_size,
-                    "reduce_only": 1,
-                },
-                price=last,
-                size=side_size,
-                role="liquidation",
-            )
+            try:
+                self.engine._apply_fill(
+                    {
+                        "order_id": f"liq-{symbol}-{int(time.time())}",
+                        "contract": symbol,
+                        "size": side_size,
+                        "reduce_only": 1,
+                    },
+                    price=last,
+                    size=side_size,
+                    role="liquidation",
+                )
+            except PaperReject as e:
+                # 取不到合约乘数时拒绝入账 —— 否则一笔强平就能把账户打成 -7 万（实测）。
+                # 仓位保持不动，下一个 tick 再试：宁可延后强平，也不算错账。
+                log.warning("liquidation deferred for %s: %s", symbol, e)
+                continue
             closed.append({"contract": symbol, "price": last, "liquidation_price": liq, "size": size})
         return closed
 
@@ -112,10 +122,11 @@ class RiskEngine:
             except Exception:  # noqa: BLE001
                 rate = 0.0
             last_px = float(self.feed.get_last_price(symbol) or 0)
-            try:
-                quanto = float(getattr(self.feed.get_contract(symbol), "quanto_multiplier", 1) or 1)
-            except Exception:  # noqa: BLE001
-                quanto = 1.0
+            # 乘数走 engine 的统一入口（绝不兜底成 1.0）；取不到就本轮不结算，
+            # 而不是按错 10000 倍的金额扣钱
+            quanto = self.engine._quanto(symbol, strict=False)
+            if not quanto:
+                continue
             # 多头付、空头收（rate>0 时）
             amount = -rate * abs(size) * quanto * last_px * (1 if size > 0 else -1)
             if abs(amount) > 1e-12:

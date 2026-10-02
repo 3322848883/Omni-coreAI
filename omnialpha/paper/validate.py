@@ -64,7 +64,10 @@ def validate_and_round_order(
             raise PaperReject("size below lot size")
         size = rounded if size > 0 else -rounded
 
-    quanto = float(getattr(contract_meta, "quanto_multiplier", 1) or 1)
+    # 乘数绝不兜底成 1：BTC_USDT 真实值是 0.0001，兜底会让 notional/fee/margin 全错 10000 倍
+    quanto = float(getattr(contract_meta, "quanto_multiplier", 0) or 0)
+    if quanto <= 0:
+        raise PaperReject("quanto_multiplier unavailable; refuse to fall back to 1.0 (10000x error)")
     price_round = float(getattr(contract_meta, "order_price_round", 0) or 0)
     lev_cap = float(leverage_max or getattr(contract_meta, "leverage_max", 100) or 100)
 
