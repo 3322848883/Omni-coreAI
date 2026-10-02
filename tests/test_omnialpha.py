@@ -423,7 +423,13 @@ class FakeClient:
         out = []
         for i, o in enumerate(self.orders):
             if isinstance(o, dict) and o.get("text"):
-                out.append({"id": i + 1, "text": o.get("text"), "contract": o.get("contract")})
+                row = {"id": i + 1, "text": o.get("text"), "contract": o.get("contract")}
+                # 剩余量 / 只减仓标记要透传 —— `_has_pending_entry` 靠它们判「还有没有
+                # 未成交的入场单」，而 `left` 是**带符号**的（卖单为负）。
+                for k in ("left", "size", "is_reduce_only"):
+                    if k in o:
+                        row[k] = o[k]
+                out.append(row)
         return out
 
     def list_price_orders(self, contract=None):
@@ -635,33 +641,50 @@ class TestExecutor(unittest.TestCase):
         self.assertEqual(len(cancelled_ids), 2)
         self.assertNotIn("4", cancelled_ids)  # 别家命名空间不碰
 
-    def test_orphan_cleanup_skipped_when_pending_entry(self):
-        """有**待成交入场单**时整体跳过 —— 它的预挂保护单不是孤儿。
+    def test_orphan_cleanup_skipped_when_pending_limit_entry(self):
+        """**普通挂单**形态的待成交入场单 → 整体跳过清理。
 
-        否则委托一成交就是裸仓。注意这里同时覆盖**普通挂单**与**条件单**两种形态：
-        `stop_entry_*` 突破进场是条件单（挂在 price_orders）。
+        入场单放在 `client.orders`（走 `list_orders` 分支），且 `price_orders` 里
+        **不放任何入场单** —— 这样 True 只可能来自普通挂单分支，那条分支才真正被验到。
+
+        旧版本把「普通挂单」那个用例也塞进了 `client.price_orders`，于是两个 subTest
+        都在测条件单分支，普通分支一次也没执行过 —— 这正是 `b0307ab`（`left` 为负的
+        空头入场单识别不到）能躲过测试的原因。**「测试写了」≠「那个分支被测了」。**
         """
-        for entry in (
-            # 普通 limit 入场单
-            {"initial": {"text": "t-brk", "reduce_only": 0, "size": -39},
-             "status": "open", "id": "3"},
-            # 条件单形态（stop_entry_* 突破进场）
-            {"initial": {"text": "t-brk", "reduce_only": 0, "size": -39},
-             "status": "untriggered", "id": "3"},
-        ):
-            with self.subTest(status=entry["status"]):
-                client = FakeClient()
-                client.price_orders = [
-                    {"initial": {"text": "t-brk-sl", "reduce_only": 1}, "status": "untriggered", "id": "1"},
-                    {"initial": {"text": "t-brk-tp", "reduce_only": 1}, "status": "untriggered", "id": "2"},
-                    entry,
-                ]
-                client.get_positions = lambda: []
-                ex = Executor(client, symbols_whitelist=["BTC_USDT"], label_prefix="brk")
-                self.assertTrue(ex._has_pending_entry("BTC_USDT"),
-                                f"待成交入场单（status={entry['status']}）必须被识别")
-                self.assertEqual(ex._cleanup_orphan_protectors("BTC_USDT"), [],
-                                 "有待成交入场单时不该撤任何保护单")
+        client = FakeClient()
+        client.orders = [{
+            "text": "t-brk", "contract": "BTC_USDT",
+            "size": -39, "left": -39, "is_reduce_only": False,   # 空头：left 为负
+        }]
+        client.price_orders = [
+            {"initial": {"text": "t-brk-sl", "reduce_only": 1}, "status": "untriggered", "id": "1"},
+            {"initial": {"text": "t-brk-tp", "reduce_only": 1}, "status": "untriggered", "id": "2"},
+        ]
+        client.get_positions = lambda: []
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], label_prefix="brk")
+        self.assertTrue(ex._has_pending_entry("BTC_USDT"),
+                        "普通挂单分支必须独立成立（left=-39 为负，即空头入场单）")
+        self.assertEqual(ex._cleanup_orphan_protectors("BTC_USDT"), [],
+                         "有待成交入场单时不该撤任何保护单")
+
+    def test_orphan_cleanup_skipped_when_pending_stop_entry(self):
+        """**条件单**形态（`stop_entry_*` 突破进场，挂 price_orders）→ 整体跳过清理。
+
+        `client.orders` 为空 —— 这样 True 只可能来自条件单分支。
+        """
+        client = FakeClient()
+        client.orders = []
+        client.price_orders = [
+            {"initial": {"text": "t-brk-sl", "reduce_only": 1}, "status": "untriggered", "id": "1"},
+            {"initial": {"text": "t-brk-tp", "reduce_only": 1}, "status": "untriggered", "id": "2"},
+            {"initial": {"text": "t-brk", "reduce_only": 0, "size": -39}, "status": "untriggered", "id": "3"},
+        ]
+        client.get_positions = lambda: []
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], label_prefix="brk")
+        self.assertTrue(ex._has_pending_entry("BTC_USDT"),
+                        "条件单分支必须独立成立")
+        self.assertEqual(ex._cleanup_orphan_protectors("BTC_USDT"), [],
+                         "有待成交入场单时不该撤任何保护单")
 
     def test_orphan_cleanup_skipped_when_position(self):
         """有仓且方向匹配时保留保护单。"""

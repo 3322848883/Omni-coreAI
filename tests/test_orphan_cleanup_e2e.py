@@ -256,6 +256,36 @@ class TestOrphanCleanupE2E(unittest.TestCase):
             client.place_entry("t-pt", -15, left=0)
             self.assertFalse(ex._has_pending_entry("BTC_USDT"))
 
+    def test_all_three_forms_together_block_sweep(self):
+        """三种形态**同时**在场 —— 生产的真实形态，整体不得撤任何保护单。
+
+        分开测每条分支只能证明「每条都能单独成立」；同时在场才能覆盖「先命中的
+        分支是否掩盖了后面那条」这类问题。生产里这三种本来就是并存的：
+
+        ① 普通挂单：AI 的限价入场单（空头 → `left` 为负）
+        ② 条件单：`stop_entry_*` 突破进场（挂 price_orders，非 reduce_only）
+        ③ 各自的预挂保护单（reduce_only 的 sl/tp）
+
+        `_has_pending_entry` 连着出过两次同型 bug（`62dce02` 漏条件单、
+        `b0307ab` 漏空头 left 为负），两次都是「只覆盖了一种形态」。这条测试
+        把三种形态钉在一起，任一条分支回归都会在这里现形。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            client, ex = self._make(Path(td))
+            client.set_position(0)
+            # ① 普通挂单：空头限价入场（left=-15）
+            client.place_entry("t-pt", -15)
+            # ② 条件单：突破进场（非 reduce_only）
+            client.place_protector("t-pt-brk", -5, 86000, is_reduce_only=False)
+            # ③ 预挂保护单
+            client.place_protector("t-pt-sl", 15, 85500)
+            client.place_protector("t-pt-tp", 7, 84800)
+            self.assertTrue(ex._has_pending_entry("BTC_USDT"),
+                            "三种形态并存时必须识别为「有待成交入场单」")
+            self.assertEqual(ex._cleanup_orphan_protectors("BTC_USDT"), [],
+                             "三种形态并存时不该撤任何保护单")
+            self.assertEqual(len(client.price_orders), 3, "三张单都该保留")
+
 
     def test_pending_stop_entry_blocks_sweep(self):
         """`stop_entry_*` 是**条件单**（挂在 price_orders），也必须算「待成交入场」。
