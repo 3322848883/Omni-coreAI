@@ -12,6 +12,21 @@ class TradeLogger:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
+    def _ledger_root(self) -> Optional[Path]:
+        """从 trade_log_path() 的布局反推 root：`<root>/data/bots/<bot_id>/logs/trades.jsonl`。
+
+        只在布局匹配时返回；不匹配返回 None。**宁可跳过 ledger 写入，也不要用
+        「往上数几层」猜一个目录** —— 原来写死 `parents[2]` 少算一层，把 ledger
+        写到了 `<root>/data/bots/data/bots.db`，6061 笔真实成交全部落错库
+        （见 tests/test_tradelog_ledger_path.py）。
+        """
+        parts = self.path.resolve().parts
+        # .../data/bots/<bot_id>/logs/trades.jsonl
+        if len(parts) >= 5 and parts[-1] == "trades.jsonl" and parts[-2] == "logs" \
+                and parts[-4] == "bots" and parts[-5] == "data":
+            return Path(*parts[:-5])
+        return None
+
     def write(self, event: dict[str, Any]) -> dict[str, Any]:
         row = {
             "ts": datetime.now(timezone.utc).isoformat(),
@@ -44,17 +59,18 @@ class TradeLogger:
         try:
             from .ledger import Ledger, default_ledger_path
 
-            root = Path(getattr(self, "root", None) or self.path.parent.parent.parent)
-            led = Ledger(default_ledger_path(root))
-            led.insert_trade(
-                bot_id,
-                plan_cycle=row.get("plan_cycle"),
-                action="execution",
-                ok=bool(report.get("ok")),
-                steps=report.get("steps"),
-                source=source,
-            )
-            led.close()
+            root = self._ledger_root()
+            if root is not None:
+                led = Ledger(default_ledger_path(root))
+                led.insert_trade(
+                    bot_id,
+                    plan_cycle=row.get("plan_cycle"),
+                    action="execution",
+                    ok=bool(report.get("ok")),
+                    steps=report.get("steps"),
+                    source=source,
+                )
+                led.close()
         except Exception:  # noqa: BLE001
             pass
         # 成交事件推送（开/平/减仓/改保护；无渠道或模拟盘关闭则静默）
