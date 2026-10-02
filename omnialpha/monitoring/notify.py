@@ -337,10 +337,29 @@ def format_trade_steps(bot_id: str, steps: list) -> list[str]:
     return lines
 
 
+def _unwrap_price(v):
+    """从 Gate 的触发单规格里取出价格。
+
+    `stop_entry_*` 类的 `detail.sl`/`detail.tp` 可能是**字典**（如
+    `{'strategy_type':0,'price_type':1,'price':'86080.0','rule':2,'bbo':'','expiration':0}`），
+    直接 str() 会把整段原始代码推到卡片上（线上 2026-10-02 实测）。这里逐层取出 price。
+    """
+    if isinstance(v, dict):
+        for k in ("price", "trigger_price", "trigger", "order_price"):
+            inner = v.get(k)
+            if inner not in (None, "", 0, "0"):
+                return _unwrap_price(inner)
+        return None
+    return v
+
+
 def _fmt_num(v, digits: int = 2) -> str:
-    """数字格式化：去掉浮点噪声，空值显示 —。"""
+    """数字格式化：去掉浮点噪声，空值显示 —。**绝不打印原始容器**。"""
+    v = _unwrap_price(v)
     if v is None or v == "":
         return "—"
+    if isinstance(v, (dict, list, tuple)):
+        return "—"  # 兜底：拿不到可读值，也不要把原始结构推给用户
     try:
         f = float(v)
         if f == int(f):
@@ -351,11 +370,21 @@ def _fmt_num(v, digits: int = 2) -> str:
 
 
 def _entry_price(detail: dict, s: dict) -> str:
-    """入场价：detail.entry_price → order.fill_price/price → detail.price。"""
+    """入场价：detail.entry_price → order.fill_price/price → detail.price。
+
+    `stop_entry_*` 的价格在 `order.trigger.price`（触发价），不在 `order.price`
+    （那里是 0），所以必须一并兜底。
+    """
+    o = detail.get("order") or {}
+    body = detail.get("body") or {}
     for src in (
         detail.get("entry_price"),
-        (detail.get("order") or {}).get("fill_price"),
-        (detail.get("order") or {}).get("price"),
+        o.get("fill_price"),
+        o.get("avg_price"),
+        o.get("price"),
+        (o.get("trigger") or {}).get("price"),
+        (body.get("trigger") or {}).get("price"),
+        (o.get("initial") or {}).get("price"),
         detail.get("price"),
         detail.get("avg_price"),
         s.get("price"),
@@ -375,39 +404,41 @@ def _first_val(*vals):
 
 
 def _leg_price(legs):
-    """tp_orders / sl_orders 形如 [{trigger_price|price|trigger}]，取第一腿。"""
+    """tp_orders / sl_orders 形如 [{trigger:{price:...}}] 或 [{trigger_price:...}]。"""
     if not isinstance(legs, (list, tuple)):
         return None
     for leg in legs:
         if isinstance(leg, dict):
             v = _first_val(leg.get("trigger_price"), leg.get("price"), leg.get("trigger"))
+            v = _unwrap_price(v)
             if v is not None:
                 return v
     return None
 
 
 def _resolve_tp(detail: dict, s: dict):
-    """止盈价：detail.tp → step.tp → tp_placed.price → tp_orders[].trigger_price。
+    """止盈价：detail.tp → step.tp → tp_placed.price → tp_orders[].trigger.price。
 
     不同 action 的 detail 形状不同（open_* 用 detail.tp；modify_tp_sl 用
     detail.tp_placed.price；stop_entry_* 只给 tp_orders[]），所以必须逐层兜底。
+    且 detail.tp 可能是 Gate 的触发单规格 dict —— 用 _unwrap_price 取出真价格。
     """
-    return _first_val(
+    return _unwrap_price(_first_val(
         detail.get("tp"),
         s.get("tp"),
         (detail.get("tp_placed") or {}).get("price"),
         _leg_price(detail.get("tp_orders")),
-    )
+    ))
 
 
 def _resolve_sl(detail: dict, s: dict):
-    """止损价：detail.sl → step.sl → sl_placed.price → sl_orders[].trigger_price。"""
-    return _first_val(
+    """止损价：detail.sl → step.sl → sl_placed.price → sl_orders[].trigger.price。"""
+    return _unwrap_price(_first_val(
         detail.get("sl"),
         s.get("sl"),
         (detail.get("sl_placed") or {}).get("price"),
         _leg_price(detail.get("sl_orders")),
-    )
+    ))
 
 
 def _resolve_pnl(detail: dict, s: dict):
@@ -425,14 +456,23 @@ def _resolve_pnl(detail: dict, s: dict):
 
 
 def _resolve_size(detail: dict, s: dict):
-    """仓位数量 → (显示值, 单位)。优先 USD 名义；拿不到就退化成合约张数。"""
+    """仓位数量 → (显示值, 单位)。优先 USD 名义；拿不到就退化成合约张数。
+
+    `stop_entry_*` 的数量在 `order.initial.size`（`order.size` 不存在），必须兜底。
+    """
     usd = _first_val(detail.get("size_usd"))
     if usd is not None:
         return _fmt_num(usd), "USDT"
     order = detail.get("order") or {}
+    body = detail.get("body") or {}
+    oinit = order.get("initial") or {}
+    binit = body.get("initial") or {}
     qty = _first_val(
         order.get("size"),
         order.get("filled_size"),
+        oinit.get("size"),
+        oinit.get("amount"),
+        binit.get("size"),
         detail.get("size"),
         detail.get("contracts"),
         s.get("size"),

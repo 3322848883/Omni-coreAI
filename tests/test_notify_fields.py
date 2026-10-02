@@ -82,6 +82,36 @@ LIVE_CLOSE = {
 }
 
 
+LIVE_STOP_ENTRY_DICT = {
+    # 2026-10-02 线上真实形状（archive/done/20261002-115144-btc-15m-01.json.result.json）：
+    # 这种 stop_entry 挂单里 detail.sl / detail.tp 是 Gate 的**触发单规格 dict**，
+    # 入场价在 order.trigger.price、数量在 order.initial.size。
+    # 修前卡片把整个 dict str() 出来，用户看到的就是原始代码。
+    "action": "stop_entry_long", "symbol": "BTC_USDT", "ok": True, "error": "",
+    "detail": {
+        "order": {
+            "id": 2105989124329574400,
+            "trigger": {"strategy_type": 0, "price_type": 1, "price": 86900.0,
+                        "rule": 1, "bbo": "", "expiration": 0},
+            "initial": {"contract": "BTC_USDT", "size": 14, "price": 0,
+                        "tif": "ioc", "text": "t-brk", "amount": 14},
+            "status": "open", "filled_size": 0, "direction": "long",
+        },
+        "body": {"initial": {"contract": "BTC_USDT", "size": 14, "text": "t-brk"},
+                 "trigger": {"price": 86900.0, "rule": 1}},
+        "order_check": {"kind": "stop_entry", "ok": True},
+        "sl": {"strategy_type": 0, "price_type": 1, "price": "86080.0", "rule": 2,
+               "bbo": "", "expiration": 0},
+        "tp": {"strategy_type": 0, "price_type": 1, "price": "87280.0", "rule": 1,
+               "bbo": "", "expiration": 0},
+        "tp_orders": [{"trigger": {"price": 88100.0, "rule": 1},
+                       "initial": {"size": -7, "text": "t-brk-tp"}}],
+        "sl_orders": [{"trigger": {"price": 86080.0, "rule": 2},
+                       "initial": {"size": -14, "text": "t-brk-sl"}}],
+    },
+}
+
+
 def _fields(card: dict) -> dict:
     """把卡片 elements 摊平成 {字段名: 值}。"""
     out = {}
@@ -174,6 +204,60 @@ class TestCardNoMissingFields(unittest.TestCase):
                 self.assertNotIn("—", lines[0], lines[0])
                 self.assertNotIn("= ", lines[0], lines[0])
                 self.assertNotIn("size= ", lines[0], lines[0])
+
+
+class TestTriggerSpecDictNotPrinted(unittest.TestCase):
+    """回归：Gate 触发单规格是 dict，绝不能被 str() 到卡片上（用户报的「显示出了代码」）。"""
+
+    def test_fmt_num_never_prints_container(self):
+        from omnialpha.monitoring.notify import _fmt_num
+
+        self.assertEqual(_fmt_num({"price": "86080.0", "rule": 2}), "86080")
+        self.assertEqual(_fmt_num({"no_price": 1}), "—")
+        self.assertEqual(_fmt_num([1, 2]), "—")
+        self.assertEqual(_fmt_num({}), "—")
+
+    def test_unwrap_price(self):
+        from omnialpha.monitoring.notify import _unwrap_price
+
+        self.assertEqual(_unwrap_price({"price": "86080.0"}), "86080.0")
+        self.assertEqual(_unwrap_price({"trigger": {"price": 88100.0}}), 88100.0)
+        self.assertIsNone(_unwrap_price({"rule": 1}))
+
+    def test_resolvers_unwrap_dicts(self):
+        d = LIVE_STOP_ENTRY_DICT["detail"]
+        self.assertEqual(_resolve_sl(d, LIVE_STOP_ENTRY_DICT), "86080.0")
+        self.assertEqual(_resolve_tp(d, LIVE_STOP_ENTRY_DICT), "87280.0")
+
+    def test_entry_price_from_order_trigger(self):
+        from omnialpha.monitoring.notify import _entry_price
+
+        d = LIVE_STOP_ENTRY_DICT["detail"]
+        self.assertEqual(_entry_price(d, LIVE_STOP_ENTRY_DICT), "86900")
+
+    def test_size_from_order_initial(self):
+        self.assertEqual(_resolve_size(LIVE_STOP_ENTRY_DICT["detail"],
+                                       LIVE_STOP_ENTRY_DICT), ("14", "张"))
+
+    def test_card_contains_no_raw_code(self):
+        """核心断言：卡片文本里不能出现 dict 字面量。"""
+        cards = format_trade_card("brooks-btc", [LIVE_STOP_ENTRY_DICT])
+        self.assertEqual(len(cards), 1)
+        f = _fields(cards[0])
+        blob = " ".join(f.values())
+        for bad in ("strategy_type", "price_type", "{", "}", "bbo", "expiration"):
+            with self.subTest(bad=bad):
+                self.assertNotIn(bad, blob, f"卡片里出现了原始代码: {blob}")
+        self.assertEqual(f["入场价"], "86900")
+        self.assertEqual(f["止损"], "86080")
+        self.assertEqual(f["止盈"], "87280")
+        self.assertEqual(f["仓位"], "14 张")
+
+    def test_steps_text_contains_no_raw_code(self):
+        lines = format_trade_steps("brooks-btc", [LIVE_STOP_ENTRY_DICT])
+        self.assertEqual(len(lines), 1)
+        for bad in ("strategy_type", "{", "}", "bbo"):
+            self.assertNotIn(bad, lines[0], lines[0])
 
 
 if __name__ == "__main__":
