@@ -51,6 +51,8 @@ class StrategistConfig:
     env: str = "live"
     bot_root: Optional[Path] = None
     risk: RiskConfig = field(default_factory=RiskConfig)
+    # 账户级风控（顶层 bot 配置）：执行器用它算权益比例硬顶，策略侧也据此收敛给 AI 的预算
+    account_risk: dict = field(default_factory=dict)
     llm: LLMConfig = field(default_factory=LLMConfig)
     # on-demand market tools for the LLM (not a full dump)
     tools: dict = field(default_factory=dict)
@@ -138,6 +140,38 @@ class PlanRunner:
         except Exception:  # noqa: BLE001
             pass
 
+    def _prompt_risk(self, snapshot: dict) -> dict:
+        """给 AI 的预算取「配置值」与「权益 × max_notional_pct」的较小值。
+
+        执行器的硬闸门是 equity×max_notional_pct（见 executor._check_notional）。
+        若只把静态配置值交给 AI，权益一下跌闸门就收紧，AI 仍按旧预算出价 →
+        整笔被拒、白烧一轮。这里把闸门算出来一起给，两者就不会再打架。
+        """
+        cfg_max = self.cfg.risk.max_notional_usd
+        raw_pct = (self.cfg.account_risk or {}).get("max_notional_pct")
+        try:
+            pct = float(raw_pct) if raw_pct is not None else 5.0
+        except (TypeError, ValueError):
+            pct = 5.0
+        equity = 0.0
+        try:
+            acct = snapshot.get("account") or {}
+            equity = float(acct.get("total") or acct.get("balance") or 0)
+        except (TypeError, ValueError):
+            equity = 0.0
+        limit: Optional[float] = cfg_max
+        if equity > 0 and pct > 0:
+            cap = equity * pct
+            limit = cap if limit is None else min(float(limit), cap)
+        return {
+            "min_confidence": self.cfg.risk.min_confidence,
+            "max_notional_usd": round(limit, 2) if limit is not None else None,
+            "max_chips": self.cfg.risk.max_chips,
+            "allow_actions": sorted(self.cfg.risk.allow_actions)
+            if self.cfg.risk.allow_actions
+            else None,
+        }
+
     def run_once(self, trigger: str = "manual") -> dict[str, Any]:
         cycle_id = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         snapshot = collect_snapshot(
@@ -161,14 +195,7 @@ class PlanRunner:
         )
         user = build_user_prompt(
             snapshot,
-            {
-                "min_confidence": self.cfg.risk.min_confidence,
-                "max_notional_usd": self.cfg.risk.max_notional_usd,
-                "max_chips": self.cfg.risk.max_chips,
-                "allow_actions": sorted(self.cfg.risk.allow_actions)
-                if self.cfg.risk.allow_actions
-                else None,
-            },
+            self._prompt_risk(snapshot),
             self.cfg.symbols,
         )
         # agent-memory：画像 + 近况事件（失败不影响本轮）
@@ -405,14 +432,7 @@ class PlanRunner:
         )
         user = build_user_prompt(
             snapshot,
-            {
-                "min_confidence": self.cfg.risk.min_confidence,
-                "max_notional_usd": self.cfg.risk.max_notional_usd,
-                "max_chips": self.cfg.risk.max_chips,
-                "allow_actions": sorted(
-                    self.cfg.risk.allow_actions
-                ) if self.cfg.risk.allow_actions else None,
-            },
+            self._prompt_risk(snapshot),
             self.cfg.symbols,
         )
         # vision：从 snapshot 生成 K 线图（可配置多周期）

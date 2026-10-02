@@ -67,6 +67,7 @@ def _build_plan_runner(bot, paths: ProjectPaths):
         env=bot.env,
         bot_root=paths.root,
         bot_id=bot.bot_id,
+        account_risk=dict(getattr(bot, "account_risk", None) or {}),
         skills=(s.get("skills") if s.get("skills") is not None else getattr(bot, "skills", None)),
         risk=RiskConfig(
             min_confidence=float(risk.get("min_confidence") or 0.75),
