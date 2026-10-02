@@ -50,6 +50,35 @@ def _pick(raw: dict, fields: tuple[str, ...]) -> dict[str, Any]:
     return {k: _f(raw.get(k)) if k != "time" else raw.get(k) for k in fields}
 
 
+def position_state(account: dict) -> tuple[str, str]:
+    """给 AI 的持仓状态摘要：(state, note)。
+
+    **为什么需要**：执行器挂入场单后 1–3 秒就把 TP/SL 一起挂上（不等成交），所以
+    「无持仓 + 有待成交入场单 + 有保护单」是**常态**。但 AI 看到 `protections` 里有单、
+    `positions` 里没有，很容易误读成「有持仓可管」→ 发 `modify_tp_sl` → `NO_POSITION`。
+    实盘 2026-10-02 07:59 那轮就是这么失败的（07:44 挂的 `t-brk` 19 张未成交）。
+
+    所以在 snapshot 里显式标注状态，让 AI 不必从 `positions`/`protections` 的存在与否去猜。
+    """
+    pos_n = len([p for p in (account or {}).get("positions") or [] if p])
+    oo = (account or {}).get("open_orders") or []
+    pend_n = len([
+        o for o in oo
+        if str((o or {}).get("status") or "").lower() in ("open", "partially_filled")
+    ])
+    if pos_n:
+        return "position_open", (
+            "有持仓；protections 里的单属于该持仓，可用 modify_tp_sl 调整 TP/SL"
+        )
+    if pend_n:
+        return "entry_pending", (
+            "**无持仓**：只有未成交的入场委托。protections 里的单是随入场单预挂的，"
+            "成交后才成为该持仓的保护 —— 此时**不要发 modify_tp_sl**（会 NO_POSITION），"
+            "也不要以为已有仓位"
+        )
+    return "flat", "无持仓、无待成交入场单"
+
+
 def collect_snapshot(
     client: GateClient,
     symbols: list[str],
@@ -257,6 +286,8 @@ def collect_snapshot(
         except Exception as e:  # noqa: BLE001
             account["protections"] = []
             meta["degraded"].append("protections")
+    # 显式标注持仓状态：AI 不必从 positions/protections 的有无去猜（见 position_state）
+    account["position_state"], account["position_state_note"] = position_state(account)
 
     return {
         "interval": interval,

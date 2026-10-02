@@ -885,9 +885,14 @@ class Executor:
             )
         positions = self._symbol_positions(intent.symbol)
         if not positions:
+            # 良性 no-op：无持仓就没有保护单可调，**不能算失败** —— 否则整轮被记成
+            # failed、白烧一个周期并污染失败归档。实测两种成因都会走到这里：
+            #   ① 计划同轮里先 reduce/close 再 modify（模拟盘 103 笔）
+            #   ② AI 看到「随未成交入场单预挂的保护单」以为有持仓（实盘 07:59 那轮）
+            # 与 gate_client.close_position() 对「已平的账本」按 no-op success 处理一致。
             return StepResult(
-                "modify_tp_sl", intent.symbol, False,
-                error=f"NO_POSITION: no open position on {intent.symbol}",
+                "modify_tp_sl", intent.symbol, True,
+                detail={"noop": f"no position on {intent.symbol}; nothing to modify"},
             )
         side = intent.side
         if side in ("long", "short"):

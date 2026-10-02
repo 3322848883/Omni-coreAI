@@ -485,14 +485,20 @@ class TestModifyTpSl(unittest.TestCase):
         # cancelled only old sl, kept old tp
         self.assertEqual(len(client.cancelled), 1)
 
-    def test_modify_requires_position(self):
+    def test_modify_without_position_is_benign_noop(self):
+        """无持仓时的 modify_tp_sl 是**良性 no-op**（2026-10-02 改）。
+
+        此前它返回 ok=False、整轮失败 —— 白烧一个周期并污染失败归档。实测两种成因：
+        模拟盘「同轮先平仓再改保护」（103 笔）与实盘「AI 看到随未成交入场单预挂的保护单
+        以为有持仓」（2026-10-02 07:59）。与 close_position() 对已平账本按 no-op success 一致。
+        """
         client = FakeClient()  # flat
         ex = Executor(client, symbols_whitelist=["BTC_USDT"], label_prefix="brk")
         rep = ex.execute_signal(
             parse_signal({"action": "modify_tp_sl", "symbol": "BTC_USDT", "tp": 85000})
         )
-        self.assertFalse(rep.ok)
-        self.assertIn("NO_POSITION", rep.results[0].error or "")
+        self.assertTrue(rep.ok, "无持仓不应算失败")
+        self.assertIn("noop", rep.results[0].detail)
 
     def test_modify_requires_level(self):
         client = self._client_with_pos()
