@@ -21,5 +21,14 @@ log_level: INFO
 # === 账户推送配置（模拟盘） ===
 # 模拟盘独立密钥：用户级环境变量 GATE_TESTNET_API_KEY / GATE_TESTNET_API_SECRET（密钥不落盘，2026-08-30 已从 yaml 迁出）
 # 与实盘 GATE_API_KEY 完全隔离；环境变量缺失时账户推送自动关闭（行情照常）
-account_push: true
+# 账户推送：默认**关**。
+# 它需要 `GATE_TESTNET_API_KEY` / `GATE_TESTNET_API_SECRET`（模拟盘独立密钥，与实盘
+# `GATE_API_KEY` 隔离）。密钥缺失时 `account_push` 会被强制关闭，但
+# `_account_push_configured` 仍为 True → `_account_health()` 报 `push_mismatch`
+# → **健康端点恒返回 503**（即使 K 线采集一切正常）。
+#
+# 那个 503 是「密钥环境丢失」的签名，本意是好的；但在「只用它采 K 线」的部署里
+# 会变成**恒假的告警** —— 恒假和恒真一样没用，还会盖住真正的故障。
+# 所以这里显式关掉：要用测试网账户推送时，先设好上面两个环境变量，再把这里改回 true。
+account_push: false
 account_push_interval: 60
