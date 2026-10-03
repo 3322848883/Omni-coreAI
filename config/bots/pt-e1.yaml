@@ -18,6 +18,8 @@ strategist:
   candles: 100
   write_hold: false
   tools: {enabled: true, native: true, max_rounds: 3, allow: [smc_map, smc_events, klines]}
-  market: {mode: hybrid, indicators: [], timeframes: [5m, 15m, 1h], extra_candles: 80}
+  vision: true
+  vision_timeframes: [5m, 15m, 1h, 4h]
+  market: {mode: hybrid, indicators: [], timeframes: [5m, 15m, 1h, 4h], extra_candles: 80}
   risk: {min_confidence: 0.3, max_chips: 1, max_notional_usd: 3000}
   llm: {provider: gw-flash, model: global:deepseek-v4.1-flash-sg, reasoning_effort: medium}
