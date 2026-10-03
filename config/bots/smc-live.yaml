@@ -1,4 +1,10 @@
-﻿# SMC · BTC/ETH · 实盘行情（只分析）
+# SMC · ETH 实盘 — 正式配置
+# 策略：prompts/smc_pa.md（人格11 · SMC）
+# 风控按权益比例：单笔 ≤ 权益 5%，总量 ≤ 权益 10%（同 brooks-btc 的做法）
+#
+# enabled: false —— 布置完成但**不启动**。要启用时在服务器建
+# config/bots.local/smc-live.yaml 写 `enabled: true`（该目录 gitignore）。
+
 bot_id: smc-live
 enabled: false
 env: live
@@ -6,43 +12,63 @@ api_key_env: GATE_API_KEY
 api_secret_env: GATE_API_SECRET
 
 symbols:
-  - BTC_USDT
   - ETH_USDT
 
-max_notional_usd: 20
+# 绝对兜底（真正的闸门是下面的 max_notional_pct / max_total_notional_pct）
+max_notional_usd: 10000
+max_orders_per_file: 5
+max_files_per_run: 20
+poll_interval_sec: 2
 label_prefix: smc
 position_policy: strict
+default_replace: symbol
 order_scope: own
 require_sl: true
 
 account_risk:
-  max_leverage: 10
-  max_total_notional_usd: 20
+  halt: false
+  max_leverage: 50
+  max_total_notional_usd: 10000
+  # 权益比例硬顶：单笔名义 ≤ 权益 × 此倍数（executor._check_notional 执行）
+  max_notional_pct: 5.0
+  # 总量闸门（按比例）：持仓名义合计 + 本单 ≤ 权益 × 此倍数
+  max_total_notional_pct: 10.0
+  # 裸仓自动补保护：先跑 dry（只记录「本来会挂什么」，不下单），观察一轮再改 true
+  auto_protect: "dry"
+  auto_protect_sl_pct: 2.0
 
 strategist:
-  enabled: false
-  prompt_file: prompts/smc_trader.md
-  interval_sec: 300
-  timeframe: 15m
+  enabled: true
+  prompt_file: prompts/smc_pa.md
+  interval_sec: 900
+  timeframe: 5m
+  # 多周期图：5m / 15m / 1h / 4h 四张（与 market.timeframes 对齐）
+  vision: true
+  vision_timeframes: ["5m", "15m", "1h", "4h"]
   event_on_kline_close: true
-  event_timeframe: 15m
-  candles: 100
+  event_timeframe: 5m
+  candles: 120
   write_hold: true
   tools:
-    enabled: false
+    enabled: true
     native: true
     max_rounds: 3
+    # SMC 白名单：只要地图、事件流、原始 K 线。indicators/sqzmom/tv_* 一律关掉
+    # —— SMC 不用传统指标，需要波动率尺度时读 structure_scale。
+    allow: [smc_map, smc_events, klines]
   market:
-    mode: rest_only
-    indicators: [atr14]
-    timeframes: []
-    extra_candles: 30
+    mode: hybrid
+    indicators: []          # [] = 快照不注入任何指标
+    timeframes: ["5m", "15m", "1h", "4h"]
+    extra_candles: 80
+  ai_triggers:
+    enabled: true
+    max_active: 5
+    default_cooldown_sec: 300
   risk:
     min_confidence: 0.55
-    max_chips: 2
-    max_notional_usd: 20
+    max_chips: 1            # SMC 提示词要求单腿
+    max_notional_usd: 10000
   llm:
     provider: gw-flash
-    thinking: true
     reasoning_effort: high
-    max_tokens: 8192
