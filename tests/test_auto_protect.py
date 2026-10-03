@@ -400,5 +400,75 @@ class TestAutoProtectSweep(unittest.TestCase):
             self.assertEqual(client.placed, [])
 
 
+class TestPartialCoverage(unittest.TestCase):
+    """SL 只覆盖一部分时按差额补 —— 此前会被判成「已受保护」跳过（静默半裸仓）。
+
+    真会发生的路径：`_resync_protectors()` 只在 `_close()` 里跑（close/reduce 之后），
+    所以 `add_*` 让持仓变大后没有任何地方会把 SL 放大。
+    """
+
+    def _make(self, root, size):
+        client = FakeClient(mark=85000.0)
+        ex = Executor(
+            client, label_prefix="pt", root=root, bot_id="paper-test",
+            account_risk={"auto_protect": True, "auto_protect_sl_pct": 2.0},
+        )
+        client.set_position(size)
+        return client, ex
+
+    def test_partial_sl_adds_only_the_shortfall(self):
+        with tempfile.TemporaryDirectory() as td:
+            client, ex = self._make(Path(td), 10)
+            client.place_protector("t-pt-sl", -4, 83000)   # 只覆盖 4 张
+            out = ex.ensure_protection("BTC_USDT")
+            self.assertIn("placed", out, out)
+            self.assertEqual(out["covered_size"], 4)
+            self.assertEqual(out["need_size"], 6)
+            # 只补差额 6 张，不是重挂全量 10
+            self.assertEqual(abs(int(client.placed[0]["initial"]["size"])), 6)
+
+    def test_full_coverage_skips(self):
+        with tempfile.TemporaryDirectory() as td:
+            client, ex = self._make(Path(td), 10)
+            client.place_protector("t-pt-sl", -10, 83000)
+            self.assertEqual(ex.ensure_protection("BTC_USDT")["skipped"], "sl_present")
+
+    def test_over_coverage_skips(self):
+        """保护单比持仓大（如入场单部分成交）→ 已覆盖，不动手。"""
+        with tempfile.TemporaryDirectory() as td:
+            client, ex = self._make(Path(td), 10)
+            client.place_protector("t-pt-sl", -25, 83000)
+            self.assertEqual(ex.ensure_protection("BTC_USDT")["skipped"], "sl_present")
+
+    def test_multiple_partial_sls_sum_up(self):
+        """多张 SL 张数合计达到持仓 → 跳过（不重复补）。"""
+        with tempfile.TemporaryDirectory() as td:
+            client, ex = self._make(Path(td), 10)
+            client.place_protector("t-pt-sl", -4, 83000)
+            client.place_protector("t-pt-sl", -6, 83500)
+            self.assertEqual(ex.ensure_protection("BTC_USDT")["skipped"], "sl_present")
+
+    def test_terminal_sl_not_counted_toward_coverage(self):
+        """已终结的 SL 不计入覆盖 → 按缺口补全量。"""
+        with tempfile.TemporaryDirectory() as td:
+            client, ex = self._make(Path(td), 10)
+            po = client.place_protector("t-pt-sl", -4, 83000)
+            po["status"] = "cancelled"
+            out = ex.ensure_protection("BTC_USDT")
+            self.assertIn("placed", out, out)
+            self.assertEqual(out["covered_size"], 0)
+            self.assertEqual(out["need_size"], 10)
+
+    def test_short_position_partial_shortfall(self):
+        """空头同理：SL 覆盖 3 张 / 持仓 8 张 → 补 5 张。"""
+        with tempfile.TemporaryDirectory() as td:
+            client, ex = self._make(Path(td), -8)
+            client.place_protector("t-pt-sl", 3, 87000)
+            out = ex.ensure_protection("BTC_USDT")
+            self.assertIn("placed", out, out)
+            self.assertEqual(out["need_size"], 5)
+            self.assertEqual(int(client.placed[0]["initial"]["size"]), 5)
+
+
 if __name__ == "__main__":
     unittest.main()

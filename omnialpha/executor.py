@@ -1590,13 +1590,20 @@ class Executor:
                 notes.append({"resized_error": str(e), "text": text})
         return notes
 
-    def _has_owned_sl(self, symbol: str, prefix: str) -> bool:
-        """是否已有本 bot 的**未终结** SL 保护单。
+    def _owned_sl_size(self, symbol: str, prefix: str) -> int:
+        """本 bot **未终结 SL 覆盖的张数合计**（绝对值）。
 
         只看 SL、不看 TP —— `watcher.reconcile_protection()` 的判据是
         `"-sl" in text or "-tp" in text`，也就是「只有 TP 没有 SL」会被判成已受保护。
         补保护这条路必须按 SL 单独判，不能沿用那个判据。
+
+        **返回张数而不是布尔**：只看「有没有 SL」不够 —— 持仓 100 张而 SL 只覆盖
+        10 张时会被判成「已受保护」而不补，留下静默的半裸仓。而这是真会发生的：
+        `_resync_protectors()` 只在 `_close()` 里被调用一次（close/reduce 之后），
+        **`add_*` 让持仓变大后没有任何地方会把 SL 放大** —— 而 `open_*`→`add_*`
+        映射恰恰让持仓可以单调增长。
         """
+        total = 0
         for po in self._owned_price_orders(symbol, prefix):
             text = str((po.get("initial") or {}).get("text") or po.get("text") or "")
             tail = text.rsplit("-", 1)[-1].lower() if text else ""
@@ -1606,8 +1613,12 @@ class Executor:
                 "cancelled", "finished", "filled", "triggered", "failed", "closed"
             ):
                 continue
-            return True
-        return False
+            init = po.get("initial") or {}
+            try:
+                total += abs(int(init.get("size") or po.get("size") or 0))
+            except (TypeError, ValueError):
+                continue
+        return total
 
     def ensure_protection(self, symbol: str) -> dict:
         """裸仓兜底：持仓在、owned SL 不在时，按配置补一张 reduce_only SL。
@@ -1620,6 +1631,9 @@ class Executor:
 
         只补 SL，**绝不补 TP**：SL 是风控，TP 是策略 —— 自动塞一个 TP 等于替 AI 做了
         它没做的决策，还会和它下一轮的意图打架。
+
+        **按覆盖张数判，不按「有没有 SL」判**（`_owned_sl_size`）：SL 只覆盖一部分
+        时按差额补，而不是判成「已受保护」跳过 —— 那是静默的半裸仓。
 
         由 `account_risk` 逐 bot 开启（默认关）：
           auto_protect: false（默认）→ 只回报检测结果，不下单
@@ -1636,8 +1650,8 @@ class Executor:
              `left` 为负）连着修了两次漏判。而「补保护」是**必须动**的路径：一个可能漏判
              的判据不该给它当闸门，否则漏判的代价是「裸仓一直没人管」。
           ② 它多余：未成交入场单的保护单保护的是**将来**那条仓位，与当前这条无关；
-             而能走到下面挂单那一步，就说明 `_has_owned_sl` 已是 False，即账户上不存在
-             任何 owned SL —— 那待成交单自然也没有预挂 SL，不会双挂。
+             而能走到下面挂单那一步，就说明覆盖张数不足（`covered < size`），
+             本 bot 现有的 owned SL 覆盖不了这条持仓 —— 不会双挂。
 
         本方法只做「检测 + 挂单」，**不告警**：告警与限流是调用方（watcher 的扫描循环）
         的策略，那里才有跨轮状态。
@@ -1666,9 +1680,16 @@ class Executor:
         pos = positions[0]
         pos_side = pos["side"]
         size = abs(int(pos["size"]))
-        if self._has_owned_sl(symbol, self._own_prefix("")):
+        covered = self._owned_sl_size(symbol, self._own_prefix(""))
+        if covered >= size:
             out["skipped"] = "sl_present"
             return out
+        # 覆盖不足 → 只补**差额**，不重挂全量。会走到这里的两条路：
+        #   ① 完全没有 SL（covered=0）
+        #   ② SL 只覆盖了一部分 —— `add_*` 让持仓变大后没有任何地方会把 SL 放大
+        #      （`_resync_protectors()` 只在 `_close()` 里跑）。此前这种情况会被
+        #      判成「已受保护」而跳过，留下静默的半裸仓。
+        need = size - covered
 
         try:
             ticker = self.client.get_ticker(symbol) or {}
@@ -1685,6 +1706,7 @@ class Executor:
         sl = float(round_price(raw, meta))
         out.update({
             "position_side": pos_side, "position_size": size,
+            "covered_size": covered, "need_size": need,
             "mark": mark, "sl": sl, "sl_pct": pct,
         })
         if dry:
@@ -1706,7 +1728,7 @@ class Executor:
         try:
             rec, err = self._place_exit_leg(
                 lambda: self._place_trigger(
-                    intent, trigger_side, sl, is_tp=False, meta=meta, size=size
+                    intent, trigger_side, sl, is_tp=False, meta=meta, size=need
                 ),
                 kind="sl",
                 price_order=True,
