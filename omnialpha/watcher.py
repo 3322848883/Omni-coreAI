@@ -337,7 +337,7 @@ def _auto_protect_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict) -> i
     """定期给裸仓补 SL（`account_risk.auto_protect` 逐 bot 开启，默认关）。
 
     与 `_orphan_sweep` 是一对：一个撤孤儿、一个补缺失。但**判据故意不共用** ——
-    补保护只看「持仓 + owned SL」（`Executor._has_owned_sl`），
+    补保护只看「持仓张数 vs owned SL 覆盖张数」（`Executor._owned_sl_size`），
     `Executor._has_pending_entry` **只归孤儿扫描**。
 
     曾经共用过一版（补保护也拿 `_has_pending_entry` 当闸门），结果是补保护被一个
