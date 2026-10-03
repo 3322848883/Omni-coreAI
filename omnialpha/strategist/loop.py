@@ -24,7 +24,7 @@ from .prompt import build_system_prompt, build_user_prompt, load_strategy_prompt
 from .risk import RiskConfig, apply_risk
 from .schema import PlanError, parse_plan_text
 from .snapshot import collect_snapshot
-from .tools import NATIVE_TOOLS, TOOL_GUIDE, available_native_tools, extract_tool_calls, run_tool
+from .tools import NATIVE_TOOLS, TOOL_GUIDE, available_native_tools, extract_tool_calls, filter_tool_schemas, run_tool
 from .triggers import check_conditions, parse_conditions
 from .trigger_store import AITriggerPolicy, AITriggerStore, TriggerPolicyError, validate_trigger_payload
 
@@ -109,14 +109,20 @@ class PlanRunner:
         self.tool_usage: list[dict] = []
 
     def _record_tool_use(self, name: str, args: dict, result: Any) -> None:
-        """记录一次工具调用：工具名、参数摘要、结果规模。"""
+        """记录一次工具调用：工具名、参数摘要、结果规模，以及完整返回。
+
+        `result_full` 是排查「模型到底拿到了什么」的唯一依据。只存 preview 时，
+        核对工具数值（如 SMC 的 structure_scale.atr）只能靠复现，无法判断模型
+        是**引用了真实值**还是**自己估算**。
+        """
         try:
-            preview = str(result)[:120] if result is not None else ""
+            text = str(result) if result is not None else ""
             self.tool_usage.append({
                 "tool": str(name or ""),
                 "args": {k: str(v)[:40] for k, v in (args or {}).items()},
-                "result_preview": preview,
-                "result_len": len(str(result or "")),
+                "result_preview": text[:200],
+                "result_full": text[:20000],
+                "result_len": len(text),
             })
         except Exception:  # noqa: BLE001
             pass
@@ -925,6 +931,7 @@ class PlanRunner:
                     self.client, name, args,
                     env=self.cfg.env, bot_root=self.cfg.bot_root, market_cfg=self.cfg.market,
                     bot_id=self.cfg.bot_id, skill_ids=self.cfg.skills,
+                    allow=self.cfg.tools.get("allow"), deny=self.cfg.tools.get("deny"),
                 )
                 self._record_tool_use(name, args, res)
                 results.append({"tool": name, "result": res})
@@ -961,7 +968,13 @@ class PlanRunner:
         # 只挂「实际能用」的工具：pa-data-source 的 aux_cache.db 不在时，那 10 个 aux
         # 工具每次调用都只会返回 not found（实测实盘占累计调用的 7.3%）。见
         # tools.available_native_tools 的说明。
-        base_tools = available_native_tools(self.cfg.bot_root)
+        # 再按 bot 配置收窄（`strategist.tools.allow` / `.deny`，支持通配）——
+        # 这是**程序强制**的：模型看不到就调不到，不依赖它自觉遵守提示词。
+        base_tools = filter_tool_schemas(
+            available_native_tools(self.cfg.bot_root),
+            allow=self.cfg.tools.get("allow"),
+            deny=self.cfg.tools.get("deny"),
+        )
         active_tools: Optional[list] = None
         for _round in range(max(1, max_rounds) + 1):
             tools = active_tools if active_tools is not None else base_tools
@@ -987,6 +1000,7 @@ class PlanRunner:
                     self.client, name, args,
                     env=self.cfg.env, bot_root=self.cfg.bot_root, market_cfg=self.cfg.market,
                     bot_id=self.cfg.bot_id, skill_ids=self.cfg.skills,
+                    allow=self.cfg.tools.get("allow"), deny=self.cfg.tools.get("deny"),
                 )
                 self._record_tool_use(name, args, result)
                 # 收窄：skill 成功加载且声明 allowed-tools → 限定后续工具面

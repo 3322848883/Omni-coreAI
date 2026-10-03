@@ -40,7 +40,7 @@ from typing import Any, Optional
 from ..gate_client import GateClient, GateApiError
 
 
-from .indicators import attach_indicators, latest_indicators
+from .indicators import _resolve_wanted, attach_indicators, latest_indicators
 
 
 from .market import MarketConfig, resolve_candles
@@ -140,6 +140,17 @@ TOOL_NAMES = (
 
 
 )
+
+
+# kline 表自带 ema20/atr14 两列，bar dict 会一路带进工具返回 —— 即使
+# `strategist.market.indicators: []` 也关不掉。返回前按 wanted 剥掉。
+_CARRIED_INDICATOR_KEYS = ("ema20", "atr14")
+
+
+def _strip_carried_indicators(row: dict, wanted) -> dict:
+    allow = set(wanted or ())
+    return {k: v for k, v in row.items()
+            if k not in _CARRIED_INDICATOR_KEYS or k in allow}
 
 
 
@@ -1139,6 +1150,81 @@ def available_native_tools(bot_root=None) -> list:
     ]
 
 
+# 元工具：始终保留。它们是加载 skill 方法论 / 读 references 的唯一入口，
+# 被白名单挡掉等于把 SkillKit 弄坏。
+META_TOOL_NAMES = ("skill", "skill_ref")
+
+# SMC 工具的内部预热根数。原版在 TV 上 `ta.atr(200)` 始终有值、且结构状态机
+# （start/bos/choch/loc/main）是全局累积的。只喂模型要的 limit 根会让 ATR 降级
+# （实测 limit=120 → ATR=31.8，2000 根 → 76.1）、状态机落在不同分支 —— 同一段
+# 区间内两者结论不同。实测 300 根即收敛（limit=300 与 2000 逐条一致），取 500 留余量。
+_SMC_WARMUP_BARS = 500
+
+
+def _tool_allowed(name: str, allow=None, deny=None) -> bool:
+    """bot 级工具策略的**唯一判据**。`filter_tool_schemas` 与 `run_tool` 都用它。
+
+    两处必须同源：只过滤 schema 是**不够**的 —— 模型会凭空报出不在 schema 里的
+    工具名，实测 5 轮里 1 轮出现 `sqzmom` / `tv_rsi_yata`（白名单只放 3 个工具）。
+    schema 负责「看不到」，这里负责「调不到」。
+    """
+    import fnmatch
+
+    if name in META_TOOL_NAMES:
+        return True
+    allow_pats = [p for p in (allow or []) if str(p).strip()]
+    deny_pats = [p for p in (deny or []) if str(p).strip()]
+    if allow_pats and not any(fnmatch.fnmatch(name, str(p)) for p in allow_pats):
+        return False
+    if deny_pats and any(fnmatch.fnmatch(name, str(p)) for p in deny_pats):
+        return False
+    return True
+
+
+def filter_tool_schemas(schemas: list, allow=None, deny=None) -> list:
+    """按 bot 配置的 `strategist.tools.allow` / `.deny` 过滤工具 schema。
+
+    两者都支持 fnmatch 通配（如 `tv_*`、`smc_*`）。语义：
+
+      - `allow` 非空 → **只保留命中的**（元工具始终保留）
+      - `deny` → 在 allow 之后**再移除命中的**（deny 优先）
+      - 都不给 → 原样返回（向后兼容）
+
+    为什么过滤 schema 而不是只拦调用：模型**看不到**就**调不到** ——
+    这比事后拒绝更彻底，也不会浪费一个轮次。与 `available_native_tools`
+    的「数据源不在就不挂」是同一条原则。
+    **但它不能替代调用点的检查** —— 见 `_tool_allowed` 的说明。
+    """
+    return [
+        t for t in schemas
+        if _tool_allowed((t.get("function") or {}).get("name") or "", allow, deny)
+    ]
+
+
+def validate_tool_policy(allow=None, deny=None, known=None) -> None:
+    """`allow` / `deny` 里出现匹配不到任何工具的模式 → 抛错。
+
+    为什么要抛错而不是忽略：本项目的教训是**静默失效** ——
+    一个拼错的 `deny: [sqzmo]` 会**静默地什么都不禁**，而配置看起来是生效的
+    （同 HealthMonitor 装饰性、触发器参数越界那几类）。宁可启动就炸。
+    """
+    import fnmatch
+
+    known = list(known if known is not None else TOOL_NAMES)
+    bad = []
+    for pats, label in ((allow, "allow"), (deny, "deny")):
+        for p in (pats or []):
+            p = str(p).strip()
+            if p and not any(fnmatch.fnmatch(n, p) for n in known):
+                bad.append("%s: %r" % (label, p))
+    if bad:
+        raise ValueError(
+            "strategist.tools 里有匹配不到任何工具的模式（拼错了？）："
+            + ", ".join(bad)
+            + "。可用工具：" + ", ".join(sorted(known))
+        )
+
+
 
 
 
@@ -1196,6 +1282,12 @@ def run_tool(
     skill_ids: Optional[list] = None,
 
 
+    allow: Optional[list] = None,
+
+
+    deny: Optional[list] = None,
+
+
 ) -> Any:
 
 
@@ -1212,6 +1304,20 @@ def run_tool(
 
 
         return {"error": f"unknown tool {name!r}", "allowed": list(TOOL_NAMES)}
+
+
+    # bot 级策略：**必须在调用点再拦一次**。只过滤 schema 不够 ——
+    # 模型会凭空报出不在 schema 里的工具名（实测 5 轮里 1 轮出现 sqzmom/tv_rsi_yata，
+    # 而白名单只放了 3 个工具）。schema 管「看不到」，这里管「调不到」。
+    if not _tool_allowed(name, allow, deny):
+
+
+        return {
+            "error": f"tool {name!r} is not enabled for this bot",
+            # 把**可用工具**直接列出来，减少模型的盲目重试（实测它会连着猜好几次）
+            "available": [n for n in TOOL_NAMES if _tool_allowed(n, allow, deny)],
+            "hint": "该工具被 strategist.tools 的 allow/deny 关掉了；请只用 available 里的工具",
+        }
 
 
     # skill: SkillKit L2 loading (no gate client needed)
@@ -1290,7 +1396,9 @@ def run_tool(
             res = resolve_candles(client, sym, tf, limit, market_cfg=market_cfg, env=env, bot_root=bot_root)
 
 
-            rows = attach_indicators(list(res.rows), (market_cfg.indicators if market_cfg else None))
+            wanted = _resolve_wanted(market_cfg.indicators if market_cfg else None)
+
+            rows = attach_indicators(list(res.rows), wanted)
 
 
             return {
@@ -1308,7 +1416,7 @@ def run_tool(
                 "stale": res.stale,
 
 
-                "rows": rows[-limit:],
+                "rows": [_strip_carried_indicators(r, wanted) for r in rows[-limit:]],
 
 
             }
@@ -1365,7 +1473,7 @@ def run_tool(
                 "latest": latest_indicators(rows, names) if rows else {},
 
 
-                "rows": rows[-limit:],
+                "rows": [_strip_carried_indicators(r, names) for r in rows[-limit:]],
 
 
             }
@@ -2096,7 +2204,10 @@ def run_tool(
             # same hybrid path as klines: per-exchange local DB → that venue's REST
 
 
-            res = resolve_candles(client, sym, tf, lim, market_cfg=market_cfg, env=env, bot_root=bot_root)
+            fetch = max(lim, _SMC_WARMUP_BARS)
+
+
+            res = resolve_candles(client, sym, tf, fetch, market_cfg=market_cfg, env=env, bot_root=bot_root)
 
 
             rows = list(res.rows or [])
@@ -2109,6 +2220,9 @@ def run_tool(
 
 
                 "symbol": sym, "tf": tf, "n": len(rows),
+
+
+                "limit_requested": lim, "bars_analyzed": len(rows),
 
 
                 "source": res.source, "stale": res.stale, "degraded": res.degraded,
@@ -2144,7 +2258,10 @@ def run_tool(
             lim = max(30, min(int(args.get("limit") or 150), 300))
 
 
-            res = resolve_candles(client, sym, tf, lim, market_cfg=market_cfg, env=env, bot_root=bot_root)
+            fetch = max(lim, _SMC_WARMUP_BARS)
+
+
+            res = resolve_candles(client, sym, tf, fetch, market_cfg=market_cfg, env=env, bot_root=bot_root)
 
 
             rows = list(res.rows or [])
@@ -2157,6 +2274,9 @@ def run_tool(
 
 
                 "symbol": sym, "tf": tf, "n": len(rows),
+
+
+                "limit_requested": lim, "bars_analyzed": len(rows),
 
 
                 "source": res.source, "stale": res.stale, "degraded": res.degraded,

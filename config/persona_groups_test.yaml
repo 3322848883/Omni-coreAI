@@ -1,0 +1,84 @@
+# 仅用于人格集对照实验（2026-10-03）
+#
+# 为什么单独一份：`persona-run` 不带 --group 时会跑**所有 enabled 组**，
+# 而 config/persona_groups.yaml 里还有 6 个别的组（disc-trio / e2e-quad /
+# single-test / disc-test / consensus-test / mirror-test）。用 --config 指向本文件
+# 就只跑这两个对照臂，且**一个进程内组间串行**，不会自己把网关压垮。
+#
+# 启动：
+#   .venv\Scripts\python.exe -m omnialpha persona-run --config config/persona_groups_test.yaml --interval 300
+groups:
+  - name: disc-ctl
+    # 对照组：复刻原 disc-test 的人格集（Brooks / SMC交易员 / 均值回归）
+    topology: single_account
+    members: [pt-a1, pt-a2, pt-a3]
+    target_account: pt-a1
+    fusion: weighted_vote
+    fusion_config:
+      weights: {pt-a1: 1, pt-a2: 1, pt-a3: 1}
+    on_conflict: hold
+    enabled: true
+    discussion:
+      enabled: true
+      rounds: 3
+      timeout_sec: 120
+      early_exit_on_agreement: false
+
+  - name: disc-exp
+    # 实验组：Brooks(价格结构) + ICT(时间×流动性) + 订单流(微观成交)
+    topology: single_account
+    members: [pt-b1, pt-b2, pt-b3]
+    target_account: pt-b1
+    fusion: weighted_vote
+    fusion_config:
+      weights: {pt-b1: 1, pt-b2: 1, pt-b3: 1}
+    on_conflict: hold
+    enabled: true
+    discussion:
+      enabled: true
+      rounds: 3
+      timeout_sec: 120
+      early_exit_on_agreement: false
+
+  - name: disc-mix
+    # 混合组：Brooks(价格结构) + ICT(时间×流动性) + 均值回归(方向对立)
+    #
+    # 加这一臂是为了验证一个假设：首轮数据（n=2）显示「方向分歧」比「证据轴正交」
+    # 更能产生讨论价值 —— 压缩区间行情下，ICT 与 Brooks 都判 hold（同质），
+    # 只有均值回归给出了相反方向，讨论才有可辩内容。
+    # 若假设成立，本组（既保留正交的时间轴、又保留方向对立）应表现最好。
+    topology: single_account
+    members: [pt-c1, pt-c2, pt-c3]
+    target_account: pt-c1
+    fusion: weighted_vote
+    fusion_config:
+      weights: {pt-c1: 1, pt-c2: 1, pt-c3: 1}
+    on_conflict: hold
+    enabled: true
+    discussion:
+      enabled: true
+      rounds: 3
+      timeout_sec: 120
+      early_exit_on_agreement: false
+
+  - name: disc-pa
+    # 纯价格行为学三人组（同家族、入场机制对立）
+    #
+    # Brooks人格1（止损单触发） vs 方方土（一律 stop_entry，禁市价追）
+    # vs Rose（优先限价，等回调）。
+    # 三人共享同一套语言（市场周期/信号K线/H1H2/通道/区间），所以讨论会聚焦在
+    # 「同一个信号该怎么执行」，可比性高于跨家族组合。
+    # 已知冲突点：方方土「坏信号K可以反做」vs Brooks人格1「不无条件反做坏信号K」。
+    topology: single_account
+    members: [pt-d1, pt-d2, pt-d3]
+    target_account: pt-d1
+    fusion: weighted_vote
+    fusion_config:
+      weights: {pt-d1: 1, pt-d2: 1, pt-d3: 1}
+    on_conflict: hold
+    enabled: true
+    discussion:
+      enabled: true
+      rounds: 3
+      timeout_sec: 120
+      early_exit_on_agreement: false

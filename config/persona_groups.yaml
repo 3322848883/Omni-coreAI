@@ -1,4 +1,4 @@
-﻿groups:
+groups:
   - name: disc-trio
     topology: single_account
     members: [pa-a, smc-paper, orderflow-paper]
@@ -62,3 +62,36 @@
       weights: {pa-a: 1, pa-b: 1}
     on_conflict: hold
     enabled: true
+  # ── 人格集对照实验（2026-10-03）──────────────────────────────
+  # 两组机器人配置**完全相同**（同所同周期同工具同模型同风控），
+  # 唯一变量是 prompt_file 组成的人格集。用来回答「哪三个人格讨论质量更高」。
+  - name: disc-ctl
+    # 对照组：复刻原 disc-test 的人格集
+    topology: single_account
+    members: [pt-a1, pt-a2, pt-a3]
+    target_account: pt-a1
+    fusion: weighted_vote
+    fusion_config:
+      weights: {pt-a1: 1, pt-a2: 1, pt-a3: 1}
+    on_conflict: hold
+    enabled: true
+    discussion:
+      enabled: true
+      rounds: 3
+      timeout_sec: 120
+      early_exit_on_agreement: false
+  - name: disc-exp
+    # 实验组：Brooks(价格结构) + ICT(时间×流动性) + 订单流(微观成交)
+    topology: single_account
+    members: [pt-b1, pt-b2, pt-b3]
+    target_account: pt-b1
+    fusion: weighted_vote
+    fusion_config:
+      weights: {pt-b1: 1, pt-b2: 1, pt-b3: 1}
+    on_conflict: hold
+    enabled: true
+    discussion:
+      enabled: true
+      rounds: 3
+      timeout_sec: 120
+      early_exit_on_agreement: false

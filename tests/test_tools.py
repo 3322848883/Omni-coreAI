@@ -141,7 +141,14 @@ class TestTools(unittest.TestCase):
         self.assertIn("order_blocks", out)
 
     def test_smc_tool_reports_source_and_n(self):
+        """`limit` 是「至少要多少根」；实际取数会预热到 `_SMC_WARMUP_BARS`。
+
+        原版在 TV 上 `ta.atr(200)` 始终有值、结构状态机全局累积。只喂 limit 根会让
+        ATR 降级（limit=120 → ATR=31.7，500 根 → 73.8）、状态机落在不同分支 ——
+        实测同一区间内结论不同。预热后各 limit 结论逐条一致。
+        """
         from omnialpha.strategist.market import MarketConfig
+        from omnialpha.strategist.tools import _SMC_WARMUP_BARS
 
         c = FakeKlineClient("okx")
         out = run_tool(
@@ -151,8 +158,34 @@ class TestTools(unittest.TestCase):
             market_cfg=MarketConfig(mode="rest_only", exchange="okx"),
         )
         self.assertEqual(out["source"], "exchange")
-        self.assertEqual(out["n"], 40)
+        self.assertEqual(out["limit_requested"], 40)
+        self.assertGreaterEqual(out["n"], _SMC_WARMUP_BARS)
+        self.assertEqual(out["n"], out["bars_analyzed"])
         self.assertEqual(c.name, "okx")
+
+    def test_smc_tool_result_is_independent_of_limit(self):
+        """不同 limit 必须给出相同结论 —— 否则模型的判断会随 limit 漂移。"""
+        from omnialpha.strategist.market import MarketConfig
+
+        outs = []
+        for lim in (30, 120, 300):
+            c = FakeKlineClient("okx")
+            outs.append(run_tool(
+                c, "smc_events",
+                {"symbol": "BTC_USDT", "tf": "15m", "limit": lim},
+                env="live",
+                market_cfg=MarketConfig(mode="rest_only", exchange="okx"),
+            ))
+        for o in outs:
+            self.assertNotIn("error", o)
+        sig = [(o["trend"], o["last_event"], o["structure_level"],
+                len(o["events"]), len(o["order_blocks"]["bull"])) for o in outs]
+        self.assertEqual(sig[0], sig[1])
+        self.assertEqual(sig[1], sig[2])
+        # ATR 不得降级
+        for o in outs:
+            self.assertFalse(o["structure_scale"]["atr_degraded"])
+            self.assertEqual(o["structure_scale"]["atr_period_used"], 200)
 
 
 if __name__ == "__main__":

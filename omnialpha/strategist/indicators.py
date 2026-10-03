@@ -1144,11 +1144,31 @@ def parse_indicator_name(name: str) -> dict[str, Any]:
     )
 
 
+# 默认指标集：**只在「没配」时用**。
+# 显式配 `[]` = 关掉，一个都不挂 —— 见 `_resolve_wanted` 的说明。
+DEFAULT_INDICATORS = ["ema20", "ema50", "atr14", "rsi14"]
+
+
+def _resolve_wanted(wanted) -> list[str]:
+    """None = 没配 → 默认集；其他（含 `[]`）→ 原样。
+
+    本项目里「`[]` 被 `or` 兜底成默认」这个坑出现了三层（`__main__` 配置层、
+    `snapshot` 快照层、这里），导致「关掉指标」这个配置**看起来生效、实际不生效**。
+    所以统一走这个函数，并在 tests/test_tool_policy.py 里钉住语义。
+    """
+    return list(DEFAULT_INDICATORS if wanted is None else wanted)
+
+
 def attach_indicators(rows: list[dict[str, Any]], wanted: list[str] | None = None) -> list[dict[str, Any]]:
-    """Attach indicator columns; raises IndicatorNameError on unknown names."""
+    """Attach indicator columns; raises IndicatorNameError on unknown names.
+
+    `wanted` 语义：**None = 没配 → 用默认集；`[]` = 显式关掉 → 一个都不挂。**
+    不能写 `wanted or [默认]` —— `[]` 是 falsy，那样写「关掉指标」永远不生效
+    （实测：SMC 配了 `indicators: []` 仍在 reasoning 里引用 EMA20=84712 / ATR=22）。
+    """
     if not rows:
         return rows
-    wanted = list(wanted or ["ema20", "ema50", "atr14", "rsi14"])
+    wanted = _resolve_wanted(wanted)
     specs = [parse_indicator_name(n) for n in wanted]
 
     # dedupe expensive multi-output families
@@ -1374,7 +1394,7 @@ def attach_indicators(rows: list[dict[str, Any]], wanted: list[str] | None = Non
 
 
 def latest_indicators(rows: list[dict[str, Any]], wanted: list[str] | None = None) -> dict[str, Any]:
-    wanted = list(wanted or ["ema20", "ema50", "atr14", "rsi14"])
+    wanted = _resolve_wanted(wanted)
     if not rows:
         return {k: None for k in wanted}
     last = rows[-1]

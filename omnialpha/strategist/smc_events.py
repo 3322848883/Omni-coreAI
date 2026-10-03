@@ -81,6 +81,7 @@ class SMCEventsResult:
     bear_fvgs: list = field(default_factory=list)
     structure_level: Optional[float] = None
     premium_discount: dict = field(default_factory=dict)
+    structure_scale: dict = field(default_factory=dict)
     drawings: dict = field(default_factory=dict)
 
 
@@ -142,15 +143,46 @@ def pivotlow(lows: list[float], left: int, right: int) -> list[Optional[float]]:
 
 
 # ── 订单块 ─────────────────────────────────────────────────────────
-def _ob_cords(highs, lows, atrs, bull: bool, idx: int, ob_mode: str = "length") -> float:
-    if ob_mode == "full":
-        return lows[idx] if bull else highs[idx]
+def _ob_cords(highs, lows, atrs, bull: bool, idx: int, ob_mode: str = "length",
+              atr_len: int = 5) -> float:
+    """原版 `fnOB` 的 `cords` 入参。
+
+    Full  = 整个蜡烛（bull 取 high，bear 取 low）→ top/btm 就是整根蜡烛
+    Length= 用 ATR 收窄到 low+atr / high-atr（不越过另一端）
+    原版 `atr = ta.atr(200) / (5 / len)`，`len` = ATR 长度参数（默认 5）。
+    """
+    if str(ob_mode).lower() == "full":
+        return highs[idx] if bull else lows[idx]
     a = atrs[idx] if idx < len(atrs) and atrs[idx] is not None else 0.0
+    if atr_len:
+        a = a / (5.0 / atr_len)
     if bull:
         cand = lows[idx] + a
         return highs[idx] if cand > highs[idx] else cand
     cand = highs[idx] - a
     return lows[idx] if cand < lows[idx] else cand
+
+
+def _find_extreme(highs, lows, use_max: bool, from_idx: int, n: int,
+                  useob: bool = False) -> int:
+    """原版 `find(ms, use_max, sweep, useob)`：在 `[from_idx, 当前]` 找极值。
+
+    原版用「往回数」的偏移量，这里用绝对索引，语义等价。
+
+    `useob`（原版 `msmode == "Adjusted Points"`）分支对应原版
+    `if idx + 1 < bar_index and high[idx + 1] > high[idx]` —— 但那是**死代码**：
+    `idx` 已经指向循环区间内的最大值，`idx + 1`（更早一根）不可能更高。
+    这里照样保留以对齐原版结构，实际不会触发。
+    """
+    s = max(0, min(from_idx, n - 1))
+    rng = range(s, n)
+    idx = max(rng, key=lambda j: highs[j]) if use_max else min(rng, key=lambda j: lows[j])
+    if useob and idx - 1 >= s:
+        if use_max and highs[idx - 1] > highs[idx]:
+            idx -= 1
+        elif (not use_max) and lows[idx - 1] < lows[idx]:
+            idx -= 1
+    return idx
 
 
 def _ob_action(ob: OB, o: float, h: float, l: float, c: float, method: str) -> str:
@@ -179,33 +211,58 @@ def _overlap(a_top: float, a_btm: float, b_top: float, b_btm: float) -> bool:
     return a_btm < b_top and a_top > b_btm
 
 
-def _dedupe(items, top_key="top", btm_key="btm"):
-    if len(items) < 2:
-        return list(items)
-    out = [items[0]]
-    seen = {(
-        getattr(items[0], "bar_time", None),
-        round(getattr(items[0], top_key), 8),
-        round(getattr(items[0], btm_key), 8),
-    )}
-    for x in items[1:]:
-        ident = (
-            getattr(x, "bar_time", None),
-            round(getattr(x, top_key), 8),
-            round(getattr(x, btm_key), 8),
-        )
-        if ident in seen:
+def _prune_same(items, recent: bool = True, top_key="top", btm_key="btm"):
+    """原版 `overlap()` 的同类内去重：与 `items[0]`（最新）重叠的项被移除。
+
+    `recent=True`（原版 `wichlap == "Recent"`）移除遍历到的旧项；
+    `recent=False`（`"Old"`）反过来移除最新的那个。
+    """
+    if not items:
+        return items
+    # 先去掉完全相同的重复项（同 bar、同区间）：原版 overlap() 只与 items[0]
+    # 比较，不相邻的重复项会双双留下 —— 实测 15m 上同一位置出现两次，
+    # 对分析是纯噪声。
+    seen = set()
+    uniq = []
+    for x in items:
+        key = (getattr(x, "bar_index", None),
+               round(getattr(x, top_key), 8), round(getattr(x, btm_key), 8))
+        if key in seen:
             continue
-        skip = False
-        for kept in out:
-            if _overlap(getattr(x, top_key), getattr(x, btm_key),
-                        getattr(kept, top_key), getattr(kept, btm_key)):
-                skip = True
-                break
-        if not skip:
-            out.append(x)
-            seen.add(ident)
-    return out
+        seen.add(key)
+        uniq.append(x)
+    items[:] = uniq
+    if len(items) < 2:
+        return items
+    for i in range(len(items) - 1, 0, -1):
+        if i >= len(items):
+            continue
+        stuff, current = items[i], items[0]
+        if _overlap(getattr(stuff, top_key), getattr(stuff, btm_key),
+                    getattr(current, top_key), getattr(current, btm_key)):
+            items.pop(i if recent else 0)
+    return items
+
+
+def _prune_cross(items, other, recent: bool = True, top_key="top", btm_key="btm"):
+    """原版 `overlap()` 的跨类去重：`items` 与 `other[0]` 重叠则移除 `items` 的项。
+
+    原版对 bull 与 bear 各跑一遍（双向），调用方需正反各调一次。
+
+    注意：原版跨类分支写的是 `v = wichlap == "Recent" ? 0 : i`，与同类内的
+    `? i : 0` **相反**。照抄会让 `remove(0)` 删掉「最新项」——即使真正重叠的是
+    `items[i]`——实测把 11 个 OB 删到只剩 1 个。这里按同类内的语义统一
+    （Recent 移除重叠的那个旧项），视为修正原版笔误。
+    """
+    if not items or not other:
+        return items
+    for i in range(len(items) - 1, -1, -1):
+        if i >= len(items):
+            continue
+        if _overlap(getattr(items[i], top_key), getattr(items[i], btm_key),
+                    getattr(other[0], top_key), getattr(other[0], btm_key)):
+            items.pop(i if recent else 0)
+    return items
 
 
 # ── FVG ────────────────────────────────────────────────────────────
@@ -245,9 +302,12 @@ def compute_smc_events(
     ob_atr_len: int = 5,
     hide_ob_overlap: bool = True,
     hide_fvg_overlap: bool = True,
+    hide_cross_overlap: bool = False,
     ob_last: int = 10,
     fvg_last: int = 10,
     buildsweep: bool = True,
+    ms_mode: str = "adjusted",
+    wichlap: str = "recent",
     features: Optional[dict] = None,
 ) -> SMCEventsResult:
     """SMC 结构事件流（smc_events）。
@@ -274,7 +334,17 @@ def compute_smc_events(
     vols = [float(r.get("v") or 0) for r in rows]
     times = [int(r.get("t") or i) for i, r in enumerate(rows)]
 
-    atrs = atr_series(highs, lows, closes, atr_period)
+    # ta.atr(period) 需 period 根才出值；数据不足时 rma 返回全 None，会让
+    # _ob_cords 的 ATR 高度塌成 0（OB 退化成一条线）。周期自适应 + warmup 兜底。
+    atr_used = max(1, min(int(atr_period), n))
+    atrs = atr_series(highs, lows, closes, atr_used)
+    if any(a is None for a in atrs):
+        trs = true_range(highs, lows, closes)
+        cum_tr = 0.0
+        for _i in range(n):
+            cum_tr += trs[_i]
+            if atrs[_i] is None:
+                atrs[_i] = cum_tr / (_i + 1)
 
     ph = pivothigh(highs, ms_len, ms_len)
     pl = pivotlow(lows, ms_len, ms_len)
@@ -318,11 +388,12 @@ def compute_smc_events(
                   times[idx], idx, vols[idx],
                   dir=(1 if closes[idx] > opens[idx] else -1))
 
-    def find_extreme(use_max: bool, from_idx: int) -> int:
-        if from_idx >= n - 1:
-            return n - 1
-        rng = range(max(0, from_idx), n)
-        return max(rng, key=lambda j: highs[j]) if use_max else min(rng, key=lambda j: lows[j])
+    # 原版 msmode 默认 "Adjusted Points" → find() 带 useob 微调
+    useob_find = str(ms_mode).lower() != "extreme"
+    recent_win = str(wichlap).lower() != "old"
+
+    def find_extreme(use_max: bool, from_idx: int, useob: bool = False) -> int:
+        return _find_extreme(highs, lows, use_max, from_idx, n, useob)
 
     for i in range(1, n):
         if ph[i] is not None:
@@ -357,34 +428,36 @@ def compute_smc_events(
             continue
 
         if start == 1:
+            # 原版这里是 switch —— 只执行第一个命中的分支，四个分支互斥。
+            # 写成独立 if 会让同一根 bar 既记扫荡又记 CHoCH。
             if buildsweep and lows[i] <= choch and closes[i] >= choch:
                 dnsweep = True
                 choch = lows[i]
                 push_event("choch", "bear", choch, i, sweep=True)
-            if buildsweep and highs[i] >= bos and closes[i] <= bos:
+            elif buildsweep and highs[i] >= bos and closes[i] <= bos:
                 upsweep = True
                 bos = highs[i]
                 push_event("choch", "bull", bos, i, sweep=True)
-            if closes[i] <= choch:
-                idbull = find_extreme(True, loc)
-                bull_obs.insert(0, make_ob(True, _ob_cords(highs, lows, atrs, True, idbull, ob_mode), idbull))
+            elif closes[i] <= choch:
+                # 原版 ms.find(false, ...) —— bull OB 取「最低点」那根蜡烛
+                idbull = find_extreme(False, loc, useob_find)
+                bull_obs.insert(0, make_ob(True, _ob_cords(highs, lows, atrs, True, idbull, ob_mode, ob_atr_len), idbull))
                 trend = BEAR
-                old_bos = bos
+                # 原版 ms.choch := ms.bos —— 不做 fallback，bos 为 na 时 choch 也是 na
+                choch = bos
                 bos = None
-                choch = old_bos if old_bos is not None else highs[i]
                 start = 2
                 loc = temp = i
                 main = lows[i]
                 last_txt = "choch"
                 push_event("choch", "bear", closes[i], i)
                 continue
-            if closes[i] >= bos:
-                idbear = find_extreme(True, loc)
-                bear_obs.insert(0, make_ob(False, _ob_cords(highs, lows, atrs, False, idbear, ob_mode), idbear))
+            elif closes[i] >= bos:
+                idbear = find_extreme(True, loc, useob_find)
+                bear_obs.insert(0, make_ob(False, _ob_cords(highs, lows, atrs, False, idbear, ob_mode, ob_atr_len), idbear))
                 trend = BULL
-                old_choch = choch
+                # 原版 ms.choch := ms.choch —— 保持不变
                 bos = None
-                choch = old_choch if old_choch is not None else lows[i]
                 start = 2
                 loc = temp = i
                 main = highs[i]
@@ -396,12 +469,14 @@ def compute_smc_events(
             if trend == BEAR:
                 if lows[i] <= main:
                     main, temp = lows[i], i
-                if bos is not None and php and php[0] < choch:
+                # 原版 msmode == "Adjusted Points" 且 bar_index % mslen == 0 才调整
+                if (bos is not None and useob_find and i % ms_len == 0
+                        and php and php[0] < choch):
                     choch, loc, temp = php[0], phn[0], phn[0]
                 if bos is None:
+                    # 原版这里只建立 BOS 线（ms.bos := ms.main），不设 ms.txt
                     if crossup and closes[i] > opens[i] and closes[i - 1] > opens[i - 1]:
                         bos, loc = main, temp
-                        push_event("bos", "bear", bos, i)
                 if bos is not None and buildsweep and lows[i] <= bos and closes[i] >= bos:
                     dnsweep = True
                     bos = lows[i]
@@ -409,10 +484,10 @@ def compute_smc_events(
                 elif bos is not None and closes[i] <= bos:
                     last_txt = "bos"
                     push_event("bos", "bear", bos, i)
-                    idbear = find_extreme(True, loc)
-                    bear_obs.insert(0, make_ob(False, _ob_cords(highs, lows, atrs, False, idbear, ob_mode), idbear))
+                    idbear = find_extreme(True, loc, useob_find)
+                    bear_obs.insert(0, make_ob(False, _ob_cords(highs, lows, atrs, False, idbear, ob_mode, ob_atr_len), idbear))
                     bos = None
-                    idh = find_extreme(True, loc if loc else i)
+                    idh = find_extreme(True, loc if loc else i, useob_find)
                     choch, loc = highs[idh], idh
                 if choch is not None and buildsweep and highs[i] >= choch and closes[i] <= choch:
                     upsweep = True
@@ -421,21 +496,29 @@ def compute_smc_events(
                 elif choch is not None and closes[i] >= choch:
                     last_txt = "choch"
                     push_event("choch", "bull", choch, i)
-                    idbull = find_extreme(True, loc)
-                    bull_obs.insert(0, make_ob(True, _ob_cords(highs, lows, atrs, True, idbull, ob_mode), idbull))
-                    trend = BULL
+                    idbull = find_extreme(False, loc, useob_find)
+                    bull_obs.insert(0, make_ob(True, _ob_cords(highs, lows, atrs, True, idbull, ob_mode, ob_atr_len), idbull))
+                    # 原版 switch：bos 为 na 时用 find 的低点，否则沿用 bos
+                    if bos is None:
+                        id_lo = find_extreme(False, loc if loc else i, useob_find)
+                        choch = lows[id_lo]
+                    else:
+                        choch = bos
                     bos = None
+                    trend = BULL
                     main = highs[i]
                     loc = temp = i
             else:
                 if highs[i] >= main:
                     main, temp = highs[i], i
-                if bos is not None and plp and plp[0] > choch:
+                # 原版 msmode == "Adjusted Points" 且 bar_index % mslen == 0 才调整
+                if (bos is not None and useob_find and i % ms_len == 0
+                        and plp and plp[0] > choch):
                     choch, loc, temp = plp[0], pln[0], pln[0]
                 if bos is None:
+                    # 原版这里只建立 BOS 线，不设 ms.txt
                     if crossdn and closes[i] < opens[i] and closes[i - 1] < opens[i - 1]:
                         bos, loc = main, temp
-                        push_event("bos", "bull", bos, i)
                 if bos is not None and buildsweep and highs[i] >= bos and closes[i] <= bos:
                     upsweep = True
                     bos = highs[i]
@@ -443,10 +526,10 @@ def compute_smc_events(
                 elif bos is not None and closes[i] >= bos:
                     last_txt = "bos"
                     push_event("bos", "bull", bos, i)
-                    idbull = find_extreme(True, loc)
-                    bull_obs.insert(0, make_ob(True, _ob_cords(highs, lows, atrs, True, idbull, ob_mode), idbull))
+                    idbull = find_extreme(False, loc, useob_find)
+                    bull_obs.insert(0, make_ob(True, _ob_cords(highs, lows, atrs, True, idbull, ob_mode, ob_atr_len), idbull))
                     bos = None
-                    idl = find_extreme(False, loc if loc else i)
+                    idl = find_extreme(False, loc if loc else i, useob_find)
                     choch, loc = lows[idl], idl
                 if choch is not None and buildsweep and lows[i] <= choch and closes[i] >= choch:
                     dnsweep = True
@@ -455,10 +538,16 @@ def compute_smc_events(
                 elif choch is not None and closes[i] <= choch:
                     last_txt = "choch"
                     push_event("choch", "bear", choch, i)
-                    idbear = find_extreme(True, loc)
-                    bear_obs.insert(0, make_ob(False, _ob_cords(highs, lows, atrs, False, idbear, ob_mode), idbear))
-                    trend = BEAR
+                    idbear = find_extreme(True, loc, useob_find)
+                    bear_obs.insert(0, make_ob(False, _ob_cords(highs, lows, atrs, False, idbear, ob_mode, ob_atr_len), idbear))
+                    # 原版 switch：bos 为 na 时用 find 的高点，否则沿用 bos
+                    if bos is None:
+                        id_hi = find_extreme(True, loc if loc else i, useob_find)
+                        choch = highs[id_hi]
+                    else:
+                        choch = bos
                     bos = None
+                    trend = BEAR
                     main = lows[i]
                     loc = temp = i
 
@@ -549,12 +638,21 @@ def compute_smc_events(
         bull_fvgs = [f for f in bull_fvgs if not f.removed]
         bear_fvgs = [f for f in bear_fvgs if not f.removed]
 
+    # 原版 overlap()/overlapFVG()：同类内去重 + 跨类（bull↔bear）双向去重。
+    # 跨类默认关闭 —— 原版那是为了画面整洁，而 bull OB 与 bear OB 重叠在 SMC 里
+    # 本就是常态（价格在同一区间来回），全删会丢掉一半的 OB 信息。
     if hide_ob_overlap:
-        bull_obs = _dedupe(bull_obs)
-        bear_obs = _dedupe(bear_obs)
+        _prune_same(bull_obs, recent_win)
+        _prune_same(bear_obs, recent_win)
+    if hide_cross_overlap:
+        _prune_cross(bull_obs, bear_obs, recent_win)
+        _prune_cross(bear_obs, bull_obs, recent_win)
     if hide_fvg_overlap:
-        bull_fvgs = _dedupe(bull_fvgs)
-        bear_fvgs = _dedupe(bear_fvgs)
+        _prune_same(bull_fvgs, recent_win)
+        _prune_same(bear_fvgs, recent_win)
+    if hide_cross_overlap:
+        _prune_cross(bull_fvgs, bear_fvgs, recent_win)
+        _prune_cross(bear_fvgs, bull_fvgs, recent_win)
 
     res.trend = trend
     res.last_event = last_txt
@@ -576,6 +674,27 @@ def compute_smc_events(
         "equilibrium": eq,
         "discount_bottom": bottom,
         "current_zone": "premium" if closes[-1] > eq else "discount",
+        "source": "full_history",
+    }
+
+    # 结构尺度：与 smc_map 同口径，让模型在本周期也有真实可引用的波动率
+    _obs = bull_obs + bear_obs
+    _fvs = bull_fvgs + bear_fvgs
+    _ob_h = [abs(o.top - o.btm) for o in _obs]
+    _fvg_w = [abs(f.top - f.btm) for f in _fvs]
+    _recent = min(20, n)
+    _rr = [highs[k] - lows[k] for k in range(n - _recent, n)]
+    res.structure_scale = {
+        "atr": round(atrs[-1], 4) if atrs[-1] is not None else None,
+        "atr_period_used": atr_used,
+        "atr_degraded": atr_used < max(1, int(atr_period)),
+        "range_high": top,
+        "range_low": bottom,
+        "range_source": "full_history",
+        "ob_height_avg": round(sum(_ob_h) / len(_ob_h), 4) if _ob_h else None,
+        "fvg_width_avg": round(sum(_fvg_w) / len(_fvg_w), 4) if _fvg_w else None,
+        "recent_bar_range_avg": round(sum(_rr) / len(_rr), 4),
+        "recent_bars": _recent,
     }
 
     for e in res.events:
@@ -674,4 +793,5 @@ def smc_events_summary(res: SMCEventsResult) -> dict:
         "fvgs": {"bull": [_f(x) for x in res.bull_fvgs[:5]],
                  "bear": [_f(x) for x in res.bear_fvgs[:5]]},
         "premium_discount": res.premium_discount,
+        "structure_scale": res.structure_scale,
     }

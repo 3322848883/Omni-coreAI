@@ -1,0 +1,23 @@
+bot_id: pt-b2
+enabled: false
+env: paper
+exchange: gate
+symbols: [BTC_USDT]
+max_notional_usd: 3000
+label_prefix: ptb2
+position_policy: free
+require_sl: true
+paper:
+  feed_exchange: gate
+  initial_capital: 5000
+  leverage: 20
+strategist:
+  enabled: false
+  prompt_file: prompts/ict_pa.md
+  timeframe: 5m
+  candles: 100
+  market: {mode: hybrid, indicators: [ema20, atr14], timeframes: [5m, 15m, 1h], extra_candles: 80}
+  write_hold: false
+  tools: {enabled: true, native: true, max_rounds: 3}
+  risk: {min_confidence: 0.3, max_chips: 1, max_notional_usd: 3000}
+  llm: {provider: gw-flash, model: global:deepseek-v4.1-flash-sg, reasoning_effort: medium}

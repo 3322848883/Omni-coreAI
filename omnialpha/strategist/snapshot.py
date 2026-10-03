@@ -169,7 +169,7 @@ def collect_snapshot(
                 env=env,
                 bot_root=bot_root,
             )
-            rows = attach_indicators(list(result.rows), cfg.indicators or None)
+            rows = attach_indicators(list(result.rows), cfg.indicators)
             entry["candles"] = rows
             entry["candle_source"] = result.source
             entry["stale"] = result.stale
@@ -183,7 +183,7 @@ def collect_snapshot(
             if result.error:
                 entry["candles_error"] = result.error
             if rows:
-                entry["indicators"] = latest_indicators(rows, cfg.indicators or None)
+                entry["indicators"] = latest_indicators(rows, cfg.indicators)
 
             # multi-timeframe extras (compact: last N bars + latest indicators)
             extra_tfs = [str(tf).lower() for tf in (getattr(cfg, "extra_timeframes", None) or [])]
@@ -197,10 +197,10 @@ def collect_snapshot(
                             client, sym, tf, n_extra,
                             market_cfg=cfg, env=env, bot_root=bot_root,
                         )
-                        xrows = attach_indicators(list(xres.rows), cfg.indicators or None)
+                        xrows = attach_indicators(list(xres.rows), cfg.indicators)
                         entry["tf"][tf] = {
                             "candles": xrows[-n_extra:] if xrows else [],
-                            "indicators": latest_indicators(xrows, cfg.indicators or None) if xrows else {},
+                            "indicators": latest_indicators(xrows, cfg.indicators) if xrows else {},
                             "source": xres.source,
                             "stale": xres.stale,
                         }

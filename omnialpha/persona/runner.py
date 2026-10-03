@@ -283,10 +283,21 @@ class PersonaRunner:
                     }
             self.discussion_log.append(round_rec)
 
-            # 应用修正
+            # 应用修正 —— **必须连 chips 一起改**。
+            # fuse_plans._norm_dir 与 _execute 都优先读 `chips[0].action`，
+            # 只改 `decision` 的话讨论结果进不了融合（线上实测：三人讨论后都改成
+            # stop_entry_long，融合票仍是讨论前的 hold/long/hold）。
             if discussions:
                 for bot_id, revised in discussions.items():
-                    current[bot_id] = {**current[bot_id], **revised}
+                    merged = {**current[bot_id],
+                              **{k: v for k, v in revised.items() if k != "chip"}}
+                    chip = revised.get("chip")
+                    if chip is None:
+                        merged["chips"] = []
+                    else:
+                        rest = list((current[bot_id].get("chips") or [])[1:])
+                        merged["chips"] = [chip] + rest
+                    current[bot_id] = merged
             else:
                 # 没有有效修正，退出
                 return current, round_num

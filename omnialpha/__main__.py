@@ -24,6 +24,21 @@ def _root_from_args(args) -> Path:
     return Path.cwd().resolve()
 
 
+def _resolve_list_cfg(mk: dict, key: str, default: list) -> list:
+    """区分「没配」（用默认）与「显式配空」（真的关掉）。
+
+    **不能写 `mk.get(key) or default`** —— `[]` 是 falsy，那样写会让
+    `indicators: []` 静默退回默认值，「关掉指标」这个配置永远不生效。
+    这个坑在本项目里已经出现两次（配置层 + CLI 显示层），所以抽成函数并加测试。
+
+    语义：键存在且非 null → 用它的值（`[]` 就是关掉）；
+    键缺失或为 null → 用默认。
+    """
+    if mk.get(key) is not None:
+        return [str(x) for x in (mk[key] or [])]
+    return list(default)
+
+
 def _build_plan_runner(bot, paths: ProjectPaths):
     from .strategist.llm_client import LLMClient, LLMConfig
     from .strategist.loop import PlanRunner, StrategistConfig
@@ -57,12 +72,14 @@ def _build_plan_runner(bot, paths: ProjectPaths):
             exchange=str(mk.get("exchange") or bot.exchange or "gate").strip().lower(),
             stale_factor=2.0 if mk.get("stale_factor") is None else float(mk.get("stale_factor")),
             health_url=mk.get("health_url"),
-            indicators=[str(x) for x in (mk.get("indicators") or ["ema20", "ema50", "atr14", "rsi14"])],
+            indicators=_resolve_list_cfg(mk, "indicators",
+                                        ["ema20", "ema50", "atr14", "rsi14"]),
             extra_timeframes=(
                 list(mk.get("timeframes") or mk.get("extra_timeframes") or [])
             ),
             extra_candles=int(mk.get("extra_candles") or 20),
-            refresh=[str(x) for x in (mk.get("refresh") or ["ticker", "stats", "orderbook"])],
+            refresh=_resolve_list_cfg(mk, "refresh",
+                                      ["ticker", "stats", "orderbook"]),
         ),
         env=bot.env,
         bot_root=paths.root,
@@ -78,6 +95,24 @@ def _build_plan_runner(bot, paths: ProjectPaths):
         llm=LLMConfig(),
     )
     from .providers import resolve_llm_config
+
+    # ── 工具 / 指标配置的启动期校验 ──────────────────────────────
+    # 为什么必须在这里炸：拼错的 `deny: [sqzmo]` 会**静默地什么都不禁**，
+    # 而配置看起来是生效的（本项目反复栽的「静默失效」形态）。
+    from .strategist.indicators import IndicatorNameError, parse_indicator_name
+    from .strategist.tools import TOOL_NAMES, validate_tool_policy
+
+    validate_tool_policy(
+        allow=cfg.tools.get("allow"), deny=cfg.tools.get("deny"), known=TOOL_NAMES
+    )
+    for name in (cfg.market.indicators or []):
+        try:
+            parse_indicator_name(name)
+        except IndicatorNameError as e:
+            raise ValueError(
+                "bot %s 的 market.indicators 里有非法指标名 %r：%s"
+                % (bot.bot_id, name, e)
+            ) from e
 
     cfg.llm = resolve_llm_config(paths.root, bot_id=bot.bot_id, llm=llm)
     client = bot.create_client()
@@ -177,6 +212,62 @@ def cmd_status(args) -> int:
         out["heartbeats"] = []
         out["ledger_error"] = str(e)
     print(json.dumps(out, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_tools(args) -> int:
+    """显示每个 bot **实际生效**的工具 / 技能 / 指标。
+
+    配置的「灵活」必须配一个「看得见」—— 否则改了 yaml 却不知道有没有生效，
+    就会退回「静默失效」。这里不构造 client，纯读配置。
+    """
+    from .config import load_all_bots
+    from .strategist.tools import (
+        META_TOOL_NAMES,
+        available_native_tools,
+        filter_tool_schemas,
+    )
+
+    paths = ProjectPaths(_root_from_args(args))
+    bots = load_all_bots(paths.config_dir)
+    ids = [args.bot] if args.bot else sorted(bots)
+    base = available_native_tools(paths.root)
+    base_names = [(t.get("function") or {}).get("name") for t in base]
+
+    for bid in ids:
+        bot = bots.get(bid)
+        if bot is None:
+            print("%s: 找不到该 bot" % bid)
+            continue
+        s = dict(bot.strategist or {})
+        tcfg = dict(s.get("tools") or {})
+        mk = dict(s.get("market") or {})
+        allow, deny = tcfg.get("allow"), tcfg.get("deny")
+        eff = filter_tool_schemas(base, allow=allow, deny=deny)
+        eff_names = [(t.get("function") or {}).get("name") for t in eff]
+        skills = s.get("skills") if s.get("skills") is not None else getattr(bot, "skills", None)
+        print("=" * 78)
+        print("bot: %s   env=%s  enabled=%s" % (bid, bot.env, getattr(bot, "enabled", None)))
+        print("  prompt     : %s" % s.get("prompt_file"))
+        print("  skills     : %s" % ("全部可见（未限制）" if skills is None else (skills or "无")))
+        # 注意 `[]` 是 falsy —— 不能写成 `mk.get("indicators") or 默认`，
+        # 否则「显式关掉指标」会被显示成（并实际退回）默认值。
+        if "indicators" in mk:
+            _ind = mk["indicators"] or []
+            ind_txt = ("、".join(str(x) for x in _ind) if _ind else "无（已显式关闭）")
+        else:
+            ind_txt = "（未配置，用默认 ema20/ema50/atr14/rsi14）"
+        print("  指标(快照)  : %s" % ind_txt)
+        print("  tools.enabled=%s  max_rounds=%s" % (
+            tcfg.get("enabled"), tcfg.get("max_rounds")))
+        print("  tools.allow: %s" % (allow or "（不限）"))
+        print("  tools.deny : %s" % (deny or "（无）"))
+        print("  → 实际可用 %d/%d 个：" % (len(eff_names), len(base_names)))
+        for n in eff_names:
+            print("      %s%s" % (n, "  [元工具]" if n in META_TOOL_NAMES else ""))
+        removed = [n for n in base_names if n not in eff_names]
+        if removed:
+            print("  → 被关掉 %d 个：%s" % (len(removed), ", ".join(removed)))
     return 0
 
 
@@ -627,6 +718,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_prun.add_argument("--bot", required=True)
     p_prun.add_argument("--root", default="")
     p_prun.set_defaults(func=cmd_paper_run)
+    p_tools = sub.add_parser("tools", help="show a bot's effective tools / skills / indicators")
+    p_tools.add_argument("--bot", default="", help="bot id (default: all bots)")
+    p_tools.add_argument("--root", default="")
+    p_tools.set_defaults(func=cmd_tools)
+
     p_persona = sub.add_parser("persona-run", help="multi-persona co-managed orders (fuse then execute)")
     p_persona.add_argument("--group", default="", help="persona group name (default: all enabled)")
     p_persona.add_argument("--config", default="", help="persona_groups.yaml path")

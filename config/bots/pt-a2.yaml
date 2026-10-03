@@ -1,0 +1,22 @@
+bot_id: pt-a2
+enabled: false
+env: paper
+exchange: gate
+symbols: [BTC_USDT]
+max_notional_usd: 3000
+label_prefix: pta2
+position_policy: free
+require_sl: true
+paper:
+  feed_exchange: gate
+  initial_capital: 5000
+  leverage: 20
+strategist:
+  enabled: false
+  prompt_file: prompts/smc_trader.md
+  timeframe: 15m
+  candles: 30
+  write_hold: false
+  tools: {enabled: true, native: true, max_rounds: 3}
+  risk: {min_confidence: 0.3, max_chips: 1, max_notional_usd: 3000}
+  llm: {provider: gw-flash, model: global:deepseek-v4.1-flash-sg, reasoning_effort: medium}
