@@ -96,5 +96,38 @@ class GateExchange(ExchangeClient):
     def close_position(self, contract: str, side: Optional[str] = None, size: int = 0):
         return self._c.close_position(self._s(contract), side=side, size=size)
 
+    # ── 补齐透传：这 6 个此前没有包装，调用即 AttributeError ──
+    # 生产调用点实测：`get_available_usdt`（executor 的 size_pct / margin_pct 分支，
+    # 4 处）、`place_trailing_order` / `stop_trailing_orders`（`trail` / `cancel_trail_all`
+    # 动作，都在 schema 的允许集里 → 可达）。`public_get` / `get_contracts` /
+    # `rest_signed_request` 当前调用方少，但一并补齐。
+    #
+    # 这与当初**触发子系统整个死掉 178 个周期**是同一类问题（那边是 `public_get`
+    # 缺失、被 `except` 兜底成 False）—— **适配器必须暴露底层客户端的完整接口，
+    # 否则调用方在运行时才炸**。测试里的假客户端实现了完整接口，所以这个缺口
+    # 在单测里完全隐形。现在由 `tests/test_exchange_proxy_complete.py` 守着。
+
+    def get_available_usdt(self) -> float:
+        return self._c.get_available_usdt()
+
+    def get_contracts(self, max_age_sec: int = 3600) -> dict:
+        return self._c.get_contracts(max_age_sec=max_age_sec)
+
+    def place_trailing_order(self, body: dict) -> dict:
+        b = dict(body)
+        b["contract"] = self._s(b.get("contract") or b.get("symbol") or "")
+        return self._c.place_trailing_order(b)
+
+    def stop_trailing_orders(self, contract: Optional[str] = None):
+        return self._c.stop_trailing_orders(self._s(contract) if contract else None)
+
+    def public_get(self, path: str, query_string: str = "", attempts: int = 3) -> Any:
+        return self._c.public_get(path, query_string, attempts=attempts)
+
+    def rest_signed_request(
+        self, method: str, path: str, query_string: str = "", body: Any = None
+    ) -> Any:
+        return self._c.rest_signed_request(method, path, query_string=query_string, body=body)
+
     def raw(self) -> GateClient:
         return self._c
