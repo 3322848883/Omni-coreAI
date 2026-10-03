@@ -725,7 +725,8 @@ class PlanRunner:
         """
         try:
             from .vision import generate_and_encode
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            log.warning("vision 模块不可用，本轮不发 K 线图: %s", e)
             return []
         symbols = self.cfg.symbols or []
         if not symbols:
@@ -763,8 +764,12 @@ class PlanRunner:
                 b64 = generate_and_encode(merged, symbol=sym, timeframe=tf)
                 if b64:
                     out.append(b64)
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
+                log.warning("生成 %s 周期 K 线图失败，该周期本轮无图: %s", tf, e)
                 continue
+        if not out and tfs:
+            # vision 开着却一张图都没生成 —— 此前是彻底静默的，等于「不发图但没人知道」
+            log.warning("vision 已开启但一张图都没生成（请求周期 %s），本轮将无图发给模型", tfs)
         return out
 
     def _generate_chart(self, snapshot: dict) -> Optional[str]:

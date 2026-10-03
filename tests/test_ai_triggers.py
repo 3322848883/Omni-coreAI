@@ -42,6 +42,38 @@ class TestTriggerPolicy(unittest.TestCase):
                 ["BTC_USDT"],
             )
 
+    def test_symbol_omitted_defaults_when_single_symbol(self):
+        """单币种 bot 漏写 symbol → 自动补上，不拒整条触发器。
+
+        线上实测：`trigger_rejected: symbol not allowed: ''` 在提示词补全参数范围
+        （`ecf409f`）之后**仍是唯一还在发生的触发器拒绝**（2026-10-02 之后 5 次），
+        而单币种 bot 漏写 symbol 时意图毫无歧义 —— 白烧一轮没有道理。
+        """
+        out = validate_trigger_payload(
+            {"type": "price_break", "lookback": 20, "side": "low"},
+            AITriggerPolicy(enabled=True),
+            ["BTC_USDT"],
+        )
+        self.assertEqual(out["symbol"], "BTC_USDT")
+
+    def test_symbol_omitted_still_rejected_when_multi_symbol(self):
+        """多币种 bot 漏写 symbol → 仍然拒（这时真的猜不出用哪个币）。"""
+        with self.assertRaises(TriggerPolicyError):
+            validate_trigger_payload(
+                {"type": "price_break", "lookback": 20, "side": "low"},
+                AITriggerPolicy(enabled=True),
+                ["BTC_USDT", "ETH_USDT"],
+            )
+
+    def test_symbol_wrong_still_rejected(self):
+        """写错 symbol 仍然拒 —— 新逻辑只补「空」，不纠错。"""
+        with self.assertRaises(TriggerPolicyError):
+            validate_trigger_payload(
+                {"type": "price_break", "symbol": "DOGE_USDT", "lookback": 20},
+                AITriggerPolicy(enabled=True),
+                ["BTC_USDT"],
+            )
+
     def test_store_add_ttl_and_max(self):
         with tempfile.TemporaryDirectory() as td:
             store = AITriggerStore(Path(td) / "ai_triggers.json", AITriggerPolicy(enabled=True, max_active=2))

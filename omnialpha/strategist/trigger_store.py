@@ -91,6 +91,12 @@ def validate_trigger_payload(
         raise TriggerPolicyError(f"type not allowed: {ctype!r}")
     symbol = str(raw.get("symbol") or "").strip().upper()
     allowed = tuple(policy.allow_symbols) or tuple(bot_symbols or [])
+    if not symbol and len(allowed) == 1:
+        # 单币种 bot 漏写 symbol 时意图**没有歧义** —— 直接补上，而不是把整条触发器拒掉。
+        # 线上实测：`trigger_rejected: symbol not allowed: ''` 在提示词补全参数范围之后
+        # 仍是唯一还在发生的触发器拒绝（2026-10-02 修复后 5 次），纯属白烧一轮。
+        # 多币种时仍然拒 —— 那种情况下「用哪个币」是真的猜不出来。
+        symbol = str(allowed[0]).strip().upper()
     if allowed and symbol not in allowed:
         raise TriggerPolicyError(f"symbol not allowed: {symbol!r}")
 
