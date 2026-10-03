@@ -66,9 +66,11 @@ strategist:
     max_active: 5
     default_cooldown_sec: 300
   risk:
-    min_confidence: 0.55
+    min_confidence: 0.6
     max_chips: 1            # SMC 提示词要求单腿
     max_notional_usd: 10000
+  # skill 白名单：新装 skill 不会自动进实盘（发布≠可用）
+  skills: [price-action-trading]
   llm:
     provider: gw-flash
     reasoning_effort: high
