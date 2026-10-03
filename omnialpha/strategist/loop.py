@@ -107,6 +107,9 @@ class PlanRunner:
         self._ai_store = AITriggerStore(self.history_dir / "ai_triggers.json", self._ai_policy)
         # 工具使用统计（每轮累计，随 thinking 落盘）——防 AI 偷懒不查数据
         self.tool_usage: list[dict] = []
+        # 本轮快照摘要（设计 S2.4 的 journal `snapshot_digest`）；
+        # persona 侧写 journal 时从这里取。
+        self.last_snapshot_digest: str = ""
 
     def _record_tool_use(self, name: str, args: dict, result: Any) -> None:
         """记录一次工具调用：工具名、参数摘要、结果规模，以及完整返回。
@@ -199,6 +202,52 @@ class PlanRunner:
             + "\n换条件请用 trigger_ops remove 旧的再 add；已满就别再 add（会被拒）。"
         )
 
+    def _order_context_for(self, root: Path, bid: str) -> Optional[dict]:
+        """本 bot 当前持仓的订单上下文（设计 S2.3）。
+
+        订单库是 persona 组共享的（`data/shared/orders/`），按 `members` /
+        `target_account` 关联到本 bot。单 bot 策略没有共享订单 → 返回 None，
+        prompt 里显示「当前无持仓」。
+
+        有多个 open 单时取 `updated_at` 最新的（设计是单币单计划，正常只有一个）。
+        """
+        try:
+            from ..persona.orders import SharedOrderStore
+            store = SharedOrderStore(root)
+            mine = [r for r in store.list_open()
+                    if bid in (r.get("members") or []) or r.get("target_account") == bid]
+            if not mine:
+                return None
+            mine.sort(key=lambda r: int(r.get("updated_at") or 0), reverse=True)
+            return store.get_order_context(mine[0]["order_id"])
+        except Exception as e:  # noqa: BLE001
+            log.warning("order context lookup failed: %s", e)
+            return None
+
+    def _record_cache_usage(self, root: Path, bid: str, system: str) -> tuple[int, str]:
+        """记录本轮 prompt 缓存命中 + 前缀稳定性，返回 (命中token, 模型名)。
+
+        返回值直接喂给 journal（设计 S2.4 的 `prompt_cache_hit_tokens` / `llm_model`），
+        这样「缓存命中率」这个成本主杠杆才是可测量的，而不是恒 0。
+        """
+        hit, model = 0, ""
+        try:
+            from ..memory import CacheGuard
+            if hasattr(self.llm, "cache_hit_tokens"):
+                hit = int(self.llm.cache_hit_tokens())
+            if hasattr(self.llm, "prompt_tokens"):
+                total = int(self.llm.prompt_tokens())
+            else:
+                total = 0
+            model = str(getattr(self.llm, "last_model", "") or "")
+            guard = CacheGuard(root, bid)
+            guard.record(hit, total, model=model)
+            if not guard.check_prefix(system):
+                log.warning("memory cache prefix changed this cycle — 缓存命中率会掉")
+        except Exception as e:  # noqa: BLE001
+            log.warning("cache guard failed: %s", e)
+        return hit, model
+
     def run_once(self, trigger: str = "manual") -> dict[str, Any]:
         cycle_id = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         snapshot = collect_snapshot(
@@ -225,20 +274,24 @@ class PlanRunner:
             self._prompt_risk(snapshot),
             self.cfg.symbols,
         )
-        # agent-memory：画像 + 近况事件（失败不影响本轮）
+        # agent-memory：订单上下文 + 画像 + 近况，按缓存优化顺序拼装（设计 S2.6）
+        root = self.cfg.bot_root or Path.cwd()
+        bid = self.cfg.bot_id or self.inbox.name
+        # 失败不影响本轮 —— 退回未加工的 system/user（少记忆，但不缺席）
         try:
-            from ..memory import MemoryJournal, MemoryProfile
-            root = self.cfg.bot_root or Path.cwd()
-            bid = self.cfg.bot_id or self.inbox.name
-            prof = MemoryProfile(root, bid).prompt_summary()
-            if prof:
-                system = system + "\n[画像] " + prof
-            recent = MemoryJournal(root, bid).read_recent_summaries(3)
-            if recent:
-                user = user + "\n【近期决策】\n" + "\n".join(recent)
-        except Exception:  # noqa: BLE001
-            pass
-        user = user + self._active_triggers_block()
+            from ..memory import build_context
+            ctx = build_context(
+                root, bid,
+                system_prompt=system,
+                order_context=self._order_context_for(root, bid),
+                snapshot_text=user,
+                n_recent=3,
+                extra_suffix=self._active_triggers_block(),
+            )
+            system, user = ctx["system"], ctx["user"]
+        except Exception as e:  # noqa: BLE001
+            log.warning("memory context assembly failed, using plain prompts: %s", e)
+            user = user + self._active_triggers_block()
         # vision：多周期 K 线图（可选配置）
         charts: list = []
         if self.cfg.vision:
@@ -246,9 +299,13 @@ class PlanRunner:
                 charts = self._generate_charts(snapshot)
             except Exception:  # noqa: BLE001
                 charts = []
-        root = self.cfg.bot_root or Path.cwd()
-        bid = self.cfg.bot_id or self.inbox.name
         degraded: Optional[str] = None
+        # 缓存护栏：本轮 usage 清零（工具循环会多次调用 LLM，只看单次会漏算）
+        try:
+            if hasattr(self.llm, "reset_usage"):
+                self.llm.reset_usage()
+        except Exception:  # noqa: BLE001
+            pass
         t_llm = time.time()
         try:
             text = self._chat_with_tools(system, user, chart_base64=charts or None)
@@ -257,6 +314,8 @@ class PlanRunner:
             degraded = f"llm_failed: {e}"
             text = ""
         llm_latency = round(time.time() - t_llm, 1)
+        # 缓存护栏：记录 prompt 缓存命中 + 前缀稳定（设计 S2.6 / T7）
+        cache_hit, llm_model = self._record_cache_usage(root, bid, system)
         # monitoring: heartbeat（LLM 调用完成；延迟取真实值，别再硬编码 0）
         try:
             from ..monitoring import HealthMonitor
@@ -309,21 +368,34 @@ class PlanRunner:
         risk_result = apply_risk(plan, self.cfg.risk)
         payload = chips_to_signal(plan, risk_result, bot_id=self.cfg.bot_id or self.inbox.name)
         orders = payload.get("orders") or []
-        # agent-memory：每轮决策入 journal
+        # agent-memory：每轮决策入 journal（含快照摘要/模型/缓存命中，设计 S2.4）
         try:
             from ..memory import MemoryJournal
-            root = self.cfg.bot_root or Path.cwd()
-            bid = self.cfg.bot_id or self.inbox.name
             acts = [c.action for c in plan.chips]
+            digest = MemoryJournal.snapshot_digest(snapshot)
+            self.last_snapshot_digest = digest
             MemoryJournal(root, bid).append(
                 cycle_id=plan.cycle_id,
                 decision=",".join(acts) or "hold",
                 reasoning=plan.reasoning[:500],
+                snapshot_digest=digest,
+                llm_model=llm_model,
+                prompt_cache_hit_tokens=cache_hit,
                 executed=bool(orders),
                 exec_result={"orders": len(orders), "trigger": trigger},
             )
         except Exception:  # noqa: BLE001
             pass
+        # agent-memory：遗忘机制（TTL 归档 + 超龄已平仓清理，设计 S2.7）
+        # 内部按间隔（默认 24h）判断，未到点直接返回 —— 每轮调是安全的。
+        try:
+            from ..memory import run_gc
+            gc = run_gc(root, bot_id=bid)
+            if gc.get("ran") and (gc.get("archived") or gc.get("removed")):
+                log.info("memory gc: archived=%s removed=%s",
+                         gc.get("archived"), gc.get("removed"))
+        except Exception as e:  # noqa: BLE001
+            log.warning("memory gc failed: %s", e)
         if not orders:
             if self.cfg.write_hold:
                 write_hold_audit(self.history_dir, plan, cycle_id=plan.cycle_id)

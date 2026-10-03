@@ -18,13 +18,21 @@ def build_context(
     bot_id: str,
     *,
     system_prompt: str,
-    order_context: Optional[dict],
-    snapshot: dict,
+    order_context: Optional[dict] = None,
+    snapshot: Optional[dict] = None,
+    snapshot_text: str = "",
     n_recent: int = 3,
+    extra_suffix: str = "",
 ) -> dict:
     """组装每轮主上下文。
 
-    返回 {"messages": [...], "cacheable_prefix_tokens": int, "dynamic_tokens": int}
+    顺序按缓存优化（设计 S2.6）：**固定前缀在前、变化内容殿后**
+    system（人设+契约+工具+画像） → 订单上下文 → recent_events → 快照 → 附加块。
+
+    `snapshot_text` 非空时直接用它当「本轮快照」段（调用方已渲染好，例如带了
+    风控/品种宇宙），否则由 `snapshot` 格式化而来 —— 两条路都不丢内容。
+
+    返回 messages + 组装好的 system/user 字符串 + token 粗估。
     """
     journal = MemoryJournal(root, bot_id)
     profile = MemoryProfile(root, bot_id)
@@ -34,20 +42,15 @@ def build_context(
     system_parts = [system_prompt]
     if profile_summary:
         system_parts.append(f"\n[画像] {profile_summary}")
-    system_msg = "\n".join(system_parts)
+    system = "\n".join(system_parts)
 
-    # 订单上下文框架（结构稳定，内容动态）
+    # ── 动态后缀（缓存未命中区）───────────────────────
     order_block = _format_order_context(order_context)
-
-    # recent_events 内容
     recent_summaries = journal.read_recent_summaries(n_recent)
     recent_block = _format_recent(recent_summaries)
+    snapshot_block = snapshot_text or _format_snapshot(snapshot or {})
 
-    # ── 动态后缀 ──────────────────────────────────────
-    snapshot_block = _format_snapshot(snapshot)
-
-    # ── 消息列表（OpenAI/DeepSeek chat format）────────
-    user_content = f"""[订单上下文]
+    user = f"""[订单上下文]
 {order_block}
 
 [近况]
@@ -57,18 +60,35 @@ def build_context(
 {snapshot_block}
 
 请输出 Plan JSON（含 memory_refs 引用历史决策）。"""
+    if extra_suffix:
+        user = user + "\n" + extra_suffix
 
     messages = [
-        {"role": "system", "content": system_msg},
-        {"role": "user", "content": user_content},
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
     ]
 
     return {
         "messages": messages,
+        "system": system,
+        "user": user,
         "order_context": order_context,
         "recent_summaries": recent_summaries,
         "profile_summary": profile_summary,
+        "cacheable_prefix_tokens": _est_tokens(system),
+        "dynamic_tokens": _est_tokens(user),
     }
+
+
+def _est_tokens(text: str) -> int:
+    """粗估 token 数：CJK 一字≈1 token，其余≈4 字符/token。
+
+    只用于观测（对照设计 S2.6 的 ~4k/轮预算），不参与任何控制流。
+    """
+    if not text:
+        return 0
+    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    return cjk + (len(text) - cjk + 3) // 4
 
 
 def _format_order_context(ctx: Optional[dict]) -> str:

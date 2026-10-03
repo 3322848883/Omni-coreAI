@@ -79,6 +79,11 @@ class SharedOrderStore:
         rec.setdefault("invalidation", [])
         rec["status"] = rec.get("status") or "open"
         rec["created_at"] = int(time.time())
+        # `opened_at`：设计 S2.3 要的字段。与 created_at 分开是因为订单记录也可能被
+        # 复用（同一 order_id 跨多次开仓时 created_at 是文件首次写入时间）。
+        rec.setdefault("opened_at", rec["created_at"])
+        rec.setdefault("entry_price", None)
+        rec.setdefault("size_usd", None)
         rec["updated_at"] = rec["created_at"]
         with self._lock_for(oid):
             self._write(self._path(oid), rec)

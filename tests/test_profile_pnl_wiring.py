@@ -155,5 +155,64 @@ class TestProfilePnlWiring(unittest.TestCase):
                              "log_execution 必须把 signal.meta.order_id 落进成交日志")
 
 
+class TestProfileSpecFields(unittest.TestCase):
+    """设计 S2.5 要求的字段：win_rate / avg_pnl_usd / best_act / worst_act。
+
+    原先只实现了计数（win_count / total_pnl_usd），设计里的 4 个派生字段全缺。
+    """
+
+    def test_derived_fields_present_on_fresh_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            d = MemoryProfile(Path(td), "b").load()
+            for k in ("win_rate", "avg_pnl_usd", "best_act", "worst_act", "by_action"):
+                self.assertIn(k, d, f"新画像缺字段 {k}")
+
+    def test_win_rate_and_avg_pnl_derived(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = MemoryProfile(Path(td), "b")
+            p.record_trade(pnl_usd=50.0, action="open_long")
+            p.record_trade(pnl_usd=-20.0, action="stop_entry_short")
+            d = p.load()
+            self.assertEqual(d["win_rate"], 0.5)          # 1 胜 / 2 笔
+            self.assertAlmostEqual(d["avg_pnl_usd"], 15.0)  # (50-20)/2
+            self.assertIn("胜率50%", p.prompt_summary())
+            self.assertIn("均盈亏15.0u", p.prompt_summary())
+
+    def test_best_and_worst_act_by_average_pnl(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = MemoryProfile(Path(td), "b")
+            # open_long: 平均 (30+50)/2 = 40；stop_entry_short: 平均 -20
+            p.record_trade(pnl_usd=30.0, action="open_long")
+            p.record_trade(pnl_usd=50.0, action="open_long")
+            p.record_trade(pnl_usd=-20.0, action="stop_entry_short")
+            d = p.load()
+            self.assertEqual(d["best_act"], "open_long")
+            self.assertEqual(d["worst_act"], "stop_entry_short")
+
+    def test_single_action_has_no_worst(self):
+        """只有一类动作时 worst_act 留空（拿它当「最差」会误导）。"""
+        with tempfile.TemporaryDirectory() as td:
+            p = MemoryProfile(Path(td), "b")
+            p.record_trade(pnl_usd=10.0, action="open_long")
+            d = p.load()
+            self.assertEqual(d["best_act"], "open_long")
+            self.assertEqual(d["worst_act"], "")
+
+    def test_legacy_file_without_new_fields_still_derives(self):
+        """老画像文件（只有 win_count/total_pnl_usd）读出来要立刻带上新字段。"""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "data" / "bots" / "b" / "state" / "memory_profile.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({
+                "total_trades": 4, "win_count": 3, "total_pnl_usd": 80.0,
+                "avg_hold_rounds": 5.0, "max_drawdown_usd": -10.0, "updated_at": 1,
+            }), encoding="utf-8")
+            d = MemoryProfile(root, "b").load()
+            self.assertEqual(d["win_rate"], 0.75)
+            self.assertAlmostEqual(d["avg_pnl_usd"], 20.0)
+            self.assertEqual(d["best_act"], "")
+
+
 if __name__ == "__main__":
     unittest.main()

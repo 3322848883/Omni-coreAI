@@ -176,21 +176,35 @@ class PersonaRunner:
                 detail=f"{action} {decision}",
                 by=f"fusion:{fusion.get('mode', '')}",
             )
+            # 开仓：落开仓理由 + 引用本轮 journal 索引（设计 S2.3 / FinPos memory_refs）
+            if act_key == "open":
+                reason = str((plans.get(source_bot) or {}).get("reasoning")
+                             or fusion.get("reason") or "")[:500]
+                if reason:
+                    self.orders.set_reason(order_id, reason)
+                if cycle_id:
+                    self.orders.add_memory_ref(order_id, f"journal:{cycle_id}")
             self.orders.refresh_recent_events(order_id)
             # 平仓：更新 profile
             if self._order_status_after(action) == "closed":
                 self._update_profile_on_close(order_id)
 
-        # journal 追加（每轮，含 hold）
+        # journal 追加（每轮，含 hold；含快照摘要/模型/缓存命中，设计 S2.4）
         try:
             from ..memory import MemoryJournal
             journal = MemoryJournal(self.root, source_bot or self.group.members[0])
             plan = plans.get(source_bot) or {}
+            runner = (getattr(self, "plan_runners", None) or {}).get(source_bot)
+            llm = getattr(runner, "llm", None)
+            hit = int(llm.cache_hit_tokens()) if hasattr(llm, "cache_hit_tokens") else 0
             journal.append(
                 cycle_id=cycle_id or f"c-{int(time.time())}",
                 decision=decision,
                 reasoning=str(plan.get("reasoning") or fusion.get("reason") or "")[:200],
                 memory_refs=[f"order:{order_id}"],
+                snapshot_digest=str(getattr(runner, "last_snapshot_digest", "") or ""),
+                llm_model=str(getattr(llm, "last_model", "") or ""),
+                prompt_cache_hit_tokens=hit,
                 executed=executed,
                 exec_result={"action": action, "order_id": order_id},
             )
@@ -350,24 +364,27 @@ class PersonaRunner:
             return "modify_tp"
         return "hold"
 
-    def _realized_pnl_of(self, order_id: str, target_account: str) -> Optional[float]:
-        """从目标账户的成交日志里取这笔单的**已实现盈亏**；取不到返回 None。
+    def _exec_facts_of(self, order_id: str, target_account: str) -> dict:
+        """从目标账户的成交日志里取这笔单的执行事实：已实现盈亏 + 成交价。
 
         人格组下单只是把信号写进目标账户的 inbox（`_exec_single`），由那个账户的
         `run` 进程**异步**执行 —— 所以本进程当时根本不知道成交结果，这正是原先
         `record_trade(pnl_usd=0.0)` 的由来。`tradelog.log_execution` 会把
         `signal.meta.order_id` 落进成交日志（见那里的注释），据此回连。
+
+        返回 `{"pnl": float|None, "entry_price": float|None}` —— 取不到就是 None，
+        **调用方不能拿 0 顶替**（那会把盈利单记成胜率 0%）。
         """
+        facts: dict = {"pnl": None, "entry_price": None}
         try:
             from ..paths import bot_paths
             p = bot_paths(self.root, target_account, create=False).logs / "trades.jsonl"
             if not p.is_file():
-                return None
-            # 成交日志是 append-only；我们关心的是刚平的那笔，扫尾部足够
+                return facts
+            # 成交日志是 append-only；我们关心的是这笔单，扫尾部足够
             lines = p.read_text(encoding="utf-8").splitlines()[-500:]
         except Exception:  # noqa: BLE001
-            return None
-        pnl: Optional[float] = None
+            return facts
         for ln in lines:
             try:
                 rec = json.loads(ln)
@@ -379,10 +396,18 @@ class PersonaRunner:
                 d = st.get("detail") or {}
                 if d.get("realized_pnl") is not None:
                     try:
-                        pnl = float(d["realized_pnl"])  # 同一单多次平仓 → 取最后一次
+                        facts["pnl"] = float(d["realized_pnl"])  # 同单多次平仓 → 取最后一次
                     except (TypeError, ValueError):
-                        continue
-        return pnl
+                        pass
+                # 入场价只从**开仓类**步骤取（平仓步骤的 entry_price 实为平仓成交价）
+                act = str(st.get("action") or "")
+                if facts["entry_price"] is None and act.startswith(("open", "stop_entry", "add")):
+                    px = d.get("entry_price") or d.get("fill_price") or d.get("avg_price")
+                    try:
+                        facts["entry_price"] = float(px)
+                    except (TypeError, ValueError):
+                        pass
+        return facts
 
     def _update_profile_on_close(self, order_id: str) -> None:
         """平仓后更新策略画像（确定性统计）。
@@ -391,7 +416,7 @@ class PersonaRunner:
         而 `MemoryProfile.prompt_summary()` 会把它拼进 system prompt，
         等于告诉 AI「你的策略一直在输」。比没有数据更糟。
 
-        真实盈亏从成交日志回连（`_realized_pnl_of`）；**取不到就跳过** ——
+        真实盈亏从成交日志回连（`_exec_facts_of`）；**取不到就跳过** ——
         宁可不记这一笔，也不记一条假的（信号可能还没被执行：目标账户没起 `run`）。
         """
         try:
@@ -401,7 +426,15 @@ class PersonaRunner:
                 return
             members = list(self.group.members or [])
             target = str(rec.get("target_account") or (members[0] if members else ""))
-            pnl = self._realized_pnl_of(order_id, target)
+            facts = self._exec_facts_of(order_id, target)
+            # 成交价一旦拿到就补进订单上下文（设计 S2.3 的 `entry_price`）——
+            # 开仓时成交结果未知，只能在这里回填；取不到就保持 None。
+            if facts.get("entry_price") is not None:
+                try:
+                    self.orders.update(order_id, entry_price=facts["entry_price"])
+                except Exception:  # noqa: BLE001
+                    pass
+            pnl = facts.get("pnl")
             if pnl is None:
                 self._log({"event": "profile_skip", "order_id": order_id,
                            "target_account": target,
@@ -410,7 +443,16 @@ class PersonaRunner:
             profile = MemoryProfile(self.root, members[0] if members else target)
             lifecycle = rec.get("lifecycle") or []
             hold_rounds = len([e for e in lifecycle if e.get("act") != "close"])
-            profile.record_trade(pnl_usd=pnl, hold_rounds=hold_rounds)
+            # 归类用**开仓动作**（lifecycle 首条的 detail 形如 "open_long long" /
+            # "stop_entry_short short"，取第一个词）—— 设计 S2.5 的 best_act/worst_act
+            # 要按动作看哪类进场更赚。
+            act = ""
+            for e in lifecycle:
+                if e.get("act") == "open":
+                    act = str(e.get("detail") or "").split(" ")[0]
+                    break
+            profile.record_trade(pnl_usd=pnl, hold_rounds=hold_rounds, action=act,
+                                 entry_price=float(facts.get("entry_price") or 0))
         except Exception:  # noqa: BLE001
             pass
 
@@ -559,8 +601,29 @@ class PersonaRunner:
                 pass
         return payload
 
+    def _note_invalidation(self, order_id: Optional[str], payload: dict) -> None:
+        """tp/sl 被改动时把旧价位标记为「假设失效」（设计 S2.7，Memora FAMA）。
+
+        触发点选「管理动作改了 tp/sl」：旧止盈止损代表的是**旧的行情假设**，
+        被改掉即说明那个假设不再成立 —— 这是 invalidation 唯一能自动判定的时刻。
+        """
+        if not order_id:
+            return
+        try:
+            rec = self.orders.get(order_id) or {}
+            for field in ("tp", "sl"):
+                old, new = rec.get(field), payload.get(field)
+                if old is None or new is None:
+                    continue
+                if float(old) == float(new):
+                    continue
+                self.orders.add_invalidation(order_id, field, old, new)
+        except Exception:  # noqa: BLE001
+            pass
+
     def _exec_single(self, payload: dict, order_id: Optional[str]) -> dict:
         """单账户：写 target_account 的 inbox，去重单执行。"""
+        self._note_invalidation(order_id, payload)
         target = self.group.target_account
         from ..paths import BotPaths
         inbox = BotPaths(self.root, target).inbox
@@ -574,13 +637,14 @@ class PersonaRunner:
             self.orders.update(
                 order_id,
                 status=self._order_status_after(payload.get("action", "")),
-                **{k: payload.get(k) for k in ("symbol", "tp", "sl") if payload.get(k)},
+                **{k: payload.get(k) for k in ("symbol", "tp", "sl", "size_usd") if payload.get(k)},
             )
         return {"executed": True, "topology": "single_account",
                 "target_account": target, "signal_file": str(path)}
 
     def _exec_mirror(self, payload: dict, order_id: Optional[str]) -> dict:
         """镜像：广播到各成员账户（原子写 + 校验）。"""
+        self._note_invalidation(order_id, payload)
         from ..paths import BotPaths
         delivered, failed = [], []
         for bot in self.group.members:
@@ -601,6 +665,6 @@ class PersonaRunner:
                 failed.append({"bot": bot, "error": f"{type(e).__name__}: {e}"})
         if order_id:
             self.orders.update(order_id, status="open" if "close" not in payload["action"] else "closed",
-                               **{k: payload.get(k) for k in ("symbol", "tp", "sl") if payload.get(k)})
+                               **{k: payload.get(k) for k in ("symbol", "tp", "sl", "size_usd") if payload.get(k)})
         return {"executed": not failed, "topology": "mirror_accounts",
                 "delivered": delivered, "failed": failed}

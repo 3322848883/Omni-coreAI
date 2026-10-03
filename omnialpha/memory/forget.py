@@ -57,3 +57,36 @@ def cleanup_closed_orders(root: Path, max_age_days: int = 365) -> int:
             p.unlink(missing_ok=True)
             removed += 1
     return removed
+
+
+def run_gc(root: Path, *, bot_id: str = "", max_age_days: int = 90,
+           orders_max_age_days: int = 365, interval_hours: int = 24) -> dict:
+    """按间隔执行遗忘（TTL journal 归档 + 超龄已平仓清理）。
+
+    **按间隔而不是每轮**：`archive_journal` 要全量读 journal 再重写，15 分钟一轮
+    跑一次纯属浪费。上次执行时间落 `data/shared/memory_gc.json`。
+
+    返回 `{"ran": bool, ...}` —— 未到间隔时 `ran=False`，调用方无需关心细节。
+    """
+    root = Path(root)
+    state = root / "data" / "shared" / "memory_gc.json"
+    now = int(time.time())
+    last = 0
+    try:
+        if state.exists():
+            last = int(json.loads(state.read_text(encoding="utf-8")).get("ts") or 0)
+    except Exception:  # noqa: BLE001
+        last = 0
+    interval = max(1, int(interval_hours)) * 3600
+    if last and now - last < interval:
+        return {"ran": False, "next_in_sec": interval - (now - last)}
+    archived = archive_journal(root, bot_id, max_age_days) if bot_id else 0
+    removed = cleanup_closed_orders(root, orders_max_age_days)
+    try:
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(json.dumps({
+            "ts": now, "archived": archived, "removed": removed,
+        }, ensure_ascii=False), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ran": True, "archived": archived, "removed": removed}

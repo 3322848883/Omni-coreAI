@@ -67,6 +67,46 @@ class LLMConfig:
 class LLMClient:
     def __init__(self, cfg: Optional[LLMConfig] = None):
         self.cfg = cfg or LLMConfig()
+        # 本轮累计 usage（工具循环会调多次 LLM，单次 last_usage 会漏算）
+        self.usage_total: dict = {}
+
+    def reset_usage(self) -> None:
+        """清零本轮 usage 累计。每轮 Plan 开始时调一次。"""
+        self.usage_total = {}
+
+    @staticmethod
+    def _sum_usage(acc: dict, usage: dict) -> dict:
+        """把一次调用的 usage 累加进 acc（嵌套 dict 递归；非数值跳过）。"""
+        for k, v in (usage or {}).items():
+            if isinstance(v, dict):
+                acc[k] = LLMClient._sum_usage(dict(acc.get(k) or {}), v)
+            elif isinstance(v, bool) or not isinstance(v, (int, float)):
+                continue
+            else:
+                acc[k] = acc.get(k, 0) + v
+        return acc
+
+    def cache_hit_tokens(self) -> int:
+        """本轮累计的 prompt 缓存命中 token 数。
+
+        DeepSeek 用 `prompt_cache_hit_tokens`，OpenAI 形状用
+        `prompt_tokens_details.cached_tokens` —— 两种都认，取不到算 0。
+        """
+        u = self.usage_total or {}
+        hit = u.get("prompt_cache_hit_tokens")
+        if hit is None:
+            hit = (u.get("prompt_tokens_details") or {}).get("cached_tokens")
+        try:
+            return int(hit or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def prompt_tokens(self) -> int:
+        """本轮累计的 prompt token 数（缓存命中率的分母）。"""
+        try:
+            return int((self.usage_total or {}).get("prompt_tokens") or 0)
+        except (TypeError, ValueError):
+            return 0
 
     def chat(self, system: str, user: str) -> str:
         return self.chat_messages(
@@ -154,6 +194,8 @@ class LLMClient:
                 self.last_reasoning_chain.append(self.last_reasoning)
             self.last_finish_reason = choice.get("finish_reason")
             self.last_usage = data.get("usage") or {}
+            self.usage_total = self._sum_usage(
+                dict(getattr(self, "usage_total", None) or {}), self.last_usage)
             self.last_model = data.get("model") or self.cfg.effective_model()
             tool_calls = msg.get("tool_calls") or []
         except Exception as e:  # noqa: BLE001

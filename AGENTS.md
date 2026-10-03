@@ -250,7 +250,10 @@ skill 可声明 `allowed-tools`（激活后**收窄**工具面）、`model-invoc
 **本地模拟盘（paper）**：复刻交易所语义的本地模拟交易。env: paper 即启用，行情/费率/合约元数据委托绑定的真实所，订单/持仓/资金/强平/费率结算全在本地 data/bots/<id>/paper/account.db。
 
 - 命令：python -m omnialpha paper-run --bot <id>（独立进程 + 撮合 tick 线程）
-- 配置（bot yaml paper: 段）：eed_exchange（绑定行情所）、initial_capital（默认 10000）、leverage（默认 20）、ee_rate、unding_enabled、position_mode、margin_mode、price_band_pct
+- 配置（bot yaml paper: 段）：
+eed_exchange（绑定行情所）、initial_capital（默认 10000）、leverage（默认 20）、
+ee_rate、
+unding_enabled、position_mode、margin_mode、price_band_pct
 - 成交价：**盘口价**（买→ask 卖→bid）；订单全类型（limit/market/stop_entry/TP-SL 触发/GTC/IOC/FOK/PO）
 - 强平：按初始/维持保证金反推强平价，触及即强制平仓
 - 资金费率：每 8h 取真实费率对持仓结算
@@ -263,7 +266,9 @@ skill 可声明 `allowed-tools`（激活后**收窄**工具面）、`model-invoc
 - **工具审计**：每轮 `tool_usage` + `tool_usage_summary` 随 `thinking.json` 落盘（防偷懒）
 - 共同记忆 `data/shared/orders/<order_id>.json`。`python -m omnialpha persona-run --group <name>`
 
-**记忆系统**（agent-memory）：四层记忆（Order/Journal/Profile/Working），恒定 ~4k token/轮。订单上下文含 reason/lifecycle/recent_events(top-5)/memory_refs/invalidation。决策日志 append-only 事件溯源（`state/memory_journal.jsonl`）。策略画像确定性统计（`state/memory_profile.json`）。缓存优化（稳定前缀+变化值殿后）。`omnialpha.memory` 模块。
+**记忆系统**（agent-memory）：四层记忆（Order/Journal/Profile/Working），恒定 ~4k token/轮。订单上下文含 reason/lifecycle/recent_events(top-5)/memory_refs/invalidation，**每轮按 `members`/`target_account` 关联到本 bot 并注入 prompt**。决策日志 append-only 事件溯源（`state/memory_journal.jsonl`，含 `snapshot_digest`/`llm_model`/`prompt_cache_hit_tokens`）。策略画像确定性统计（`state/memory_profile.json`，含 `win_rate`/`avg_pnl_usd`/`best_act`/`worst_act`）。上下文由 `build_context` 按缓存顺序组装（稳定前缀 → 变化值殿后）。遗忘按 24h 间隔跑（TTL 归档 + 超龄已平仓清理，状态落 `data/shared/memory_gc.json`）。
+
+**看缓存成本**：`data/bots/<id>/state/cache_stats.jsonl` 每轮一行（`hit`/`total`/`hit_rate`/`model`）；前缀稳定性摘要落 `state/cache_prefix.sha256`，变了会打 `memory cache prefix changed` 警告。缓存命中率是成本主杠杆（DeepSeek 1/50 价差）——**没有这个文件说明没在记**。
 
 **信号广播**：一信号 → 多所，目标在 `config/broadcast.yaml`（AI 碰不到）。`python -m omnialpha broadcast` 常驻分发；可选 1/2/N 个目标；逐个校验写入、失败报错；目标 bot 各自独立执行。信号内 `targets` 字段忽略（防 AI 注入）。
 
