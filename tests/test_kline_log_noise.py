@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import types
 import unittest
 from pathlib import Path
 
@@ -22,6 +23,17 @@ ROOT = Path(__file__).resolve().parents[1]
 PA = ROOT / "pa-data-source"
 if str(PA) not in sys.path:
     sys.path.insert(0, str(PA))
+
+# `kline_watcher` 顶层 `import websocket`（pa-data-source 的依赖 websocket-client），
+# 而 omnialpha 的 requirements 只有 pyyaml/matplotlib —— 跑测试的解释器里不一定有它。
+# 本测试只关心 `flush_status()` 的日志节流逻辑，不需要真的 websocket，
+# 所以缺了就塞个空壳让 import 过得去。
+# （不这么做的话：本机恰好装了 websocket 就绿、服务器没装就整条 ImportError ——
+#   实测踩到过一次，部署直接被测试失败挡住。）
+try:
+    import websocket  # noqa: F401
+except ModuleNotFoundError:
+    sys.modules["websocket"] = types.ModuleType("websocket")
 
 import kline_watcher as kw  # noqa: E402
 

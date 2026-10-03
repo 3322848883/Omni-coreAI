@@ -20,7 +20,6 @@ from omnialpha.paper.exchange import PaperExchange
 
 SYMBOL = "BTC_USDT"
 
-
 class FakeMeta:
     quanto_multiplier = 1.0
     order_size_round = 1.0
