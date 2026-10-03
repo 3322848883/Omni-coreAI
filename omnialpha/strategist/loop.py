@@ -24,7 +24,7 @@ from .prompt import build_system_prompt, build_user_prompt, load_strategy_prompt
 from .risk import RiskConfig, apply_risk
 from .schema import PlanError, parse_plan_text
 from .snapshot import collect_snapshot
-from .tools import NATIVE_TOOLS, TOOL_GUIDE, extract_tool_calls, run_tool
+from .tools import NATIVE_TOOLS, TOOL_GUIDE, available_native_tools, extract_tool_calls, run_tool
 from .triggers import check_conditions, parse_conditions
 from .trigger_store import AITriggerPolicy, AITriggerStore, TriggerPolicyError, validate_trigger_payload
 
@@ -467,8 +467,16 @@ class PlanRunner:
                 charts = []
         try:
             text = self._chat_with_tools(system, user, chart_base64=charts or None)
+            # 与 run_once 对齐：必须把 CoT 与正文一起落盘。
+            # 原先这里只传 system/user/text，而 _save_thinking 读的是 `content` / `reasoning`，
+            # 于是**多人格模式（persona-run 走 analyze_once）的 thinking.json 里
+            # reasoning_chain 与 content_head 双双为空** —— 2KB vs 单 bot 的 27KB。
+            # 后果：多人格讨论的「分析过程」不可审计，只有 plan.reasoning 那一句话。
             self._save_thinking(
-                cycle_id=cycle_id, system=system, user=user, text=text, trigger=trigger
+                cycle_id=cycle_id,
+                trigger=trigger,
+                content=text,
+                reasoning=list(getattr(self.llm, "last_reasoning_chain", []) or []),
             )
         except Exception as e:  # noqa: BLE001
             log.error("analyze llm failed: %s", e)
@@ -605,9 +613,14 @@ class PlanRunner:
             "你是交易策略人格，参与多空讨论。只输出一个 JSON 对象，不要 Markdown 前后缀。\n"
             '{"decision":"open_long|open_short|close|reduce_long|reduce_short|hold|'
             'stop_entry_long|stop_entry_short",'
-            '"confidence":0.0,"reasoning":"≤30字"}\n'
+            '"confidence":0.0,"reasoning":"≤30字",'
+            '"type":"limit|market|post_only|ioc|fok","price":0.0,"trigger_price":0.0,'
+            '"sl":0.0,"tp":0.0,"size_usd":0.0}\n'
             f"{stage_hint}\n"
-            "规则：1) decision 用英文枚举；2) confidence 0~1；3) reasoning ≤30 字。"
+            "规则：1) decision 用英文枚举；2) confidence 0~1；3) reasoning ≤30 字；"
+            "4) **入场类（open_*/stop_entry_*）必须给出 sl 与可执行价位**"
+            "（限价给 price，突破进场给 trigger_price）；"
+            "5) 给不出可执行价位就选 hold —— 讨论的结论要能直接执行，不是只表个态。"
         )
         user_prompt = (
             f"我的当前决策：{my_decision}\n我的理由：{my_reasoning}\n\n"
@@ -639,9 +652,49 @@ class PlanRunner:
             except (TypeError, ValueError):
                 conf = plan.get("confidence")
             reasoning = str(data.get("reasoning") or my_reasoning)[:30]
-            return {"decision": decision, "confidence": conf, "reasoning": reasoning}
+            # 讨论必须产出**可执行**的结论。只改 decision 而不改 chips 的话，
+            # fuse_plans._norm_dir 与 _execute 都优先读 chips[0].action ——
+            # 讨论结果根本进不了融合（线上实测：三人讨论后都改成 stop_entry_long，
+            # 融合票却仍是讨论前的 hold/long/hold，讨论成了纯日志表演）。
+            chip = self._discussion_chip(data, decision, plan)
+            if decision in ("open_long", "open_short", "stop_entry_long", "stop_entry_short") \
+                    and chip is None:
+                decision = "hold"   # 入场却给不出可执行价位 → 退回 hold，不假装能执行
+            return {"decision": decision, "confidence": conf,
+                    "reasoning": reasoning, "chip": chip}
         except Exception:  # noqa: BLE001
             return None
+
+    @staticmethod
+    def _discussion_chip(data: dict, decision: str, plan: dict) -> Optional[dict]:
+        """把讨论结论拼成可执行 chip；入场类缺 sl / 价位则返回 None（调用方退回 hold）。"""
+        chips = plan.get("chips") or []
+        base = dict(chips[0]) if chips and isinstance(chips[0], dict) else {}
+        if decision == "hold":
+            return None
+
+        def num(key):
+            try:
+                v = data.get(key)
+                return float(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        chip = dict(base)
+        chip["action"] = decision
+        chip["symbol"] = chip.get("symbol") or "BTC_USDT"
+        if decision not in ("open_long", "open_short", "stop_entry_long", "stop_entry_short"):
+            return chip          # close/reduce/modify 沿用原 chip 的执行字段
+        sl = num("sl")
+        if sl is None or sl <= 0:
+            return None          # 入场没止损 → 不可执行
+        chip["sl"] = sl
+        for key in ("price", "trigger_price", "tp", "size_usd"):
+            v = num(key)
+            if v is not None and v > 0:
+                chip[key] = v
+        chip["type"] = str(data.get("type") or chip.get("type") or "market").lower()
+        return chip
 
     def _tool_usage_summary(self) -> dict:
         """工具使用摘要：{工具名: 次数} + 是否查过数据。"""
@@ -905,9 +958,13 @@ class PlanRunner:
         allowed-tools：激活带该声明的 skill 后，后续轮次工具面收窄（skill/skill_ref 始终保留）。
         """
         META_TOOLS = {"skill", "skill_ref"}
+        # 只挂「实际能用」的工具：pa-data-source 的 aux_cache.db 不在时，那 10 个 aux
+        # 工具每次调用都只会返回 not found（实测实盘占累计调用的 7.3%）。见
+        # tools.available_native_tools 的说明。
+        base_tools = available_native_tools(self.cfg.bot_root)
         active_tools: Optional[list] = None
         for _round in range(max(1, max_rounds) + 1):
-            tools = active_tools if active_tools is not None else NATIVE_TOOLS
+            tools = active_tools if active_tools is not None else base_tools
             msg = self.llm.chat_message_full(messages, tools=tools, tool_choice="auto")
             calls = msg.get("tool_calls") or []
             if not calls:
@@ -937,7 +994,7 @@ class PlanRunner:
                     allowed = self._skill_allowed_tools(str(args.get("name") or ""))
                     if allowed:
                         keep = set(allowed) | META_TOOLS
-                        narrowed = [t for t in NATIVE_TOOLS if t["function"]["name"] in keep]
+                        narrowed = [t for t in base_tools if t["function"]["name"] in keep]
                         if narrowed:
                             active_tools = narrowed
                 messages.append({

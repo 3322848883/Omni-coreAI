@@ -1115,6 +1115,30 @@ from .tv_tools import TV_TOOL_DEFS as _TV_TOOL_DEFS  # noqa: E402
 NATIVE_TOOLS.extend(_TV_TOOL_DEFS)
 
 
+# 依赖 pa-data-source `aux_cache.db` 的工具。数据源不在时它们**每次调用只会返回
+# `aux_cache.db not found`** —— 实测实盘：trades_flow 19/19、market_stats 1/1、
+# liquidations 1/1 全失败，占累计 286 次调用的 7.3%，模型白烧轮次。
+AUX_TOOL_NAMES = (
+    "trades_flow", "liquidations", "market_stats", "tech_analysis", "coin_info",
+    "onchain", "social", "overview", "sentiment", "macro",
+)
+
+
+def available_native_tools(bot_root=None) -> list:
+    """按数据源可用性过滤后的工具 schema 列表。
+
+    数据源（`aux_cache.db`）不在时**不把那 10 个 aux 工具挂给模型** —— 模型看不到
+    就调不到，自然不会再白烧轮次。这是「AI 可见的工具面必须与系统实际能提供的一致」
+    那条原则的直接落地（同 HealthMonitor 装饰性、AI 预算 vs 闸门那一类）。
+    """
+    if _aux_db(bot_root) is not None:
+        return NATIVE_TOOLS
+    return [
+        t for t in NATIVE_TOOLS
+        if (t.get("function") or {}).get("name") not in AUX_TOOL_NAMES
+    ]
+
+
 
 
 
