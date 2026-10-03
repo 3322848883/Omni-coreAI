@@ -25,6 +25,7 @@ pa-data-source/data/
 pa-data-source/logs/
 pa-data-source/aux-data/
 pa-data-source/gate-cli.exe
+pa-data-source/gate-cli
 pa-data-source/__pycache__/
 pa-data-source/*.lock
 
