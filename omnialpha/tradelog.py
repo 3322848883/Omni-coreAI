@@ -49,6 +49,10 @@ class TradeLogger:
                 "type": "execution",
                 "bot_id": bot_id,
                 "source": source,
+                # `order_id`：人格组下单时写在 signal.meta 里。**必须落进成交日志** ——
+                # 否则「这笔单的已实现盈亏」无法回连到人格组的订单记录（memory 画像要靠它）。
+                # persona 信号没有 plan_cycle，所以不能拿 plan_cycle 当 join 键。
+                "order_id": (signal_meta or {}).get("order_id"),
                 "plan_cycle": (signal_meta or {}).get("plan_cycle") or (signal_meta or {}).get("signal_id"),
                 "strategy": (signal_meta or {}).get("strategy"),
                 "ok": report.get("ok"),

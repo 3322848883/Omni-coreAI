@@ -350,17 +350,67 @@ class PersonaRunner:
             return "modify_tp"
         return "hold"
 
+    def _realized_pnl_of(self, order_id: str, target_account: str) -> Optional[float]:
+        """从目标账户的成交日志里取这笔单的**已实现盈亏**；取不到返回 None。
+
+        人格组下单只是把信号写进目标账户的 inbox（`_exec_single`），由那个账户的
+        `run` 进程**异步**执行 —— 所以本进程当时根本不知道成交结果，这正是原先
+        `record_trade(pnl_usd=0.0)` 的由来。`tradelog.log_execution` 会把
+        `signal.meta.order_id` 落进成交日志（见那里的注释），据此回连。
+        """
+        try:
+            from ..paths import bot_paths
+            p = bot_paths(self.root, target_account, create=False).logs / "trades.jsonl"
+            if not p.is_file():
+                return None
+            # 成交日志是 append-only；我们关心的是刚平的那笔，扫尾部足够
+            lines = p.read_text(encoding="utf-8").splitlines()[-500:]
+        except Exception:  # noqa: BLE001
+            return None
+        pnl: Optional[float] = None
+        for ln in lines:
+            try:
+                rec = json.loads(ln)
+            except Exception:  # noqa: BLE001
+                continue
+            if str(rec.get("order_id") or "") != str(order_id):
+                continue
+            for st in (rec.get("steps") or []):
+                d = st.get("detail") or {}
+                if d.get("realized_pnl") is not None:
+                    try:
+                        pnl = float(d["realized_pnl"])  # 同一单多次平仓 → 取最后一次
+                    except (TypeError, ValueError):
+                        continue
+        return pnl
+
     def _update_profile_on_close(self, order_id: str) -> None:
-        """平仓后更新策略画像（确定性统计）。"""
+        """平仓后更新策略画像（确定性统计）。
+
+        **不再写死 `pnl_usd=0.0`** —— 那会把盈利单记成「胜率 0%、均盈亏 0u」，
+        而 `MemoryProfile.prompt_summary()` 会把它拼进 system prompt，
+        等于告诉 AI「你的策略一直在输」。比没有数据更糟。
+
+        真实盈亏从成交日志回连（`_realized_pnl_of`）；**取不到就跳过** ——
+        宁可不记这一笔，也不记一条假的（信号可能还没被执行：目标账户没起 `run`）。
+        """
         try:
             from ..memory import MemoryProfile
             rec = self.orders.get(order_id)
             if rec is None:
                 return
-            profile = MemoryProfile(self.root, self.group.members[0])
+            members = list(self.group.members or [])
+            target = str(rec.get("target_account") or (members[0] if members else ""))
+            pnl = self._realized_pnl_of(order_id, target)
+            if pnl is None:
+                self._log({"event": "profile_skip", "order_id": order_id,
+                           "target_account": target,
+                           "reason": "no realized_pnl yet（信号可能还没被执行）"})
+                return
+            profile = MemoryProfile(self.root, members[0] if members else target)
             lifecycle = rec.get("lifecycle") or []
             hold_rounds = len([e for e in lifecycle if e.get("act") != "close"])
-            profile.record_trade(pnl_usd=0.0, hold_rounds=hold_rounds)
+            profile.record_trade(pnl_usd=pnl, hold_rounds=hold_rounds)
         except Exception:  # noqa: BLE001
             pass
 
