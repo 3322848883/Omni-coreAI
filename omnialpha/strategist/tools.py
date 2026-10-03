@@ -975,7 +975,7 @@ NATIVE_TOOLS = [
             "name": "smc_map",
 
 
-            "description": "SMC market map (where am I): dual-timeframe trend (swing/internal), premium/discount zones, key liquidity levels (EQH/EQL), OB/FVG regions. Use for direction and location.",
+            "description": "SMC market map (where am I): dual-timeframe trend (swing/internal), premium/discount zones, key liquidity levels (EQH/EQL), OB/FVG regions. Use for direction and location. NOTE: premium_discount here is computed from the LAST SWING RANGE (trailing top/bottom); smc_events computes the same-named field from FULL HISTORY — do NOT compare premium_top/equilibrium/current_zone across the two tools, read each one's own `source` field. bar/bar_index is relative to this call's window and NOT comparable across tools or timeframes; use `time` (unix sec) to align. FIELD NOTES: order_blocks[].bl_pos/br_pos = buy/sell activity bar COUNTS inside the OB (not price levels); [].vol_share = this OB's share among OBs of the SAME direction (sums to 1 per direction), not absolute volume.",
 
 
             "parameters": {
@@ -993,7 +993,7 @@ NATIVE_TOOLS = [
                     "tf": {"type": "string", "enum": ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]},
 
 
-                    "limit": {"type": "integer", "minimum": 30, "maximum": 300},
+                    "limit": {"type": "integer", "minimum": 30, "maximum": 300, "description": "Minimum bars to analyze. The tool internally fetches at least 500 bars so ta.atr(200) stays valid and the structure state machine is fully warmed up — results are identical regardless of the limit you pass. See bars_analyzed in the result for the actual count."},
 
 
                 },
@@ -1023,7 +1023,7 @@ NATIVE_TOOLS = [
             "name": "smc_events",
 
 
-            "description": "SMC structure events (what just fired): pivot BOS/CHoCH event stream, liquidity sweeps (x), order blocks with breakers/activity, FVG with breakers/raids. Use for timing and triggers.",
+            "description": "SMC structure events (what just fired): pivot BOS/CHoCH event stream, liquidity sweeps (x), order blocks with breakers/activity, FVG with breakers/raids. Use for timing and triggers. NOTE: premium_discount here is computed from FULL HISTORY (max high / min low); smc_map computes the same-named field from the last SWING RANGE — do NOT compare them, read each one's own `source` field. bar is relative to this call's window and NOT comparable across tools or timeframes; use `time` (unix sec) to align. FIELD NOTES: order_blocks[].dir = the OB candle's own direction (1 = close>open), NOT the OB's bias; [].bl_pos/br_pos = buy/sell activity bar COUNTS (not price levels); [].vol_share = this OB's share among OBs of the SAME direction (sums to 1 per direction), not absolute volume; sweeps[].kind = which structure line got swept (choch/bos), NOT the sweep type.",
 
 
             "parameters": {
@@ -1041,7 +1041,7 @@ NATIVE_TOOLS = [
                     "tf": {"type": "string", "enum": ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]},
 
 
-                    "limit": {"type": "integer", "minimum": 30, "maximum": 300},
+                    "limit": {"type": "integer", "minimum": 30, "maximum": 300, "description": "Minimum bars to analyze. The tool internally fetches at least 500 bars so ta.atr(200) stays valid and the structure state machine is fully warmed up — results are identical regardless of the limit you pass. See bars_analyzed in the result for the actual count."},
 
 
                 },
