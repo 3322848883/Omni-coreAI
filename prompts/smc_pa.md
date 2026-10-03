@@ -54,11 +54,11 @@
 
 ## 对接执行（仅策略差异点；工具与字段枚举以系统契约为准）
 
-- **必用** `smc_map` / `smc_events`，且**逐项读取**：`order_blocks` / `sweeps` / `fvgs` / `events` / `premium_discount`。**未逐项读完，不得下「无信号 / 无扫荡 / 无 OB」的结论。**
+- **必用** `smc_map` / `smc_events`，且**逐项读取**：`order_blocks` / `fvgs` / `events` / `premium_discount`（两个工具都有）；**`sweeps` 只有 `smc_events` 有** —— 判断扫荡必须查它，`smc_map` 里没有这个字段。**未逐项读完，不得下「无信号 / 无扫荡 / 无 OB」的结论。**
 - **估值区口径**：`smc_map` 的 `premium_discount` 用**最后一段 swing 区间**，`smc_events` 用**全历史** —— 两者不可跨工具比较，各看自己的 `source` 字段（`swing_range` / `full_history`）。区间可能已过期（价格跑到区间外），这时以结构为准。
 - **入场（优先限价）**：`open_*` + `type:limit` + `price`（OB 边界 / OB+FVG 重叠 / 扫荡后回调）。
 - **必须带 `sl`**（OB 另一端、扫荡极值外）。
 - **1R + 锁利**：`reduce_*` + `modify_tp_sl`；结构坏 → `close` / `reduce_*`。
-- **杠杆**：`leverage` 50 以内按需自定。
+- **杠杆**：用 bot 配置的 `paper.leverage`，**不要自己抬高**（配置是硬约束）。
 - **主周期 5m，HTF 15m/1h**；多币合计风险超约 2% 时只做一腿。
 - 无信号 → `hold`，写清在等扫荡 / OB / FVG / MSS 哪一种。
