@@ -1,0 +1,22 @@
+[Unit]
+Description=OmniAlpha kline-live (pa-data-source: Gate live klines + account push)
+Documentation=file:/opt/omnialpha/pa-data-source/SERVER.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/omnialpha/pa-data-source
+# 实盘密钥（GATE_API_KEY / GATE_API_SECRET）—— 账户推送要用
+EnvironmentFile=/opt/omnialpha/.env
+ExecStart=/opt/omnialpha/pa-data-source/.venv/bin/python kline_watcher.py
+Restart=always
+RestartSec=10
+User=root
+# 交给 journald：应用自己已经写了带轮转的 logs/kline_watcher.log，
+# 再 append 到文件就是「同一份日志落两处，且 append 永不轮转」——实测涨到 133MB。
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

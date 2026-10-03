@@ -1,0 +1,21 @@
+[Unit]
+Description=OmniAlpha aux-info-feed (pa-data-source: Gate aux cache for AI tools)
+Documentation=file:/opt/omnialpha/pa-data-source/SERVER.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/omnialpha/pa-data-source
+EnvironmentFile=/opt/omnialpha/.env
+ExecStart=/opt/omnialpha/pa-data-source/.venv/bin/python fetch_aux.py --loop
+Restart=always
+RestartSec=10
+User=root
+# 交给 journald：fetch_aux 自己写了带轮转的 aux-data/logs/aux_info_feed.log，
+# 再 append 到文件就是同一份日志落两处、且 append 永不轮转。
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

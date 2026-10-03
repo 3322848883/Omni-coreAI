@@ -123,21 +123,27 @@ ps aux | grep -E "kline_watcher|fetch_aux" | grep -v grep
 systemctl enable --now pa-data-source        # 再起 watchdog
 ```
 
-**按组件起时，建议的单元与参数**（与 `watchdog.py` 的 `TARGETS` 保持一致）：
+**按组件起时，直接用仓库里现成的单元**（与 `watchdog.py` 的 `TARGETS` 保持一致）：
 
-```ini
-# Gate 实盘 K 线 + 账户推送
-ExecStart=/opt/omnialpha/pa-data-source/.venv/bin/python kline_watcher.py
-# Gate 测试网 K 线（端口/锁/库都要错开，否则与上面抢）
-ExecStart=... kline_watcher.py --env testnet --config watchlist_testnet.yaml \
-          --db data/kline_testnet.db --health-port 18081 --lock kline_watcher_testnet.lock
-# aux 辅助流
-ExecStart=... fetch_aux.py --loop
+```
+systemd/omnialpha-kline-live.service       Gate 实盘 K 线 + 账户推送
+systemd/omnialpha-kline-testnet.service    Gate 测试网 K 线
+systemd/omnialpha-aux.service              aux 辅助流
 ```
 
-**多实例的日志要分开**：`logger.py` 默认把两个 `kline_watcher` 实例都写到
-`logs/kline_watcher.log`，消息会交错（实测踩过：把测试网的行当成实盘的，误判
-「实盘采错品种」）。给每个实例设 `Environment=PA_KLINE_LOG=<各自的文件>` 即可分开。
+安装步骤、验证命令、以及**单元里故意那么写的三处**（`journal` 而非 `append:文件`、
+testnet 不挂 `EnvironmentFile`、testnet 设 `PA_KLINE_LOG`）见
+[`systemd/README.md`](systemd/README.md)。
+
+```bash
+cd /opt/omnialpha/pa-data-source
+install -m 644 systemd/omnialpha-*.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now omnialpha-kline-live omnialpha-kline-testnet omnialpha-aux
+```
+
+> 这些单元**只在服务器上生效**，本地跑不到 systemd —— 所以关键约定由
+> `tests/test_pa_units.py` 守着（改单元文件时它会先报错）。
 
 ## 6. 稳定性机制（服务器上同样生效）
 

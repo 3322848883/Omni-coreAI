@@ -1,0 +1,28 @@
+[Unit]
+Description=OmniAlpha kline-testnet (pa-data-source: Gate testnet klines)
+Documentation=file:/opt/omnialpha/pa-data-source/SERVER.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/omnialpha/pa-data-source
+# **故意不挂 EnvironmentFile**：
+#   ① 本实例只用它采 K 线（公开接口不需要密钥）；
+#   ② 测试网账户推送要的是 GATE_TESTNET_API_KEY / GATE_TESTNET_API_SECRET，
+#      与实盘 GATE_API_KEY 隔离 —— 塞实盘密钥进去毫无用处；
+#   ③ 更要紧的是 watchlist_testnet.yaml 的 account_push 已显式关掉，
+#      见那里的注释：否则 _account_health() 报 push_mismatch → 健康端点**恒 503**。
+# 日志与实盘实例分开：两者默认都写 logs/kline_watcher.log 会消息交错，
+# 实测因此误判过「实盘采错品种」（其实是测试网的行）。
+Environment=PA_KLINE_LOG=/opt/omnialpha/pa-data-source/logs/kline_watcher_testnet.log
+# --db / --health-port / --lock 三者都必须与实盘实例错开，否则互抢
+ExecStart=/opt/omnialpha/pa-data-source/.venv/bin/python kline_watcher.py --env testnet --config watchlist_testnet.yaml --db data/kline_testnet.db --health-port 18081 --lock kline_watcher_testnet.lock
+Restart=always
+RestartSec=10
+User=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
