@@ -105,6 +105,14 @@ watchlist_config = {}
 ws_app = None
 status_counters = {}
 status_lock = threading.Lock()
+# 覆盖摘要（flush_status）是**状态**不是事件：原来每次 K 线 upsert 都打一遍
+# （`handle_candle_update` → `flush_status()`），而每个轮询周期要 upsert
+# 5 品种 × 6 周期 = 30 根。实测占日志 **96%**：199MB / 6 小时 ≈ **541 MB/天**，
+# 而 `TimedRotatingFileHandler(backupCount=7)` 按天轮转 ⇒ 峰值可达数 GB。
+# 改为「真有变化才打；无变化时最多每 STATUS_HEARTBEAT_SEC 打一次」——
+# 保留保活信号（否则「无输出」又会被当成「没在跑」），砍掉绝大部分重复。
+STATUS_HEARTBEAT_SEC = 600.0
+_last_status_log = 0.0
 latest_prices = {}
 prices_lock = threading.Lock()
 last_disconnect_time = 0
@@ -1333,8 +1341,10 @@ def update_status(symbol, interval, action, count=None):
 
 
 def flush_status():
+    global _last_status_log
     with status_lock:
         parts = []
+        changed = False
         for entry in get_symbol_intervals():
             for interval in entry["intervals"]:
                 key = f"{entry['name']}_{interval}"
@@ -1343,10 +1353,18 @@ def flush_status():
                 if sc["added"] > 0:
                     parts.append(f"{name} {interval} +{sc['added']} ({sc['total']})")
                     sc["added"] = 0
+                    changed = True
                 else:
                     parts.append(f"{name} {interval} ({sc['total']})")
-        if parts:
-            logger.info(" | ".join(parts))
+        if not parts:
+            return
+        # 只在「真有新增」或「距上次打点超过心跳间隔」时输出。
+        # 注意：`changed` 为真时上面已经清过计数器，所以跳过时不会有信息丢失。
+        now = time.time()
+        if not changed and (now - _last_status_log) < STATUS_HEARTBEAT_SEC:
+            return
+        _last_status_log = now
+        logger.info(" | ".join(parts))
 
 
 def handle_candle_update(n_field, candle_data):
