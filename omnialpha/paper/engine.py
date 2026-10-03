@@ -156,11 +156,18 @@ class PaperEngine:
 
         # IOC/FOK：未立即成交则撤销
         if tif in ("IOC", "FOK") and result.get("status") in (ORDER_OPEN, ORDER_PARTIALLY_FILLED):
+            rolled_back = False
             if tif == "FOK" and float(result.get("filled_size") or 0) < abs(size):
                 # FOK 全成或撤销：回滚成交
                 self._rollback_fills(order_id, symbol)
+                rolled_back = True
             self.store.update_order(order_id, status=ORDER_CANCELLED, finish_time=_now())
-            result = self.store.get_order(order_id) or result
+            fresh = dict(self.store.get_order(order_id) or result)
+            # 部分成交仍可能已实现盈亏；回滚过就不算（仓位已冲销）
+            if not rolled_back and result.get("pnl") is not None:
+                fresh["pnl"] = result["pnl"]
+                fresh["realised_pnl"] = result["pnl"]
+            result = fresh
         return _order_view(result)
 
     def place_price_order(self, body: dict) -> dict:
@@ -261,8 +268,13 @@ class PaperEngine:
             return order
 
         fill_px = self._fill_price(symbol, size)
-        self._apply_fill(order, fill_px, size, role="taker")
-        return self.store.get_order(order_id) or order
+        realised = self._apply_fill(order, fill_px, size, role="taker")
+        out = self.store.get_order(order_id) or order
+        # 平/减仓的已实现盈亏回传给调用方：executor 用它落 `detail.realized_pnl`，
+        # 再供成交卡片与策略画像消费。原先只写进 fills 表，调用方永远拿不到。
+        if realised:
+            out = dict(out, pnl=realised, realised_pnl=realised)
+        return out
 
     def _rollback_fills(self, order_id: str, symbol: str) -> None:
         """FOK 失败回滚成交与仓位（简化：按 fills 反向冲销）。"""
@@ -273,7 +285,12 @@ class PaperEngine:
             acct = self.store.get_account()
             self.store.update_account(balance=float(acct.get("balance") or 0) + float(f.get("fee") or 0))
 
-    def _apply_fill(self, order: dict, price: float, size: float, role: str = "taker") -> None:
+    def _apply_fill(self, order: dict, price: float, size: float, role: str = "taker") -> float:
+        """入账一笔成交，返回本次的**已实现盈亏**（开仓为 0）。
+
+        返回值供调用方回传（见 `match_order`）—— 原先只写进 fills 表，
+        调用方（executor）拿不到，导致平仓步骤永远没有 `realized_pnl`。
+        """
         symbol = order["contract"]
         filled = float(order.get("filled_size") or 0)
         total = float(order["size"])
@@ -281,7 +298,7 @@ class PaperEngine:
         remaining = abs(total) - filled
         if remaining <= 1e-12:
             self.store.update_order(order["order_id"], status=ORDER_FILLED, finish_time=_now())
-            return
+            return 0.0
         size = float(size)
         if abs(size) > remaining + 1e-12:
             size = remaining if size > 0 else -remaining
@@ -317,7 +334,7 @@ class PaperEngine:
             "kind": "trade",
         })
         if not created:
-            return
+            return 0.0
 
         realised = self._update_position(symbol, size, price, quanto=quanto,
                                          reduce_only=bool(order.get("reduce_only")))
@@ -334,6 +351,7 @@ class PaperEngine:
         self.store.update_account(balance=bal)
         self._recompute_available()
         self.recalc_equity()
+        return realised
 
     def _update_position(self, symbol: str, size: float, price: float,
                          quanto: float = 1.0, reduce_only: bool = False) -> float:

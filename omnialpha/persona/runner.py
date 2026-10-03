@@ -525,6 +525,12 @@ class PersonaRunner:
         }
         if side_override:
             payload["side"] = side_override
+        # 执行必需但原先被丢掉的字段 —— 尤其 `trigger_price`：没有它，
+        # stop_entry_* 会被 executor 以「requires trigger_price」整笔拒掉，
+        # 人格的突破单从来没有真正挂出去过。
+        for k in ("price", "trigger_price", "trigger_price_type", "size", "leverage"):
+            if chip.get(k) is not None:
+                payload[k] = chip.get(k)
         # modify_tp_sl 至少要有一个目标价：两个都没有就退回 hold，
         # 否则 executor 必然报 "requires tp and/or sl"、白烧一轮
         if action == "modify_tp_sl" and payload.get("tp") is None and payload.get("sl") is None:

@@ -245,9 +245,11 @@ class TestForgetWiring(unittest.TestCase):
 def _persona_runner(root: Path) -> PersonaRunner:
     r = PersonaRunner.__new__(PersonaRunner)
     r.root = root
-    r.group = SimpleNamespace(members=[BOT], name="g")
+    r.group = SimpleNamespace(members=[BOT], name="g", topology="single_account",
+                              target_account=BOT, fusion_config={})
     r.orders = SharedOrderStore(root)
     r.plan_runners = {}
+    r.bots = {}
     r.discussion_log = []
     r.log_path = root / "data" / "shared" / "persona_log.jsonl"
     r.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -376,6 +378,85 @@ class TestNoDeadMemoryModules(unittest.TestCase):
     def test_memory_ref_written_in_production(self):
         self.assertTrue(_prod_call_files("add_memory_ref"),
                         "memory_refs 又没有生产写入点了（S2.3）")
+
+
+# ── persona 分析路径（analyze_once）也要有记忆 ──────────────
+
+class TestPersonaAnalysisPathMemory(unittest.TestCase):
+    """`analyze_once` 是 persona-run 真正走的路径，且人格组**正是持有订单**的那条。
+
+    原先它自己手写一套 prompt 拼装、完全不注入记忆 —— 只接 `run_once` 就等于
+    「有记忆的单 bot、没记忆的人格」。
+    """
+
+    def test_analyze_once_injects_order_context(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            store = SharedOrderStore(root)
+            store.create({
+                "order_id": OID, "symbol": "BTC_USDT", "side": "long",
+                "group": "g", "members": [BOT], "target_account": BOT,
+                "status": "open",
+            })
+            store.set_reason(OID, "人格路径的开仓理由")
+            store.add_lifecycle(OID, "open", "entry=84000")
+            store.refresh_recent_events(OID)
+
+            llm = _RecordingLLM()
+            _plan_runner(root, llm).analyze_once()
+            self.assertIn("人格路径的开仓理由", llm.users[-1],
+                          "analyze_once（persona-run 走的路径）没注入订单上下文")
+
+    def test_analyze_once_records_cache_stats(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _plan_runner(root, _RecordingLLM(hit=700, total=1400)).analyze_once()
+            p = root / "data" / "bots" / BOT / "state" / "cache_stats.jsonl"
+            self.assertTrue(p.is_file(), "analyze_once 没记录缓存命中（S2.6/T7）")
+            rec = json.loads(p.read_text(encoding="utf-8").strip().splitlines()[-1])
+            self.assertEqual(rec["hit"], 700)
+
+
+class TestPersonaSignalCarriesExecutionFields(unittest.TestCase):
+    """人格的 chip 必须把执行必需字段带到 executor —— 尤其 `trigger_price`。
+
+    原先 `analyze_once` 手抄 7 个字段、`_execute` 又手抄 5 个，
+    `trigger_price` 在**源头**就丢了 → stop_entry_* 被 executor 整笔拒掉。
+    """
+
+    def test_chips_out_preserves_trigger_price(self):
+        reply = json.dumps({
+            "cycle_id": "c-trig",
+            "chips": [{"symbol": "BTC_USDT", "action": "stop_entry_short",
+                       "confidence": 0.8, "size_usd": 100,
+                       "trigger_price": 84400, "tp": 83890, "sl": 84720}],
+        })
+        with tempfile.TemporaryDirectory() as td:
+            out = _plan_runner(Path(td), _RecordingLLM(reply=reply)).analyze_once()
+            chip = out["plan"]["chips"][0]
+            self.assertEqual(chip.get("action"), "stop_entry_short")
+            self.assertEqual(chip.get("trigger_price"), 84400,
+                             f"chip 在源头丢了 trigger_price：{chip}")
+
+    def test_execute_payload_carries_trigger_price(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            r = _persona_runner(root)
+            r.orders.create({
+                "order_id": OID, "symbol": "BTC_USDT", "side": "short",
+                "members": [BOT], "target_account": BOT, "status": "open",
+            })
+            captured: dict = {}
+            r._exec_single = lambda payload, oid: (captured.update(payload)
+                                                   or {"executed": True})
+            fusion = {"action": "stop_entry_short", "decision": "short",
+                      "mode": "weighted_vote", "reason": "x", "votes": {BOT: "short"}}
+            plans = {BOT: {"chips": [{"symbol": "BTC_USDT", "action": "stop_entry_short",
+                                      "size_usd": 100, "trigger_price": 84400,
+                                      "tp": 83890, "sl": 84720}]}}
+            r._execute(fusion, plans, OID)
+            self.assertEqual(captured.get("trigger_price"), 84400,
+                             f"executor 收到的 payload 缺 trigger_price：{captured}")
 
 
 if __name__ == "__main__":

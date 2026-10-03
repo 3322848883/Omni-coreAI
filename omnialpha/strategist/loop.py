@@ -224,6 +224,30 @@ class PlanRunner:
             log.warning("order context lookup failed: %s", e)
             return None
 
+    def _assemble_prompt(self, root: Path, bid: str,
+                         system: str, user: str) -> tuple[str, str]:
+        """按缓存优化顺序组装 system/user（订单上下文 → 近况 → 快照 → 触发器）。
+
+        **单 bot（`run_once`）与多人格（`analyze_once`）共用这一个入口** —— 两条路径
+        各自手写拼装时，只接一条就会出现「有记忆的单 bot、没记忆的人格」。
+
+        失败不影响本轮：退回未加工的 system/user（少记忆，但不缺席）。
+        """
+        try:
+            from ..memory import build_context
+            ctx = build_context(
+                root, bid,
+                system_prompt=system,
+                order_context=self._order_context_for(root, bid),
+                snapshot_text=user,
+                n_recent=3,
+                extra_suffix=self._active_triggers_block(),
+            )
+            return ctx["system"], ctx["user"]
+        except Exception as e:  # noqa: BLE001
+            log.warning("memory context assembly failed, using plain prompts: %s", e)
+            return system, user + self._active_triggers_block()
+
     def _record_cache_usage(self, root: Path, bid: str, system: str) -> tuple[int, str]:
         """记录本轮 prompt 缓存命中 + 前缀稳定性，返回 (命中token, 模型名)。
 
@@ -277,21 +301,7 @@ class PlanRunner:
         # agent-memory：订单上下文 + 画像 + 近况，按缓存优化顺序拼装（设计 S2.6）
         root = self.cfg.bot_root or Path.cwd()
         bid = self.cfg.bot_id or self.inbox.name
-        # 失败不影响本轮 —— 退回未加工的 system/user（少记忆，但不缺席）
-        try:
-            from ..memory import build_context
-            ctx = build_context(
-                root, bid,
-                system_prompt=system,
-                order_context=self._order_context_for(root, bid),
-                snapshot_text=user,
-                n_recent=3,
-                extra_suffix=self._active_triggers_block(),
-            )
-            system, user = ctx["system"], ctx["user"]
-        except Exception as e:  # noqa: BLE001
-            log.warning("memory context assembly failed, using plain prompts: %s", e)
-            user = user + self._active_triggers_block()
+        system, user = self._assemble_prompt(root, bid, system, user)
         # vision：多周期 K 线图（可选配置）
         charts: list = []
         if self.cfg.vision:
@@ -535,7 +545,12 @@ class PlanRunner:
             self._prompt_risk(snapshot),
             self.cfg.symbols,
         )
-        user = user + self._active_triggers_block()
+        # agent-memory：与 run_once 共用同一套组装（订单上下文 + 画像 + 近况 + 触发器）。
+        # 人格组正是**持有订单记录**的那条路径 —— 这里漏掉就等于「有记忆的单 bot、
+        # 没记忆的人格」，而画像/近况本来就为持仓管理而设计。
+        root = self.cfg.bot_root or Path.cwd()
+        bid = self.cfg.bot_id or self.inbox.name
+        system, user = self._assemble_prompt(root, bid, system, user)
         # vision：从 snapshot 生成 K 线图（可配置多周期）
         charts: list = []
         if self.cfg.vision:
@@ -543,8 +558,16 @@ class PlanRunner:
                 charts = self._generate_charts(snapshot)
             except Exception:  # noqa: BLE001
                 charts = []
+        # 缓存护栏：本轮 usage 清零（工具循环会多次调用 LLM，只看单次会漏算）
+        try:
+            if hasattr(self.llm, "reset_usage"):
+                self.llm.reset_usage()
+        except Exception:  # noqa: BLE001
+            pass
         try:
             text = self._chat_with_tools(system, user, chart_base64=charts or None)
+            # 缓存护栏：记录本轮命中 + 前缀稳定（设计 S2.6 / T7）
+            self._record_cache_usage(root, bid, system)
             # 与 run_once 对齐：必须把 CoT 与正文一起落盘。
             # 原先这里只传 system/user/text，而 _save_thinking 读的是 `content` / `reasoning`，
             # 于是**多人格模式（persona-run 走 analyze_once）的 thinking.json 里
@@ -569,15 +592,17 @@ class PlanRunner:
         # 给融合层的紧凑 Plan（不写 inbox）
         chips_out = []
         for c in getattr(plan, "chips", []) or []:
-            chips_out.append({
-                "symbol": getattr(c, "symbol", ""),
-                "action": getattr(c, "action", ""),
-                "confidence": getattr(c, "confidence", 0.0),
-                "size_usd": getattr(c, "size_usd", None),
-                "tp": getattr(c, "tp", None),
-                "sl": getattr(c, "sl", None),
-                "reasoning": getattr(c, "reasoning", ""),
-            })
+            # 用 Chip 自己的序列化 —— 它含执行必需字段（`trigger_price` / `price` /
+            # `side` / `leverage` …）。原先手抄 7 个字段，把 stop_entry_* 的
+            # `trigger_price` 丢在**源头**，于是人格永远挂不出突破单：executor 一律以
+            # "stop_entry_short requires trigger_price (breakout level)" 拒掉。
+            try:
+                d = c.to_signal_dict()
+            except Exception:  # noqa: BLE001
+                d = {"symbol": getattr(c, "symbol", ""), "action": getattr(c, "action", "")}
+            d["confidence"] = getattr(c, "confidence", 0.0)
+            d["reasoning"] = getattr(c, "reasoning", "")
+            chips_out.append(d)
         return {
             "ok": True,
             "cycle_id": plan.cycle_id,

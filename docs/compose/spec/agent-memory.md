@@ -273,3 +273,66 @@ commits: 544a008..9661998
 
 **另**：本文件此前有 150 处随机丢字（U+FFFD，同一行里有的 `、` 完好、有的丢了，不可机械还原）。
 本次按上下文重建全文，结构与历史陈述保持不变，仅补回丢失字符。
+
+## 补记二（2026-10-04 · 本地模拟盘实测）：接通后仍有 3 个「最后一公里」缺口
+
+上面「补记一」把生产调用点从 0 补上了。**但在本地模拟盘真跑一遍才发现，闭环还断在三处** ——
+这些只有真执行才暴露得出来（测试全绿、日志无异常时它们完全隐形）。
+
+### 1. paper 平仓从来不写 `realized_pnl` → 画像永远拿不到数据（根因）
+
+`PaperEngine._apply_fill` 算出 `realised` 后只写进 `fills` / `positions` 表，
+`place_order` 返回的订单视图里**没有它**；而 `Executor._close` 读的是 `order["pnl"]`
+→ 永远 `None` → `detail["realized_pnl"]` 从不出现。`_exec_facts_of` 正是靠这个字段回连
+→ **即使把目标账户 `enabled: true` 起来，画像也永远停在「无数据」**。
+
+实测证据（真实模拟盘一笔平仓的成交日志）：
+```
+action=close ok=True entry=84851.0 realized_pnl=None     ← 修复前
+action=close ok=True entry=84851.0 realized_pnl=0.0133   ← 修复后
+```
+修法（`omnialpha/paper/engine.py`）：`_apply_fill` 返回 `realised`，
+`match_order` / `place_order` 把它挂到订单视图的 `pnl` / `realised_pnl` 上。
+回归测试：`tests/test_paper_pnl_propagation.py`（引擎层 + 真实 `PaperExchange` 的执行器层）。
+
+### 2. `analyze_once`（persona 真正走的路径）完全没有记忆
+
+`PlanRunner` 有**两套** prompt 拼装：`run_once`（单 bot）与 `analyze_once`（persona-run）。
+补记一只接了前者 —— 而**人格组正是持有订单记录的那条路径**，于是等于
+「有记忆的单 bot、没记忆的人格」。现已抽出共用入口 `_assemble_prompt()`，
+两条路径共用同一套组装（订单上下文 + 画像 + 近况 + 触发器），缓存护栏也一并接上。
+
+> 教训：同一个类里有两份重复的组装逻辑时，「接线」必须两个入口都接 —— 否则
+> 只接一条路径是**看不出来**的（另一条路径照常跑，只是没有记忆）。
+
+### 3. `trigger_price` 在源头就被丢掉 → 人格的突破单从来没挂出去过
+
+`analyze_once` 的 `chips_out` 手抄 7 个字段、`_execute` 又手抄 5 个，
+`trigger_price` 在两处都被丢 → `stop_entry_*` 一律被 executor 以
+`schema: stop_entry_short requires trigger_price (breakout level)` 整笔拒掉。
+
+实测：一个积压的 persona 信号（`stop_entry_short`）被消费后立刻失败，就是这个原因。
+修法：`chips_out` 改用 `Chip.to_signal_dict()`（含 `trigger_price`/`price`/`side`/`leverage`），
+`_execute` 补上这些字段的透传。实测复验：带 `trigger_price` 的 `stop_entry_short`
+真的在模拟盘上挂出了条件单（`84400` 空单 + `83890` TP + `84720` SL），随后按指令撤销。
+
+### 本地模拟盘实测结果（画像闭环打通）
+
+真实执行 → 真实成交日志 → 画像回连 → 注入 prompt：
+
+```json
+{"total_trades": 1, "win_count": 1, "win_rate": 1.0, "total_pnl_usd": 0.01,
+ "avg_pnl_usd": 0.01, "best_act": "open_long", "by_action": {"open_long": {"n": 1, "pnl": 0.01}}}
+```
+`prompt_summary()` → `"历史表现: 1笔交易, 胜率100%, 均持仓1.0轮, 均盈亏0.01u"`
+
+本地启用方式（`config/bots.local/pt-b1.yaml` 是 gitignore 的机器级覆盖）：
+```yaml
+enabled: true     # 目标账户；strategist.enabled 保持 false（纯执行，由 persona-run 驱动）
+```
+进程：`scripts/start_pt_b1_paper_bg.bat`（只起 `paper-run` = exec + 撮合）。
+
+### 反向验证
+
+`scripts/_reverse_verify.py`：逐处破坏接线 → **10/10 预期项全部变红**（含 AST 回归钉
+「不许再有模块无调用点」）→ 自动还原。paper 盈亏回传另有独立反向验证（2/2 变红）。
