@@ -66,40 +66,45 @@ class TestCoverageLogNotSpammy(unittest.TestCase):
         kw.status_counters.clear()
         kw._last_status_log = 0.0
 
-    def test_unchanged_repeated_flushes_are_suppressed(self):
-        """无变化时反复 flush 只应留下第一次（心跳起点），不是每次都打。"""
+    def _advance(self):
+        """把「上次打点时间」推到一个心跳间隔之前，模拟时间流逝。"""
+        kw._last_status_log = kw.time.time() - (kw.STATUS_HEARTBEAT_SEC + 1)
+
+    def test_rapid_flushes_are_rate_limited(self):
+        """高频调用只应留下第一次，其余被限频吞掉。"""
         for _ in range(20):
             kw.flush_status()
         self.assertEqual(
             len(self.cap.lines), 1,
-            f"20 次无变化的 flush 只该打 1 次（首次心跳），实际 {len(self.cap.lines)} 次",
+            f"20 次连续 flush 只该打 1 次，实际 {len(self.cap.lines)} 次",
         )
 
-    def test_change_is_logged_with_delta(self):
-        kw.flush_status()                      # 首次心跳
+    def test_liveness_even_without_any_change(self):
+        """**没有变化也要按心跳打** —— 否则「无输出」会被当成「没在跑」。"""
+        kw.flush_status()
+        self.cap.lines.clear()
+        self._advance()
+        kw.flush_status()
+        self.assertEqual(len(self.cap.lines), 1, "到点应打一次保活，即使没有任何新增")
+
+    def test_delta_accumulates_across_the_window(self):
+        """窗口内多次新增要累加到同一条 `+N` 里 —— 提前 return 不能清计数器。"""
+        kw.flush_status()                 # 窗口起点
         self.cap.lines.clear()
         kw.update_status("BTC_USDT", "1m", "add", 2000)
         kw.update_status("BTC_USDT", "1m", "add", 2001)
-        kw.flush_status()
+        kw.flush_status()                 # 被限频吞掉
+        self.assertEqual(self.cap.lines, [], "限频窗口内不该输出")
+        kw.update_status("BTC_USDT", "1m", "add", 2002)
+        self._advance()
+        kw.flush_status()                 # 到点
         self.assertEqual(len(self.cap.lines), 1)
-        self.assertIn("BTC_USDT 1m +2 (2001)", self.cap.lines[0])
+        self.assertIn("BTC_USDT 1m +3 (2002)", self.cap.lines[0])
 
-    def test_heartbeat_resumes_after_interval(self):
-        kw.flush_status()                      # 首次
-        self.cap.lines.clear()
-        kw._last_status_log = kw.time.time() - (kw.STATUS_HEARTBEAT_SEC + 1)
-        kw.flush_status()
-        self.assertEqual(len(self.cap.lines), 1, "超过心跳间隔后应重新打一次保活")
-
-    def test_change_resets_counter_so_nothing_lost(self):
-        kw.update_status("ETH_USDT", "5m", "add", 10)
-        kw.flush_status()
-        self.cap.lines.clear()
-        kw.flush_status()                      # 无变化 → 抑制
-        self.assertEqual(self.cap.lines, [])
-        kw.update_status("ETH_USDT", "5m", "add", 11)
-        kw.flush_status()
-        self.assertIn("+1 (11)", self.cap.lines[0])
+    def test_real_cadence_bounds_daily_volume(self):
+        """核心指标：一天最多打 86400/STATUS_HEARTBEAT_SEC 条。"""
+        per_day = int(86400 / kw.STATUS_HEARTBEAT_SEC)
+        self.assertLessEqual(per_day, 200, f"每天 {per_day} 条太多（原实现是 ~73 万条）")
 
 
 if __name__ == "__main__":

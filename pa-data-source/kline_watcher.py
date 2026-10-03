@@ -135,6 +135,7 @@ INTERVAL_SECONDS = {
     "1m": 60,
     "5m": 300,
     "15m": 900,
+    "30m": 1800,
     "1h": 3600,
     "4h": 14400,
     "1d": 86400,
@@ -1343,8 +1344,18 @@ def update_status(symbol, interval, action, count=None):
 def flush_status():
     global _last_status_log
     with status_lock:
+        now = time.time()
+        # 覆盖摘要是**状态**不是事件 —— 固定低频输出即可（默认 10 分钟一次）。
+        #
+        # **不能**用「有变化才打」来节流：当前那根未完成的 K 线每个轮询周期都会被
+        # upsert，于是 `added` 几乎每轮都 > 0、「变化」几乎总成立 —— 实测那样改
+        # 仍然 ~440MB/天，等于没节流（第一版就是这么写错的）。
+        #
+        # 提前 return 时**不清计数器**，所以 `+N` 会是这一整个窗口的累计增量。
+        if (now - _last_status_log) < STATUS_HEARTBEAT_SEC:
+            return
+        _last_status_log = now
         parts = []
-        changed = False
         for entry in get_symbol_intervals():
             for interval in entry["intervals"]:
                 key = f"{entry['name']}_{interval}"
@@ -1353,18 +1364,10 @@ def flush_status():
                 if sc["added"] > 0:
                     parts.append(f"{name} {interval} +{sc['added']} ({sc['total']})")
                     sc["added"] = 0
-                    changed = True
                 else:
                     parts.append(f"{name} {interval} ({sc['total']})")
-        if not parts:
-            return
-        # 只在「真有新增」或「距上次打点超过心跳间隔」时输出。
-        # 注意：`changed` 为真时上面已经清过计数器，所以跳过时不会有信息丢失。
-        now = time.time()
-        if not changed and (now - _last_status_log) < STATUS_HEARTBEAT_SEC:
-            return
-        _last_status_log = now
-        logger.info(" | ".join(parts))
+        if parts:
+            logger.info(" | ".join(parts))
 
 
 def handle_candle_update(n_field, candle_data):
