@@ -46,8 +46,12 @@ _SYSTEM_HEAD = (
     "14) 孤儿保护单（必须处理）：**无持仓但存在 tp/sl 类 reduce_only 挂单** = 前一笔仓位止盈/止损触发后遗留。"
     "本轮必须撤销（action=cancel_price_all 或 cancel_*），reasoning 写明「孤儿保护单已撤」。"
     "禁止对孤儿单只 hold 不管。\n"
+    # 这里只列**一定可用**的行情工具。不要列 aux 族（trades_flow/liquidations/
+    # market_stats/…）—— 它们依赖 pa-data-source 的 aux_cache.db，数据源不在时
+    # 会被 available_native_tools() 从工具面摘掉，模型根本调不到；
+    # 提示词里却点名它 = 「AI 可见的约束与实际不一致」。
     "15) **禁止偷懒不查数据**：决策前**必须调用行情工具**（klines/indicators/ticker/orderbook/"
-    "smc_map/smc_events/sqzmom/trades_flow 至少 1 个）获取当前市场数据。"
+    "smc_map/smc_events/sqzmom 至少 1 个）获取当前市场数据。"
     "工具返回不足可继续查；**从未调用任何工具就直接输出 Plan = 违规**，视为猜测不是分析。\n"
     "16) **持仓状态以 account.position_state 为准**，不要从 positions/protections 的有无去猜："
     "`position_open`=有持仓（可用 modify_tp_sl 调 TP/SL）；"

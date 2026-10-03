@@ -97,6 +97,48 @@ journalctl -u pa-data-source -f          # 查看日志
 
 > 生产建议把密钥放 systemd `EnvironmentFile=` 或环境变量服务（如 systemd-creds / docker secret），不要写死在 unit 文件里。
 
+### 5.1 ⚠️ 两种启动方式**只能选一种**（否则触发重启风暴）
+
+`watchdog.py` 是「**全 4 个目标一起起**」（`TARGETS`：kline-live + kline-testnet +
+kline-multi + fetch-aux），且任一子进程崩溃就整体重启。所以：
+
+| 你想跑的 | 用哪种 | 注意 |
+|---|---|---|
+| **全部 4 个** | `watchdog.py`（一个 systemd 单元） | 简单，但无法只跑其中几个 |
+| **只跑其中几个**（如只要 Gate、不要那 5 个非 Gate 交易所） | **按组件各建一个 systemd 单元**，各自 `Restart=always` | 此时**绝不能**再起 `watchdog.py` |
+
+**混用会出事的机制**：`fetch_aux.py` 有 `aux-data/aux_fetch.lock`、
+`kline_watcher.py` 有 `kline_watcher.lock` —— 都是**单实例锁**。两个实例抢锁时
+一个起不来 → 被 watchdog 判定「崩溃」→ 整体重启 → 反复循环。
+**这正是 2026-08 那次「重启风暴」的成因**（fetch_aux 退码 1 → 整体重启连锁 →
+5 次/小时触顶停摆，健康端点无响应、留下孤儿锁）。
+
+**切换顺序**（从「按组件」切到「watchdog」）：
+
+```bash
+systemctl stop omnialpha-kline-live omnialpha-kline-testnet omnialpha-aux
+systemctl disable omnialpha-kline-live omnialpha-kline-testnet omnialpha-aux
+# 确认锁文件已释放、无残留进程
+ps aux | grep -E "kline_watcher|fetch_aux" | grep -v grep
+systemctl enable --now pa-data-source        # 再起 watchdog
+```
+
+**按组件起时，建议的单元与参数**（与 `watchdog.py` 的 `TARGETS` 保持一致）：
+
+```ini
+# Gate 实盘 K 线 + 账户推送
+ExecStart=/opt/omnialpha/pa-data-source/.venv/bin/python kline_watcher.py
+# Gate 测试网 K 线（端口/锁/库都要错开，否则与上面抢）
+ExecStart=... kline_watcher.py --env testnet --config watchlist_testnet.yaml \
+          --db data/kline_testnet.db --health-port 18081 --lock kline_watcher_testnet.lock
+# aux 辅助流
+ExecStart=... fetch_aux.py --loop
+```
+
+**多实例的日志要分开**：`logger.py` 默认把两个 `kline_watcher` 实例都写到
+`logs/kline_watcher.log`，消息会交错（实测踩过：把测试网的行当成实盘的，误判
+「实盘采错品种」）。给每个实例设 `Environment=PA_KLINE_LOG=<各自的文件>` 即可分开。
+
 ## 6. 稳定性机制（服务器上同样生效）
 
 | 机制 | 说明 |
