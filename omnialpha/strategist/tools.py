@@ -1815,10 +1815,15 @@ def run_tool(
             sym = str(args.get("symbol") or args.get("sym") or "").replace("_", "").upper() or ""
 
 
-            # aux may store BTC or BTCUSDT
+            # aux 里存的是哪种形态实测为准：`fetch_aux.py` 写的是**带下划线的合约名**
+            # （`BTC_USDT`），历史上/别处也可能是 `BTCUSDT` 或 `BTC`。三种都试 ——
+            # 少试一种就是「查不到却静默返回空」，比报错更难发现。
 
 
-            keys = [sym, sym.replace("USDT", "")] if sym else []
+            base = sym.replace("USDT", "")
+
+
+            keys = [k for k in (sym, f"{base}_USDT", base) if k] if sym else []
 
 
             rows = []
