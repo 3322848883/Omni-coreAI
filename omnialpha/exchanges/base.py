@@ -93,7 +93,7 @@ class ExchangeClient:
         """ContractMeta-like: quanto_multiplier, order_size_round, order_price_round, leverage_max"""
         raise NotImplementedError
 
-    def get_contract_stats(self, symbol: str, limit: int = 1) -> list[dict]:
+    def get_contract_stats(self, symbol: str, limit: int = 1, interval: str = "") -> list[dict]:
         return []
 
     # ── account / positions ────────────────────────────

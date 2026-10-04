@@ -161,7 +161,9 @@ class BinanceExchange(ExchangeClient):
             leverage_max=lev_max,
         )
 
-    def get_contract_stats(self, symbol: str, limit: int = 1) -> list:
+    def get_contract_stats(self, symbol: str, limit: int = 1, interval: str = "") -> list:
+        # Binance 的 openInterest 端点只给当前快照，没有按周期聚合的历史序列，
+        # 故 `interval` 在此无效（签名与其他所保持一致，便于调用方统一传参）。
         d = self._pub("/fapi/v1/openInterest", {"symbol": self.mapper.native(symbol)}) or {}
         return [{
             "open_interest": _f(d.get("openInterest")),

@@ -34,9 +34,13 @@ class _FakeRes:
 
 
 class TestTvToolRegistration(unittest.TestCase):
-    def test_three_tools_registered(self):
+    def test_seven_tools_registered(self):
         names = [t["function"]["name"] for t in TV_TOOL_DEFS]
-        self.assertEqual(names, ["tv_linreg_trendlines", "tv_rsi_yata", "tv_lr_ha_candles"])
+        self.assertEqual(names, [
+            "tv_linreg_trendlines", "tv_rsi_yata", "tv_lr_ha_candles",
+            "tv_delta_flow_profile", "tv_oi_visible_range", "tv_vol_oi_footprint",
+            "tv_cdv",
+        ])
 
     def test_names_match_real_indicators(self):
         """工具名对应 TV 原始指标名（非缩写）。"""
@@ -51,8 +55,8 @@ class TestTvToolRegistration(unittest.TestCase):
             self.assertIn(n, TOOL_NAMES)
 
     def test_tool_count(self):
-        # 22 基础 + 3 TV
-        self.assertEqual(len(NATIVE_TOOLS), 25)
+        # 23 基础（含 taker_delta）+ 7 TV
+        self.assertEqual(len(NATIVE_TOOLS), 30)
 
 
 class TestTvToolRun(unittest.TestCase):

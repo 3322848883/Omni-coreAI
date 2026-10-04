@@ -37,8 +37,8 @@ class GateExchange(ExchangeClient):
     def get_contract(self, symbol: str):
         return self._c.get_contract(self._s(symbol))
 
-    def get_contract_stats(self, symbol: str, limit: int = 1) -> list:
-        return self._c.get_contract_stats(self._s(symbol), limit=limit)
+    def get_contract_stats(self, symbol: str, limit: int = 1, interval: str = "") -> list:
+        return self._c.get_contract_stats(self._s(symbol), limit=limit, interval=interval)
 
     def get_account(self) -> dict:
         return self._c.get_account() or {}

@@ -219,10 +219,17 @@ class GateClient:
     def get_last_price(self, symbol: str) -> float:
         return float(self.get_ticker(symbol).get("last"))
 
-    def get_contract_stats(self, symbol: str, limit: int = 1) -> list:
-        raw = self.public_get(
-            f"{FUTURES_API}/contract_stats", f"contract={symbol}&limit={int(limit)}"
-        )
+    def get_contract_stats(self, symbol: str, limit: int = 1, interval: str = "") -> list:
+        """合约市场结构统计。`interval` 留空时用交易所默认粒度。
+
+        显式传 `interval` 可拿**按周期聚合的历史序列**（Gate 支持
+        1m/5m/15m/30m/1h/4h/8h/1d，limit 实测可到 2000）——持仓量类指标
+        （OI 四象限、Delta、Money Flow）需要序列而非单点快照。
+        """
+        qs = f"contract={symbol}&limit={int(limit)}"
+        if interval:
+            qs += f"&interval={interval}"
+        raw = self.public_get(f"{FUTURES_API}/contract_stats", qs)
         return list(raw or [])
 
     def get_orderbook_top(self, symbol: str, limit: int = 5) -> dict:

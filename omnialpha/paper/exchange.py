@@ -86,9 +86,9 @@ class PaperExchange(ExchangeClient):
     def get_contract(self, symbol: str) -> Any:
         return self.feed.get_contract(symbol)
 
-    def get_contract_stats(self, symbol: str, limit: int = 1) -> list[dict]:
+    def get_contract_stats(self, symbol: str, limit: int = 1, interval: str = "") -> list[dict]:
         try:
-            return self.feed.get_contract_stats(symbol, limit=limit) or []
+            return self.feed.get_contract_stats(symbol, limit=limit, interval=interval) or []
         except Exception:  # noqa: BLE001
             return []
 

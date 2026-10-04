@@ -109,6 +109,21 @@ TOOL_GUIDE = """【行情工具 · 按需调用】
 - tv_lr_ha_candles(symbol, tf, limit, length) → TV LR HA Candles：线性回归 Heikin-Ashi + T3 + ATR 波动带
 
 
+- tv_delta_flow_profile(symbol, tf, limit, lookback, rows, polarity) → TV Delta Flow Profile：逐价位 money flow（量×价位）+ delta（买−卖）+ POC 与 PoC 迁移轨迹
+
+
+- tv_oi_visible_range(symbol, tf, limit, rows, va_pct, delta_rows) → TV OI Visible Range：持仓量四象限（价涨跌 × OI 增减）+ 各象限 POC/VA + 档位汇总
+
+
+- tv_vol_oi_footprint(symbol, tf, limit, resolution, mode) → TV Volume/OI Footprint：逐价位成交量足迹（K线几何分摊，影线半绿半红）；mode=oi 改用 ΔOI
+
+
+- tv_cdv(symbol, tf, limit, ha, sma1, sma2, ema1, ema2) → TV Cumulative Delta Volume：逐根 delta 的累积（delta 由 K 线几何估算），可选 HA 与均线
+
+
+- taker_delta(symbol, tf, limit, tail) → 真 Delta/CVD（交易所实测 taker 买卖量，非估算）+ 大户持仓 + 资金费率 + 爆仓量
+
+
 默认快照只有主周期少量数据；更长历史、更高周期用工具拉。
 
 
@@ -122,6 +137,7 @@ TOOL_NAMES = (
 
 
     "klines", "indicators", "ticker", "orderbook", "contract", "stats", "account",
+    "taker_delta",
 
 
     # aux-cache (pa-data-source) — existing data only
@@ -137,6 +153,8 @@ TOOL_NAMES = (
 
     # TV Pine 指标（真实指标名）
     "tv_linreg_trendlines", "tv_rsi_yata", "tv_lr_ha_candles",
+    "tv_delta_flow_profile", "tv_oi_visible_range", "tv_vol_oi_footprint",
+    "tv_cdv",
 
 
 )
@@ -1125,6 +1143,39 @@ from .tv_tools import TV_TOOL_DEFS as _TV_TOOL_DEFS  # noqa: E402
 
 NATIVE_TOOLS.extend(_TV_TOOL_DEFS)
 
+# 真 Delta / CVD —— 用交易所**实测** taker 量，而非 K 线几何估算
+from .taker_delta import summarize as _taker_summarize  # noqa: E402
+
+_TAKER_DELTA_TOOL_DEF = {
+    "type": "function",
+    "function": {
+        "name": "taker_delta",
+        "description": (
+            "Real taker delta and cumulative delta (CVD) from exchange-reported taker "
+            "buy/sell volume (Gate /contract_stats: long_taker_size − short_taker_size). "
+            "Unlike tv_cdv — which ESTIMATES delta from candle geometry — these are "
+            "measured values. Also returns large-holder positioning (top_lsr_size, "
+            "top_long_size/top_short_size), account long/short ratio, funding rate, "
+            "and liquidation sizes."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "e.g. BTC_USDT"},
+                "tf": {"type": "string",
+                       "enum": ["1m", "5m", "15m", "30m", "1h", "4h", "1d"],
+                       "description": "aggregation interval (default 5m)"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 500,
+                          "description": "periods to fetch (default 60)"},
+                "tail": {"type": "integer", "minimum": 1, "maximum": 50,
+                         "description": "how many recent points to return (default 10)"},
+            },
+            "required": ["symbol"],
+        },
+    },
+}
+NATIVE_TOOLS.append(_TAKER_DELTA_TOOL_DEF)
+
 
 # 依赖 pa-data-source `aux_cache.db` 的工具。数据源不在时它们**每次调用只会返回
 # `aux_cache.db not found`** —— 实测实盘：trades_flow 19/19、market_stats 1/1、
@@ -1581,10 +1632,77 @@ def run_tool(
             sym = str(args.get("symbol") or args.get("sym") or "")
 
 
-            rows = client.get_contract_stats(sym, limit=1) or []
+            interval = str(args.get("interval") or args.get("tf") or "")
 
 
-            return rows[-1] if rows else {"symbol": sym, "note": "no stats"}
+            lim = max(1, min(int(args.get("limit") or 1), 200))
+
+
+            rows = client.get_contract_stats(sym, limit=lim, interval=interval) or []
+
+
+            if not rows:
+
+                return {"symbol": sym, "note": "no stats"}
+
+
+            # 真 Delta 就藏在 taker 量里；顺手算出来，省得模型自己翻字段做减法
+
+            latest = dict(rows[-1])
+
+            lt, st = latest.get("long_taker_size"), latest.get("short_taker_size")
+
+            if lt is not None and st is not None:
+
+                try:
+
+                    latest["taker_delta"] = float(lt) - float(st)
+
+                except (TypeError, ValueError):
+
+                    pass
+
+
+            if lim == 1:
+
+                return latest
+
+
+            return {"symbol": sym, "interval": interval or "default", "stats": rows}
+
+
+
+
+        if name == "taker_delta":
+
+
+            sym = str(args.get("symbol") or args.get("sym") or "")
+
+
+            tf = str(args.get("tf") or args.get("interval") or "5m").lower()
+
+
+            lim = max(1, min(int(args.get("limit") or 60), 500))
+
+
+            tail = max(1, min(int(args.get("tail") or 10), 50))
+
+
+            rows = client.get_contract_stats(sym, limit=lim, interval=tf) or []
+
+
+            if not rows:
+
+                return {"symbol": sym, "tf": tf, "error": "no contract_stats rows"}
+
+
+            rows = sorted(rows, key=lambda x: x.get("time") or 0)
+
+
+            out = _taker_summarize(rows, tail=tail)
+
+
+            return {"symbol": sym, "tf": tf, **out}
 
 
 

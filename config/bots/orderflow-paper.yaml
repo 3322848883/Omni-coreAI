@@ -1,4 +1,4 @@
-﻿# 人格10 · 订单流 — 本地模拟盘
+# 人格10 · 订单流 — 本地模拟盘
 # DOM + 成交流水（Delta）+ 多空比/OI；限价优先；0.5%–1% 风险
 bot_id: orderflow-paper
 enabled: false
@@ -42,16 +42,34 @@ strategist:
   timeframe: 5m
   event_on_kline_close: true
   event_timeframe: 5m
-  candles: 60
+  candles: 120
   write_hold: true
+  # 订单流只认订单簿 / 成交流水 / 持仓量三类数据源，故收窄工具面：
+  # 传统指标（indicators/sqzmom/tv_rsi_*）与 SMC 术语（smc_map/smc_events）
+  # 都写在人格的「禁止」清单里 —— 工具面看得到就会用，直接从面里拿掉。
+  # 三个 tv_ 是订单流核心：逐价位资金流/Delta、持仓量四象限、成交量足迹。
   tools:
     enabled: true
     native: true
     max_rounds: 5
+    allow:
+      - orderbook                # 盘口：吸收判断
+      - ticker
+      - klines
+      - market_stats             # 多空比/持仓量/爆仓快照（1h，aux 缓存）
+      - stats                    # /contract_stats 原始记录（含 taker 买卖量）
+      - taker_delta              # 真 Delta / CVD（交易所实测 taker 量）
+      - liquidations             # 爆仓事件流
+      - tv_delta_flow_profile    # 逐价位 money flow + delta + POC 迁移
+      - tv_oi_visible_range      # 持仓量四象限（价涨跌 × OI 增减）
+      - tv_vol_oi_footprint      # 逐价位成交量足迹
+      - tv_cdv                   # 累积 Delta（K 线几何估算，零依赖）
+  # 订单流不依赖任何 skill；空列表 = 不载入（缺省则是全部可见）
+  skills: []
   market:
     mode: rest_only
-    # 订单流：不喂传统指标，避免污染人格
-    indicators: [atr14]
+    # 不喂任何传统指标（原为 [atr14]，实测模型会拿它当入场理由）
+    indicators: []
     extra_timeframes: ["1m"]
     extra_candles: 20
     refresh: [ticker, stats, orderbook]
