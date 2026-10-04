@@ -64,6 +64,10 @@ strategist:
       - tv_oi_visible_range      # 持仓量四象限（价涨跌 × OI 增减）
       - tv_vol_oi_footprint      # 逐价位成交量足迹
       - tv_cdv                   # 累积 Delta（K 线几何估算，零依赖）
+      - orderflow_tape           # 逐秒主动买卖量/Delta/CVD/大单（WS 逐笔实采）
+      - orderflow_footprint      # 逐价位真实买卖量 + POC + 失衡档位
+      - orderbook_state          # 盘口状态四维度 + 分级（微观信号前置门）
+      - orderbook_walls          # 长寿挂单（age>=30s）及其结局
   # 订单流不依赖任何 skill；空列表 = 不载入（缺省则是全部可见）
   skills: []
   market:

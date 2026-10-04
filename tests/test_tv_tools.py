@@ -55,8 +55,8 @@ class TestTvToolRegistration(unittest.TestCase):
             self.assertIn(n, TOOL_NAMES)
 
     def test_tool_count(self):
-        # 23 基础（含 taker_delta）+ 7 TV
-        self.assertEqual(len(NATIVE_TOOLS), 30)
+        # 27 基础（含 taker_delta + 4 个 orderflow）+ 7 TV
+        self.assertEqual(len(NATIVE_TOOLS), 34)
 
 
 class TestTvToolRun(unittest.TestCase):

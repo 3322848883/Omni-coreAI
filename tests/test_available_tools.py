@@ -21,6 +21,7 @@ from unittest import mock
 from omnialpha.strategist.tools import (
     AUX_TOOL_NAMES,
     NATIVE_TOOLS,
+    ORDERFLOW_TOOL_NAMES,
     available_native_tools,
 )
 
@@ -53,10 +54,33 @@ class TestAvailableNativeTools(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             db = Path(td) / "aux_cache.db"
             db.write_bytes(b"")
-            with mock.patch.dict(os.environ, {"OMNIALPHA_AUX": str(db)}):
+            ofdb = Path(td) / "orderflow.db"
+            ofdb.write_bytes(b"")
+            with mock.patch.dict(os.environ, {"OMNIALPHA_AUX": str(db),
+                                              "OMNIALPHA_ORDERFLOW": str(ofdb)}):
                 names = _names(available_native_tools(td))
         self.assertTrue(set(AUX_TOOL_NAMES) <= names)
+        self.assertTrue(set(ORDERFLOW_TOOL_NAMES) <= names)
         self.assertEqual(names, _names(NATIVE_TOOLS))
+
+    def test_orderflow_dropped_when_db_missing(self):
+        """订单流工具同理：orderflow.db 不在（采集未启用）时不挂。"""
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "aux_cache.db"
+            db.write_bytes(b"")
+            missing = str(Path(td) / "nope.db")
+            with mock.patch.dict(os.environ, {"OMNIALPHA_AUX": str(db),
+                                              "OMNIALPHA_ORDERFLOW": missing}):
+                names = _names(available_native_tools(td))
+        for n in ORDERFLOW_TOOL_NAMES:
+            self.assertNotIn(n, names, f"{n} 应当被摘掉")
+        self.assertIn("klines", names)
+        # aux 工具不受影响（两个数据源互相独立）
+        self.assertIn("trades_flow", names)
+
+    def test_orderflow_names_all_exist(self):
+        self.assertTrue(set(ORDERFLOW_TOOL_NAMES) <= _names(NATIVE_TOOLS),
+                        f"不在 NATIVE_TOOLS 里: {set(ORDERFLOW_TOOL_NAMES) - _names(NATIVE_TOOLS)}")
 
     def test_bot_root_lookup_finds_db(self):
         """未设环境变量时按 <bot_root>/pa-data-source/aux-data/aux_cache.db 找。

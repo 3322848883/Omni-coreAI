@@ -23,6 +23,17 @@ from logger import setup_logger, logger
 from data_monitor import update_data_time, check_and_alert, get_monitor_status
 from backup_source import check_and_switch_source, is_backup_active, restore_primary_source, get_backup_status
 from health_check import start_health_check, get_health_checker
+
+# 订单流采集（订单簿增量 + 逐笔方向）—— 复用本进程已建的 Gate WS 连接，
+# 不另开连接。模块缺失时降级为「只采 K 线」，不影响原有功能。
+try:
+    from orderflow_collect import OrderFlowCollector
+
+    _ORDERFLOW_OK = True
+except Exception as _of_err:  # noqa: BLE001
+    OrderFlowCollector = None
+    _ORDERFLOW_OK = False
+    _ORDERFLOW_ERR = str(_of_err)
 WATCHLIST_PATH = os.path.join(SCRIPT_DIR, "watchlist.yaml")
 KLINE_LOCK_FILE = os.path.join(SCRIPT_DIR, "kline_watcher.lock")
 HEALTH_PORT = 18080
@@ -1481,6 +1492,39 @@ def rest_poll_loop():
             time.sleep(1)
 
 
+# ── 订单流采集（复用本进程 WS 连接）─────────────────────────────
+orderflow_collector = None
+_orderflow_stop = threading.Event()
+
+
+def start_orderflow():
+    """建采集器 + 起后台 flush 线程。任何失败都不影响 K 线采集。"""
+    global orderflow_collector
+    if not _ORDERFLOW_OK:
+        logger.warning("订单流模块不可用，跳过: %s", _ORDERFLOW_ERR)
+        return
+    try:
+        contracts = [e["name"] for e in get_symbol_intervals()]
+        if not contracts:
+            return
+        db_path = os.path.join(DATA_DIR, "orderflow.db")
+        orderflow_collector = OrderFlowCollector(contracts, db_path)
+
+        def _loop():
+            while not _orderflow_stop.is_set():
+                try:
+                    orderflow_collector.flush()
+                except Exception as e:  # noqa: BLE001
+                    logger.error("订单流 flush 失败: %s", e)
+                _orderflow_stop.wait(1.0)
+
+        threading.Thread(target=_loop, name="orderflow-flush", daemon=True).start()
+        logger.info("订单流采集已启动: %d 合约 → %s", len(contracts), db_path)
+    except Exception as e:  # noqa: BLE001
+        logger.error("订单流采集启动失败: %s", e)
+        orderflow_collector = None
+
+
 def on_message(ws, message):
     try:
         data = json.loads(message)
@@ -1488,6 +1532,11 @@ def on_message(ws, message):
         return
     channel = data.get("channel", "")
     event = data.get("event", "")
+
+    # 订单流频道（订单簿快照/增量、逐笔成交）—— 必须在本函数的其他分支之前处理，
+    # 否则会被后面的频道判断丢弃。
+    if orderflow_collector is not None and orderflow_collector.on_message(data):
+        return
 
     if channel == "futures.positions" and event == "update":
         result = data.get("result", [])
@@ -1703,6 +1752,15 @@ def on_open(ws):
             ws.send(json.dumps(sub_msg))
             logger.info("Subscribing private channel: %s", ch)
 
+    # 订单流频道（公共）：订单簿快照/增量 + 逐笔成交。与 K 线共用本连接。
+    if orderflow_collector is not None:
+        subs = orderflow_collector.subscriptions()
+        for sub in subs:
+            req = dict(sub)
+            req["time"] = int(time.time())
+            ws.send(json.dumps(req))
+        logger.info("Subscribing orderflow channels: %d subscriptions", len(subs))
+
 
 def fill_gaps_during_downtime():
     global last_disconnect_time, downtime_gaps
@@ -1850,6 +1908,7 @@ def signal_handler(sig, frame):
     global running
     logger.info("Shutting down...")
     running = False
+    _orderflow_stop.set()
     if ws_app:
         try:
             ws_app.close()
@@ -2101,6 +2160,8 @@ def main():
     logger.info("Initializing SQLite...")
     init_db()
     init_account_db()
+    # 订单流采集（复用 WS 连接；失败不影响 K 线采集）
+    start_orderflow()
     logger.info("Fetching historical data via REST API...")
     initial_load()
     logger.info("Recalculating EMA20 for all tables...")

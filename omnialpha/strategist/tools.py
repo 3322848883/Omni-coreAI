@@ -124,6 +124,18 @@ TOOL_GUIDE = """【行情工具 · 按需调用】
 - taker_delta(symbol, tf, limit, tail) → 真 Delta/CVD（交易所实测 taker 买卖量，非估算）+ 大户持仓 + 资金费率 + 爆仓量
 
 
+- orderflow_tape(symbol, limit) → 逐秒主动买卖量/Delta/CVD/大单（WS 逐笔实采，size 符号即方向）
+
+
+- orderflow_footprint(symbol, minutes, rows) → 逐价位真实买卖量 + POC + 失衡档位（判据：单档买卖比 ≥3:1）
+
+
+- orderbook_state(symbol, limit) → 盘口状态四维度（价差/深度/撤单率/成交密度）+ 分级（微观信号的前置门）
+
+
+- orderbook_walls(symbol, min_age, limit) → 长寿挂单（age ≥ 30s）及其结局（被吃/被撤）
+
+
 默认快照只有主周期少量数据；更长历史、更高周期用工具拉。
 
 
@@ -155,6 +167,9 @@ TOOL_NAMES = (
     "tv_linreg_trendlines", "tv_rsi_yata", "tv_lr_ha_candles",
     "tv_delta_flow_profile", "tv_oi_visible_range", "tv_vol_oi_footprint",
     "tv_cdv",
+
+    # 订单流实采（pa-data-source/orderflow.db，WS 采）
+    "orderflow_tape", "orderflow_footprint", "orderbook_state", "orderbook_walls",
 
 
 )
@@ -1143,6 +1158,17 @@ from .tv_tools import TV_TOOL_DEFS as _TV_TOOL_DEFS  # noqa: E402
 
 NATIVE_TOOLS.extend(_TV_TOOL_DEFS)
 
+# 订单流实采工具（读 pa-data-source/orderflow.db）—— 与 tv_* 的几何估算版互补：
+# tv_* 零依赖但对齐 TV 原版算法，这批是 WS 实采的逐笔方向/挂单存活/撤单率。
+from .orderflow_tools import (  # noqa: E402
+    ORDERFLOW_TOOL_DEFS as _ORDERFLOW_TOOL_DEFS,
+    ORDERFLOW_TOOL_NAMES,
+    _orderflow_db,
+    run_orderflow_tool,
+)
+
+NATIVE_TOOLS.extend(_ORDERFLOW_TOOL_DEFS)
+
 # 真 Delta / CVD —— 用交易所**实测** taker 量，而非 K 线几何估算
 from .taker_delta import summarize as _taker_summarize  # noqa: E402
 
@@ -1192,13 +1218,17 @@ def available_native_tools(bot_root=None) -> list:
     数据源（`aux_cache.db`）不在时**不把那 10 个 aux 工具挂给模型** —— 模型看不到
     就调不到，自然不会再白烧轮次。这是「AI 可见的工具面必须与系统实际能提供的一致」
     那条原则的直接落地（同 HealthMonitor 装饰性、AI 预算 vs 闸门那一类）。
+
+    订单流工具同理：`orderflow.db` 不在（采集未启用）时不挂。
     """
-    if _aux_db(bot_root) is not None:
-        return NATIVE_TOOLS
-    return [
-        t for t in NATIVE_TOOLS
-        if (t.get("function") or {}).get("name") not in AUX_TOOL_NAMES
-    ]
+    out = NATIVE_TOOLS
+    if _aux_db(bot_root) is None:
+        out = [t for t in out
+               if (t.get("function") or {}).get("name") not in AUX_TOOL_NAMES]
+    if _orderflow_db(bot_root) is None:
+        out = [t for t in out
+               if (t.get("function") or {}).get("name") not in ORDERFLOW_TOOL_NAMES]
+    return out
 
 
 # 元工具：始终保留。它们是加载 skill 方法论 / 读 references 的唯一入口，
@@ -1430,6 +1460,10 @@ def run_tool(
             from .tv_tools import run_tv_tool
             return run_tv_tool(client, name, args, env=env, bot_root=bot_root,
                                market_cfg=market_cfg)
+
+
+        if name in ORDERFLOW_TOOL_NAMES:
+            return run_orderflow_tool(bot_root, name, args)
 
 
         if name == "klines":

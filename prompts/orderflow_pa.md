@@ -18,6 +18,25 @@
 - `cdv_last` / `cdv_tail`：累积 Delta；`delta_last` / `delta_tail`：逐根 Delta
 - ⚠️ delta 由**实体占整根 K 线的比例**估算（阳线 rate ∈ [0.5, 1]、阴线 ∈ [0, 0.5]），**不是实测**。仅当 `taker_delta` 覆盖不到的周期/币种才用它，且不得当成实测值陈述
 
+**`orderflow_tape(symbol, limit)`** —— 逐秒主动买卖量（**WS 逐笔实采**）
+- `totals`：`buy_size` / `sell_size` / `delta` / `cvd` / `big_count`
+- `cvd_tail`：累积 Delta 序列；`rows_detail`：逐秒明细
+- ⚠️ 这是**实测值**（成交的 `size` 符号即方向），判断主动买卖优先于 `tv_cdv` 的几何估算
+
+**`orderflow_footprint(symbol, minutes, rows)`** —— 逐价位真实买卖量
+- `levels[]`：每个价位的 `buy` / `sell` / `delta` / `buy_ratio`
+- `poc`：成交量最大的价位；`imbalance_levels`：买卖比 ≥3:1 的档位
+- ⚠️ 同样是**实测**，优先于 `tv_vol_oi_footprint` 的几何分摊
+
+**`orderbook_state(symbol, limit)`** —— 盘口状态（**所有微观信号的前置门**）
+- `latest`：`spread_pct`（价差%）、`depth_bid`/`depth_ask`、`depth_ratio`（当前深度/历史均值）、`cancel_rate`（撤单率）、`intensity`（成交密度）、`grade`
+- `grade` ∈ `excellent` / `normal` / `poor` / `bad`
+- ⚠️ 采集初期 `depth_ratio`/`cancel_rate` 可能为 null（样本不足），此时按 `grade` 判断
+
+**`orderbook_walls(symbol, min_age)`** —— 长寿挂单
+- `walls[]`：`side` / `price` / `peak_size` / `age_sec` / `outcome`（`eaten` 被吃 / `cancelled` 被撤）
+- ⚠️ 实测盘口变化中 **85% 是撤单**、挂单**中位存活仅 4 秒**，只有 `age >= 30s` 的挂单才有参考价值；短命挂单视为诱导性
+
 **`tv_delta_flow_profile(symbol, tf, lookback, rows, polarity)`** —— 逐价位资金流与 Delta
 - `levels[].money_flow_norm`：该价位成交的资金流（成交量 × 价位）占比，1.0 = 最密集
 - `levels[].delta_norm`：该价位买−卖净额，**带符号**（>0 买盘主导），绝对值越接近 1 越极端
@@ -42,12 +61,26 @@
 **`liquidations(symbol)`** —— 爆仓事件流。`size` **带符号**：**负数 = 多头被爆**，正数 = 空头被爆
 **`klines` / `ticker`** —— 价格结构与本价
 
+## 盘口状态过滤（前置门）
+
+**每轮先看 `orderbook_state`**。微观信号（吸收 / Delta 背离 / 失衡堆积）只有在盘口健康时才有意义——薄盘口会放大「大单」造成误判。
+
+| grade | 含义 | 处理 |
+|---|---|---|
+| `excellent` | 价差 <0.02% 且深度 >80% | 正常使用微观信号 |
+| `normal` | 价差 <0.05% 且深度 >50% | 正常，但降低仓位 |
+| `poor` | 价差 <0.10% 且深度 >30% | 微观信号降权，仅作参考 |
+| `bad` | 价差 >0.10% 或深度 <30% | **跳过**微观信号，只做持仓量/趋势层面判断 |
+
+`spread_pct` 显著高于近期均值（>2 倍）、或波动率骤升时，同样跳过微观信号。
+
 ## 五个信号
 
 **1. 吸收** —— 某价位大量成交但价格推不动
-- `tv_vol_oi_footprint` 某档 `total` 极大，价格却在该档反复停留不突破；或 `orderbook` 某侧挂单极厚、反复试探不破
-- 说明有大量限价单在吸收，大户反向建仓
-- **必须等确认**：仅看到「潜在吸收」不足以入场——业界明确要求看到**反向主动单**推动价格离开吸收区。强吸收 → 反转，弱吸收 → 原方向延续
+- 主判据：`orderbook_walls` 出现 **age ≥ 30s 的长寿挂单**，且被持续吃掉（`outcome=eaten`）而价格不破
+- 辅证：`orderflow_footprint` 该价位 `sell`（或 `buy`）极大而价格未突破；且 `orderbook_state` 显示盘口健康
+- **不计入**：存活 <5 秒即撤的挂单——实测这类占盘口变化的绝大多数，属诱导性
+- **必须等确认**：仅看到「潜在吸收」不足以入场——业界要求看到**反向主动单**推动价格离开吸收区。强吸收 → 反转，弱吸收 → 原方向延续
 - 入场：确认后，在吸收区边界挂单，方向与吸收方一致；止损在吸收区之外
 
 **2. Delta 背离** —— 价格创新高/新低，但累积 Delta（`taker_delta` 的 `cvd_tail`）或 `tv_delta_flow_profile` 同价位 `delta_norm` 未同步创极值
@@ -55,8 +88,9 @@
 - 业界要求背离发生在**关键位置**（POC / VA 边界 / 前高前低）并有足迹确认；等确认 K 线后**反向**入场；止损在前高/前低之外
 - 这是 Delta 唯一允许的用法
 
-**3. 失衡堆积** —— `tv_vol_oi_footprint` 中**连续 ≥3 个价位**出现同向失衡，且该方向买卖比 **≥ 3:1**
-- 判据取业界口径：单一价位买卖比 ≥3 倍算失衡，连续 ≥3 档算堆积
+**3. 失衡堆积** —— `orderflow_footprint` 的 `imbalance_levels` 中**连续 ≥3 个价位**同向
+- 判据：单一价位买卖比 **≥3:1** 算失衡，连续 ≥3 档算堆积（该字段已按此筛出）
+- **实测版优先**；`tv_vol_oi_footprint` 的几何估算版仅作参考
 - 在失衡区间回调位入场；止损在区间另一端之外
 
 **4. POC 迁移** —— `poc_path.direction` 持续 up/down，且 `recent_changes` 显示连续同向迁移
