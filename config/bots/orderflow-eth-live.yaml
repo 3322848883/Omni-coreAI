@@ -1,0 +1,107 @@
+# 订单流 · ETH 单币实盘 — eth-disc 讨论组成员
+#
+# 由 config/bots/orderflow-live.yaml 复制而来，策略段**逐字一致**，差异只有：
+#   bot_id / label_prefix，以及 symbols 由 [BTC_USDT, ETH_USDT] 收窄为 ETH 单币。
+# 复制而非复用现有 bot，是为了让讨论组与独立实盘 bot 互不影响 ——
+# 现有 smc-live / orderflow-live / wyckoff-live 保持原样。
+#
+# 为什么要单币：讨论组里三个成员必须看同一个标的。快照按 symbols 注入行情
+# （snapshot.py 的 for sym in symbols），双币配置会让三个人格各说一个币，
+# 融合时串标的。而组级没有标的覆盖能力（PersonaGroup.trigger 定义了但从未使用）。
+#
+# enabled: false —— 讨论组只做「分析 + 讨论 + 投票」。persona-run 不读 enabled
+# （load_all_bots 全量加载），所以分析照常，但本 bot 不会被 watchdog 拉起。
+#
+# 策略：prompts/orderflow_pa.md（人格10 · 订单流）
+# 风控按权益比例：单笔 ≤ 权益 5%，总量 ≤ 权益 10%（同 smc-live / brooks-btc 的做法）
+#
+# 数据源依赖：本 bot 的 orderflow_* 工具读 pa-data-source/data/orderflow.db，
+# 由 kline_watcher 的订单流采集（WS）写入。数据源不在时这些工具**不会挂给模型**
+# （tools.available_native_tools 的过滤），模型会自动只用 tv_*/taker_delta 那批。
+
+bot_id: orderflow-eth-live
+enabled: false
+env: live
+api_key_env: GATE_API_KEY
+api_secret_env: GATE_API_SECRET
+
+symbols:
+  - ETH_USDT
+
+# 绝对兜底（真正的闸门是下面的 max_notional_pct / max_total_notional_pct）
+max_notional_usd: 10000
+max_orders_per_file: 5
+max_files_per_run: 20
+poll_interval_sec: 2
+label_prefix: ofe
+position_policy: strict
+default_replace: symbol
+order_scope: own
+require_sl: true
+
+account_risk:
+  halt: false
+  max_leverage: 50
+  max_total_notional_usd: 10000
+  # 权益比例硬顶：单笔名义 ≤ 权益 × 此倍数（executor._check_notional 执行）
+  max_notional_pct: 5.0
+  # 总量闸门（按比例）：持仓名义合计 + 本单 ≤ 权益 × 此倍数
+  max_total_notional_pct: 10.0
+  # 裸仓自动补保护：先跑 dry（只记录「本来会挂什么」，不下单），观察一轮再改 true
+  auto_protect: "dry"
+  auto_protect_sl_pct: 2.0
+
+strategist:
+  enabled: true
+  prompt_file: prompts/orderflow_pa.md
+  interval_sec: 900
+  timeframe: 5m
+  # 多周期图：5m / 15m / 1h / 4h 四张（与 market.timeframes 对齐）
+  vision: true
+  vision_timeframes: ["5m", "15m", "1h", "4h"]
+  event_on_kline_close: true
+  event_timeframe: 5m
+  candles: 120
+  write_hold: true
+  tools:
+    enabled: true
+    native: true
+    max_rounds: 6
+    # 订单流白名单：实测微观数据（orderflow_*）+ 真 Delta/CVD（taker_delta）
+    # + 几何估算对照（tv_*）+ 盘口/爆仓/原始统计。
+    # 传统指标（indicators/sqzmom）、SMC 术语（smc_map/smc_events）一律关掉
+    # —— 都写在人格的「禁止」清单里，看得到就会用。
+    allow:
+      - klines
+      - ticker
+      - orderbook
+      - market_stats
+      - stats
+      - taker_delta
+      - liquidations
+      - tv_delta_flow_profile
+      - tv_oi_visible_range
+      - tv_vol_oi_footprint
+      - tv_cdv
+      - orderflow_tape
+      - orderflow_footprint
+      - orderbook_state
+      - orderbook_walls
+  market:
+    mode: hybrid
+    indicators: []          # [] = 快照不注入任何指标（避免模型拿 ATR/EMA 当理由）
+    timeframes: ["5m", "15m", "1h", "4h"]
+    extra_candles: 80
+  ai_triggers:
+    enabled: true
+    max_active: 5
+    default_cooldown_sec: 300
+  risk:
+    min_confidence: 0.6     # 实盘取保守值（模拟盘用 0.55）
+    max_chips: 1            # 单币单腿（原双币配置是 2）
+    max_notional_usd: 10000
+  # skill 白名单：订单流不依赖任何 skill（空 = 不载入）
+  skills: []
+  llm:
+    provider: gw-flash
+    reasoning_effort: high

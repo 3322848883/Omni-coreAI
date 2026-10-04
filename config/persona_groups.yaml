@@ -95,3 +95,31 @@ groups:
       rounds: 3
       timeout_sec: 120
       early_exit_on_agreement: false
+
+  # ── ETH 三人格讨论组（2026-10-04）────────────────────────────
+  # 三种**方法论互不重叠**的人格，同看 ETH 单币：
+  #   订单流   微观成交（订单簿 / 逐价位 Delta / 主动买卖）
+  #   SMC      结构事件（BOS/CHoCH / 扫荡 / OB-FVG）
+  #   Wyckoff  量价阶段（A–E 状态机 / 吸筹派发）
+  # 实测（三人格真实行情对照）同一时点常给出不同甚至相反的结论 ——
+  # 这组就是让它们当面辩：3 轮（相互反驳 → 深化讨论 → 最终决策）后等权融合。
+  #
+  # 成员必须是**单币**配置（smc-eth-live / orderflow-eth-live / wyckoff-eth-live）：
+  # 快照按 symbols 注入行情，双币配置会让三个人格各说一个币，融合时串标的。
+  # 三个成员都是 env: live（真实账户上下文），但 enabled: false ——
+  # persona-run 不读 enabled，所以分析照常、不会下单。
+  - name: eth-disc
+    topology: single_account
+    members: [smc-eth-live, orderflow-eth-live, wyckoff-eth-live]
+    target_account: smc-eth-live
+    fusion: weighted_vote
+    fusion_config:
+      weights: {smc-eth-live: 1, orderflow-eth-live: 1, wyckoff-eth-live: 1}
+    on_conflict: hold
+    enabled: true
+    discussion:
+      enabled: true
+      rounds: 3
+      timeout_sec: 120
+      # 不早退：即使首轮就一致也要跑满 3 轮，保留完整的辩论过程供审计
+      early_exit_on_agreement: false

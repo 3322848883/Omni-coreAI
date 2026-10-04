@@ -1,0 +1,91 @@
+# SMC · ETH 单币实盘 — eth-disc 讨论组成员
+#
+# 由 config/bots/smc-live.yaml 复制而来，策略段**逐字一致**，差异只有：
+#   bot_id / label_prefix，以及 symbols 固定为 ETH 单币。
+# 复制而非复用现有 bot，是为了让讨论组与独立实盘 bot 互不影响 ——
+# 现有 smc-live / orderflow-live / wyckoff-live 保持原样。
+#
+# 为什么要单币：讨论组里三个成员必须看同一个标的。现有 orderflow-live /
+# wyckoff-live 的 symbols 是 [BTC_USDT, ETH_USDT]，快照会注入两个币，
+# 融合时就会串标的（订单流对 BTC 表态、Wyckoff 对 ETH 表态）。而组级没有
+# 标的覆盖能力（PersonaGroup.trigger 定义了但代码从未使用），只能落到 bot 配置。
+#
+# 参与 config/persona_groups.yaml 的 eth-disc 组：
+#   SMC（结构事件） × 订单流（微观成交） × Wyckoff（量价阶段）
+#   → weighted_vote 等权融合 + 3 轮讨论。
+#
+# enabled: false —— 讨论组只做「分析 + 讨论 + 投票」。persona-run 不读 enabled
+# （load_all_bots 全量加载），所以分析照常，但本 bot 不会被 watchdog 拉起。
+#
+# 策略：prompts/smc_pa.md（人格11 · SMC）
+# 风控按权益比例：单笔 ≤ 权益 5%，总量 ≤ 权益 10%（同 brooks-btc 的做法）
+
+bot_id: smc-eth-live
+enabled: false
+env: live
+api_key_env: GATE_API_KEY
+api_secret_env: GATE_API_SECRET
+
+symbols:
+  - ETH_USDT
+
+# 绝对兜底（真正的闸门是下面的 max_notional_pct / max_total_notional_pct）
+max_notional_usd: 10000
+max_orders_per_file: 5
+max_files_per_run: 20
+poll_interval_sec: 2
+label_prefix: sme
+position_policy: strict
+default_replace: symbol
+order_scope: own
+require_sl: true
+
+account_risk:
+  halt: false
+  max_leverage: 50
+  max_total_notional_usd: 10000
+  # 权益比例硬顶：单笔名义 ≤ 权益 × 此倍数（executor._check_notional 执行）
+  max_notional_pct: 5.0
+  # 总量闸门（按比例）：持仓名义合计 + 本单 ≤ 权益 × 此倍数
+  max_total_notional_pct: 10.0
+  # 裸仓自动补保护：先跑 dry（只记录「本来会挂什么」，不下单），观察一轮再改 true
+  auto_protect: "dry"
+  auto_protect_sl_pct: 2.0
+
+strategist:
+  enabled: true
+  prompt_file: prompts/smc_pa.md
+  interval_sec: 900
+  timeframe: 5m
+  # 多周期图：5m / 15m / 1h / 4h 四张（与 market.timeframes 对齐）
+  vision: true
+  vision_timeframes: ["5m", "15m", "1h", "4h"]
+  event_on_kline_close: true
+  event_timeframe: 5m
+  candles: 120
+  write_hold: true
+  tools:
+    enabled: true
+    native: true
+    max_rounds: 3
+    # SMC 白名单：只要地图、事件流、原始 K 线。indicators/sqzmom/tv_* 一律关掉
+    # —— SMC 不用传统指标，需要波动率尺度时读 structure_scale。
+    allow: [smc_map, smc_events, klines]
+  market:
+    mode: hybrid
+    indicators: []          # [] = 快照不注入任何指标
+    timeframes: ["5m", "15m", "1h", "4h"]
+    extra_candles: 80
+  ai_triggers:
+    enabled: true
+    max_active: 5
+    default_cooldown_sec: 300
+  risk:
+    min_confidence: 0.6
+    max_chips: 1            # SMC 提示词要求单腿
+    max_notional_usd: 10000
+  # skill 白名单：新装 skill 不会自动进实盘（发布≠可用）
+  skills: [price-action-trading]
+  llm:
+    provider: gw-flash
+    reasoning_effort: high
