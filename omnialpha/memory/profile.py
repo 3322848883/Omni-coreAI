@@ -139,8 +139,13 @@ class MemoryProfile:
         n = rec["total_trades"]
         wr = round(rec.get("win_rate", 0.0) * 100)
         avg_pnl = rec.get("avg_pnl_usd", 0.0)
-        return (f"历史表现: {n}笔交易, 胜率{wr}%, "
-                f"均持仓{rec.get('avg_hold_rounds', 0)}轮, 均盈亏{avg_pnl}u")
+        parts = [f"{n}笔交易", f"胜率{wr}%"]
+        # 账本投影给不出持仓轮数（文件里也没有时是 0）→ 宁可不报，
+        # 别写「均持仓0轮」——那读起来像「开仓即平」，是假信息。
+        if rec.get("avg_hold_rounds"):
+            parts.append(f"均持仓{rec['avg_hold_rounds']}轮")
+        parts.append(f"均盈亏{avg_pnl}u")
+        return "历史表现: " + ", ".join(parts)
 
     def _write(self, rec: dict) -> None:
         self.path.write_text(
