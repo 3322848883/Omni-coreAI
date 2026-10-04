@@ -333,6 +333,35 @@ class TestPersonaMemoryWiring(unittest.TestCase):
                           "决策没引用 journal 索引（FinPos memory_refs）")
             self.assertTrue(rec["recent_events"], "recent_events 没刷新")
 
+    def test_direction_reversal_starts_a_new_order(self):
+        """方向反转必须**另起一张单** —— 否则注入的订单上下文会把持仓方向说反。
+
+        实测：账户已是 +177 多仓，订单记录却仍写着 `side=short`、
+        理由是「卖墙吸收…限价空」—— 把持仓方向说反比没有记忆更危险。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            r = _persona_runner(root)
+            oid_long = r._resolve_order_id("long", {})
+            r.orders.create({"order_id": oid_long, "symbol": "BTC_USDT", "side": "long",
+                             "group": "g", "members": [BOT], "target_account": BOT,
+                             "status": "open"})
+            # 同向 → 复用（共同记忆贯穿持仓期）
+            self.assertEqual(r._resolve_order_id("long", {}), oid_long)
+
+            # 反向 → 新单 + 旧单关闭
+            oid_short = r._resolve_order_id("short", {})
+            self.assertNotEqual(oid_short, oid_long, "方向反转应另起一张单")
+            self.assertEqual(r.orders.get(oid_long)["status"], "closed",
+                             "反转后旧单必须关闭，否则它会继续进 prompt")
+
+            r.orders.create({"order_id": oid_short, "symbol": "BTC_USDT", "side": "short",
+                             "group": "g", "members": [BOT], "target_account": BOT,
+                             "status": "open"})
+            # hold / 管理动作仍复用当前方向的单
+            self.assertEqual(r._resolve_order_id("hold", {}), oid_short)
+            self.assertEqual(r._resolve_order_id("reduce", {}), oid_short)
+
     def test_persona_journal_has_new_fields(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

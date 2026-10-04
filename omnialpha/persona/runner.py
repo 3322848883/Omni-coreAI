@@ -475,8 +475,18 @@ class PersonaRunner:
         按 group 过滤，多组隔离互不干扰。
         """
         opens = self.orders.list_open(group=self.group.name)
+        # 方向反转 → **另起一张单**，而不是在旧记录上再记一次 open。
+        # 否则注入 prompt 的订单上下文会自相矛盾：实测账户已是 +177 多仓，
+        # 而订单上下文还写着「方向: short / 理由: …限价空」（side 与 reason 都是旧的）
+        # —— 把持仓方向说反，比没有记忆更危险。
+        if opens and decision in ("long", "short"):
+            cur = str(opens[0].get("side") or "")
+            if cur and cur != decision:
+                self.orders.update(opens[0]["order_id"], status="closed")
+                return new_order_id()
+            return opens[0]["order_id"]
         # 管理动作 / hold：沿用现有 open 单（共同记忆贯穿持仓期）
-        if decision in ("hold", "close", "reduce", "modify") or opens:
+        if decision in ("hold", "close", "reduce", "modify"):
             return opens[0]["order_id"] if opens else None
         # 无持仓 + 方向开仓 → 建新单
         if decision in ("long", "short"):
