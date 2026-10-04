@@ -651,20 +651,27 @@ python -m omnialpha persona-run --once             # 单轮
 
 ### 记忆系统（agent-memory）
 
-四层记忆架构，恒定 ~4k token/轮：
+四层记忆架构，每轮注入 prompt：
 
 | 层 | 载体 | 生命周期 | 进 prompt |
 |---|---|---|---|
 | Working | 当前快照 + 近 3 轮 | 每轮重建 | ✅ |
-| Order | `data/shared/orders/` | 开仓→平仓 | ✅ 持仓期 |
-| Journal | `state/memory_journal.jsonl` | 永久 append-only | ❌ 摘要 |
+| Order | `data/shared/orders/<order_id>.json` | 开仓→平仓 | ✅ 持仓期 |
+| Journal | `state/memory_journal.jsonl` | 永久 append-only | ✅ 近况摘要 |
 | Profile | `state/memory_profile.json` | 跨订单持久 | ✅ 精简 |
 
-- **订单上下文**：reason / lifecycle / recent_events（top-5 关键事件）/ memory_refs / invalidation
-- **决策日志**：每轮 append-only 事件溯源（合规级审计）
-- **策略画像**：平仓后确定性统计更新
-- **缓存优化**：稳定前缀 ~1850t 缓存命中，变化值殿后
-- **遗忘机制**：TTL 归档（90 天）+ 已平仓清理（365 天）
+- **订单上下文**：reason / lifecycle / recent_events（top-5 关键事件，按 `weight × 时间衰减`）/ memory_refs / invalidation。
+  匹配**按路径区分**：单 bot（`plan-loop`）只看 `target_account == 自己`；人格（`persona-run`）看全组 `members`（组内共管同一张单）。
+  方向反转时**另起一张单**（旧单关闭）—— 否则注入的持仓方向会与账户相反。
+- **决策日志**：每轮 append-only 事件溯源（含 `snapshot_digest` / `llm_model` / `prompt_cache_hit_tokens`），
+  **hold 轮也记** —— 近况摘要与缓存曲线都靠它，只在成交时记会让近况几乎空白。
+- **策略画像**：核心统计（笔数 / 胜率 / 总盈亏 / 最大回撤）**由 paper 账本投影**（`fills.realised_pnl`），
+  覆盖**全部**平仓（含 SL/TP 触发 —— 那是交易所侧成交、没有信号，不进 `logs/trades.jsonl`）与**全部** bot。
+  `by_action` / `best_act` 由平仓事件尽力而为；无账本（live 账户）时退回文件累加值。
+- **缓存护栏**：`state/cache_stats.jsonl` 每轮记 `hit` / `total` / `hit_rate` / `model`，前缀摘要落 `cache_prefix.sha256`。
+  实测命中率约 **0.04–0.75**（前缀越稳越高）。注意 `total` 是**本轮累计**（工具循环的每次调用都计入），
+  实测 **70–331k token/轮** —— 远高于设计时的 ~4k 预算，大头是工具返回的行情数据。
+- **遗忘机制**：按 **24h 间隔**跑 TTL 归档（90 天）+ 超龄已平仓清理（365 天），状态落 `data/shared/memory_gc.json`。
 
 ### 监控告警与回测（prod-hardening）
 
