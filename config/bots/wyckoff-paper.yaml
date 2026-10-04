@@ -42,16 +42,31 @@ strategist:
   timeframe: 15m
   event_on_kline_close: true
   event_timeframe: 15m
-  candles: 80
+  # 80 根看不清一个完整区间。tv_wyckoff 内部固定吃 >=500 根，
+  # 这里给的是让模型自己核对量价形态用的原始 K 线。
+  candles: 150
   write_hold: true
+  # Wyckoff 只认量价（OHLCV + 成交量），故收窄工具面。
+  # 实测未收窄时（35 个工具全开）模型会拿 indicators(atr14/ema20/rsi14) 当入场理由，
+  # 并用 smc_map 的 BOS / Premium-Discount 判断 Wyckoff 阶段 ——
+  # 工具面看得到就会用，直接从面里拿掉。
   tools:
     enabled: true
     native: true
-    max_rounds: 4
+    # 跨周期要多次调 tv_wyckoff（15m + 1h），4 轮会截断
+    max_rounds: 5
+    allow:
+      - klines        # 原始 OHLCV：核对量价形态
+      - tv_wyckoff    # 五阶段状态机 + 15 事件 + 双评分 + next/checks
+      - ticker        # 实时价：挂限价、算止损距离
+      - contract      # 最小下单量/张值/杠杆上限：仓位换算
+  # Wyckoff 不依赖任何 skill；空列表 = 不载入（缺省则是全部可见）
+  skills: []
   market:
     mode: rest_only
-    # Wyckoff：只给量能相关，不喂震荡指标
-    indicators: [obv, atr14]
+    # 不喂任何传统指标（原为 [obv, atr14]，实测模型会拿它当入场理由）。
+    # 原版引擎自己算 ATR，也完全不用 OBV（它用的是原始 volume 与 50 期均量比）。
+    indicators: []
     extra_timeframes: ["1h"]
     extra_candles: 15
   ai_triggers:
