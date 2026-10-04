@@ -1334,6 +1334,20 @@ class Executor:
         """Breakout ENTRY: trigger then OPEN. Not stop-loss."""
         self._check_symbol(intent.symbol)
         meta = self.client.get_contract(intent.symbol)
+        # 与 `_open` 同源：先按「权益 × risk_pct ÷ 止损距离」反推名义，再做波动率调整。
+        # 缺这两步时 stop_entry 的仓位只受 max_notional 限制 —— 风险公式被整个绕过。
+        # 实测（eth-disc 讨论组）4 轮里 3 轮产出的正是 stop_entry_long，于是
+        # 「每笔风险 X% 本金」在多数单子上不生效，仓位直接顶到 max_notional 上限。
+        size_note = ""
+        if intent.size is None and intent.size_usd is not None:
+            entry_for_risk = (intent.price if intent.price is not None
+                              else self.client.get_last_price(intent.symbol))
+            if entry_for_risk:
+                intent.size_usd, size_note = self._align_size_to_risk(
+                    intent, float(entry_for_risk))
+                intent.size_usd, vol_note = self._vol_adjust(intent, intent.size_usd)
+                if vol_note:
+                    size_note = f"{size_note}; {vol_note}" if size_note else vol_note
         self._check_notional(intent.size_usd)
         if intent.size is not None:
             contracts = int(intent.size)
@@ -1372,6 +1386,10 @@ class Executor:
         check = self._confirm_price_order_landed(order, kind="stop_entry")
         ok = bool(check.get("ok") and check.get("confirmed"))
         detail = {"order": order, "body": body, "order_check": check}
+        if size_note:
+            detail["size_note"] = size_note
+        if intent.size_usd is not None:
+            detail["size_usd"] = float(intent.size_usd)
         if not ok:
             return StepResult(intent.action, intent.symbol, False, detail=detail,
                               error=f"stop_entry not confirmed id={order.get('id')}")

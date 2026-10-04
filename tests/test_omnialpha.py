@@ -820,6 +820,32 @@ class TestExecutor(unittest.TestCase):
         self.assertIn("size_clamped", note)
         self.assertLessEqual(float(rep.results[0].detail.get("size_usd") or 0), 30)
 
+    def test_stop_entry_size_clamped_to_risk_formula(self):
+        """stop_entry 也必须按风险公式定仓（与 open_long 同源）。
+
+        原先 `_stop_entry` 只过 `_check_notional`、不调 `_align_size_to_risk` ——
+        于是「每笔风险 = 权益 × risk_pct」在突破单上整个失效，仓位直接顶到
+        max_notional 上限。实测 eth-disc 讨论组 4 轮里 3 轮产出的正是
+        `stop_entry_long`，等于风险公式在多数单子上没生效。
+        """
+        client = FakeClient()
+        client.get_account = lambda: {"total": 1000.0, "available": 1000.0}
+        client.get_last_price = lambda s: 50000.0
+        ex = Executor(client, max_notional_usd=1e12,
+                      account_risk={"max_notional_pct": 10, "risk_pct": 0.01},
+                      require_sl=True)
+        # equity=1000, risk=1%, entry=50000, sl=25000 → dist=50%
+        # expected = 1000*0.01/0.5 = 20 USDT 名义
+        rep = ex.execute_signal(parse_signal({
+            "action": "stop_entry_long", "symbol": "BTC_USDT",
+            "size_usd": 100, "price": 50000, "trigger_price": 50100, "sl": 25000,
+        }))
+        self.assertTrue(rep.ok, rep.to_dict())
+        detail = rep.results[0].detail or {}
+        self.assertIn("size_clamped", detail.get("size_note") or "",
+                      "stop_entry 也必须走风险公式钳位")
+        self.assertLessEqual(float(detail.get("size_usd") or 0), 30)
+
     def test_cancel_all_own_scope_only_touches_label_prefix(self):
         """order_scope=own + explicit bot label must not wipe another bot's book (prelaunch M12)."""
         client = FakeClient()
