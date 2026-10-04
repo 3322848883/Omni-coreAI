@@ -187,12 +187,13 @@ llm:
 | 落盘 | 每轮 **`state/*.thinking.json`**（思维链 reasoning_content） |
 | 账户 | **REST**：余额+持仓+open_orders+TP/SL（全 bot） |
 
-**25 个工具**（原生 function calling）：
+**35 个工具**（原生 function calling）：
 
-- 行情：`klines` `indicators` `ticker` `orderbook` `contract` `stats` `account` `smc_map` `smc_events` `sqzmom`
+- 行情：`klines` `indicators` `ticker` `orderbook` `contract` `stats` `account` `smc_map` `smc_events` `sqzmom` `taker_delta`
 - aux：`trades_flow` `liquidations` `market_stats` `tech_analysis` `coin_info` `onchain` `social` `overview` `sentiment` `macro`
+- 订单流（pa-data-source 实采）：`orderflow_tape` `orderflow_footprint` `orderbook_state` `orderbook_walls`
 - skill：`skill` `skill_ref`（SkillKit）
-- **TV 指标**：`tv_linreg_trendlines`（Linreg & Trendlines）`tv_rsi_yata`（RSI Yata）`tv_lr_ha_candles`（LR HA Candles）
+- **TV 指标**：`tv_linreg_trendlines` `tv_rsi_yata` `tv_lr_ha_candles` `tv_delta_flow_profile` `tv_oi_visible_range` `tv_vol_oi_footprint` `tv_cdv` `tv_wyckoff`
 
 **SkillKit（可安装 skill）** —— 三级渐进披露：
 
@@ -223,7 +224,9 @@ skill 可声明 `allowed-tools`（激活后**收窄**工具面）、`model-invoc
 
 **指标 26 族**（`indicators` 工具，周期任意）：EMA/SMA/MA/RMA/WMA/VWMA/HMA/KAMA/ALMA/T3/LSMA、Linreg/Linreg Channel、ATR（Pine 平滑 rma/sma/ema/wma）、RSI（含平滑+BB）、MACD（EMA/SMA）、BOLL（SMA/EMA/RMA/WMA/VWMA 基线）、Stoch、CCI、Williams %R、MFI、ADX、VWAP、OBV、SuperTrend、SQZMOM、pine_ema 套件。
 
-**TV 指标 3 套**（独立工具，Pine 原版移植并已对齐验证）：`tv_linreg_trendlines`（Linreg & Trendlines：3 层回归通道 + 枢轴趋势线）、`tv_rsi_yata`（RSI Yata：平滑 RSI + MA + BB + RSI 蜡烛 + OB/OS + 直方图 + RSI-MACD + HH/HL/LH/LL）、`tv_lr_ha_candles`（LR HA Candles：线性回归 Heikin-Ashi + T3 + ATR 波动带）。
+**TV 指标 8 套**（独立工具，Pine 原版移植并已对齐验证）：`tv_linreg_trendlines`（Linreg & Trendlines：3 层回归通道 + 枢轴趋势线）、`tv_rsi_yata`（RSI Yata：平滑 RSI + MA + BB + RSI 蜡烛 + OB/OS + 直方图 + RSI-MACD + HH/HL/LH/LL）、`tv_lr_ha_candles`（LR HA Candles：线性回归 Heikin-Ashi + T3 + ATR 波动带）、`tv_delta_flow_profile`（Delta Flow Profile：逐价位资金流/Delta + POC 迁移）、`tv_oi_visible_range`（OI Visible Range：持仓量四象限 + 价位分布）、`tv_vol_oi_footprint`（Volume/OI Footprint：逐价位买卖足迹）、`tv_cdv`（Cumulative Delta Volume：K 线几何估算累积 Delta）、`tv_wyckoff`（Wyckoff [theUltimator5]：A→E 五阶段状态机 + 15 个 Wyckoff 事件 + 结构置信度/验证双评分 + `next`「还差什么条件」+ `checks` 门槛明细）。
+
+`tv_wyckoff` 的输入是**纯 OHLCV**，内部固定喂 ≥500 根（`limit` 低于 500 会被抬到 500），不移植原版的 `request.security` 多周期扫描——要跨周期就让模型自己换 `tf` 多次调用。`phase: null` 表示当前没有活跃战役（原版指标此时显示 "Searching for SC / BC"），是正常状态。
 
 取数与 `klines` 同源：hybrid 时优先本所 `kline_<ex>.db`，否则走**该所** REST（`exchange:` 决定数据源）。
 

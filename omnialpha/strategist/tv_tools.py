@@ -1,11 +1,16 @@
 """TV Pine Script 指标工具（挂到 LLM 工具位）。
 
-三个指标按 TradingView 原始名称命名：
+按 TradingView 原始名称命名，与 `tv_indicators` 模块一一对应；
+数据走与 klines 同源的 `resolve_candles`。
+
   1. tv_linreg_trendlines  — Linreg & Trendlines (ParkF)
   2. tv_rsi_yata           — RSI Yata
   3. tv_lr_ha_candles      — Linear Regression Heikin Ashi Candles (B3AR_Trades)
-
-与 tv_indicators 模块一一对应；数据走与 klines 同源的 resolve_candles。
+  4. tv_delta_flow_profile — Delta Flow Profile (LuxAlgo)
+  5. tv_oi_visible_range   — OI Visible Range (Kioseff Trading)
+  6. tv_vol_oi_footprint   — Volume / OI Footprint (Leviathan Capital)
+  7. tv_cdv                — Cumulative Delta Volume (LonesomeTheBlue)
+  8. tv_wyckoff            — Wyckoff [theUltimator5]（五阶段状态机 + 双评分）
 """
 from __future__ import annotations
 
@@ -18,7 +23,9 @@ from .tv_indicators import (
     MODE_VOLUME,
     POLARITY_BAR,
     POLARITY_PRESSURE,
+    STRICTNESS,
     cdv_rate,
+    compute_wyckoff,
     cumulative_delta_volume,
     delta_flow_profile,
     heikin_ashi,
@@ -44,7 +51,7 @@ from .tv_indicators import (
 TV_TOOL_NAMES = (
     "tv_linreg_trendlines", "tv_rsi_yata", "tv_lr_ha_candles",
     "tv_delta_flow_profile", "tv_oi_visible_range", "tv_vol_oi_footprint",
-    "tv_cdv",
+    "tv_cdv", "tv_wyckoff",
 )
 
 _SYM = {"type": "string", "description": "e.g. BTC_USDT"}
@@ -54,6 +61,11 @@ _LIMIT = {"type": "integer", "minimum": 30, "maximum": 300,
 # 剖面类指标的窗口上限是 1500 根（对齐原版 lookback 上限），需要更长的 K 线
 _LIMIT_LONG = {"type": "integer", "minimum": 30, "maximum": 1500,
                "description": "candles to fetch (default 400; must cover lookback)"}
+# Wyckoff 状态机要走完 A→E 需要足够历史，内部强制至少 500 根
+_LIMIT_WY = {"type": "integer", "minimum": 200, "maximum": 1500,
+             "description": ("candles to fetch (default 600). The engine always "
+                             "consumes at least 500 bars internally, so values below "
+                             "500 are raised to 500")}
 
 TV_TOOL_DEFS: list[dict[str, Any]] = [
     {
@@ -241,6 +253,41 @@ TV_TOOL_DEFS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "tv_wyckoff",
+            "description": (
+                "Wyckoff [theUltimator5] (TV Pine v6): the full Wyckoff campaign state "
+                "machine driven by volume + spread + ATR + pivot structure. Reports the "
+                "current phase (A stopping action / B building cause / C test / D trend "
+                "within range / E trend out of range), whether the structure is "
+                "ACCUMULATION or DISTRIBUTION (and RE- variants), which side was halted "
+                "(SC vs BC), the confirmed trading range, the 15 Wyckoff events (SC/BC, "
+                "AR, ST, Spring/UTAD, Test, SOS/SOW, LPS/LPSY, Markup/Markdown) with "
+                "times and prices, two 0-100 scores (structure confidence + validation), "
+                "and `next` — the engine's own plain-English statement of what it is "
+                "waiting for (e.g. 'Building cause: tests 1/2  age 18/30  support 1/4 "
+                "(need 2)'). `phase: None` means no campaign is currently active (the "
+                "engine is searching for a new SC/BC) — that is a real state, not an "
+                "error. `checks` lists every gating condition with current vs required "
+                "value. Use this instead of guessing phases from price action."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": _SYM, "tf": _TF, "limit": _LIMIT_WY,
+                    "entry_strictness": {
+                        "type": "string", "enum": list(STRICTNESS),
+                        "description": ("entry-signal gating (default Standard): "
+                                        "Conservative needs more maturity, Aggressive "
+                                        "fires earlier"),
+                    },
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
 ]
 
 
@@ -323,6 +370,22 @@ def _align_by_time(rows: list, oi_map: dict) -> list:
             pairs.append((r, oi_map[ti]))
     pairs.sort(key=lambda p: int(p[0]["t"]))
     return pairs
+
+
+def _mintick(client, sym: str) -> float:
+    """`syminfo.mintick` 的替代：合约报价最小变动。
+
+    原版里 mintick 只作为下限保护（`max(x, mintick)`）；只要它远小于 ATR 就不影响
+    结果。取不到合约元数据时退化为极小值，而不是编一个值。
+    """
+    try:
+        meta = client.get_contract(sym)
+        tick = float(getattr(meta, "order_price_round", 0.0) or 0.0)
+        if tick > 0:
+            return tick
+    except Exception:  # noqa: BLE001 — 网络/接口异常统一走兜底，不炸整轮
+        pass
+    return 1e-9
 
 
 def run_tv_tool(client: GateClient, name: str, args: dict,
@@ -565,5 +628,37 @@ def run_tv_tool(client: GateClient, name: str, args: dict,
                     e = x * k + e * (1.0 - k)
                 out[key + "_last"] = round(e, 4)
         return out
+
+    if name == "tv_wyckoff":
+        sym = str(args.get("symbol") or args.get("sym") or "BTC_USDT")
+        tf = str(args.get("tf") or args.get("interval") or "15m").lower()
+        # 状态机要走完 A→E，内部至少喂 500 根（对齐 SMC 那次的预热教训）
+        lim = max(500, min(int(args.get("limit") or 600), 1500))
+        res = resolve_candles(client, sym, tf, lim, market_cfg=market_cfg,
+                              env=env, bot_root=bot_root)
+        rows = list(res.rows or [])
+        if len(rows) < 200:
+            return {"error": f"not enough candles ({len(rows)})", "symbol": sym, "tf": tf}
+        raw_t = [x.get("t") for x in rows]
+        if all(v is not None for v in raw_t):
+            times = [float(v) for v in raw_t]
+            # 各所 K 线时间戳统一是 epoch 秒；若上游给了毫秒就地归一
+            # （epoch 秒到 2286 年才 1e10，故 >1e11 一定是毫秒）
+            if times[-1] > 1e11:
+                times = [x / 1000.0 for x in times]
+        else:
+            times = None
+        r = compute_wyckoff(
+            [float(x["o"]) for x in rows], [float(x["h"]) for x in rows],
+            [float(x["l"]) for x in rows], [float(x["c"]) for x in rows],
+            [float(x.get("v") or 0.0) for x in rows],
+            times=times,
+            strictness=str(args.get("entry_strictness") or "Standard"),
+            mintick=_mintick(client, sym),
+        )
+        if "error" in r:
+            return {**r, "symbol": sym, "tf": tf}
+        return {"symbol": sym, "tf": tf, "bars": len(rows),
+                "source": getattr(res, "source", None), **r}
 
     return {"error": f"unknown tv tool {name!r}", "allowed": list(TV_TOOL_NAMES)}

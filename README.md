@@ -756,7 +756,7 @@ AI 策略层按需调用：`klines` `indicators` `ticker` `orderbook` `contract`
 
 - **两套 SMC**：`smc_map`（市场地图：趋势/估值区/关键位）与 `smc_events`（结构事件：BOS/CHoCH/扫荡/Breaker）互补
 - **指标 26 族**（任意周期）：EMA/SMA/MA/RMA/WMA/VWMA/HMA/KAMA/ALMA/T3/LSMA、Linreg/Linreg Channel、ATR（4 平滑）、BOLL（5 基线）、RSI（含平滑+BB）、Stoch、CCI、WR、MFI、ADX、MACD、VWAP、OBV、SuperTrend、SQZMOM、pine_ema 套件
-- **TV 指标 3 套**（Pine 原版移植，已对齐验证）：`tv_linreg_trendlines`（3 层回归通道+枢轴趋势线）、`tv_rsi_yata`（增强 RSI 全套）、`tv_lr_ha_candles`（LR Heikin-Ashi + T3 + 波动带）
+- **TV 指标 8 套**（Pine 原版移植，已对齐验证）：`tv_linreg_trendlines`（3 层回归通道+枢轴趋势线）、`tv_rsi_yata`（增强 RSI 全套）、`tv_lr_ha_candles`（LR Heikin-Ashi + T3 + 波动带）、`tv_delta_flow_profile`（Delta 资金流剖面+POC 迁移）、`tv_oi_visible_range`（持仓量四象限）、`tv_vol_oi_footprint`（逐价位量仓足迹）、`tv_cdv`（累积 Delta 估算）、`tv_wyckoff`（Wyckoff 五阶段状态机+15 事件+双评分+`next` 待办条件）
 
 ## SkillKit — 可安装 Skill
 

@@ -1,4 +1,4 @@
-"""TV Indicators: 7 complete indicator modules from Pine Script.
+"""TV Indicators: 8 complete indicator modules from Pine Script.
 
 1. Linreg & Trendlines (ParkF) - linear regression channel + trendlines
 2. RSI Yata - enhanced RSI with smoothing/MA/BB/candles/histogram
@@ -7,6 +7,7 @@
 5. OI Visible Range (Kioseff Trading) - open-interest quadrants + price levels
 6. Volume / OI Footprint (Leviathan Capital) - per-level volume/OI footprint
 7. Cumulative Delta Volume (LonesomeTheBlue) - geometry-estimated CDV
+8. Wyckoff [theUltimator5] - A-E campaign state machine + 15 events + dual score
 """
 from .cdv import cdv_rate, cumulative_delta_volume, heikin_ashi_from
 from .linreg_trendlines import calc_dev, calc_slope, linreg_channel, trendlines
@@ -42,6 +43,7 @@ from .vol_oi_footprint import (
     overlap_amount,
     vol_oi_footprint,
 )
+from .wyckoff import STRICTNESS, compute_wyckoff
 from ..indicators import alma, hma, kama
 
 __all__ = [
@@ -56,5 +58,6 @@ __all__ = [
     "oi_visible_range", "QUADRANTS",
     "vol_oi_footprint", "overlap_amount", "MODE_VOLUME", "MODE_OI",
     "cumulative_delta_volume", "cdv_rate", "heikin_ashi_from",
+    "compute_wyckoff", "STRICTNESS",
     "kama", "hma", "alma",
 ]

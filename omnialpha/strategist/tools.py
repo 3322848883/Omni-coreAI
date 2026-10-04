@@ -166,7 +166,7 @@ TOOL_NAMES = (
     # TV Pine 指标（真实指标名）
     "tv_linreg_trendlines", "tv_rsi_yata", "tv_lr_ha_candles",
     "tv_delta_flow_profile", "tv_oi_visible_range", "tv_vol_oi_footprint",
-    "tv_cdv",
+    "tv_cdv", "tv_wyckoff",
 
     # 订单流实采（pa-data-source/orderflow.db，WS 采）
     "orderflow_tape", "orderflow_footprint", "orderbook_state", "orderbook_walls",

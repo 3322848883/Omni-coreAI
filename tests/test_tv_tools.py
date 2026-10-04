@@ -34,12 +34,12 @@ class _FakeRes:
 
 
 class TestTvToolRegistration(unittest.TestCase):
-    def test_seven_tools_registered(self):
+    def test_eight_tools_registered(self):
         names = [t["function"]["name"] for t in TV_TOOL_DEFS]
         self.assertEqual(names, [
             "tv_linreg_trendlines", "tv_rsi_yata", "tv_lr_ha_candles",
             "tv_delta_flow_profile", "tv_oi_visible_range", "tv_vol_oi_footprint",
-            "tv_cdv",
+            "tv_cdv", "tv_wyckoff",
         ])
 
     def test_names_match_real_indicators(self):
@@ -47,6 +47,7 @@ class TestTvToolRegistration(unittest.TestCase):
         self.assertIn("tv_linreg_trendlines", TV_TOOL_NAMES)  # Linreg & Trendlines
         self.assertIn("tv_rsi_yata", TV_TOOL_NAMES)           # RSI Yata
         self.assertIn("tv_lr_ha_candles", TV_TOOL_NAMES)      # LR HA Candles
+        self.assertIn("tv_wyckoff", TV_TOOL_NAMES)            # Wyckoff [theUltimator5]
 
     def test_in_native_tools(self):
         names = [t["function"]["name"] for t in NATIVE_TOOLS]
@@ -55,8 +56,18 @@ class TestTvToolRegistration(unittest.TestCase):
             self.assertIn(n, TOOL_NAMES)
 
     def test_tool_count(self):
-        # 27 基础（含 taker_delta + 4 个 orderflow）+ 7 TV
-        self.assertEqual(len(NATIVE_TOOLS), 34)
+        # 27 基础（含 taker_delta + 4 个 orderflow）+ 8 TV
+        self.assertEqual(len(NATIVE_TOOLS), 35)
+
+    def test_tool_names_exactly_match_native_tools(self):
+        """`TOOL_NAMES` 是手写清单，必须与 `NATIVE_TOOLS` 完全一致。
+
+        不一致时 `run_tool` 会把真实存在的工具判成 `unknown tool`——
+        模型能看到工具（工具面来自 NATIVE_TOOLS），一调却被拒。加新工具时最容易漏这里。
+        """
+        declared = [t["function"]["name"] for t in NATIVE_TOOLS]
+        self.assertEqual(sorted(TOOL_NAMES), sorted(declared))
+        self.assertEqual(len(TOOL_NAMES), len(set(TOOL_NAMES)), "TOOL_NAMES 有重复项")
 
 
 class TestTvToolRun(unittest.TestCase):
