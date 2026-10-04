@@ -89,14 +89,35 @@ class SharedOrderStore:
             self._write(self._path(oid), rec)
         return rec
 
+    @staticmethod
+    def _read_json(path: Path, *, retries: int = 8) -> Optional[dict]:
+        """读订单 JSON，对**瞬时读失败**做短暂重试。
+
+        Windows 上并发读写会瞬时失败（`os.replace` 期间的共享冲突）。原先 `get()`
+        把所有异常都吞成 None，调用方于是把它当成「订单不存在」—— 实测 4 个进程
+        并发写同一张单时 7/8 直接抛 `KeyError: order not found`，真正的共享冲突
+        被完全掩盖。`list_open()` 更糟：它会**静默跳过**读不到的文件，于是 bot
+        会看到「无持仓」（而这条路径是可达的 —— 既跑独立 plan 又是 persona 组成员
+        的 bot 会同时读写 `data/shared/orders/`）。
+
+        仍失败才返回 None（调用方仍需自行判断是真不存在还是持续故障）。
+        """
+        for attempt in range(max(1, retries)):
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                return None
+            except Exception:  # noqa: BLE001
+                if attempt == retries - 1:
+                    return None
+                time.sleep(0.005 * (attempt + 1))
+        return None
+
     def get(self, order_id: str) -> Optional[dict]:
         p = self._path(order_id)
         if not p.exists():
             return None
-        try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001
-            return None
+        return self._read_json(p)
 
     def update(self, order_id: str, **fields: Any) -> dict:
         with self._lock_for(order_id):
@@ -143,9 +164,8 @@ class SharedOrderStore:
         """列出 open 订单；可选按 group 过滤（多组隔离）。"""
         out = []
         for p in sorted(self.dir.glob("*.json")):
-            try:
-                rec = json.loads(p.read_text(encoding="utf-8"))
-            except Exception:  # noqa: BLE001
+            rec = self._read_json(p)
+            if rec is None:
                 continue
             if rec.get("status") != "open":
                 continue
