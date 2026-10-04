@@ -24,6 +24,28 @@ CHIP_ACTIONS = {
 
 CHIP_ORDER_TYPES = {"market", "limit", "post_only", "ioc", "fok"}
 
+# 模型常把「触发后按市价/限价成交」写成 stop_market / stop_limit，或把
+# tp_mode/sl_mode 的值（trigger）误写进 type。schema 用 `trigger_price` + `type`
+# 表达同一件事，所以这里把别名归一 —— 否则整笔信号会被 executor 拒掉。
+CHIP_TYPE_ALIASES = {
+    "trigger": "market", "stop": "market", "stop_order": "market",
+    "tp": "market", "sl": "market", "tp_sl": "market",
+    "stop_loss": "market", "take_profit": "market",
+    "stop_market": "market", "stop_limit": "limit",
+    "trigger_market": "market", "trigger_limit": "limit",
+}
+
+
+def normalize_chip_type(raw: Any) -> Optional[str]:
+    """把模型写的订单类型归一到 `CHIP_ORDER_TYPES`；不支持返回 None。
+
+    **讨论环节也要用**：`_discussion_chip` 绕过了 `parse_plan`，模型在那里写
+    `stop_market` 会一路进到信号里，被 executor 以 `unsupported type` 整笔拒掉。
+    """
+    t = str(raw or "market").strip().lower()
+    t = CHIP_TYPE_ALIASES.get(t, t)
+    return t if t in CHIP_ORDER_TYPES else None
+
 
 class PlanError(Exception):
     pass
@@ -143,19 +165,9 @@ def parse_plan(data: Any) -> Plan:
                 conf = conf / 100.0
             else:
                 raise PlanError(f"chips[{i}].confidence out of range")
-        order_type = order_type_raw
-        if order_type not in CHIP_ORDER_TYPES:
-            # recovery: 模型常把 tp_mode/sl_mode 的值（trigger）误写进 type
-            # trigger/stop 类条件单实际是 market/limit 挂触发，归一到 market
-            _type_aliases = {
-                "trigger": "market", "stop": "market", "stop_order": "market",
-                "tp": "market", "sl": "market", "tp_sl": "market",
-                "stop_loss": "market", "take_profit": "market",
-            }
-            if order_type in _type_aliases:
-                order_type = _type_aliases[order_type]
-            else:
-                raise PlanError(f"chips[{i}].type unsupported: {order_type!r}")
+        order_type = normalize_chip_type(order_type_raw)
+        if order_type is None:
+            raise PlanError(f"chips[{i}].type unsupported: {order_type_raw!r}")
         side = raw.get("side")
         if side is not None:
             side = str(side).strip().lower()

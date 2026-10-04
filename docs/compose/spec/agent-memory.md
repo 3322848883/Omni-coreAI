@@ -336,3 +336,40 @@ enabled: true     # 目标账户；strategist.enabled 保持 false（纯执行�
 
 `scripts/_reverse_verify.py`：逐处破坏接线 → **10/10 预期项全部变红**（含 AST 回归钉
 「不许再有模块无调用点」）→ 自动还原。paper 盈亏回传另有独立反向验证（2/2 变红）。
+
+## 补记三（2026-10-04 · 真实 persona 周期实测）：4 轮里每轮都暴露一个问题
+
+用 `persona-run --group disc-exp --once` 真跑了 4 轮（真实 LLM + 真实模拟盘）。
+**每一轮都暴露一个前两轮补记没覆盖的问题** —— 这就是「真实测试」不可替代的地方。
+
+| 轮 | 决策 | 暴露的问题 | 修法 |
+|---|---|---|---|
+| 1–2 | hold | journal **零新增**：hold 分支在 `_post_exec_hooks` 之前 `return`，且该函数开头还有 `if not order_id: return` —— 注释写着「每轮，含 hold」，控制流却把它挡掉了 | journal 与 order_id 解耦（无单也记，`memory_refs` 留空）；hold 分支也调 hooks |
+| 3 | stop_entry_long | 信号被拒：`unsupported type: 'stop_market'`。**讨论环节**的 `_discussion_chip` 绕过了 `parse_plan` 的类型校验，把模型在讨论里写的 `stop_market` 原样塞进信号 | 抽出 `normalize_chip_type()`，`parse_plan` 与 `_discussion_chip` 共用 |
+| 3 | — | `snapshot_digest` 恒空：只在 `run_once` 里设过 `last_snapshot_digest`，persona 走的 `analyze_once` 从没设 | 抽出 `_remember_snapshot_digest()`，两条路径都调 |
+| 3 | — | **我自己引入的风险越权**：透传字段时把 `leverage`/`size` 也放过去了（模型提 50，配置是 20，而 pt-b1 没配 `account_risk.max_leverage`，闸门不生效） | 只透传**机制**字段（`price`/`trigger_price`/`trigger_price_type`），风险字段一律不传 |
+| 4 | open_short | 无（链路全通） | — |
+
+### 第 4 轮的真实产出（全链路打通）
+
+信号：`open_short, type=limit, price=84887, trigger_price=84990, tp=84500, sl=84990, size_usd=1000`
+（`leverage`/`size` 已不在载荷里）；真实模拟盘成交 → 持仓 `-117` 张 @ `84887.8`。
+
+| 层 | 真实产出 |
+|---|---|
+| Journal | `snapshot_digest=sha256:e988a81ec5b2`、`llm_model=deepseek-v4.1-flash`、`prompt_cache_hit_tokens=11136`、`memory_refs=[order:o-565ec4f48041]` |
+| 订单上下文 | `reason_text`（真实决策理由）、`memory_refs`（2 条 journal 引用）、`recent_events` 带**衰减权重**（10.0 / 9.18 / 0.03）、`invalidation` **4 条**（tp/sl 变更时自动写入） |
+| 缓存护栏 | 3 人格 × 4 轮真实命中率：`0.036→0.538→0.574→0.141` 等 |
+
+### 一个诚实的观察：设计预算没达到
+
+设计说「恒定 ~4k token/轮」，实测 `total` 是 **70–90k/轮**（工具循环会调多次 LLM，
+`usage_total` 累计），缓存命中只占小头（`hit` 3k–45k）。
+所以「缓存命中率是成本主杠杆」这句话目前**成立但杠杆很小** —— 大头在工具返回的行情数据。
+这属于后续优化项，不是缺陷；但值得记下来，免得再按 4k 做成本推算。
+
+### 反向验证
+
+`scripts/_reverse_verify.py`：10/10 预期项变红（含 AST 回归钉）；paper 盈亏回传 2/2 变红。
+新增 `tests/test_persona_signal_contract.py`（6 项）—— 用**真实 executor schema**
+（`omnialpha.schema.parse_signal`）当裁判，直接断言 persona 产出的 payload 能被接受。

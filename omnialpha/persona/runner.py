@@ -141,6 +141,10 @@ class PersonaRunner:
         if decision == DIR_HOLD and action in ("hold", ""):
             result["executed"] = False
             self._log({"event": "hold", "fusion": fusion})
+            # 设计 S2.4 要求**每轮**都进 journal（含 hold）。原先这里直接 return，
+            # 于是 hold 轮完全不留痕 —— 而近况摘要与缓存命中曲线都靠 journal，
+            # 只在成交时记会让「近况」几乎空白（实测：真实一轮 hold 后 journal 零新增）。
+            self._post_exec_hooks(order_id, fusion, flat, result, cycle_id)
             return result
 
         # 执行映射
@@ -157,9 +161,11 @@ class PersonaRunner:
 
     def _post_exec_hooks(self, order_id: Optional[str], fusion: dict,
                          plans: dict, result: dict, cycle_id: str) -> None:
-        """执行后更新订单上下文（lifecycle/recent_events）+ 追加 journal。"""
-        if not order_id:
-            return
+        """每轮收尾：订单上下文（lifecycle/recent_events）+ 追加 journal。
+
+        **journal 不依赖是否有单** —— 设计 S2.4 要求每轮一条（含 hold），
+        近况摘要与缓存命中曲线都靠它。只有真有单时才更新订单上下文。
+        """
         action = result.get("action") or fusion.get("action") or "hold"
         decision = result.get("decision") or fusion.get("decision") or ""
         executed = bool(result.get("executed"))
@@ -168,8 +174,8 @@ class PersonaRunner:
             votes = fusion.get("votes") or {}
             source_bot = next(iter(votes), "")
 
-        # lifecycle 管理事件
-        if executed:
+        # lifecycle 管理事件（只有真的有单、且真的执行了才记）
+        if order_id and executed:
             act_key = self._lifecycle_act(action)
             self.orders.add_lifecycle(
                 order_id, act_key,
@@ -201,7 +207,7 @@ class PersonaRunner:
                 cycle_id=cycle_id or f"c-{int(time.time())}",
                 decision=decision,
                 reasoning=str(plan.get("reasoning") or fusion.get("reason") or "")[:200],
-                memory_refs=[f"order:{order_id}"],
+                memory_refs=[f"order:{order_id}"] if order_id else [],
                 snapshot_digest=str(getattr(runner, "last_snapshot_digest", "") or ""),
                 llm_model=str(getattr(llm, "last_model", "") or ""),
                 prompt_cache_hit_tokens=hit,
@@ -525,10 +531,14 @@ class PersonaRunner:
         }
         if side_override:
             payload["side"] = side_override
-        # 执行必需但原先被丢掉的字段 —— 尤其 `trigger_price`：没有它，
-        # stop_entry_* 会被 executor 以「requires trigger_price」整笔拒掉，
-        # 人格的突破单从来没有真正挂出去过。
-        for k in ("price", "trigger_price", "trigger_price_type", "size", "leverage"):
+        # 执行机制字段的透传 —— 尤其 `trigger_price`：没有它，stop_entry_*
+        # 会被 executor 以「requires trigger_price」整笔拒掉，人格的突破单从来没挂出去过。
+        #
+        # **只透传机制，不透传风险**：`size`（张数）与 `leverage` 是风险项 ——
+        # `_apply_risk` 只钳 `size_usd`，把 LLM 的 `size`/`leverage` 也放过去
+        # 就等于让 Plan 绕过 yaml 风控（实测：LLM 提了 leverage=50，而配置是 20，
+        # pt-b1 又没配 account_risk.max_leverage，闸门不生效）。
+        for k in ("price", "trigger_price", "trigger_price_type"):
             if chip.get(k) is not None:
                 payload[k] = chip.get(k)
         # modify_tp_sl 至少要有一个目标价：两个都没有就退回 hold，

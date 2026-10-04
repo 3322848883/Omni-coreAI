@@ -22,7 +22,7 @@ from .llm_client import LLMClient, LLMConfig, LLMError
 from .market import MarketConfig
 from .prompt import build_system_prompt, build_user_prompt, load_strategy_prompt
 from .risk import RiskConfig, apply_risk
-from .schema import PlanError, parse_plan_text
+from .schema import PlanError, normalize_chip_type, parse_plan_text
 from .snapshot import collect_snapshot
 from .tools import NATIVE_TOOLS, TOOL_GUIDE, available_native_tools, extract_tool_calls, filter_tool_schemas, run_tool
 from .triggers import check_conditions, parse_conditions
@@ -224,6 +224,19 @@ class PlanRunner:
             log.warning("order context lookup failed: %s", e)
             return None
 
+    def _remember_snapshot_digest(self, snapshot: Any) -> str:
+        """记录本轮快照摘要（journal 的 `snapshot_digest` 从这里取，设计 S2.4）。
+
+        **两条路径都要调** —— 只设在 `run_once` 里时，persona 侧写出的 journal
+        这一格永远是空的（实测踩到过）。
+        """
+        try:
+            from ..memory import MemoryJournal
+            self.last_snapshot_digest = MemoryJournal.snapshot_digest(snapshot)
+        except Exception:  # noqa: BLE001
+            self.last_snapshot_digest = ""
+        return self.last_snapshot_digest
+
     def _assemble_prompt(self, root: Path, bid: str,
                          system: str, user: str) -> tuple[str, str]:
         """按缓存优化顺序组装 system/user（订单上下文 → 近况 → 快照 → 触发器）。
@@ -283,6 +296,7 @@ class PlanRunner:
             env=self.cfg.env,
             bot_root=self.cfg.bot_root,
         )
+        self._remember_snapshot_digest(snapshot)
         account = snapshot.get("account") or {}
         if account.get("error"):
             # 账户取不到不阻断——行情分析仍可进行（AI 会看到 account 为空）
@@ -382,13 +396,11 @@ class PlanRunner:
         try:
             from ..memory import MemoryJournal
             acts = [c.action for c in plan.chips]
-            digest = MemoryJournal.snapshot_digest(snapshot)
-            self.last_snapshot_digest = digest
             MemoryJournal(root, bid).append(
                 cycle_id=plan.cycle_id,
                 decision=",".join(acts) or "hold",
                 reasoning=plan.reasoning[:500],
-                snapshot_digest=digest,
+                snapshot_digest=self.last_snapshot_digest,
                 llm_model=llm_model,
                 prompt_cache_hit_tokens=cache_hit,
                 executed=bool(orders),
@@ -531,6 +543,7 @@ class PlanRunner:
             env=self.cfg.env,
             bot_root=self.cfg.bot_root,
         )
+        self._remember_snapshot_digest(snapshot)
         account = snapshot.get("account") or {}
         if account.get("error"):
             # 账户取不到不阻断：多人格里仍给出行情观点，不掉票
@@ -796,7 +809,10 @@ class PlanRunner:
             v = num(key)
             if v is not None and v > 0:
                 chip[key] = v
-        chip["type"] = str(data.get("type") or chip.get("type") or "market").lower()
+        # 讨论环节的 type 必须走同一套归一 —— 它绕过了 `parse_plan`，
+        # 模型在这里写 `stop_market` 会一路进到信号里，被 executor 以
+        # `unsupported type: 'stop_market'` 整笔拒掉（线上实测踩到）。
+        chip["type"] = normalize_chip_type(data.get("type") or chip.get("type")) or "market"
         return chip
 
     def _tool_usage_summary(self) -> dict:

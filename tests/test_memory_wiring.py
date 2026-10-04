@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 import json
 import tempfile
 import unittest
@@ -416,6 +417,18 @@ class TestPersonaAnalysisPathMemory(unittest.TestCase):
             rec = json.loads(p.read_text(encoding="utf-8").strip().splitlines()[-1])
             self.assertEqual(rec["hit"], 700)
 
+    def test_analyze_once_sets_snapshot_digest(self):
+        """persona 侧写 journal 时从这里取 `snapshot_digest`。
+
+        只在 `run_once` 里设过 → 实测 persona 写出的 journal 这一格永远是空的。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            runner = _plan_runner(Path(td), _RecordingLLM())
+            self.assertEqual(runner.last_snapshot_digest, "")
+            runner.analyze_once()
+            self.assertTrue(runner.last_snapshot_digest.startswith("sha256:"),
+                            f"analyze_once 没设 snapshot_digest：{runner.last_snapshot_digest!r}")
+
 
 class TestPersonaSignalCarriesExecutionFields(unittest.TestCase):
     """人格的 chip 必须把执行必需字段带到 executor —— 尤其 `trigger_price`。
@@ -457,6 +470,44 @@ class TestPersonaSignalCarriesExecutionFields(unittest.TestCase):
             r._execute(fusion, plans, OID)
             self.assertEqual(captured.get("trigger_price"), 84400,
                              f"executor 收到的 payload 缺 trigger_price：{captured}")
+
+
+class TestHoldCyclesAreJournaled(unittest.TestCase):
+    """设计 S2.4 要求**每轮**都进 journal（含 hold）。
+
+    原先 persona 的 hold 分支在 `_post_exec_hooks` 之前就 `return`，
+    且 `_post_exec_hooks` 开头还有 `if not order_id: return` —— 于是 hold 轮零留痕。
+    实测证据：真实跑一轮（决策 hold、无成交）后三个 bot 的 journal 零新增。
+    而近况摘要与缓存命中曲线都靠 journal，只在成交时记会让「近况」几乎空白。
+    """
+
+    def test_hold_with_no_order_still_journals(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            r = _persona_runner(root)
+            r._post_exec_hooks(
+                None,
+                {"action": "hold", "decision": "hold", "mode": "weighted_vote",
+                 "votes": {BOT: "hold"}},
+                {BOT: {"reasoning": "观望等伦敦KZ"}},
+                {"executed": False}, "c-hold-1",
+            )
+            p = root / "data" / "bots" / BOT / "state" / "memory_journal.jsonl"
+            self.assertTrue(p.is_file(), "hold 轮没有写 journal")
+            rec = json.loads(p.read_text(encoding="utf-8").strip().splitlines()[-1])
+            self.assertEqual(rec["cycle_id"], "c-hold-1")
+            self.assertEqual(rec["decision"], "hold")
+            self.assertFalse(rec["executed"])
+            self.assertEqual(rec["memory_refs"], [], "没有单时不该编造 order 引用")
+
+    def test_hold_early_return_calls_hooks_before_returning(self):
+        """回归钉：hold 分支必须在 `return` 之前调 `_post_exec_hooks`。"""
+        src = inspect.getsource(PersonaRunner.run_once)
+        start = src.index('if decision == DIR_HOLD and action in ("hold", "")')
+        end = src.index("return result", start)
+        branch = src[start:end]
+        self.assertIn("_post_exec_hooks(", branch,
+                      "hold 分支又绕过 journal 了（每轮都该记，设计 S2.4）")
 
 
 if __name__ == "__main__":
