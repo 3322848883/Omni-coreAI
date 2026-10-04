@@ -271,7 +271,13 @@ TV_TOOL_DEFS: list[dict[str, Any]] = [
                 "(need 2)'). `phase: None` means no campaign is currently active (the "
                 "engine is searching for a new SC/BC) — that is a real state, not an "
                 "error. `checks` lists every gating condition with current vs required "
-                "value. Use this instead of guessing phases from price action."
+                "value. `entry` is usually None (the entry gate is strict) — read "
+                "`phase` + `next` + `checks` instead of relying on it. `event` is never "
+                "'AR' (the engine sets no event for AR; read `events.ar`). "
+                "`confidence`/`validation` are entry gates, not a bullish/bearish score. "
+                "There is no multi-timeframe scan: call this once per timeframe. "
+                "`limit` below 500 is raised to 500. "
+                "Use this instead of guessing phases from price action."
             ),
             "parameters": {
                 "type": "object",
