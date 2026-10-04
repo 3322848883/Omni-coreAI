@@ -373,3 +373,45 @@ enabled: true     # 目标账户；strategist.enabled 保持 false（纯执行�
 `scripts/_reverse_verify.py`：10/10 预期项变红（含 AST 回归钉）；paper 盈亏回传 2/2 变红。
 新增 `tests/test_persona_signal_contract.py`（6 项）—— 用**真实 executor schema**
 （`omnialpha.schema.parse_signal`）当裁判，直接断言 persona 产出的 payload 能被接受。
+
+## 补记四（2026-10-04 · 多 bot 真实测试）：隔离成立，但订单上下文串到了别的 bot
+
+用 5 个 bot 各跑一次真实 plan 周期（走单 bot 的 `run_once`）：
+`brooks-pa-paper`(BTC/15m)、`eth-range-paper`(ETH/15m)、`smc-paper`(BTC+ETH/5m/SMC)、
+`ict-paper`(BTC+ETH/5m/ICT)、`douglas-paper`(BTC+ETH/4h)。
+
+### 好的部分：多 bot 隔离成立
+
+| 检查 | 结果 |
+|---|---|
+| journal | 5 个 bot 各 +1 条，`snapshot_digest` / `llm_model` / `prompt_cache_hit_tokens` **三字段齐全** |
+| cache_stats.jsonl | **首次生成**，真实命中率 `0.745 / 0.479 / 0.496 / 0.668 / 0.476` |
+| cache_prefix.sha256 | 每个 bot 各自一份，5 个哈希互不相同 |
+| 交叉污染 | **0 条**（A 的 journal 里不出现 B 的 `cycle_id`） |
+| inbox 信号 | 4 个 bot 产出，`douglas`（hold）不产出 —— 与设计一致 |
+
+### 发现并修复：订单上下文串到了别的 bot
+
+`_order_context_for` 原先按 `bid in members` 匹配。实测：
+`smc-paper` / `orderflow-paper` 是 persona 组 `disc-trio` 的**分析成员**，
+而该组的单落在 `pa-a` 账户上 —— 于是这两个 bot **独立**跑 plan 时，
+被注入了自己并不持有的空单（它们自己的账户是平的）。
+
+修法：加 `via_group` 区分两条路径的语义。
+
+| 路径 | 匹配规则 | 理由 |
+|---|---|---|
+| 人格 `analyze_once`（`via_group=True`） | `bid in members or target_account == bid` | 组内成员共管同一张单，都要看到（设计 S2.8） |
+| 单 bot `run_once`（`via_group=False`） | **只看 `target_account == bid`** | 仓位在那个账户里；成员身份不代表持有仓位 |
+
+复验（真实订单数据）：
+
+```
+单 bot 路径：smc-paper → 无 / orderflow-paper → 无 / pa-a → o-72e329… / pt-b1 → o-565ec4… / pt-c1 → o-13ea8f…
+人格路径：  smc-paper → o-d38f2f… / pt-b1/pt-b2/pt-b3 → o-565ec4…（同组同单，符合共管）
+```
+
+> 教训：`members` 是「谁参与分析」，`target_account` 才是「仓位在谁的账户」。
+> 把两者混用，就会让 bot 在 prompt 里看到不属于自己的仓位 —— 而这类错误
+> 在单 bot 测试里**完全看不出来**，只有把多个 bot 一起跑、且它们恰好分属
+> 不同 persona 组时才会暴露。

@@ -166,6 +166,32 @@ class TestOrderContextReachesPrompt(unittest.TestCase):
             _plan_runner(root, llm).run_once()
             self.assertNotIn("别人的理由", llm.users[-1])
 
+    def test_group_member_does_not_see_position_in_another_account(self):
+        """独立跑 plan 的 bot 不该看到「自己账户上没有」的仓位。
+
+        实测：`smc-paper` 是 `disc-trio` 的分析成员，而该组的单落在 `pa-a` 账户上；
+        按 `members` 匹配会把 pa-a 的仓位注入 smc-paper 的 prompt（它自己账户是平的）。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            store = SharedOrderStore(root)
+            store.create({
+                "order_id": "o-group", "symbol": "BTC_USDT", "side": "short",
+                "group": "g", "members": [BOT, "analyst-2"],
+                "target_account": "someone-else", "status": "open",
+            })
+            store.set_reason("o-group", "落在别人账户的仓位理由")
+
+            llm = _RecordingLLM()
+            _plan_runner(root, llm).run_once()          # 单 bot 路径
+            self.assertNotIn("落在别人账户的仓位理由", llm.users[-1],
+                             "单 bot 路径注入了别人账户的仓位")
+
+            llm2 = _RecordingLLM()
+            _plan_runner(root, llm2).analyze_once()     # 人格路径
+            self.assertIn("落在别人账户的仓位理由", llm2.users[-1],
+                          "人格路径应当看到本组共管的仓位（设计 S2.8）")
+
 
 # ── S2.4 journal 三字段 + S2.6 缓存护栏 ──────────────────────
 

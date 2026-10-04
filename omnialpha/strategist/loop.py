@@ -202,20 +202,31 @@ class PlanRunner:
             + "\n换条件请用 trigger_ops remove 旧的再 add；已满就别再 add（会被拒）。"
         )
 
-    def _order_context_for(self, root: Path, bid: str) -> Optional[dict]:
+    def _order_context_for(self, root: Path, bid: str, *,
+                           via_group: bool = True) -> Optional[dict]:
         """本 bot 当前持仓的订单上下文（设计 S2.3）。
 
-        订单库是 persona 组共享的（`data/shared/orders/`），按 `members` /
-        `target_account` 关联到本 bot。单 bot 策略没有共享订单 → 返回 None，
-        prompt 里显示「当前无持仓」。
+        订单库是 persona 组共享的（`data/shared/orders/`），匹配规则分两种：
+
+        - `via_group=True`（persona 的 `analyze_once`）：`members` 里的人都算 ——
+          组内成员共管同一张单，都要看到它的理由与事件（设计 S2.8）。
+        - `via_group=False`（单 bot 的 `run_once`）：**只看 `target_account == bid`** ——
+          仓位在那个账户里。按 `members` 匹配会把**别人的仓位**塞进这个 bot 的 prompt
+          （实测：`smc-paper` 是 `disc-trio` 的分析成员，独立跑 plan 时被注入了
+          `pa-a` 账户上的空单，而它自己账户是平的）。
 
         有多个 open 单时取 `updated_at` 最新的（设计是单币单计划，正常只有一个）。
         """
         try:
             from ..persona.orders import SharedOrderStore
             store = SharedOrderStore(root)
-            mine = [r for r in store.list_open()
-                    if bid in (r.get("members") or []) or r.get("target_account") == bid]
+
+            def _mine(rec: dict) -> bool:
+                if rec.get("target_account") == bid:
+                    return True
+                return via_group and bid in (rec.get("members") or [])
+
+            mine = [r for r in store.list_open() if _mine(r)]
             if not mine:
                 return None
             mine.sort(key=lambda r: int(r.get("updated_at") or 0), reverse=True)
@@ -238,11 +249,15 @@ class PlanRunner:
         return self.last_snapshot_digest
 
     def _assemble_prompt(self, root: Path, bid: str,
-                         system: str, user: str) -> tuple[str, str]:
+                         system: str, user: str, *,
+                         via_group: bool = True) -> tuple[str, str]:
         """按缓存优化顺序组装 system/user（订单上下文 → 近况 → 快照 → 触发器）。
 
         **单 bot（`run_once`）与多人格（`analyze_once`）共用这一个入口** —— 两条路径
         各自手写拼装时，只接一条就会出现「有记忆的单 bot、没记忆的人格」。
+
+        `via_group` 决定订单上下文的匹配范围（见 `_order_context_for`）：
+        单 bot 只看自己账户，人格路径看全组。
 
         失败不影响本轮：退回未加工的 system/user（少记忆，但不缺席）。
         """
@@ -251,7 +266,7 @@ class PlanRunner:
             ctx = build_context(
                 root, bid,
                 system_prompt=system,
-                order_context=self._order_context_for(root, bid),
+                order_context=self._order_context_for(root, bid, via_group=via_group),
                 snapshot_text=user,
                 n_recent=3,
                 extra_suffix=self._active_triggers_block(),
@@ -313,9 +328,10 @@ class PlanRunner:
             self.cfg.symbols,
         )
         # agent-memory：订单上下文 + 画像 + 近况，按缓存优化顺序拼装（设计 S2.6）
+        # 单 bot 路径 → 只看自己账户的仓位（via_group=False）
         root = self.cfg.bot_root or Path.cwd()
         bid = self.cfg.bot_id or self.inbox.name
-        system, user = self._assemble_prompt(root, bid, system, user)
+        system, user = self._assemble_prompt(root, bid, system, user, via_group=False)
         # vision：多周期 K 线图（可选配置）
         charts: list = []
         if self.cfg.vision:
