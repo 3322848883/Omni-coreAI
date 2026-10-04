@@ -59,9 +59,22 @@ def position_state(account: dict) -> tuple[str, str]:
     实盘 2026-10-02 07:59 那轮就是这么失败的（07:44 挂的 `t-brk` 19 张未成交）。
 
     所以在 snapshot 里显式标注状态，让 AI 不必从 `positions`/`protections` 的存在与否去猜。
+
+    **为什么还要有 `unknown`**：账户接口失败时 `positions` 同样是**空列表**，与
+    「真的没持仓」长得一模一样。把它报成 `flat` 会让 AI 在规则 14（孤儿保护单必须撤）下
+    撤掉**真实持仓**的止损 —— 实测 2026-10-04 那轮就发出了 `cancel_price_all`，
+    而账户里 `BTC_USDT size=2366` 的持仓还在（只因当时没有 `run` 进程消费 inbox 才没出事）。
+    「取不到」和「取到空」必须分开报。
     """
-    pos_n = len([p for p in (account or {}).get("positions") or [] if p])
-    oo = (account or {}).get("open_orders") or []
+    acct = account or {}
+    if acct.get("error"):
+        return "unknown", (
+            "**持仓数据不可用**（账户接口取数失败）：`positions` 为空**不代表**无持仓。"
+            "不得据此判定无持仓；不得发 modify_tp_sl / close_* / reduce_* / flatten；"
+            "**尤其不得撤销 tp/sl 保护单**（规则 14 在此状态下不适用）。只 hold 并说明。"
+        )
+    pos_n = len([p for p in acct.get("positions") or [] if p])
+    oo = acct.get("open_orders") or []
     pend_n = len([
         o for o in oo
         if str((o or {}).get("status") or "").lower() in ("open", "partially_filled")

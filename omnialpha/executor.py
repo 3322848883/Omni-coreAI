@@ -60,6 +60,24 @@ class ExecReport:
         }
 
 
+def _parse_symbol_positions(positions: list, symbol: str) -> list[dict]:
+    """从 `/positions` 原始记录里取出该 symbol 的**非零**持仓。
+
+    `Executor._symbol_positions` 与撤单闸门共用这一份解析，避免两条路径漂移。
+    """
+    out = []
+    for p in positions or []:
+        if p.get("contract") != symbol:
+            continue
+        size = int(p.get("size") or 0)
+        if size == 0:
+            continue
+        mode = str(p.get("mode") or "")
+        side = "long" if (size > 0 or mode.endswith("long")) else "short"
+        out.append({"side": side, "size": size, "mode": mode})
+    return out
+
+
 class Executor:
     def __init__(
         self,
@@ -242,11 +260,26 @@ class Executor:
         """Cancel old owned orders that are not part of the new plan (place-before-cancel)."""
         if self.order_scope == "all":
             # legacy wipe after new plan is in place
+            positions, perr = self._positions_or_error()
+            if positions is None:
+                report.results.append(StepResult(
+                    "replace_cancel", "", False,
+                    detail={"refused": "positions_unavailable"},
+                    error=f"持仓查询失败，拒绝 replace 整表撤单（无法区分保护单与陈旧单）: {perr}"))
+                return
             symbols = sorted({i.symbol for i in intents if i.symbol})
             if not symbols and self.symbols_whitelist:
                 symbols = sorted(self.symbols_whitelist)
             elif not symbols:
                 symbols = self._open_symbols()
+            guarded = [s for s in symbols
+                       if self._live_protection_ids(self.client.list_price_orders(s) or [], positions)]
+            if guarded:
+                report.results.append(StepResult(
+                    "replace_cancel", "", False,
+                    detail={"refused": "live_protection_present", "symbols": guarded},
+                    error=f"{guarded} 上有正在保护持仓的 tp/sl，整表撤单会撤掉它们，已拒绝"))
+                return
             for sym in symbols:
                 try:
                     self.client.cancel_all_orders(sym)
@@ -271,29 +304,55 @@ class Executor:
             for o in self._owned_open_orders(intent.symbol, prefix):
                 keep_orders[intent.symbol].add(str(o.get("id") or ""))
 
+        positions, perr = self._positions_or_error()
+        if positions is None:
+            report.results.append(StepResult(
+                "replace_cancel", "", False,
+                detail={"refused": "positions_unavailable"},
+                error=f"持仓查询失败，拒绝 replace 撤旧单（无法区分保护单与陈旧单）: {perr}"))
+            return
+
         for sym, slot in pre_owned.items():
             prefix = slot.get("prefix") or ""
             # pre_owned was snapshotted BEFORE this run — these are the old ones.
             # Newly placed orders are not in this set, so cancel the snapshot as-is.
             old_p = slot.get("price_ids") or set()
             old_o = slot.get("order_ids") or set()
+            # **保护真实持仓的单不是「陈旧单」**：replace 把它们撤掉会让持仓裸奔。
+            # 实测 2026-10-04：r12 那条信号带 `replace=owned`，`cancel_price_all`
+            # 已按新闸门跳过保护单，但这里照样把 `t-wyk-tp`/`t-wyk-sl` 撤了 ——
+            # 同一条语义的三条路径（自动清理 / 显式撤单 / replace 撤旧单）必须同源。
+            cur_price = {self._order_id(p): p
+                         for p in self._owned_price_orders(sym, prefix)}
+            cur_orders = {str(o.get("id") or ""): o
+                          for o in self._owned_open_orders(sym, prefix)}
+            pending_entry = self._has_pending_entry(sym)
             cancelled = []
+            skipped = []
             for pid in sorted(old_p):
+                if self._should_keep_protection(cur_price.get(str(pid)), positions, pending_entry):
+                    skipped.append(("price", pid))
+                    continue
                 try:
                     self.client.cancel_price_order(pid)
                     cancelled.append(("price", pid))
                 except GateApiError:
                     pass
             for oid in sorted(old_o):
+                if self._should_keep_protection(cur_orders.get(str(oid)), positions, pending_entry):
+                    skipped.append(("order", oid))
+                    continue
                 try:
                     self.client.cancel_order(oid)
                     cancelled.append(("order", oid))
                 except GateApiError:
                     pass
-            if cancelled:
+            if cancelled or skipped:
                 report.results.append(StepResult(
                     "replace_cancel", sym, True,
-                    detail={"replace": "owned", "prefix": prefix, "cancelled": cancelled},
+                    detail={"replace": "owned", "prefix": prefix,
+                            "cancelled": cancelled,
+                            "skipped_live_protection": skipped},
                 ))
 
     def _entry_gate(self, intent: Intent) -> str:
@@ -397,20 +456,7 @@ class Executor:
             positions = self.client.get_positions() or []
         except Exception:  # noqa: BLE001
             return []
-        out = []
-        for p in positions:
-            if p.get("contract") != symbol:
-                continue
-            size = int(p.get("size") or 0)
-            if size == 0:
-                continue
-            mode = str(p.get("mode") or "")
-            if size > 0 or mode.endswith("long"):
-                side = "long"
-            else:
-                side = "short"
-            out.append({"side": side, "size": size, "mode": mode})
-        return out
+        return _parse_symbol_positions(positions, symbol)
 
     def _apply_replace(self, signal: SignalFile, intents: list, report: ExecReport) -> None:
         """Cancel old open/price orders before executing a new plan.
@@ -1823,12 +1869,24 @@ class Executor:
         return StepResult("close_all", symbol, True, detail={"closed_order_ids": orders})
 
     def _cancel_all(self, symbol: str, label: str = "") -> StepResult:
+        """撤销本 bot 的普通挂单（**带持仓感知**）。
+
+        与 `cancel_price_all` 同理：`cancel_all` 同样是钝动作，持仓判断错一次就会
+        连带撤掉保护。持仓数据取不到 → 拒绝；正在保护真实持仓的 reduce-only 挂单 → 跳过。
+        """
         prefix = self._own_prefix(label)
         # own-scope isolation for bot namespace / explicit label; default "signal"
         # keeps legacy wipe so cleanup/manage paths still work.
         own_tag = self._own_scope_tag(label)
         use_own = self.order_scope == "own" and prefix and own_tag not in ("", "signal")
         if use_own:
+            positions, perr = self._positions_or_error()
+            if positions is None:
+                return StepResult(
+                    "cancel_all", symbol, False,
+                    detail={"refused": "positions_unavailable"},
+                    error=f"持仓查询失败，拒绝撤销挂单（无法区分保护单与孤儿）: {perr}",
+                )
             # only this bot's open orders (text prefix), never wipe the book
             if symbol:
                 self._check_symbol(symbol)
@@ -1837,11 +1895,17 @@ class Executor:
                 rows = self.client.list_orders() or []
                 symbols = sorted({o.get("contract") for o in rows if o.get("contract")})
             cancelled = []
+            skipped = []
             errors = []
             for sym in symbols:
-                for o in self._owned_open_orders(sym, prefix):
+                owned = self._owned_open_orders(sym, prefix)
+                pending_entry = self._has_pending_entry(sym)
+                for o in owned:
                     oid = str(o.get("id") or "")
                     if not oid:
+                        continue
+                    if self._should_keep_protection(o, positions, pending_entry):
+                        skipped.append(oid)
                         continue
                     try:
                         self.client.cancel_order(oid)
@@ -1850,9 +1914,33 @@ class Executor:
                         errors.append(f"{oid}: {e}")
             ok = not errors
             return StepResult("cancel_all", symbol, ok, detail={
-                "cancelled": cancelled, "errors": errors,
-                "order_scope": "own", "prefix": prefix,
+                "cancelled": cancelled, "skipped_live_protection": skipped,
+                "errors": errors, "order_scope": "own", "prefix": prefix,
             }, error="; ".join(errors) if errors else None)
+        # 非 own-scope：整表撤单无法逐单过滤 → 存在真实保护单时拒绝
+        positions, perr = self._positions_or_error()
+        if positions is None:
+            return StepResult(
+                "cancel_all", symbol, False,
+                detail={"refused": "positions_unavailable"},
+                error=f"持仓查询失败，拒绝撤销挂单（无法区分保护单与孤儿）: {perr}",
+            )
+        guarded = []
+        for sym in ([symbol] if symbol else self._open_symbols()):
+            if not sym:
+                continue
+            try:
+                rows = self.client.list_orders(sym) or []
+            except GateApiError:
+                rows = []
+            if self._live_protection_ids(rows, positions):
+                guarded.append(sym)
+        if guarded:
+            return StepResult(
+                "cancel_all", symbol, False,
+                detail={"refused": "live_protection_present", "symbols": guarded},
+                error=f"{guarded} 上有正在保护持仓的 reduce-only 挂单，整表撤单会撤掉它们，已拒绝",
+            )
         if symbol:
             self._check_symbol(symbol)
             result = self.client.cancel_all_orders(symbol)
@@ -1867,23 +1955,101 @@ class Executor:
             result = {sym: self.client.cancel_all_orders(sym) for sym in symbols}
         return StepResult("cancel_all", symbol, True, detail={"result": result})
 
+    def _positions_or_error(self) -> tuple[Optional[list], str]:
+        """取 `/positions` 原始记录；**取数失败返回 `(None, 原因)`**。
+
+        与 `_symbol_positions` 的区别：后者有意「取不到就当没有」（它服务清理路径，
+        宁可漏清不可误清）。撤单场景里这个默认是**危险**的 —— 账户接口一抖就被读成
+        「无持仓」，真实持仓的保护单会被当孤儿撤掉。所以必须把「取不到」和「取到空」分开。
+        """
+        try:
+            return (self.client.get_positions() or []), ""
+        except Exception as e:  # noqa: BLE001 — 任何异常都按「不可确认」处理
+            return None, str(e)
+
+    def _live_protection_ids(self, orders: list, positions: list) -> set:
+        """从订单列表里挑出**正在保护真实持仓**的 reduce-only 单 id（撤单时必须跳过）。
+
+        判据与 `_cleanup_orphan_protectors` 完全同源（`_order_is_reduce_only` +
+        `_is_orphan_protector`），保证「自动清理」与「AI 直发的撤单」两条路径不漂移。
+        """
+        out = set()
+        for o in orders or []:
+            if not self._order_is_reduce_only(o):
+                continue
+            if self._is_orphan_protector(o, positions):
+                continue  # 真孤儿 → 允许撤
+            oid = self._order_id(o)
+            if oid:
+                out.add(str(oid))
+        return out
+
+    def _should_keep_protection(
+        self, order: Optional[dict], positions: list, pending_entry: bool,
+    ) -> bool:
+        """撤单前：这一单是否**必须保留**（不能当陈旧单/孤儿撤掉）。
+
+        判据与 `_cleanup_orphan_protectors` 同源（`_order_is_reduce_only` +
+        `_is_orphan_protector`），避免「自动清理」与「AI 直发的撤单 / replace 撤旧单」
+        三条路径漂移。两种保留理由：
+
+        1. **有对应持仓** → 它正在保护真实持仓（撤了就是裸仓）
+        2. **有待成交入场单** → 它可能是随入场单预挂的保护（委托一成交就是裸仓，
+           线上实测 2026-10-02 就是这么裸的）
+        """
+        if not order or not self._order_is_reduce_only(order):
+            return False
+        if not self._is_orphan_protector(order, positions):
+            return True
+        return bool(pending_entry)
+
+    def _price_order_symbols(self, symbol: str = "") -> list[str]:
+        """本次 `cancel_price_all` 会触及的 symbol 列表（闸门与执行同源）。"""
+        if symbol:
+            return [symbol]
+        return sorted({
+            (p.get("contract") or (p.get("initial") or {}).get("contract") or "")
+            for p in (self.client.list_price_orders(symbol) or [])
+        } - {""})
+
     def _cancel_price_all(self, symbol: str, label: str = "") -> StepResult:
+        """撤销本 bot 的条件单（**带持仓感知**）。
+
+        **为什么要带持仓感知**：AI 的意图通常是「撤孤儿保护单」（提示词规则 14），
+        但它能用的动作是 `cancel_price_all` = 「撤我名下**全部**条件单」—— 一个**钝动作**。
+        只要 AI 对持仓的判断错一次（实测 2026-10-04：账户接口抖动被读成 flat，
+        AI 据此要撤 `t-wyk-tp`/`t-wyk-sl`，而 BTC_USDT 上 2366 张的真实持仓还在），
+        钝动作就会连带撤掉**真实持仓的止损**。提示词的正确性不能作为安全前提，
+        所以这里把钝动作收紧：**正在保护真实持仓的 tp/sl 一律跳过**，只撤入场类条件单。
+        判据复用 `_cleanup_orphan_protectors` 那一套，避免两条路径漂移。
+
+        持仓数据取不到时**整个拒绝** —— 无法区分保护单与孤儿，宁可不动。
+        """
         if symbol:
             self._check_symbol(symbol)
+        positions, perr = self._positions_or_error()
+        if positions is None:
+            return StepResult(
+                "cancel_price_all", symbol, False,
+                detail={"refused": "positions_unavailable"},
+                error=f"持仓查询失败，拒绝撤销条件单（无法区分保护单与孤儿）: {perr}",
+            )
         prefix = self._own_prefix(label)
         own_tag = self._own_scope_tag(label)
         use_own = self.order_scope == "own" and prefix and own_tag not in ("", "signal")
         if use_own:
-            symbols = [symbol] if symbol else sorted({
-                (p.get("contract") or (p.get("initial") or {}).get("contract") or "")
-                for p in (self.client.list_price_orders(symbol) or [])
-            } - {""})
             cancelled = []
+            skipped = []
             errors = []
-            for sym in symbols or ([symbol] if symbol else []):
-                for p in self._owned_price_orders(sym, prefix):
+            for sym in self._price_order_symbols(symbol):
+                owned = self._owned_price_orders(sym, prefix)
+                pending_entry = self._has_pending_entry(sym)
+                for p in owned:
                     pid = self._order_id(p)
                     if not pid:
+                        continue
+                    if self._should_keep_protection(p, positions, pending_entry):
+                        skipped.append(pid)
                         continue
                     try:
                         self.client.cancel_price_order(pid)
@@ -1892,9 +2058,24 @@ class Executor:
                         errors.append(f"{pid}: {e}")
             ok = not errors
             return StepResult("cancel_price_all", symbol, ok, detail={
-                "cancelled": cancelled, "errors": errors,
-                "order_scope": "own", "prefix": prefix,
+                "cancelled": cancelled, "skipped_live_protection": skipped,
+                "errors": errors, "order_scope": "own", "prefix": prefix,
             }, error="; ".join(errors) if errors else None)
+        # 非 own-scope：走交易所整表撤单，**无法逐单过滤** → 存在真实保护单时直接拒绝
+        guarded = []
+        for sym in self._price_order_symbols(symbol):
+            try:
+                rows = self.client.list_price_orders(sym) or []
+            except GateApiError:
+                rows = []
+            if self._live_protection_ids(rows, positions):
+                guarded.append(sym)
+        if guarded:
+            return StepResult(
+                "cancel_price_all", symbol, False,
+                detail={"refused": "live_protection_present", "symbols": guarded},
+                error=f"{guarded} 上有正在保护持仓的 tp/sl，整表撤单会撤掉它们，已拒绝",
+            )
         result = self.client.cancel_all_price_orders(symbol or None)
         return StepResult("cancel_price_all", symbol, True, detail={"result": result})
 

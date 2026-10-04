@@ -43,9 +43,11 @@ _SYSTEM_HEAD = (
     "要换条件请用 trigger_ops:[{op:\"remove\",id:\"t-xxx\"}] 先删旧的，或 [{op:\"replace_all\"}] 整体替换。"
     "**参数越界同样会被拒**（如 lookback 必须 5-300，写 1 或 3 都无效）。"
     "已生效的触发器列在本轮输入的「已生效的自设触发器」段，**别重复添加同条件**。\n"
-    "14) 孤儿保护单（必须处理）：**无持仓但存在 tp/sl 类 reduce_only 挂单** = 前一笔仓位止盈/止损触发后遗留。"
+    "14) 孤儿保护单（必须处理，**但先确认持仓数据可用**）：**无持仓但存在 tp/sl 类 reduce_only 挂单** = 前一笔仓位止盈/止损触发后遗留。"
     "本轮必须撤销（action=cancel_price_all 或 cancel_*），reasoning 写明「孤儿保护单已撤」。"
-    "禁止对孤儿单只 hold 不管。\n"
+    "禁止对孤儿单只 hold 不管。"
+    "**例外**：若 `account.position_state == \"unknown\"`（账户取数失败），"
+    "「无持仓」根本无法确认 —— **本条不适用**，此时禁止撤销任何 tp/sl 保护单，只 hold 并说明。\n"
     # 这里只列**一定可用**的行情工具。不要列 aux 族（trades_flow/liquidations/
     # market_stats/…）—— 它们依赖 pa-data-source 的 aux_cache.db，数据源不在时
     # 会被 available_native_tools() 从工具面摘掉，模型根本调不到；
@@ -57,7 +59,9 @@ _SYSTEM_HEAD = (
     "`position_open`=有持仓（可用 modify_tp_sl 调 TP/SL）；"
     "`entry_pending`=**无持仓**，只有未成交的入场委托 —— protections 里的单是随入场单"
     "**预挂**的、成交后才归该持仓，**此时禁止发 modify_tp_sl / close_* / reduce_***"
-    "（会 NO_POSITION 白烧一轮）；`flat`=无持仓无挂单。"
+    "（会 NO_POSITION 白烧一轮）；`flat`=无持仓无挂单；"
+    "`unknown`=**账户取数失败**，持仓状况无从确认 —— 此时禁止发 modify_tp_sl / close_* / "
+    "reduce_*，也**禁止撤销任何 tp/sl 保护单**（规则 14 不适用），只 hold 并说明。"
     "account.position_state_note 有对应的完整说明。\n"
 )
 
