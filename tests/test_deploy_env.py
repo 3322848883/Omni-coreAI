@@ -183,6 +183,73 @@ class TestDeployCheckCommand(unittest.TestCase):
         self.assertIn("已装 skill", out)
         self.assertIn("结论:", out)
 
+    def test_deploy_check_skips_non_config_bot_dirs(self):
+        """`data/bots/` 下的残留目录（config 里没有 yaml）不得被报成「健康」bot。
+
+        实测 2026-10-04：测试/探针会往真实 `data/` 里写 `state/health.json`，造出
+        `data/bots/x`、`data/bots/inbox` 这类没有配置的目录；deploy-check 原先直接
+        枚举 `data/bots/*/state/health.json`，把它们报成「健康 OK」—— 看起来像有
+        bot 在跑，实际只是残留（本地 8 个）。
+        """
+        import json
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "config" / "bots").mkdir(parents=True)
+            (root / "config" / "bots" / "real-bot.yaml").write_text(
+                "bot_id: real-bot\n", encoding="utf-8")
+            for name in ("real-bot", "ghost"):
+                d = root / "data" / "bots" / name / "state"
+                d.mkdir(parents=True)
+                (d / "health.json").write_text(
+                    json.dumps({"error_streak": 0, "cycle_id": "c1"}), encoding="utf-8")
+
+            r = subprocess.run(
+                [sys.executable, "-m", "omnialpha", "--root", str(root), "deploy-check"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cwd=str(ROOT), timeout=120,
+            )
+            out = r.stdout + r.stderr
+            self.assertIn("健康 real-bot", out)
+            self.assertNotIn("健康 ghost", out)
+            self.assertIn("残留目录", out)
+            self.assertIn("ghost", out)
+
+    def test_root_before_subcommand_is_honoured(self):
+        """`--root` 写在子命令**之前**也必须生效。
+
+        argparse 的已知行为：子 parser 的默认值会覆盖父 parser 已解析出的同名值。
+        `deploy-check` 原先给子 parser 的 `--root` 留了默认值，于是
+        `omnialpha --root X deploy-check` 里的 X 被静默丢掉、退回 cwd
+        —— 跑的是真实仓库而不是指定目录（实测 2026-10-04，连测试都被它误导）。
+        子 parser 改用 `argparse.SUPPRESS` 后两种写法都生效。
+        """
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "config" / "bots").mkdir(parents=True)
+            (root / "config" / "bots" / "only-here.yaml").write_text(
+                "bot_id: only-here\n", encoding="utf-8")
+            d = root / "data" / "bots" / "only-here" / "state"
+            d.mkdir(parents=True)
+            (d / "health.json").write_text(
+                '{"error_streak": 0, "cycle_id": "c1"}', encoding="utf-8")
+
+            for argv in (
+                ["-m", "omnialpha", "--root", str(root), "deploy-check"],
+                ["-m", "omnialpha", "deploy-check", "--root", str(root)],
+            ):
+                r = subprocess.run(
+                    [sys.executable, *argv],
+                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    cwd=str(ROOT), timeout=120,
+                )
+                self.assertIn("健康 only-here", r.stdout + r.stderr, argv)
+
 
 class TestSkillDoctorCommand(unittest.TestCase):
     def test_doctor_runs(self):

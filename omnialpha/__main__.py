@@ -638,12 +638,22 @@ def cmd_deploy_check(args) -> int:
         print(f"通知渠道:   ⚠️  检测失败: {e}")
 
     # 5) 健康
+    #    只报**配置里存在**的 bot。`data/bots/` 下会有测试/探针留下的残留目录
+    #    （config 里没有对应 yaml，实测 2026-10-04 本地 8 个：x / inbox / test-bot /
+    #    disc-test / live-probe / prelaunch / _probe_ / data），直接枚举 health.json
+    #    会把它们报成「健康 OK」—— 看起来像有 bot 在跑，实际只是残留。
     health_dir = root / "data" / "bots"
+    cfg_dir = root / "config" / "bots"
     if health_dir.is_dir():
+        known = {p.stem for p in cfg_dir.glob("*.yaml")} if cfg_dir.is_dir() else None
+        leftovers = []
         for hf in sorted(health_dir.glob("*/state/health.json")):
             try:
-                h = _json.loads(hf.read_text(encoding="utf-8"))
                 bot = hf.parent.parent.name
+                if known is not None and bot not in known:
+                    leftovers.append(bot)
+                    continue
+                h = _json.loads(hf.read_text(encoding="utf-8"))
                 streak = h.get("error_streak", 0)
                 mark = "OK" if streak == 0 else f"⚠️ error_streak={streak}"
                 print(f"健康 {bot}: {mark}  cycle={h.get('cycle_id', '-')}")
@@ -651,6 +661,9 @@ def cmd_deploy_check(args) -> int:
                     ok = False
             except Exception:  # noqa: BLE001
                 continue
+        if leftovers:
+            print(f"残留目录:  {len(leftovers)} 个非配置目录（已跳过，不参与健康判定）: "
+                  f"{', '.join(sorted(leftovers))}")
 
     print("=" * 52)
     print("结论:", "PASS" if ok else "有告警")
@@ -708,6 +721,11 @@ def cmd_migrate(args) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="omnialpha", description="Gate strategy signal bot")
+    # `--root` 在主 parser 与若干子 parser 都定义了。**子 parser 必须用
+    # `default=argparse.SUPPRESS`** —— argparse 的已知行为：子 parser 的默认值会
+    # 覆盖父 parser 已解析出的同名值，于是 `omnialpha --root X deploy-check`
+    # 里那个 X 被静默丢掉、退回 cwd（实测 2026-10-04）。SUPPRESS 表示
+    # 「没显式传就不要碰这个属性」，两种写法才都能生效。
     parser.add_argument("--root", default=None, help="project root (default cwd)")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -716,11 +734,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.set_defaults(func=cmd_run)
     p_prun = sub.add_parser("paper-run", help="run one paper bot (local simulated exchange)")
     p_prun.add_argument("--bot", required=True)
-    p_prun.add_argument("--root", default="")
+    p_prun.add_argument("--root", default=argparse.SUPPRESS)
     p_prun.set_defaults(func=cmd_paper_run)
     p_tools = sub.add_parser("tools", help="show a bot's effective tools / skills / indicators")
     p_tools.add_argument("--bot", default="", help="bot id (default: all bots)")
-    p_tools.add_argument("--root", default="")
+    p_tools.add_argument("--root", default=argparse.SUPPRESS)
     p_tools.set_defaults(func=cmd_tools)
 
     p_persona = sub.add_parser("persona-run", help="multi-persona co-managed orders (fuse then execute)")
@@ -728,7 +746,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_persona.add_argument("--config", default="", help="persona_groups.yaml path")
     p_persona.add_argument("--interval", default="", help="loop interval sec (default 300)")
     p_persona.add_argument("--once", action="store_true", help="one cycle then exit")
-    p_persona.add_argument("--root", default="")
+    p_persona.add_argument("--root", default=argparse.SUPPRESS)
     p_persona.set_defaults(func=cmd_persona_run)
 
     p_once = sub.add_parser("once", help="one scan pass then exit")
@@ -774,7 +792,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_bc = sub.add_parser("broadcast", help="fan out signals to multiple bot inboxes (config-driven)")
     p_bc.add_argument("--config", default="", help="broadcast.yaml path (default config/broadcast.yaml)")
     p_bc.add_argument("--once", action="store_true", help="one scan pass then exit")
-    p_bc.add_argument("--root", default="")
+    p_bc.add_argument("--root", default=argparse.SUPPRESS)
     p_bc.set_defaults(func=cmd_broadcast)
 
     p_bt = sub.add_parser("backtest", help="journal replay backtest (PnL/Sharpe/DSR)")
@@ -794,7 +812,8 @@ def build_parser() -> argparse.ArgumentParser:
     _register_skill_parser(sub)
 
     p_dc = sub.add_parser("deploy-check", help="部署后验证（版本/overlay/bot/skill/健康）")
-    p_dc.add_argument("--root", help="project root (default: cwd / OMNIALPHA_ROOT)")
+    p_dc.add_argument("--root", default=argparse.SUPPRESS,
+                      help="project root (default: cwd / OMNIALPHA_ROOT)")
     p_dc.set_defaults(func=cmd_deploy_check)
     return parser
 
