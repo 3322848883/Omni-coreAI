@@ -30,7 +30,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from omnialpha.executor import ExecReport, Executor  # noqa: E402
+from omnialpha.executor import ExecReport, Executor, _parse_symbol_positions  # noqa: E402
 from omnialpha.gate_client import GateApiError  # noqa: E402
 from omnialpha.schema import parse_signal  # noqa: E402
 from omnialpha.strategist.prompt import build_system_prompt  # noqa: E402
@@ -305,6 +305,69 @@ class TestReplaceCancelPositionAware(unittest.TestCase):
         self.assertFalse(report.results[0].ok)
         self.assertEqual(report.results[0].detail.get("refused"), "positions_unavailable")
         self.assertEqual(client.cancelled, [])
+
+
+class TestOrphanProtectorContractMatching(unittest.TestCase):
+    """孤儿判定必须比 **contract**，不能只比方向。
+
+    实测 2026-10-04 复核发现：`_is_orphan_protector` 原来只比方向。
+    自动清理路径传的是**已按 symbol 过滤**的持仓（`_parse_symbol_positions` 输出
+    没有 contract 字段）所以看不出问题；新调用方传的是 `/positions` **全量记录** →
+    匹配范围变成「所有币」→ 多币种账户里只要任何币有同方向持仓，
+    同方向孤儿就**永远清不掉**（`cancel_price_all` 的「清孤儿」语义静默失效）。
+
+    受影响账户（同时持 2 个同方向非零仓位）：`brooks-ab-paper`、`ed-paper`、`nial-paper`。
+    """
+
+    def _tp(self, oid="p-btc-tp", sym="BTC_USDT", size=-2366):
+        return {"id": oid, "initial": {"text": "t-wyk-tp", "contract": sym,
+                                       "is_reduce_only": True, "size": size}}
+
+    def test_orphan_not_kept_alive_by_other_symbol_same_side(self):
+        """BTC 的孤儿保护单不该被「ETH 的多仓」救活。"""
+        positions = [{"contract": "ETH_USDT", "size": 100}]
+        ex = _ex(_FakeClient())
+        self.assertTrue(ex._is_orphan_protector(self._tp(), positions))
+        self.assertFalse(ex._should_keep_protection(self._tp(), positions, False))
+
+    def test_orphan_not_kept_alive_by_other_symbol_opposite_side(self):
+        positions = [{"contract": "ETH_USDT", "size": -100}]
+        ex = _ex(_FakeClient())
+        self.assertTrue(ex._is_orphan_protector(self._tp(), positions))
+
+    def test_real_protection_of_same_symbol_is_kept(self):
+        positions = [{"contract": "BTC_USDT", "size": 2366}]
+        ex = _ex(_FakeClient())
+        self.assertFalse(ex._is_orphan_protector(self._tp(), positions))
+        self.assertTrue(ex._should_keep_protection(self._tp(), positions, False))
+
+    def test_multi_symbol_keeps_each_symbols_own_protection(self):
+        positions = [{"contract": "BTC_USDT", "size": 2366},
+                     {"contract": "ETH_USDT", "size": 100}]
+        ex = _ex(_FakeClient())
+        self.assertTrue(ex._should_keep_protection(self._tp(), positions, False))
+        self.assertTrue(ex._should_keep_protection(
+            self._tp(oid="p-eth-tp", sym="ETH_USDT", size=-100), positions, False))
+
+    def test_single_symbol_path_behaviour_unchanged(self):
+        """`_parse_symbol_positions` 的输出**没有** contract 字段 → 仍只比方向。
+
+        这条保证自动清理路径（`_cleanup_orphan_protectors`）行为完全不变。
+        """
+        ex = _ex(_FakeClient())
+        pos = _parse_symbol_positions(
+            [{"contract": "BTC_USDT", "size": 2366}], "BTC_USDT")
+        self.assertIsNone(pos[0].get("contract"))
+        self.assertFalse(ex._is_orphan_protector(self._tp(), pos))
+
+    def test_cancel_price_all_still_cancels_orphan_in_multi_symbol_account(self):
+        """端到端：多币种账户里 BTC 的孤儿仍要撤得掉（防功能静默失效）。"""
+        client = _FakeClient(positions=[{"contract": "ETH_USDT", "size": 100}],
+                             price_orders=[self._tp()])
+        report = _ex(client, symbols_whitelist=["BTC_USDT", "ETH_USDT"]) \
+            .execute_signal(_sig())
+        self.assertTrue(report.ok)
+        self.assertEqual(client.cancelled, [("price", "p-btc-tp")])
 
 
 if __name__ == "__main__":

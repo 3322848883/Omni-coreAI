@@ -1488,6 +1488,15 @@ class Executor:
 
         保护单方向：sell(-size) 平多单，buy(+size) 平空单。
         有对应持仓 → 当前计划保护单，保留；无 → 孤儿。
+
+        **contract 比对只在持仓记录带 `contract` 时才做**（两个调用方的形状不同）：
+
+        - `_cleanup_orphan_protectors` 传的是 `_symbol_positions(symbol)`，输出
+          `{side, size, mode}` **没有 contract** → 已经按 symbol 过滤过了，只比方向就对
+        - `_should_keep_protection` / `_live_protection_ids` 传的是 `/positions` 的
+          **全量原始记录**（带 contract）→ 必须再比 contract，否则「BTC 的孤儿保护单」
+          会被「ETH 的多仓」误判成有对应持仓而永远清不掉（实测 2026-10-04 复核发现；
+          受影响账户如 `brooks-ab-paper` / `ed-paper` / `nial-paper` 都是多币种同向持仓）。
         """
         init = po.get("initial") or {}
         text = str(init.get("text") or po.get("text") or "")
@@ -1501,10 +1510,14 @@ class Executor:
         want = "long" if sz < 0 else "short" if sz > 0 else None
         if want is None:
             return True  # 无方向无法匹配 → 保守当孤儿
+        o_contract = str(init.get("contract") or po.get("contract") or "")
         for p in positions:
             psz = float(p.get("size") or 0)
             if psz == 0:
                 continue
+            p_contract = str(p.get("contract") or "")
+            if p_contract and o_contract and p_contract != o_contract:
+                continue  # 别的币的仓位不算「对应持仓」
             side = "long" if psz > 0 else "short"
             if side == want:
                 return False  # 有对应持仓 → 不是孤儿
