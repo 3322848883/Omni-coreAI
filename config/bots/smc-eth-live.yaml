@@ -29,8 +29,8 @@ api_secret_env: GATE_API_SECRET
 symbols:
   - ETH_USDT
 
-# 绝对兜底（真正的闸门是下面的 max_notional_pct / max_total_notional_pct）
-max_notional_usd: 10000
+# 绝对兜底（真正的闸门是下面的 risk_pct / max_notional_pct）
+max_notional_usd: 3000
 max_orders_per_file: 5
 max_files_per_run: 20
 poll_interval_sec: 2
@@ -43,11 +43,18 @@ require_sl: true
 account_risk:
   halt: false
   max_leverage: 50
-  max_total_notional_usd: 10000
-  # 权益比例硬顶：单笔名义 ≤ 权益 × 此倍数（executor._check_notional 执行）
-  max_notional_pct: 5.0
+  max_total_notional_usd: 3000
+  # 单笔风险预算：目标名义 = 权益 × risk_pct ÷ 止损距离
+  # 由 executor._align_size_to_risk 执行，open_long / stop_entry_long 两条入场
+  # 路径同源（原先 stop_entry 缺这一步，仓位只受 max_notional 限制）。
+  # 2% → 85 USDT 账户每笔最多亏 1.7 USDT。止损距离由人格按结构算，不强制。
+  risk_pct: 0.02
+  # 名义硬顶：权益 × 40（85 × 40 = 3400），让顶层 3000 的绝对上限能通过
+  max_notional_pct: 40.0
   # 总量闸门（按比例）：持仓名义合计 + 本单 ≤ 权益 × 此倍数
-  max_total_notional_pct: 10.0
+  max_total_notional_pct: 40.0
+  # 日亏兜底：一天累计亏到 5 USDT（约权益 6%）就停手
+  daily_loss_limit_usd: 5
   # 裸仓自动补保护：先跑 dry（只记录「本来会挂什么」，不下单），观察一轮再改 true
   auto_protect: "dry"
   auto_protect_sl_pct: 2.0
@@ -81,9 +88,10 @@ strategist:
     max_active: 5
     default_cooldown_sec: 300
   risk:
-    min_confidence: 0.6
+    # 讨论组的融合 confidence 实测 0.55~0.72 —— 0.6 会随机把整轮决策拦下
+    min_confidence: 0.5
     max_chips: 1            # SMC 提示词要求单腿
-    max_notional_usd: 10000
+    max_notional_usd: 3000
   # skill 白名单：新装 skill 不会自动进实盘（发布≠可用）
   skills: [price-action-trading]
   llm:
