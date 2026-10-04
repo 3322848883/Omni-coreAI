@@ -506,7 +506,8 @@ def cmd_run(args) -> int:
         return 3
     bots = load_all_bots(paths.config_dir)
     try:
-        run_forever(bots, paths, only=args.bot)
+        run_forever(bots, paths, only=args.bot,
+                    allow_disabled=bool(getattr(args, "allow_disabled", False)))
     except KeyboardInterrupt:
         print("bye")
     finally:
@@ -731,6 +732,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_run = sub.add_parser("run", help="watch inbox forever")
     p_run.add_argument("--bot", default=None)
+    p_run.add_argument("--allow-disabled", action="store_true", dest="allow_disabled",
+                       help="explicit --bot runs even when enabled: false (persona target executor)")
     p_run.set_defaults(func=cmd_run)
     p_prun = sub.add_parser("paper-run", help="run one paper bot (local simulated exchange)")
     p_prun.add_argument("--bot", required=True)

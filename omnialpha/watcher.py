@@ -411,10 +411,28 @@ def _auto_protect_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict) -> i
     return done
 
 
+def select_bots(bots: dict[str, BotConfig], only: Optional[str] = None,
+                allow_disabled: bool = False) -> dict[str, BotConfig]:
+    """挑出要跑执行循环的 bot。
+
+    `enabled` 是「watchdog 该不该管」的判据，但 persona 讨论组需要一个
+    **只执行、不分析**的消费者：组的成员必须保持 `enabled: false`（否则
+    watchdog 会拉起它们各自的 plan-loop，与讨论组的融合单在同一账户上互相
+    打架），而 target 账户的 inbox 又要有人消费。所以显式 `--bot X` +
+    `allow_disabled` 时按名字跑，不看 enabled。
+
+    没给 `only` 时 `allow_disabled` **不生效** —— 否则等于把全部 bot 都拉起来。
+    """
+    if only and allow_disabled:
+        return {k: v for k, v in bots.items() if k == only}
+    return {k: v for k, v in bots.items() if v.enabled and (only is None or k == only)}
+
+
 def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[str] = None,
-                orphan_sweep_sec: float = 300.0) -> None:
+                orphan_sweep_sec: float = 300.0,
+                allow_disabled: bool = False) -> None:
     paths.ensure()
-    selected = {k: v for k, v in bots.items() if v.enabled and (only is None or k == only)}
+    selected = select_bots(bots, only, allow_disabled)
     if not selected:
         raise SystemExit("no enabled bots to run")
     # use max poll among bots as sleep base
