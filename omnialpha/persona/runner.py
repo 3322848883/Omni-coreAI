@@ -313,7 +313,18 @@ class PersonaRunner:
                               **{k: v for k, v in revised.items() if k != "chip"}}
                     chip = revised.get("chip")
                     if chip is None:
-                        merged["chips"] = []
+                        # `_discussion_chip` 改成 hold（或非入场类）时返回 None。
+                        # **不能清空 chips**：清空虽然能让 `_norm_dir` 读到新的
+                        # `decision`，却把原始 chip 的 symbol/size_usd/tp/sl 一起丢了 ——
+                        # 下一轮该人格再改回入场类时 `_discussion_chip` 的 base 为空，
+                        # symbol 就落到硬编码兜底。实测 eth-disc 一轮里三张 chip 全部
+                        # 变成 `BTC_USDT`（讨论的是 ETH，价位也是 ETH 的 2694/2706）。
+                        # 只改写 action，其余执行字段原样保留。
+                        keep = list(current[bot_id].get("chips") or [])
+                        if keep and isinstance(keep[0], dict):
+                            keep[0] = {**keep[0],
+                                       "action": str(merged.get("decision") or "hold")}
+                        merged["chips"] = keep
                     else:
                         rest = list((current[bot_id].get("chips") or [])[1:])
                         merged["chips"] = [chip] + rest
@@ -466,11 +477,23 @@ class PersonaRunner:
         except Exception:  # noqa: BLE001
             pass
 
+    def _symbols_of(self, bot_id: str) -> list[str]:
+        """某成员配置里的标的白名单 —— 讨论 chip 缺/错 symbol 时的纠正依据。"""
+        bot = self.bots.get(bot_id)
+        syms = getattr(bot, "symbols", None) if bot is not None else None
+        return [str(s) for s in (syms or []) if s]
+
     def _symbol_of(self, plans: dict) -> str:
         for p in plans.values():
             chips = p.get("chips") or []
             if chips and isinstance(chips, list) and chips[0].get("symbol"):
                 return str(chips[0]["symbol"])
+        # 兜底用第一个成员自己的标的 —— 原先是硬编码 "BTC_USDT"，
+        # 对只做 ETH 的组会把共享订单的 symbol 写错。
+        for b in self.group.members:
+            syms = self._symbols_of(b)
+            if syms:
+                return syms[0]
         return "BTC_USDT"
 
     def _resolve_order_id(self, decision: str, fusion: dict) -> Optional[str]:
@@ -527,9 +550,21 @@ class PersonaRunner:
         # 归一化为 schema 合法 action（close_long/close_short 不在 ACTIONS，需拆成 close+side）
         action, side_override = self._normalize_action(action)
 
+        # chip 的标的必须落在该 bot 自己的白名单里。讨论丢字段后重建的 chip 会带
+        # 硬编码兜底（见 `_discuss`）；executor 的白名单闸门本来也会把这种信号整笔
+        # 拒掉，但那样只留下一条 failed —— 不如在这里纠正成该 bot 自己的标的并留痕。
+        sym = str(chip.get("symbol") or "").strip()
+        allowed = self._symbols_of(source_bot)
+        corrected_from = ""
+        if allowed and sym not in allowed:
+            corrected_from = sym
+            sym = allowed[0]
+        if not sym:
+            sym = allowed[0] if allowed else "BTC_USDT"
+
         payload = {
             "action": action,
-            "symbol": chip.get("symbol") or "BTC_USDT",
+            "symbol": sym,
             "size_usd": chip.get("size_usd"),
             "tp": chip.get("tp"),
             "sl": chip.get("sl"),
@@ -543,6 +578,8 @@ class PersonaRunner:
                 "confidence": fusion.get("confidence") or 0.0,
             },
         }
+        if corrected_from:
+            payload["meta"]["symbol_corrected"] = f"{corrected_from}→{sym}"
         if side_override:
             payload["side"] = side_override
         # 执行机制字段的透传 —— 尤其 `trigger_price`：没有它，stop_entry_*

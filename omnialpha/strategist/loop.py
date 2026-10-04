@@ -788,7 +788,8 @@ class PlanRunner:
             # fuse_plans._norm_dir 与 _execute 都优先读 chips[0].action ——
             # 讨论结果根本进不了融合（线上实测：三人讨论后都改成 stop_entry_long，
             # 融合票却仍是讨论前的 hold/long/hold，讨论成了纯日志表演）。
-            chip = self._discussion_chip(data, decision, plan)
+            chip = self._discussion_chip(data, decision, plan,
+                                         default_symbol=self._default_symbol())
             if decision in ("open_long", "open_short", "stop_entry_long", "stop_entry_short") \
                     and chip is None:
                 decision = "hold"   # 入场却给不出可执行价位 → 退回 hold，不假装能执行
@@ -797,9 +798,23 @@ class PlanRunner:
         except Exception:  # noqa: BLE001
             return None
 
+    def _default_symbol(self) -> str:
+        """本 bot 的第一个标的 —— 讨论产出的 chip 缺 symbol 时的兜底。
+
+        原先这条兜底是 `_discussion_chip` 里的硬编码 `"BTC_USDT"`，对只做 ETH 的组
+        会把标的写错（实测 eth-disc 三人格只做 ETH，产出的信号却带 `BTC_USDT`，
+        而价位是 ETH 的 2694/2706）。
+        """
+        syms = getattr(self.cfg, "symbols", None) or []
+        return str(syms[0]) if syms else ""
+
     @staticmethod
-    def _discussion_chip(data: dict, decision: str, plan: dict) -> Optional[dict]:
-        """把讨论结论拼成可执行 chip；入场类缺 sl / 价位则返回 None（调用方退回 hold）。"""
+    def _discussion_chip(data: dict, decision: str, plan: dict,
+                         default_symbol: str = "") -> Optional[dict]:
+        """把讨论结论拼成可执行 chip；入场类缺 sl / 价位则返回 None（调用方退回 hold）。
+
+        `default_symbol` 由调用方传 bot 自己的 `symbols[0]`（见 `_default_symbol`）。
+        """
         chips = plan.get("chips") or []
         base = dict(chips[0]) if chips and isinstance(chips[0], dict) else {}
         if decision == "hold":
@@ -814,7 +829,7 @@ class PlanRunner:
 
         chip = dict(base)
         chip["action"] = decision
-        chip["symbol"] = chip.get("symbol") or "BTC_USDT"
+        chip["symbol"] = chip.get("symbol") or default_symbol or "BTC_USDT"
         if decision not in ("open_long", "open_short", "stop_entry_long", "stop_entry_short"):
             return chip          # close/reduce/modify 沿用原 chip 的执行字段
         sl = num("sl")
