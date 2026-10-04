@@ -1,3 +1,4 @@
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -688,7 +689,17 @@ class TestPlanRunnerAccountAbort(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             inbox = Path(td) / "inbox"
             inbox.mkdir()
-            cfg = StrategistConfig(symbols=["BTC_USDT"], candles=5, timeframe="15m", write_hold=True)
+            # bot_root / bot_id 都要显式给：缺省时 root 落到 cwd（= 仓库根）、
+            # bot 名取 inbox 目录名（这里恰好是 "inbox"）→ 会往真实
+            # `data/bots/inbox/state/` 写状态，并在 deploy-check 里被当成「健康 bot」
+            # （实测 2026-10-04：逐个测试文件跑，确认就是本文件在写）。
+            # prompt 也得复制进临时 root —— `load_strategy_prompt` 要求 prompt_file
+            # 落在 bot_root 之下（安全遏制），空目录会报 PermissionError。
+            (Path(td) / "prompts").mkdir()
+            shutil.copy(ROOT / "prompts" / "vergex_default.md",
+                        Path(td) / "prompts" / "vergex_default.md")
+            cfg = StrategistConfig(symbols=["BTC_USDT"], candles=5, timeframe="15m",
+                                   write_hold=True, bot_root=Path(td), bot_id="mkt-e2e")
             runner = PlanRunner(BoomClient(), cfg, inbox, Path(td) / "hist", llm=StubLLM())
             result = runner.run_once()
             self.assertNotEqual(result.get("error"), "account_unavailable")

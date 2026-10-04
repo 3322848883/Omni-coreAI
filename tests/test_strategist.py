@@ -1,4 +1,5 @@
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -12,6 +13,26 @@ from omnialpha.strategist.risk import RiskConfig, apply_risk  # noqa: E402
 from omnialpha.strategist.bridge import chips_to_signal, write_signal_file  # noqa: E402
 from omnialpha.strategist.llm_client import LLMClient, LLMConfig, LLMError  # noqa: E402
 from omnialpha.schema import parse_signal  # noqa: E402
+
+
+def _tmp_root(case, prompt='vergex_default.md'):
+    """给 PlanRunner 一个临时 root（测试结束自动清理），并把 prompt 复制进去。
+
+    **为什么必须给临时 root**：`PlanRunner` 的 root 取 `cfg.bot_root or Path.cwd()`，
+    bot 名取 `cfg.bot_id or inbox.name`。用相对路径 `Path('inbox/x')` 时两者都落到
+    仓库：root = cwd、bot 名 = 'x' → 每跑一次套件就往真实 `data/bots/x/state/` 写
+    health.json / cache_stats.jsonl / memory_journal.jsonl / perf_metrics.jsonl
+    （实测 2026-10-04：逐个文件跑，确认就是本文件在写）。那些目录没有对应
+    `config/bots/*.yaml`，会在 `deploy-check` 里被当成「健康 bot」。
+
+    **为什么还要复制 prompt**：`load_strategy_prompt` 要求 prompt_file 落在
+    bot_root 之下（安全遏制），所以 bot_root 不能只给个空目录。
+    """
+    td = Path(tempfile.mkdtemp())
+    case.addCleanup(shutil.rmtree, td, ignore_errors=True)
+    (td / 'prompts').mkdir(parents=True, exist_ok=True)
+    shutil.copy(ROOT / 'prompts' / prompt, td / 'prompts' / prompt)
+    return td
 
 
 class TestPlanSchema(unittest.TestCase):
@@ -264,6 +285,7 @@ class TestPlanTriggers(unittest.TestCase):
     def _runner(self, client, **kw):
         from omnialpha.strategist.loop import PlanRunner, StrategistConfig
 
+        td = _tmp_root(self)
         cfg = StrategistConfig(
             symbols=["BTC_USDT"],
             timeframe="15m",
@@ -271,9 +293,12 @@ class TestPlanTriggers(unittest.TestCase):
             event_on_kline_close=kw.pop("event_on_kline_close", True),
             candles=5,
             write_hold=True,
+            bot_root=td,
+            bot_id="x",
             **kw,
         )
-        return PlanRunner(client, cfg, Path("inbox/x"), Path("hist/x"), llm=kw.pop("llm", None) or _HoldLLM())
+        return PlanRunner(client, cfg, td / "inbox" / "x", td / "hist" / "x",
+                          llm=kw.pop("llm", None) or _HoldLLM())
 
     def test_kline_closed_fires_once_per_advance(self):
         class KClient:
@@ -339,8 +364,11 @@ class TestPlanTriggers(unittest.TestCase):
 
         from omnialpha.strategist.loop import PlanRunner, StrategistConfig
 
-        cfg = StrategistConfig(symbols=["BTC_USDT"], candles=3, timeframe="15m")
-        runner = PlanRunner(C(), cfg, Path("inbox/x"), Path("hist/x"), llm=FixedLLM())
+        cfg = StrategistConfig(symbols=["BTC_USDT"], candles=3, timeframe="15m",
+                               bot_root=_tmp_root(self), bot_id="x")
+        td = Path(cfg.bot_root)
+        runner = PlanRunner(C(), cfg, td / "inbox" / "x", td / "hist" / "x",
+                            llm=FixedLLM())
         r1 = runner.run_once()
         r2 = runner.run_once()
         self.assertTrue(r1.get("ok"))
@@ -383,8 +411,11 @@ class TestPlanTriggers(unittest.TestCase):
 
         from omnialpha.strategist.loop import PlanRunner, StrategistConfig
 
-        cfg = StrategistConfig(symbols=["BTC_USDT"], candles=3, timeframe="15m")
-        runner = PlanRunner(Boom(), cfg, Path("inbox/x"), Path("hist/x"), llm=StubLLM())
+        cfg = StrategistConfig(symbols=["BTC_USDT"], candles=3, timeframe="15m",
+                               bot_root=_tmp_root(self), bot_id="x")
+        td = Path(cfg.bot_root)
+        runner = PlanRunner(Boom(), cfg, td / "inbox" / "x", td / "hist" / "x",
+                            llm=StubLLM())
         r = runner.run_once()
         self.assertNotEqual(r.get("error"), "account_unavailable", "账户缺失不应中止分析")
         self.assertGreater(called["n"], 0, "LLM 应仍被调用（行情分析）")
