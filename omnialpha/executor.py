@@ -64,6 +64,9 @@ def _parse_symbol_positions(positions: list, symbol: str) -> list[dict]:
     """从 `/positions` 原始记录里取出该 symbol 的**非零**持仓。
 
     `Executor._symbol_positions` 与撤单闸门共用这一份解析，避免两条路径漂移。
+    输出**总是带 `contract`** —— 这样孤儿判定可以「永远比对 contract」，
+    而不必靠「持仓记录里有没有 contract」去反推它来自哪条路径（那种推断
+    一旦多出第三方调用方就会静默失效）。
     """
     out = []
     for p in positions or []:
@@ -74,7 +77,7 @@ def _parse_symbol_positions(positions: list, symbol: str) -> list[dict]:
             continue
         mode = str(p.get("mode") or "")
         side = "long" if (size > 0 or mode.endswith("long")) else "short"
-        out.append({"side": side, "size": size, "mode": mode})
+        out.append({"contract": symbol, "side": side, "size": size, "mode": mode})
     return out
 
 
@@ -1489,14 +1492,14 @@ class Executor:
         保护单方向：sell(-size) 平多单，buy(+size) 平空单。
         有对应持仓 → 当前计划保护单，保留；无 → 孤儿。
 
-        **contract 比对只在持仓记录带 `contract` 时才做**（两个调用方的形状不同）：
+        **contract 必须比对**：两个调用方传来的持仓都带 `contract`
+        （`_symbol_positions` 的输出由 `_parse_symbol_positions` 统一补上）。
+        不比的话「BTC 的孤儿保护单」会被「ETH 的多仓」误判成有对应持仓而**永远清不掉**
+        —— 实测 2026-10-04 复核发现，受影响账户如 `brooks-ab-paper` / `ed-paper` /
+        `nial-paper` 都是多币种同向持仓。
 
-        - `_cleanup_orphan_protectors` 传的是 `_symbol_positions(symbol)`，输出
-          `{side, size, mode}` **没有 contract** → 已经按 symbol 过滤过了，只比方向就对
-        - `_should_keep_protection` / `_live_protection_ids` 传的是 `/positions` 的
-          **全量原始记录**（带 contract）→ 必须再比 contract，否则「BTC 的孤儿保护单」
-          会被「ETH 的多仓」误判成有对应持仓而永远清不掉（实测 2026-10-04 复核发现；
-          受影响账户如 `brooks-ab-paper` / `ed-paper` / `nial-paper` 都是多币种同向持仓）。
+        仍保留「两边都有 contract 才比」的守卫：持仓记录来自交易所客户端，
+        这是系统边界；缺字段时退化为只比方向（宁可多留，不可误撤）。
         """
         init = po.get("initial") or {}
         text = str(init.get("text") or po.get("text") or "")

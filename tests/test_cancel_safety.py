@@ -349,16 +349,21 @@ class TestOrphanProtectorContractMatching(unittest.TestCase):
         self.assertTrue(ex._should_keep_protection(
             self._tp(oid="p-eth-tp", sym="ETH_USDT", size=-100), positions, False))
 
-    def test_single_symbol_path_behaviour_unchanged(self):
-        """`_parse_symbol_positions` 的输出**没有** contract 字段 → 仍只比方向。
+    def test_single_symbol_path_always_carries_contract(self):
+        """`_parse_symbol_positions` 的输出**总是**带 `contract`。
 
-        这条保证自动清理路径（`_cleanup_orphan_protectors`）行为完全不变。
+        这样孤儿判定可以「永远比对 contract」，不必靠「记录里有没有 contract」
+        去反推它来自哪条路径 —— 那种推断一旦多出第三方调用方就会静默失效。
+        行为上单 symbol 路径不变：contract 就是该 symbol，比对必然命中。
         """
         ex = _ex(_FakeClient())
         pos = _parse_symbol_positions(
             [{"contract": "BTC_USDT", "size": 2366}], "BTC_USDT")
-        self.assertIsNone(pos[0].get("contract"))
+        self.assertEqual(pos[0]["contract"], "BTC_USDT")
         self.assertFalse(ex._is_orphan_protector(self._tp(), pos))
+        # 别的 symbol 的记录不会被解析进来
+        self.assertEqual(
+            _parse_symbol_positions([{"contract": "ETH_USDT", "size": 100}], "BTC_USDT"), [])
 
     def test_cancel_price_all_still_cancels_orphan_in_multi_symbol_account(self):
         """端到端：多币种账户里 BTC 的孤儿仍要撤得掉（防功能静默失效）。"""
