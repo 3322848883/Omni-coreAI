@@ -152,6 +152,37 @@ def new_order_id() -> str:
     return uuid.uuid4().hex[:16]
 
 
+def realized_pnl_stats(db_path: Any) -> Optional[dict]:
+    """汇总 paper 账本的**已实现盈亏**（权威口径）：笔数 / 盈利笔数 / 合计 / 最差单笔。
+
+    `fills.realised_pnl != 0` 即一笔平仓成交 —— **它包含交易所侧触发的平仓**
+    （SL/TP），而那类没有信号、不进 `logs/trades.jsonl`。所以「这个 bot 到底平了
+    几笔、赚亏多少」只能从这里取，不能从成交日志推。
+
+    只读打开；库不存在 / 读不出 / 没有任何平仓 → 返回 None（调用方退回非账本口径）。
+    """
+    p = Path(db_path)
+    if not p.is_file():
+        return None
+    try:
+        con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+        try:
+            vals = [float(r[0]) for r in
+                    con.execute("select realised_pnl from fills where realised_pnl != 0")]
+        finally:
+            con.close()
+    except Exception:  # noqa: BLE001
+        return None
+    if not vals:
+        return None
+    return {
+        "trades": len(vals),
+        "wins": sum(1 for v in vals if v > 0),
+        "pnl": round(sum(vals), 2),
+        "worst": round(min(vals), 2),
+    }
+
+
 class _FileLock:
     """跨进程文件锁：防止两个进程同时写 account.db。"""
 

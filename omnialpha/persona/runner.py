@@ -446,7 +446,11 @@ class PersonaRunner:
                            "target_account": target,
                            "reason": "no realized_pnl yet（信号可能还没被执行）"})
                 return
-            profile = MemoryProfile(self.root, members[0] if members else target)
+            # 画像按**持有仓位的账户**（target）建 —— paper 账本在它名下，
+            # `MemoryProfile.load()` 的账本投影也按 bot_id 去找库。
+            # 原先用 members[0]：组内成员与目标账户不一致时，画像会挂到一个
+            # 账本为空的 bot 上，投影直接失效。
+            profile = MemoryProfile(self.root, target or (members[0] if members else ""))
             lifecycle = rec.get("lifecycle") or []
             hold_rounds = len([e for e in lifecycle if e.get("act") != "close"])
             # 归类用**开仓动作**（lifecycle 首条的 detail 形如 "open_long long" /
