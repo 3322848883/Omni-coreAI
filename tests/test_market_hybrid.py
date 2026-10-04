@@ -502,6 +502,53 @@ class TestSnapshot(unittest.TestCase):
         self.assertIn("min_notional_usd", cm)
         self.assertGreater(cm["quanto_multiplier"], 0)
 
+    def test_protections_carry_price_size_rule_in_both_shapes(self):
+        """条件单的两种形状都要认：Gate 嵌套（initial/trigger）与 paper 扁平（库行）。
+
+        实测 2026-10-04：snapshot 只按 Gate 的嵌套形状取值，而 paper 的
+        `_price_order_view` 返回的是**扁平库行**（`dict(po)` + id）→
+        `trigger_price`/`size`/`rule` 全取成 None，AI 看不到当前 TP/SL 设在哪、
+        多大量，`modify_tp_sl` 变成半盲改单（模型自己指出
+        「their trigger prices are null in the data」）。
+        """
+        class _C(FakeClient):
+            def list_price_orders(self, contract=None):
+                return [
+                    # Gate 形状：字段嵌在 initial / trigger
+                    {"id": "g1", "status": "open",
+                     "initial": {"text": "t-wyk-tp", "size": -2366},
+                     "trigger": {"price": 85400.0, "rule": 1}},
+                    # paper 形状：扁平库行（trigger_price/size/rule 在顶层）
+                    {"id": "p1", "order_id": "p1", "status": "untriggered",
+                     "text": "t-wyk-sl", "size": -2366.0,
+                     "trigger_price": 84150.0, "rule": 2},
+                ]
+
+        client = _C(rest_rows=[[int(time.time()), "1", "1", "1", "1", "1", "0"]])
+        snap = collect_snapshot(client, ["BTC_USDT"], candles=5, interval="15m")
+        prot = {p["id"]: p for p in snap["account"]["protections"]}
+        self.assertEqual(len(prot), 2)
+        for pid, price, size, rule, text in (
+            ("g1", 85400.0, -2366, 1, "t-wyk-tp"),
+            ("p1", 84150.0, -2366.0, 2, "t-wyk-sl"),
+        ):
+            self.assertEqual(prot[pid]["trigger_price"], price, pid)
+            self.assertEqual(prot[pid]["size"], size, pid)
+            self.assertEqual(prot[pid]["rule"], rule, pid)
+            self.assertEqual(prot[pid]["text"], text, pid)
+
+    def test_protections_flat_shape_does_not_degrade(self):
+        """扁平形状不得被判成「取不到保护单」（那会静默丢掉 degraded 之外的字段）。"""
+        class _C(FakeClient):
+            def list_price_orders(self, contract=None):
+                return [{"id": "p1", "text": "t-wyk-sl", "size": -91.0,
+                         "trigger_price": 2747.5, "rule": 2}]
+
+        client = _C(rest_rows=[[int(time.time()), "1", "1", "1", "1", "1", "0"]])
+        snap = collect_snapshot(client, ["BTC_USDT"], candles=5, interval="15m")
+        self.assertNotIn("protections", snap["meta"]["degraded"])
+        self.assertEqual(snap["account"]["protections"][0]["trigger_price"], 2747.5)
+
     def test_snapshot_multi_timeframe_extras(self):
         now = int(time.time())
         rows = [[now - (30 - i) * 900, "1", str(1 + i * 0.01), "2", "0.5", "1", "0"] for i in range(30)]

@@ -50,6 +50,14 @@ def _pick(raw: dict, fields: tuple[str, ...]) -> dict[str, Any]:
     return {k: _f(raw.get(k)) if k != "time" else raw.get(k) for k in fields}
 
 
+def _first(*vals: Any) -> Any:
+    """返回第一个非 None 的值（0 / 空串也算有值）。"""
+    for v in vals:
+        if v is not None:
+            return v
+    return None
+
+
 def position_state(account: dict) -> tuple[str, str]:
     """给 AI 的持仓状态摘要：(state, note)。
 
@@ -284,15 +292,22 @@ def collect_snapshot(
             syms = set(symbols) | {p.get("contract") for p in account.get("positions") or []}
             for s in sorted(x for x in syms if x):
                 for p in (client.list_price_orders(s) or []):
+                    # 条件单有两种形状，必须都认：
+                    #   Gate  → 字段嵌在 initial / trigger 里
+                    #   paper → `_price_order_view` 是**扁平库行**（`dict(po)` + id），
+                    #           字段直接在顶层（trigger_price / size / rule）
+                    # 少了这层 fallback，模拟盘上 trigger_price/size/rule 全是 null ——
+                    # AI 看不到当前 TP/SL 设在哪、多大量，`modify_tp_sl` 变成半盲改单。
+                    # 实测 2026-10-04 模型自己指出「their trigger prices are null in the data」。
                     ini = p.get("initial") or {}
                     trg = p.get("trigger") or {}
                     prot.append({
                         "contract": s,
                         "id": p.get("id"),
-                        "size": ini.get("size"),
-                        "trigger_price": trg.get("price"),
-                        "rule": trg.get("rule"),
-                        "text": ini.get("text") or p.get("text"),
+                        "size": _first(ini.get("size"), p.get("size")),
+                        "trigger_price": _first(trg.get("price"), p.get("trigger_price")),
+                        "rule": _first(trg.get("rule"), p.get("rule")),
+                        "text": _first(ini.get("text"), p.get("text")),
                         "status": p.get("status"),
                     })
             account["protections"] = prot
