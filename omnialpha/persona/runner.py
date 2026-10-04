@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -254,13 +255,25 @@ class PersonaRunner:
                     })
                     return current, round_num - 1
 
+            # 本轮发言顺序。sync 下顺序不影响结果（三人读同一份快照）；
+            # relay 下它就是「谁先定调」—— random 每轮重新洗牌，避免固定第一人
+            # 长期主导（实测 eth-disc 连续 4 轮都是 SMC 第一个发言且先定方向）。
+            order = [b for b in self.group.members
+                     if current.get(b) and (current[b] or {}).get("ok", True)]
+            if d.mode == "relay" and d.order == "random":
+                random.shuffle(order)
+            # 轮开始时的立场快照。relay 下 current 会被逐个更新，事后取不到
+            # 「原来是什么」，所以必须在发言前存一份给日志用。
+            was = {b: str((current.get(b) or {}).get("decision") or "")
+                   for b in self.group.members}
+
             # 构建讨论消息：每人看到其他人的 decision + reasoning
             discussions = {}
-            for bot_id in self.group.members:
+            for bot_id in order:
                 plan = current.get(bot_id)
                 if not plan or not plan.get("ok", True):
                     continue
-                # 收集其他人的观点
+                # 收集其他人的观点（relay 下 current 已含本轮前面人的最新立场）
                 peers = []
                 for other_id, other_plan in current.items():
                     if other_id == bot_id:
@@ -275,25 +288,28 @@ class PersonaRunner:
                     revised = self._revise_with_discussion(
                         bot_id, plan, peers, round_num, max_rounds=max_rounds,
                     )
-                    if revised:
-                        discussions[bot_id] = revised
                 except Exception:  # noqa: BLE001
                     continue
+                if not revised:
+                    continue
+                discussions[bot_id] = revised
+                if d.mode == "relay":
+                    # 接力：说完立刻生效，后面的人看得到它本轮的新立场
+                    current[bot_id] = self._apply_revision(current[bot_id], revised)
 
             # 记录本轮：改口 vs 坚持
             stage = {1: "相互讨论与反驳", 2: "深化讨论"}.get(round_num, "最终决策")
-            round_rec = {"round": round_num, "stage": stage, "positions": {}}
+            round_rec = {"round": round_num, "stage": stage,
+                         "mode": d.mode, "order": list(order), "positions": {}}
             for bot_id in self.group.members:
-                old = current.get(bot_id) or {}
                 new = discussions.get(bot_id)
-                old_dec = str(old.get("decision") or "")
+                old_dec = was.get(bot_id, "")
                 if new:
                     new_dec = str(new.get("decision") or old_dec)
-                    changed = new_dec != old_dec
                     round_rec["positions"][bot_id] = {
                         "was": old_dec,
                         "now": new_dec,
-                        "changed": changed,
+                        "changed": new_dec != old_dec,
                         "reasoning": str(new.get("reasoning") or "")[:80],
                     }
                 else:
@@ -303,41 +319,48 @@ class PersonaRunner:
                     }
             self.discussion_log.append(round_rec)
 
-            # 应用修正 —— **必须连 chips 一起改**。
-            # fuse_plans._norm_dir 与 _execute 都优先读 `chips[0].action`，
-            # 只改 `decision` 的话讨论结果进不了融合（线上实测：三人讨论后都改成
-            # stop_entry_long，融合票仍是讨论前的 hold/long/hold）。
-            if discussions:
-                for bot_id, revised in discussions.items():
-                    merged = {**current[bot_id],
-                              **{k: v for k, v in revised.items() if k != "chip"}}
-                    chip = revised.get("chip")
-                    if chip is None:
-                        # `_discussion_chip` 改成 hold（或非入场类）时返回 None。
-                        # **不能清空 chips**：清空虽然能让 `_norm_dir` 读到新的
-                        # `decision`，却把原始 chip 的 symbol/size_usd/tp/sl 一起丢了 ——
-                        # 下一轮该人格再改回入场类时 `_discussion_chip` 的 base 为空，
-                        # symbol 就落到硬编码兜底。实测 eth-disc 一轮里三张 chip 全部
-                        # 变成 `BTC_USDT`（讨论的是 ETH，价位也是 ETH 的 2694/2706）。
-                        # 只改写 action，其余执行字段原样保留。
-                        keep = list(current[bot_id].get("chips") or [])
-                        if keep and isinstance(keep[0], dict):
-                            keep[0] = {**keep[0],
-                                       "action": str(merged.get("decision") or "hold")}
-                        merged["chips"] = keep
-                    else:
-                        rest = list((current[bot_id].get("chips") or [])[1:])
-                        merged["chips"] = [chip] + rest
-                    current[bot_id] = merged
-            else:
+            if not discussions:
                 # 没有有效修正，退出
                 return current, round_num
+
+            if d.mode == "sync":
+                # 同步轮次：轮末统一生效。轮内 current 保持不变，所以三人读的是同一份
+                # 上一轮快照。relay 已在每次发言后应用过，这里不再重复。
+                for bot_id, revised in discussions.items():
+                    current[bot_id] = self._apply_revision(current[bot_id], revised)
 
             # 最后一轮不再检查一致（直接融合）
             if round_num == max_rounds:
                 return current, max_rounds
 
         return current, max_rounds
+
+    @staticmethod
+    def _apply_revision(base_plan: dict, revised: dict) -> dict:
+        """把讨论修订合并进 plan —— **必须连 chips 一起改**。
+
+        `fuse_plans._norm_dir` 与 `_execute` 都优先读 `chips[0].action`，
+        只改 `decision` 的话讨论结果进不了融合（线上实测：三人讨论后都改成
+        stop_entry_long，融合票仍是讨论前的 hold/long/hold）。
+        """
+        merged = {**base_plan, **{k: v for k, v in revised.items() if k != "chip"}}
+        chip = revised.get("chip")
+        if chip is None:
+            # `_discussion_chip` 改成 hold（或非入场类）时返回 None。
+            # **不能清空 chips**：清空虽然能让 `_norm_dir` 读到新的 `decision`，
+            # 却把原始 chip 的 symbol/size_usd/tp/sl 一起丢了 —— 下一轮该人格再改回
+            # 入场类时 `_discussion_chip` 的 base 为空，symbol 就落到硬编码兜底。
+            # 实测 eth-disc 一轮里三张 chip 全部变成 `BTC_USDT`
+            # （讨论的是 ETH，价位也是 ETH 的 2694/2706）。
+            # 只改写 action，其余执行字段原样保留。
+            keep = list(base_plan.get("chips") or [])
+            if keep and isinstance(keep[0], dict):
+                keep[0] = {**keep[0], "action": str(merged.get("decision") or "hold")}
+            merged["chips"] = keep
+        else:
+            rest = list((base_plan.get("chips") or [])[1:])
+            merged["chips"] = [chip] + rest
+        return merged
 
     def _revise_with_discussion(self, bot_id: str, plan: dict,
                                  peers: list[dict], round_num: int,

@@ -15,6 +15,16 @@ CONFLICT_MODES = ("hold", "master", "majority")
 DISCUSSION_MAX_ROUNDS = 4
 DISCUSSION_DEFAULT_ROUNDS = 2
 
+# 讨论的发言模型：
+#   sync  —— 同步轮次。同轮三人读**同一份**上一轮快照，轮末统一生效。
+#            结果与发言顺序无关（可复现）。
+#   relay —— 接力发言。谁说完立刻生效，后面的人看到前面**本轮最新**的立场。
+#            信息在轮内就传开、不必等下一轮，但引入顺序依赖。
+DISCUSSION_MODES = ("sync", "relay")
+# relay 的发言顺序：fixed = 按 members 顺序；random = 每轮重新洗牌。
+# （sync 下无意义：三人读同一快照，顺序不影响结果）
+DISCUSSION_ORDERS = ("fixed", "random")
+
 
 class PersonaError(Exception):
     pass
@@ -27,10 +37,20 @@ class DiscussionConfig:
     rounds: int = DISCUSSION_DEFAULT_ROUNDS       # 最大讨论轮次（1-4）
     timeout_sec: int = 120                        # 单轮超时
     early_exit_on_agreement: bool = True          # 首轮全体一致则提前终止
+    mode: str = "sync"                            # sync | relay（见 DISCUSSION_MODES）
+    order: str = "fixed"                          # relay 的发言顺序：fixed | random
 
     def __post_init__(self):
         self.rounds = max(1, min(DISCUSSION_MAX_ROUNDS, int(self.rounds)))
         self.timeout_sec = max(10, int(self.timeout_sec))
+        self.mode = str(self.mode or "sync").strip().lower()
+        if self.mode not in DISCUSSION_MODES:
+            raise PersonaError(
+                f"discussion.mode must be one of {DISCUSSION_MODES}, got {self.mode!r}")
+        self.order = str(self.order or "fixed").strip().lower()
+        if self.order not in DISCUSSION_ORDERS:
+            raise PersonaError(
+                f"discussion.order must be one of {DISCUSSION_ORDERS}, got {self.order!r}")
 
 
 @dataclass
@@ -93,6 +113,8 @@ def load_persona_groups(path: Path) -> list[PersonaGroup]:
             rounds=max(1, min(DISCUSSION_MAX_ROUNDS, int(disc_raw.get("rounds", DISCUSSION_DEFAULT_ROUNDS)))),
             timeout_sec=max(10, int(disc_raw.get("timeout_sec", 120))),
             early_exit_on_agreement=bool(disc_raw.get("early_exit_on_agreement", True)),
+            mode=str(disc_raw.get("mode") or "sync"),
+            order=str(disc_raw.get("order") or "fixed"),
         )
         groups.append(PersonaGroup(
             name=name,
