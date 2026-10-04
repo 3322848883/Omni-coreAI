@@ -1,0 +1,98 @@
+# 人格13 · Wyckoff — 实盘
+# 策略：prompts/wyckoff_pa.md（人格13 · Wyckoff）
+#
+# enabled: false —— **布置完成但不启动**。要启用时在服务器建
+# config/bots.local/wyckoff-live.yaml 写 `enabled: true`（该目录 gitignore），
+# 再 systemctl start omnialpha-watchdog。
+#
+# ⚠️ 启用前请复核下面 account_risk 的四个数字 —— 它们是按「小额起步」设的，
+#    不是按你的风险预算算的。建议第一次就把 max_notional_pct 保持 1.0，
+#    跑顺若干周期再抬。
+#
+# strategist 段与 wyckoff-paper.yaml **逐字一致** —— 那套配置是实测验证过的
+# （工具面收窄到 4 个、indicators/skills 清空、candles 150、max_rounds 5、
+#  两轮共 21 轮实测：0 次越界工具、0 次 SMC/订单流术语、phase 读取正确）。
+
+bot_id: wyckoff-live
+enabled: false
+env: live
+api_key_env: GATE_API_KEY
+api_secret_env: GATE_API_SECRET
+
+symbols:
+  - BTC_USDT
+  - ETH_USDT
+
+# 绝对兜底（真正的闸门是下面的 max_notional_pct / max_total_notional_pct）
+max_notional_usd: 10000
+max_orders_per_file: 5
+max_files_per_run: 20
+poll_interval_sec: 2
+label_prefix: wyk
+position_policy: strict
+default_replace: symbol
+order_scope: own
+require_sl: true
+
+account_risk:
+  halt: false
+  max_leverage: 50
+  max_total_notional_usd: 10000
+  # 权益比例硬顶：单笔名义 ≤ 权益 × 此倍数（executor._check_notional 执行）
+  # 1.0 = 起步值，跑顺了再抬；人格自己按 1% 风险反推仓位，这条是硬上限
+  max_notional_pct: 1.0
+  # 总量闸门（按比例）：与人格的「多币合计风险超约 2% 只做一腿」对齐
+  max_total_notional_pct: 2.0
+  # 绝对日亏兜底（按小额起步设；启用前按你的风险预算调整）
+  daily_loss_limit_usd: 100
+  # 裸仓自动补保护：先跑 dry（只记录「本来会挂什么」，不下单），观察一轮再改 true
+  auto_protect: "dry"
+  auto_protect_sl_pct: 2.0
+
+strategist:
+  enabled: true
+  prompt_file: prompts/wyckoff_pa.md
+  interval_sec: 900
+  timeframe: 15m
+  event_on_kline_close: true
+  event_timeframe: 15m
+  # 80 根看不清一个完整区间。tv_wyckoff 内部固定吃 >=500 根，
+  # 这里给的是让模型自己核对量价形态用的原始 K 线。
+  candles: 150
+  write_hold: true
+  # Wyckoff 只认量价（OHLCV + 成交量），故收窄工具面。
+  # 实测未收窄时（35 个工具全开）模型会拿 indicators(atr14/ema20/rsi14) 当入场理由，
+  # 并用 smc_map 的 BOS / Premium-Discount 判断 Wyckoff 阶段 ——
+  # 工具面看得到就会用，直接从面里拿掉。
+  tools:
+    enabled: true
+    native: true
+    # 跨周期要多次调 tv_wyckoff（15m + 1h），4 轮会截断
+    max_rounds: 5
+    allow:
+      - klines        # 原始 OHLCV：核对量价形态
+      - tv_wyckoff    # 五阶段状态机 + 15 事件 + 双评分 + next/checks
+      - ticker        # 实时价：挂限价、算止损距离
+      - contract      # 最小下单量/张值/杠杆上限：仓位换算
+  # Wyckoff 不依赖任何 skill；空列表 = 不载入（缺省则是全部可见）
+  skills: []
+  market:
+    # 用 rest_only 而不是 hybrid：hybrid 会读本地 kline.db，而那张表的
+    # ema20/atr14 两列会被一路带进注入的 K 线快照（snapshot 不剥携带列），
+    # 等于把刚拿掉的传统指标又从后门放回来。rest_only 走 REST，那两列是 None。
+    mode: rest_only
+    # 不喂任何传统指标（原为 [obv, atr14]，实测模型会拿它当入场理由）。
+    # 原版引擎自己算 ATR，也完全不用 OBV（它用的是原始 volume 与 50 期均量比）。
+    indicators: []
+    extra_timeframes: ["1h"]
+    extra_candles: 15
+  ai_triggers:
+    enabled: true
+    max_active: 5
+  risk:
+    min_confidence: 0.6     # 实盘取保守值（模拟盘用 0.55）
+    max_chips: 2            # BTC/ETH 各最多一单
+    max_notional_usd: 10000
+  llm:
+    provider: gw-flash
+    reasoning_effort: high
