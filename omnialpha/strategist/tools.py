@@ -456,7 +456,10 @@ NATIVE_TOOLS = [
             "name": "orderbook",
 
 
-            "description": "Top of book depth.",
+            "description": (
+                "Top-of-book depth (bid/ask sizes). Used to judge absorption: whether a "
+                "level is being defended or eaten."
+            ),
 
 
             "parameters": {
@@ -537,7 +540,10 @@ NATIVE_TOOLS = [
             "name": "stats",
 
 
-            "description": "Open interest and related stats.",
+            "description": (
+                "Raw `/contract_stats` records (25 fields, including the taker buy/sell "
+                "sizes). Use it when you need a field the summarised tools do not expose."
+            ),
 
 
             "parameters": {
@@ -657,7 +663,11 @@ NATIVE_TOOLS = [
             "name": "liquidations",
 
 
-            "description": "Recent liquidations from local aux cache.",
+            "description": (
+                "Recent liquidations from local aux cache. `size` is SIGNED: "
+                "negative = a long was liquidated, positive = a short was liquidated. "
+                "Read it as a forced-flow event stream, not as a direction signal."
+            ),
 
 
             "parameters": {
@@ -702,7 +712,10 @@ NATIVE_TOOLS = [
             "name": "market_stats",
 
 
-            "description": "Open interest, long/short ratios, liq sizes from aux cache.",
+            "description": (
+                "Open interest, long/short ratios and liquidation sizes from the aux cache "
+                "(1h granularity). Snapshot only — no per-level detail."
+            ),
 
 
             "parameters": {
@@ -1180,9 +1193,13 @@ _TAKER_DELTA_TOOL_DEF = {
             "Real taker delta and cumulative delta (CVD) from exchange-reported taker "
             "buy/sell volume (Gate /contract_stats: long_taker_size − short_taker_size). "
             "Unlike tv_cdv — which ESTIMATES delta from candle geometry — these are "
-            "measured values. Also returns large-holder positioning (top_lsr_size, "
-            "top_long_size/top_short_size), account long/short ratio, funding rate, "
-            "and liquidation sizes."
+            "measured values. Prefer this over tv_cdv wherever it covers the timeframe. "
+            "Returns `delta_last`/`cvd_last` plus tails; CVD is more meaningful than a "
+            "single bar (a single bar only shows the dynamic shift, the cumulative value "
+            "carries the limited predictive edge). Also returns `taker` "
+            "(long_taker_size / short_taker_size / lsr_taker), large-holder positioning "
+            "(top_lsr_size, top_long_size/top_short_size, long_users/short_users), "
+            "funding rate, and liquidation sizes."
         ),
         "parameters": {
             "type": "object",

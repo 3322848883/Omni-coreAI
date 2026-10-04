@@ -151,7 +151,13 @@ TV_TOOL_DEFS: list[dict[str, Any]] = [
                 "Delta Flow Profile (TV Pine, LuxAlgo): money-flow profile over the last "
                 "`lookback` bars — per price level the money flow (volume × overlap ratio × "
                 "level mid-price) and the delta (buy − sell), plus the POC and its bar-by-bar "
-                "migration path (Developing PoC). Pure OHLCV; no external data source."
+                "migration path (Developing PoC). Pure OHLCV; no external data source. "
+                "`levels[].money_flow_norm` is that level's share of money flow (1.0 = the "
+                "densest level); `levels[].delta_norm` is the signed buy−sell net for that "
+                "level (|value| → 1 means extreme). "
+                "WARNING — delta only describes what already happened: measured correlation "
+                "with the SAME-period price change is 0.54, but with the NEXT bar it is 0.05. "
+                "Never read 'delta positive → go long'; delta is only usable for DIVERGENCE."
             ),
             "parameters": {
                 "type": "object",
@@ -181,7 +187,14 @@ TV_TOOL_DEFS: list[dict[str, Any]] = [
                 "price levels it spans, classified into 4 quadrants (price up/down × OI up/down = "
                 "buyers entered / sellers exited / sellers entered / buyers exited). Returns each "
                 "quadrant's POC, value area, share, plus per-level and summed buckets. "
-                "Needs Gate /contract_stats for the OI series."
+                "Needs Gate /contract_stats for the OI series. "
+                "TWO CAVEATS: (1) `va_low_price`/`va_high_price` are expanded SYMMETRICALLY "
+                "outward from the POC to `va_pct`% by the original algorithm — this DIFFERS "
+                "from the Market Profile convention of merging into the heavier side, so treat "
+                "them as reference levels, not a precise definition; (2) ΔOI is nearly "
+                "independent of price direction (measured same-period correlation ≈ 0.02), so "
+                "the quadrants answer 'what is the NATURE of this move' — they are NOT a "
+                "direction signal."
             ),
             "parameters": {
                 "type": "object",
@@ -208,7 +221,10 @@ TV_TOOL_DEFS: list[dict[str, Any]] = [
                 "(body weight 1, wicks weight 2, wick volume split half green / half red). "
                 "mode=volume uses OHLCV only; mode=oi uses the open-interest change instead "
                 "(body only, no wicks). Returns per-level green/red/delta/total, totals, POC and "
-                "positive-delta price levels."
+                "positive-delta price levels. "
+                "WARNING — this is a candle-geometry APPROXIMATION, not tick detail. Never "
+                "describe a level as 'one big order'. Where the measured orderflow_footprint "
+                "covers the window, prefer it."
             ),
             "parameters": {
                 "type": "object",
@@ -232,7 +248,10 @@ TV_TOOL_DEFS: list[dict[str, Any]] = [
                 "delta, where delta is ESTIMATED from candle geometry (body size vs wicks) — "
                 "the standard approximation when tick-level buy/sell direction is unavailable. "
                 "Returns the CDV series tail, per-bar delta tail, optional Heikin-Ashi CDV "
-                "candles, and optional SMA/EMA overlays."
+                "candles, and optional SMA/EMA overlays. "
+                "The estimated rate is the body's share of the bar (bull ∈ [0.5, 1], "
+                "bear ∈ [0, 0.5]) — never present it as a measured value; prefer taker_delta "
+                "or orderflow_tape wherever they cover the timeframe."
             ),
             "parameters": {
                 "type": "object",

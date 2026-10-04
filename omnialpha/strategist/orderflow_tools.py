@@ -35,9 +35,11 @@ ORDERFLOW_TOOL_DEFS: list[dict[str, Any]] = [
             "name": "orderflow_tape",
             "description": (
                 "Real taker tape aggregated per second from the exchange WebSocket: "
-                "taker buy/sell size (direction from trade sign), delta, cumulative delta, "
-                "and large-trade stats (threshold = 90th percentile of the last 5 minutes). "
-                "Unlike tv_cdv (candle-geometry estimate), these are measured tick values."
+                "`totals` (buy_size / sell_size / delta / cvd / big_count), `cvd_tail`, and "
+                "`rows_detail`. Large-trade threshold = 90th percentile of the last 5 minutes. "
+                "Direction comes from the trade sign, so these are measured tick values — "
+                "prefer them over tv_cdv's candle-geometry estimate. CVD is more meaningful "
+                "than a single bar (a single bar only shows the dynamic shift)."
             ),
             "parameters": {
                 "type": "object",
@@ -51,10 +53,12 @@ ORDERFLOW_TOOL_DEFS: list[dict[str, Any]] = [
         "function": {
             "name": "orderflow_footprint",
             "description": (
-                "Real footprint: per-price taker buy/sell volume aggregated over the last "
-                "`minutes`, with POC (highest-volume price) and imbalance rows "
-                "(buy/sell ratio >= 3:1, the standard criterion). Measured from ticks, "
-                "not estimated from candle geometry."
+                "Real footprint: per-price taker buy/sell volume over the last `minutes`, "
+                "returning `levels[]` (price / buy / sell / delta / buy_ratio), `poc` "
+                "(highest-volume price) and `imbalance_levels`. Imbalance criterion: a single "
+                "level counts when the buy/sell ratio is >= 3:1; a STACK requires >= 3 "
+                "consecutive same-direction levels. Measured from ticks — prefer it over "
+                "tv_vol_oi_footprint's geometry split."
             ),
             "parameters": {
                 "type": "object",
@@ -75,9 +79,15 @@ ORDERFLOW_TOOL_DEFS: list[dict[str, Any]] = [
             "name": "orderbook_state",
             "description": (
                 "Order-book state (the pre-filter for every micro signal). Four dimensions: "
-                "relative spread, top-5 depth, cancel rate, trade intensity — plus a grade "
-                "(excellent/normal/poor/bad). When the grade is poor/bad, micro-structure "
-                "signals should be down-weighted or skipped."
+                "relative spread, top-5 depth, cancel rate, trade intensity — plus a grade. "
+                "The grade thresholds (spread as a fraction; depth = current / historical mean) "
+                "are: excellent = spread <0.0002 (0.02%) and depth >0.80; normal = <0.0005 and "
+                ">0.50; poor = <0.0010 and >0.30; bad = anything worse. When the grade is "
+                "poor/bad, micro-structure signals must be down-weighted or skipped — a thin "
+                "book exaggerates every 'large order'. Also skip micro signals when spread_pct "
+                "is >2x its recent average, or when volatility spikes. Note: `depth_ratio` / "
+                "`cancel_rate` can be null early after collection starts (insufficient sample) "
+                "— fall back to `grade` then."
             ),
             "parameters": {
                 "type": "object",
