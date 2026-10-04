@@ -716,10 +716,20 @@ class Executor:
         expected = equity * risk_pct / dist
         if expected <= 0:
             return size_usd, ""
+        # 名义硬顶在这里**钳制**。`_check_notional` 里的 max_notional_usd 是拒单闸门
+        # （超了整笔 raise），若只靠它，风险公式的期望值一旦超过上限就会把正常单
+        # 整笔拒掉 —— 而「名义上限」的直觉语义是「最多开这么多」。
+        # 实测：equity 85 / risk 2% / 止损 0.296% 算出 574，配 max_notional_usd=500
+        # 会拒单；钳制后同一张单缩到 500 照常开。
+        cap = self.max_notional_usd
+        target = expected if cap is None else min(expected, float(cap))
         # 偏差超过 30% 过大 → 钳到应有值；过小（<50%）保留（可主动降风险）
-        if float(size_usd) > expected * 1.3:
-            note = f"size_clamped {float(size_usd):.0f}->{expected:.0f} (risk {risk_pct:.1%} expected)"
-            return expected, note
+        if float(size_usd) > target * 1.3:
+            note = f"size_clamped {float(size_usd):.0f}->{target:.0f} (risk {risk_pct:.1%} expected)"
+            return target, note
+        if cap is not None and float(size_usd) > float(cap):
+            # 没超过 target×1.3，但仍越过了名义硬顶 → 必须钳，否则 _check_notional 会拒
+            return float(cap), f"size_capped {float(size_usd):.0f}->{float(cap):.0f} (max_notional_usd)"
         return float(size_usd), ""
 
     def _atr_pct(self, symbol: str, lookback: int = 14) -> float:

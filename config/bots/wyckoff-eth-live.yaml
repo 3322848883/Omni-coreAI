@@ -29,8 +29,8 @@ api_secret_env: GATE_API_SECRET
 symbols:
   - ETH_USDT
 
-# 绝对兜底（真正的闸门是下面的 risk_pct / max_notional_pct）
-max_notional_usd: 3000
+# 名义硬顶（单笔）—— 由 _align_size_to_risk 钳制，超了缩小而不是拒单
+max_notional_usd: 500
 max_orders_per_file: 5
 max_files_per_run: 20
 poll_interval_sec: 2
@@ -48,8 +48,8 @@ account_risk:
   # 由 executor._align_size_to_risk 执行，open_long / stop_entry_long 两条入场
   # 路径同源。2% → 85 USDT 账户每笔最多亏 1.7 USDT；止损距离由人格按结构算。
   risk_pct: 0.02
-  # 名义硬顶：权益 × 40（85 × 40 = 3400），让顶层 3000 的绝对上限能通过
-  max_notional_pct: 40.0
+  # 名义硬顶（权益比例口径，与上面 500 的绝对上限对齐：85 × 6 ≈ 510）
+  max_notional_pct: 6.0
   # 总量闸门（按比例）
   max_total_notional_pct: 40.0
   # 日亏兜底：一天累计亏到 5 USDT（约权益 6%）就停手
@@ -102,7 +102,7 @@ strategist:
     # 讨论组的融合 confidence 实测 0.55~0.72 —— 0.6 会随机把整轮决策拦下
     min_confidence: 0.5
     max_chips: 1            # 单币单腿（原双币配置是 2）
-    max_notional_usd: 3000
+    max_notional_usd: 500
   llm:
     provider: gw-flash
     reasoning_effort: high

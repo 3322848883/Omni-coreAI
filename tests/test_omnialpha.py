@@ -846,6 +846,27 @@ class TestExecutor(unittest.TestCase):
                       "stop_entry 也必须走风险公式钳位")
         self.assertLessEqual(float(detail.get("size_usd") or 0), 30)
 
+    def test_max_notional_usd_clamps_instead_of_rejecting(self):
+        """名义硬顶要**钳制**，不能整笔拒 —— 风险公式期望值超过上限是常态。
+
+        equity 1000 / risk 1% / 止损距离 50% → 期望名义 20；把 max_notional_usd
+        设成 10，原先 `_check_notional` 会把整笔 raise 掉，现在应缩到 10 照常开。
+        """
+        client = FakeClient()
+        client.get_account = lambda: {"total": 1000.0, "available": 1000.0}
+        client.get_last_price = lambda s: 50000.0
+        ex = Executor(client, max_notional_usd=10,
+                      account_risk={"max_notional_pct": 10, "risk_pct": 0.01},
+                      require_sl=True)
+        rep = ex.execute_signal(parse_signal({
+            "action": "open_long", "symbol": "BTC_USDT",
+            "size_usd": 100, "price": 50000, "sl": 25000,
+        }))
+        self.assertTrue(rep.ok, rep.to_dict())
+        detail = rep.results[0].detail or {}
+        self.assertLessEqual(float(detail.get("size_usd") or 0), 10.0,
+                             "名义硬顶必须钳制，不能整笔拒单")
+
     def test_cancel_all_own_scope_only_touches_label_prefix(self):
         """order_scope=own + explicit bot label must not wipe another bot's book (prelaunch M12)."""
         client = FakeClient()
