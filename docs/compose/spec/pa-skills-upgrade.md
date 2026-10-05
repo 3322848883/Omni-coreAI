@@ -3,7 +3,7 @@ feature: pa-skills-upgrade
 status: delivered
 updated: 2026-10-05
 branch: feat/pa-skills-upgrade
-commits: 0948b04..d3957f9
+commits: 0948b04..2707d3e
 ---
 
 # 两个价格行为技能的 bot 适配升级
@@ -81,6 +81,19 @@ CoT 与耗时**无系统性差异**（两侧方差都很大），先前「区域
 
 另修评审指出的近重复 helper 漂移：`persona/runner.py::_tier1_from_chip` 补上
 `time_stop_bars`/`give_back_pct`，与 `loop.py::_tier1_journal_fields` 字段集对齐。
+
+**复审轮（general-31）**：C1/C3/C4 判成立，C2 判「部分修」（`cmd_plan` 边界仍无 try），
+并指出一项残留风险（A/B 脚本重写 `skills/` 却无 try/finally）。全部已修（提交 `2707d3e`）：
+
+- `cmd_plan` 补 CLI 边界 try —— 给人可读错误而不是 traceback
+- `_ab_test.py` 加 try/finally 复原，并补写 `.installed`（与 `omnialpha skill install` 一致）
+- `build_context` 只读一次 journal（原先每轮多读一遍整个文件）
+- 删 `scripts/_finalize_spec.py`（零引用，与已删的 9 个一次性脚本口径一致）
+
+复审因**环境权限限制**（bash 只放行 `git log`）无法实跑，只做了代码级复核；
+上述三项验证由实施者补跑：坏输入 **15/15 抛 `PlanError`**；单 bot 段内容正确渲染且
+无字段时省略、新段在 **user 侧**（system 未动 → 缓存前缀不漂移）；两技能安装产物
+**0 内容差异**。复审另确认：删掉的 9 个脚本全仓零引用、无任何地方依赖 `_f` 抛 `ValueError`。
 
 **Journey log**
 
