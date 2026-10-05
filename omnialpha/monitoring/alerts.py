@@ -2,6 +2,8 @@
 
 触发类型（P0.4）：
   - equity_deviation  权益偏离 >10%
+  - equity_deviation_halt  权益向下偏离触发**自动熔断**（`account_risk.equity_deviation_halt`）
+  - peak_trail_error  峰值回撤上移 SL 失败 / 回撤已越过目标（`account_risk.peak_trail`）
   - dup_fill          同一 order_id 成交入账重复
   - orphan_protector  平仓后遗留 reduce-only SL/TP
   - plan_fail         plan 周期连续失败（LLM/解析），每 error_warn 次记一条
@@ -20,6 +22,8 @@ MAX_ALERTS = 200
 
 # 告警类型常量
 TYPE_EQUITY_DEVIATION = "equity_deviation"
+TYPE_EQUITY_HALT = "equity_deviation_halt"
+TYPE_PEAK_TRAIL = "peak_trail_error"
 TYPE_DUP_FILL = "dup_fill"
 TYPE_ORPHAN = "orphan_protector"
 TYPE_PLAN_FAIL = "plan_fail"

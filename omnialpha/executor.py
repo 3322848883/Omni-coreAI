@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -60,6 +61,20 @@ class ExecReport:
         }
 
 
+# 峰值跟踪的连续性上限（秒）：两次观测间隔超过它，历史高点就不可信了 ——
+# 中间可能平过仓又开过新仓，而扫描没跑到。宁可重新起算（= 不动作），
+# 也不要拿一个来路不明的旧高点去卡当前仓位。默认 3× watcher 的 300s 扫描间隔。
+_PEAK_TRAIL_STALE_SEC = 900.0
+
+
+def _to_float(v: Any) -> float:
+    """宽松转 float：取不到返回 0.0（交易所字段可能是字符串、None 或缺失）。"""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _parse_symbol_positions(positions: list, symbol: str) -> list[dict]:
     """从 `/positions` 原始记录里取出该 symbol 的**非零**持仓。
 
@@ -77,7 +92,14 @@ def _parse_symbol_positions(positions: list, symbol: str) -> list[dict]:
             continue
         mode = str(p.get("mode") or "")
         side = "long" if (size > 0 or mode.endswith("long")) else "short"
-        out.append({"contract": symbol, "side": side, "size": size, "mode": mode})
+        out.append({
+            "contract": symbol, "side": side, "size": size, "mode": mode,
+            # 持仓身份与定价：峰值跟踪要靠 `entry_price` 判「还是不是同一条持仓」
+            # （平掉再开 / 加仓都会改入场价 → 必须重置峰值，否则会拿旧高点当基准
+            # 去卡一条新仓）。缺字段时是 0.0，调用方按「判不了身份」保守处理。
+            "entry_price": _to_float(p.get("entry_price")),
+            "mark_price": _to_float(p.get("mark_price")),
+        })
     return out
 
 
@@ -637,6 +659,61 @@ class Executor:
         except Exception:  # noqa: BLE001
             pass
 
+    def _check_equity_deviation_halt(self, start: float, total: float) -> str:
+        """权益**向下**偏离日初超阈值 → 自动熔断（逐 bot 配置，默认关）。
+
+        与 `daily_loss_limit_usd` 的分工：
+          - `daily_loss_limit_usd` 是**绝对值**（亏 $20 停手），小资金账户配不出
+            有意义的数（$20 对 $84 权益是 24%），只能配成「几乎不触发」。
+          - 本闸门是**比例**（亏掉日初的 X% 停手），小账户也能表达「亏一成停手」。
+
+        背景（架构盘点 S18）：`equity_deviation` 告警此前**只落盘、无人消费** ——
+        本项目调研的结论是「告警不接自动动作 = 没有控制」。这里把告警接上动作：
+        写 `halt.json`（当日有效、跨日自动复位），之后所有开仓类动作被
+        `_check_account_risk` 挡住，只留 close/cancel。
+
+        `equity_deviation_halt` 三种取值与 `auto_protect` 一致：
+          false（默认）→ 不启用，行为与升级前完全一致
+          "dry"        → 只记日志「本来会熔断」，不写标记（观察期用）
+          true         → 写熔断标记
+
+        **只在向下偏离时触发**：向上偏离 10% 是盈利，不该停手。
+
+        返回熔断原因（未触发/未启用返回空串）。
+        """
+        ar = self.account_risk or {}
+        mode = ar.get("equity_deviation_halt", False)
+        if not mode:
+            return ""
+        try:
+            pct = float(ar.get("equity_deviation_halt_pct") or 0)
+        except (TypeError, ValueError):
+            pct = 0.0
+        if pct <= 0 or start <= 0:
+            return ""
+        dev = (total - start) / start * 100.0
+        if dev > -pct:
+            return ""
+        reason = (f"equity_deviation {dev:+.1f}% <= -{pct:g}% "
+                  f"(day_start={start:.2f} now={total:.2f})")
+        if str(mode).lower() == "dry":
+            log.warning("[dry] would auto-halt: %s", reason)
+            return ""
+        self._write_auto_halt(reason)
+        log.error("auto halt: %s", reason)
+        if self.alert_store is not None:
+            try:
+                from .monitoring.alerts import TYPE_EQUITY_HALT
+
+                self.alert_store.raise_alert(
+                    TYPE_EQUITY_HALT, reason,
+                    deviation_pct=round(dev, 2), threshold_pct=pct,
+                    day_start=start, now=total,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        return reason
+
     def _check_account_risk(self, intent: Intent) -> None:
         """Account-level halt / exposure / daily-loss limits (pre-trade, all configurable)."""
         ar = self.account_risk or {}
@@ -673,13 +750,18 @@ class Executor:
                     raise
                 except Exception:  # noqa: BLE001
                     pass
-            # P0.4：权益偏离告警（不拦截，只落盘）
+            # P0.4：权益偏离告警（不拦截，只落盘）+ 可选的**自动熔断**（架构盘点 S18）。
+            # 原先这条告警**只落盘、无人消费** —— 本项目调研结论是「告警不接自动
+            # 动作 = 没有控制」。现在同一处算出的偏离值也喂给
+            # `_check_equity_deviation_halt`：逐 bot 配置、默认关，
+            # 开了就写 halt.json（当日有效、跨日自动复位）。
             try:
+                acct = self.client.get_account() or {}
+                total = float(acct.get("total") or acct.get("balance") or 0)
+                start = self._day_start_equity(total)
                 if self.alert_store is not None:
-                    acct = self.client.get_account() or {}
-                    total = float(acct.get("total") or acct.get("balance") or 0)
-                    start = self._day_start_equity(total)
                     self.alert_store.equity_deviation(start, total)
+                self._check_equity_deviation_halt(start, total)
             except Exception:  # noqa: BLE001
                 pass
             max_lev = ar.get("max_leverage")
@@ -1937,6 +2019,40 @@ class Executor:
                 continue
         return total
 
+    def _owned_sl_orders(self, symbol: str) -> list[tuple[str, float, int]]:
+        """本 bot 未终结的 SL 价格单 → `[(order_id, trigger_price, 张数), ...]`。
+
+        与 `_owned_sl_size` **同源**（都走 `_owned_price_orders` + `-sl/-ls` 后缀
+        + 未终结状态过滤），保证「补保护」与「上移保护」两条路径看到的是同一批单 ——
+        判据漂移是这一族代码反复出问题的地方。张数取绝对值（多单的保护单 size 为负）。
+        """
+        out: list[tuple[str, float, int]] = []
+        for po in self._owned_price_orders(symbol, self._own_prefix("")):
+            init = po.get("initial") or {}
+            text = str(init.get("text") or po.get("text") or "")
+            tail = text.rsplit("-", 1)[-1].lower() if text else ""
+            if tail not in ("sl", "ls"):
+                continue
+            if str(po.get("status") or "").lower() in (
+                "cancelled", "finished", "filled", "triggered", "failed", "closed"
+            ):
+                continue
+            pid = self._order_id(po)
+            trig = po.get("trigger") or {}
+            px = trig.get("price") or init.get("trigger_price") or po.get("trigger_price")
+            try:
+                px = float(px)
+            except (TypeError, ValueError):
+                continue
+            if not pid or px <= 0:
+                continue
+            try:
+                sz = abs(int(init.get("size") or po.get("size") or 0))
+            except (TypeError, ValueError):
+                sz = 0
+            out.append((str(pid), px, sz))
+        return out
+
     def ensure_protection(self, symbol: str) -> dict:
         """裸仓兜底：持仓在、owned SL 不在时，按配置补一张 reduce_only SL。
 
@@ -2057,6 +2173,217 @@ class Executor:
             return out
         order = rec.get("order") or {}
         out["placed"] = {"id": str(order.get("id") or ""), "price": sl, "check": rec.get("check")}
+        return out
+
+    # ── 峰值回撤保护（防坐电梯）──────────────────────────
+    def _peak_trail_path(self) -> Path:
+        """峰值状态的位置：有 account 走账户级（跨 bot 共享），否则 bot 级。
+
+        必须账户级：持仓属于**账户**，同一账户下的 bot 看到的是同一条持仓与
+        同一张 SL。状态放 bot 级会让每个 bot 各算一份峰值、各撤各挂。
+        """
+        if self.account:
+            return (Path(self.root) / "data" / "accounts" / self.account
+                    / "state" / "peak_trail.json")
+        return (Path(self.root) / "data" / "bots" / (self.bot_id or "_unknown")
+                / "state" / "peak_trail.json")
+
+    def _read_peak_trail(self) -> dict:
+        """读 `{ "SYMBOL|side": {peak, entry, size, ts} }`。读不到返回空 —— 
+        「没有峰值」= 重新起算 = 不动作，是安全侧。"""
+        try:
+            import json as _json
+
+            p = self._peak_trail_path()
+            if not p.exists():
+                return {}
+            rec = _json.loads(p.read_text(encoding="utf-8"))
+            return dict(rec.get("positions") or {})
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _write_peak_trail(self, positions: dict) -> None:
+        try:
+            import json as _json
+
+            p = self._peak_trail_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(_json.dumps(
+                {"positions": positions, "updated": int(time.time())},
+                ensure_ascii=False), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def check_peak_trail(self, symbol: str) -> dict:
+        """单持仓**价格峰值回撤** → 上移 SL（`account_risk.peak_trail` 逐 bot 开，默认关）。
+
+        为什么需要它：
+          - 止损锚定的是**挂单那一刻给定的价**，挂上去就不再动。价格涨上去再跌
+            回来它管不了 —— 那正是「坐电梯」。
+          - 交易所侧的移动止盈（`trail`）在本项目**搁置**（需资金密码，paper 侧
+            直接不支持），所以「让交易所自己往上挪止损」这条路是关着的。
+          - 账户级权益熔断（`equity_deviation_halt`）只挡新开仓，防不住浮盈回吐。
+
+        口径（**逐仓**、与入场价解耦 —— 所以浮盈仓和浮亏仓一视同仁）：
+          - 峰值 = 该持仓存续期间**最有利的价格**（多单取最高、空单取最低），只上不下
+          - 触发距离 = `peak_trail_atr` × ATR%（`_atr_pct`，1h 周期）
+          - 目标 SL = 峰值 ∓ 距离；**只往更保守的方向挪**（多单更高、空单更低）
+          - 真动手时沿用 `_modify_tp_sl` 的既定顺序：**先挂新、再撤旧**
+
+        三条**不动作**的红线（都不下单，只回报原因）：
+          ① `sl_not_better`：目标不比现有 owned SL 更保守。这也覆盖了「ATR 变大
+             导致目标下移」的情况 —— 于是 SL 单调不降，不会来回抖。
+          ② `trail_breached`：目标落在 mark 的**非法一侧**，说明这次回撤已经发生
+             过了，此刻挂单会立刻触发（= 变相市价平仓）。那是一个**不同**的动作，
+             不该由「上移止损」这条路径偷偷做掉，所以只报不挂。
+          ③ `no_owned_sl`：没有本 bot 的 SL，交给 `ensure_protection`（补保护那条路）。
+
+        峰值**必须重置**的四种情况（否则会拿旧高点去卡一条新仓）：
+          持仓消失 / 方向反转 / 入场价变了 / 上次观测太久远（`_PEAK_TRAIL_STALE_SEC`）。
+        """
+        out: dict[str, Any] = {"symbol": symbol, "peak_trail": "off"}
+        ar = self.account_risk or {}
+        mode = ar.get("peak_trail", False)
+        if not mode:
+            return out
+        try:
+            mult = float(ar.get("peak_trail_atr") or 0)
+        except (TypeError, ValueError):
+            mult = 0.0
+        if mult <= 0:
+            return out
+        dry = str(mode).lower() == "dry"
+        out["peak_trail"] = "dry" if dry else "live"
+        out["atr_mult"] = mult
+
+        positions = self._symbol_positions(symbol)
+        state = self._read_peak_trail()
+        if not positions:
+            # 持仓没了 → **必须清掉该 symbol 的峰值**。留着的话下次开同一标的会
+            # 拿上一轮的高点当基准，一开仓就「已经回撤很多」→ 立刻把新仓卡掉。
+            stale = [k for k in state if k.split("|", 1)[0] == symbol]
+            if stale:
+                for k in stale:
+                    state.pop(k, None)
+                self._write_peak_trail(state)
+            out["skipped"] = "no_position"
+            return out
+        if len(positions) > 1:
+            # 双向持仓得先定跟踪哪条腿 —— 这不是「兜底」该猜的事，交给 AI
+            out["skipped"] = "ambiguous_side"
+            return out
+
+        pos = positions[0]
+        side = pos["side"]
+        size = abs(int(pos["size"]))
+        entry = float(pos.get("entry_price") or 0)
+        key = f"{symbol}|{side}"
+
+        try:
+            ticker = self.client.get_ticker(symbol) or {}
+            mark = float(ticker.get("mark_price") or ticker.get("last") or 0)
+        except Exception as e:  # noqa: BLE001
+            out["error"] = f"no mark price: {e}"
+            return out
+        if mark <= 0:
+            out["error"] = "no mark price"
+            return out
+
+        rec = dict(state.get(key) or {})
+        peak = float(rec.get("peak") or 0)
+        # 同一条持仓的判据：方向相同（key 已含）+ 入场价一致 + 上次观测没过期。
+        # 入场价因加仓而变也算「换了持仓」（保守：重新起算，不会误触发）；
+        # 观测过期说明连续性断了（进程停过 / 扫描没跑到），历史高点不可信。
+        same = (
+            peak > 0
+            and (time.time() - float(rec.get("ts") or 0)) <= _PEAK_TRAIL_STALE_SEC
+            and abs(float(rec.get("entry") or 0) - entry) <= max(abs(entry), 1.0) * 1e-6
+        )
+        if same:
+            peak = max(peak, mark) if side == "long" else min(peak, mark)
+        else:
+            # 新起算：以当前 mark 为起点，**不追认**我们没观测到的历史高点
+            peak = mark
+        # 方向反转：同一 symbol 的**旧方向**峰值必须清掉。留着的话反手回来时
+        # key 又变回旧方向，会直接复用一个早已过期的历史高点。
+        # （双向同时持仓的情况上面已经 `ambiguous_side` 返回了，走不到这里。）
+        for k in [k for k in state
+                  if k != key and k.split("|", 1)[0] == symbol]:
+            state.pop(k, None)
+        state[key] = {"peak": peak, "entry": entry, "size": size, "ts": time.time()}
+        self._write_peak_trail(state)
+
+        atr_pct = self._atr_pct(symbol, int(ar.get("peak_trail_atr_period") or 14))
+        if atr_pct <= 0:
+            out["error"] = "no atr"
+            return out
+        meta = self.client.get_contract(symbol)
+        dist = peak * atr_pct / 100.0 * mult
+        target = float(round_price(peak - dist if side == "long" else peak + dist, meta))
+        out.update({
+            "position_side": side, "position_size": size,
+            "peak": peak, "mark": mark, "atr_pct": round(atr_pct, 4),
+            "target_sl": target,
+        })
+
+        sls = self._owned_sl_orders(symbol)
+        if not sls:
+            out["skipped"] = "no_owned_sl"
+            return out
+        best_sl = (max(s for _, s, _ in sls) if side == "long"
+                   else min(s for _, s, _ in sls))
+        out["current_sl"] = best_sl
+
+        if not (target > best_sl if side == "long" else target < best_sl):
+            out["skipped"] = "sl_not_better"
+            return out
+        if not (target < mark if side == "long" else target > mark):
+            out["skipped"] = "trail_breached"
+            return out
+        if dry:
+            return out
+
+        intent = Intent(
+            action="open_long" if side == "long" else "open_short",
+            symbol=symbol, side=side, sl=target,
+            sl_type="market",  # 触发即市价：落袋要的是「一定出得来」
+            label=self.label_prefix or "auto",
+        )
+        intent.trigger_rule_sl = infer_trigger_rules(intent.action, False)
+        side_err = self._precheck_exit_triggers(intent)
+        if side_err:
+            out["error"] = side_err
+            return out
+
+        trigger_side = "short" if side == "long" else "long"
+        try:
+            placed, perr = self._place_exit_leg(
+                lambda: self._place_trigger(
+                    intent, trigger_side, target, is_tp=False, meta=meta, size=size
+                ),
+                kind="sl",
+                price_order=True,
+            )
+        except Exception as e:  # noqa: BLE001 — boundary
+            placed, perr = None, str(e)
+        if not placed:
+            # **先挂新、再撤旧**：挂失败时旧 SL 还在，仓位不会裸 —— 这正是这个顺序
+            # 唯一的意义。反过来的话挂失败就留下裸仓（`_modify_tp_sl` 同此约定）。
+            out["error"] = f"replace failed: {perr}"
+            return out
+
+        new_id = str((placed.get("order") or {}).get("id") or "")
+        cancelled: list[str] = []
+        for pid, _, _ in sls:
+            if pid == new_id:
+                continue
+            try:
+                self.client.cancel_price_order(pid)
+                cancelled.append(pid)
+            except Exception:  # noqa: BLE001
+                pass
+        out["moved"] = {"from": best_sl, "to": target, "size": size,
+                        "id": new_id, "cancelled": cancelled}
         return out
 
     def _close(self, intent: Intent) -> StepResult:

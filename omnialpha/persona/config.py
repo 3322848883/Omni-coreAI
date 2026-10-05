@@ -63,6 +63,14 @@ class PersonaGroup:
     fusion_config: dict = field(default_factory=dict)
     on_conflict: str = "hold"
     trigger: dict = field(default_factory=dict)   # 可选组级触发覆盖
+    # 运行开关（供 watchdog 判断「这个组该不该被守护」）。与 bot 的
+    # `strategist.runtime` 同形：默认**全关**。
+    #
+    # 为什么默认关、要显式开：`enabled: true` 只表示「这份组配置有效」，
+    # 本机 persona_groups.yaml 里有 9 个组都是 true（含大量对照实验组）。
+    # 若按 `enabled` 守护，本地一启动 watchdog 就会拉起 9 个 persona-run，
+    # 每个都在跑真实 LLM 分析 —— 那是烧钱，不是守护。
+    runtime: dict = field(default_factory=dict)
     enabled: bool = True
     discussion: DiscussionConfig = field(default_factory=DiscussionConfig)
 
@@ -125,6 +133,7 @@ def load_persona_groups(path: Path) -> list[PersonaGroup]:
             fusion_config=dict(g.get("fusion_config") or {}),
             on_conflict=on_conflict,
             trigger=dict(g.get("trigger") or {}),
+            runtime=dict(g.get("runtime") or {}),
             enabled=bool(g.get("enabled", True)),
             discussion=discussion,
         ))

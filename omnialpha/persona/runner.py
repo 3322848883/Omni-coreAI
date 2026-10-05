@@ -298,7 +298,16 @@ class PersonaRunner:
                     current[bot_id] = self._apply_revision(current[bot_id], revised)
 
             # 记录本轮：改口 vs 坚持
-            stage = {1: "相互讨论与反驳", 2: "深化讨论"}.get(round_num, "最终决策")
+            # 阶段名必须跟着**实际轮数**走。原先按固定 round_num 映射
+            # （1=相互讨论、2=深化、其余=最终决策），把轮数降到 2 之后最后一轮
+            # 会被标成「深化讨论」，而 `StrategyLoop.discuss` 同一轮告诉模型的是
+            # 「最终决策」阶段 —— 审计日志与模型实际看到的东西对不上。
+            if round_num == 1:
+                stage = "相互讨论与反驳"
+            elif round_num >= max_rounds:
+                stage = "最终决策"
+            else:
+                stage = "深化讨论"
             round_rec = {"round": round_num, "stage": stage,
                          "mode": d.mode, "order": list(order), "positions": {}}
             for bot_id in self.group.members:
@@ -367,7 +376,8 @@ class PersonaRunner:
                                  max_rounds: int = 3) -> Optional[dict]:
         """让一个 personality 基于讨论修正决策（三阶段递进）。
 
-        阶段：1=相互讨论与反驳  2=深化讨论  3=最终决策
+        阶段：首轮=相互讨论与反驳，末轮=最终决策，中间=深化讨论
+        （按**实际轮数**划分，不按固定轮号 —— 见 `_discuss` 里 stage 的注释）
         通过 plan_runners 的 LLM 做修正。如果 runner 不支持则返回 None。
         """
         runner = self.plan_runners.get(bot_id)

@@ -30,7 +30,10 @@ COMPONENT_CMD = {
 @dataclass
 class Target:
     bot_id: str
-    component: str  # plan | run | paper
+    # plan | run | paper | persona | broadcast
+    #   persona  → bot_id 形如 "persona:<group>"（组级进程，不属于任何单个 bot）
+    #   broadcast → bot_id 固定 "broadcast"（全局进程）
+    component: str
     restarts: list[float] = field(default_factory=list)
     stopped: bool = False
     skip_until: float = 0.0
@@ -89,7 +92,61 @@ class Watchdog:
             else:
                 if runtime.get("run", True):
                     self.targets.append(Target(bid, "run"))
+        # 组级/全局进程 —— 原先**无人守护**（架构盘点 S17）：
+        # `persona-run` 是讨论组的大脑，它挂了意味着「保护单有人管、但没人再决策」；
+        # `broadcast` 挂了则信号不再扇出。两者此前都不在 watchdog 的清单里。
+        self.targets.extend(self._discover_globals())
         return self.targets
+
+    def _discover_globals(self) -> list[Target]:
+        """组级（persona-run）与全局（broadcast）常驻进程。
+
+        两条**显式 opt-in** 规则，都不是「存在即守护」：
+
+          - persona：组要同时 `enabled: true` **且** `runtime.persona_run: true`。
+            只看 `enabled` 不行 —— 本机 persona_groups.yaml 有 9 个组都是
+            `enabled: true`（含 4 个对照实验组），按 `enabled` 守护会让本地
+            一启动 watchdog 就拉起 9 个 persona-run，每个都在跑真实 LLM 分析。
+          - broadcast：`config/broadcast.yaml` 里至少有一条 `enabled: true` 的路由。
+            当前路由全关，守护它只是白起一个空转进程。
+
+        只在 `bot_ids is None`（全量守护）时纳入 —— 显式指定了 bot 列表时，
+        调用方要的是「只管这几个 bot」，不该顺带拉起全局进程。
+        """
+        out: list[Target] = []
+        if self.bot_ids is not None:
+            return out
+        try:
+            from .persona import load_persona_groups
+
+            p = self.root / "config" / "persona_groups.yaml"
+            if p.is_file():
+                for g in load_persona_groups(p):
+                    if not getattr(g, "enabled", False):
+                        continue
+                    if not (getattr(g, "runtime", {}) or {}).get("persona_run"):
+                        continue
+                    out.append(Target(f"persona:{g.name}", "persona"))
+        except Exception as e:  # noqa: BLE001
+            log.debug("discover persona groups failed: %s", e)
+        try:
+            if self._broadcast_has_enabled_route():
+                out.append(Target("broadcast", "broadcast"))
+        except Exception as e:  # noqa: BLE001
+            log.debug("discover broadcast failed: %s", e)
+        return out
+
+    def _broadcast_has_enabled_route(self) -> bool:
+        p = self.root / "config" / "broadcast.yaml"
+        if not p.is_file():
+            return False
+        import yaml
+
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        for r in (data.get("routes") or []):
+            if isinstance(r, dict) and r.get("enabled"):
+                return True
+        return False
 
     # ── 存活探测（OS 锁） ─────────────────────────
     @staticmethod
@@ -99,6 +156,11 @@ class Watchdog:
 
         if component == "plan":
             lock_path = root / "data" / "bots" / bot_id / "state" / "plan.lock"
+        elif component == "persona":
+            group = bot_id.split(":", 1)[-1]
+            lock_path = root / "data" / "shared" / f"persona-{group}.lock"
+        elif component == "broadcast":
+            lock_path = root / "data" / "shared" / "broadcast.lock"
         else:
             # run / paper 共用 run.lock
             lock_path = root / "data" / "bots" / bot_id / "state" / "run.lock"
@@ -129,12 +191,21 @@ class Watchdog:
         return True
 
     def _spawn(self, t: Target) -> bool:
-        cmd_name = COMPONENT_CMD.get(t.component)
-        if not cmd_name:
-            return False
         py = self._windowless_python()
-        args = [py, "-m", "omnialpha", "--root", str(self.root), cmd_name, "--bot", t.bot_id]
-        log_dir = self.root / "data" / "bots" / t.bot_id / "logs"
+        base = [py, "-m", "omnialpha", "--root", str(self.root)]
+        if t.component == "persona":
+            group = t.bot_id.split(":", 1)[-1]
+            args = base + ["persona-run", "--group", group]
+            log_dir = self.root / "data" / "shared" / "logs"
+        elif t.component == "broadcast":
+            args = base + ["broadcast"]
+            log_dir = self.root / "data" / "shared" / "logs"
+        else:
+            cmd_name = COMPONENT_CMD.get(t.component)
+            if not cmd_name:
+                return False
+            args = base + [cmd_name, "--bot", t.bot_id]
+            log_dir = self.root / "data" / "bots" / t.bot_id / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         out_fh = open(log_dir / f"{t.component}.out", "ab")
         err_fh = open(log_dir / f"{t.component}.err", "ab")

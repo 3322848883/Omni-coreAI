@@ -714,10 +714,10 @@ class PlanRunner:
                 discussion_text: str, max_rounds: int = 3) -> Optional[dict]:
         """多人格讨论：基于他人观点修订决策（三阶段递进）。
 
-        阶段语义（round_num 1-based，max_rounds 默认 3）：
-          1 = 相互讨论与反驳：看对方理由，可反驳、可被说服
-          2 = 深化讨论：聚焦分歧点，尝试达成一致
-          3 = 最终决策：定稿，给出最终 decision + 置信度
+        阶段语义（按**实际轮数**划分，不是固定轮号；`stage = min(round_num, max_rounds)`）：
+          首轮 = 相互讨论与反驳：看对方理由，可反驳、可被说服
+          中间轮 = 深化讨论：聚焦分歧点，尝试达成一致
+          末轮 = 最终决策：定稿，给出最终 decision + 置信度
 
         返回 {decision, confidence, reasoning} 或 None（无法修订）。
         """
