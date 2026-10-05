@@ -168,6 +168,46 @@ class TestReconcileProtectors(unittest.TestCase):
         # 新组（3、4，合计 10 张）覆盖目标 → 旧组（1、2）整组撤
         self.assertEqual(sorted(client.cancelled), ["1", "2"])
 
+    def test_pending_stop_entry_counts(self):
+        """**条件单**里的入场类也要计入待成交张数。
+
+        这个坑在本项目出现过三次（`_has_pending_entry` 最初漏条件单 → 孤儿
+        扫描误撤预挂保护单 → 委托一成交即裸仓）。eth-disc 的入场单正是条件单
+        （`stop_entry_*` 挂在 `/price_orders`），漏扫会让 `pending_size=0`、
+        对账直接跳过 —— 实测保护单 30 张 vs 目标 0，一直清不掉。
+        """
+        client = _Client(positions=[], protectors=[
+            _prot(1, 10, tail="sl", created=1000.0),   # 旧组
+            _prot(2, 10, tail="tp", created=1200.0),   # 新组
+            _prot(3, 10, tail="sl", created=1200.0),
+        ])
+        ex = self._ex(client)
+        ex._owned_open_orders = lambda sym, prefix: []       # 无普通挂单
+        ex._owned_price_orders = lambda sym, prefix: [       # 但有一个入场条件单
+            {"id": "e1", "status": "open",
+             "initial": {"contract": "BTC_USDT", "size": 10,
+                         "is_reduce_only": False, "text": "t-b1-entry"}},
+        ]
+        res = reconcile_protectors(ex, "BTC_USDT")
+        self.assertEqual(res["pending_size"], 10, "条件单入场单必须计入")
+        self.assertEqual(res["target_size"], 10)
+        # 新组（2、3 各 10 张）覆盖目标 → 旧组（1）撤
+        self.assertEqual(client.cancelled, ["1"])
+
+    def test_reduce_only_condition_not_counted(self):
+        """reduce_only 的条件单是保护单，不是入场单 —— 不能计入待成交。"""
+        client = _Client(positions=[], protectors=[])
+        ex = self._ex(client)
+        ex._owned_open_orders = lambda sym, prefix: []
+        ex._owned_price_orders = lambda sym, prefix: [
+            {"id": "p1", "status": "open",
+             "initial": {"contract": "BTC_USDT", "size": -10,
+                         "is_reduce_only": True, "text": "t-b1-sl"}},
+        ]
+        res = reconcile_protectors(ex, "BTC_USDT")
+        self.assertEqual(res["pending_size"], 0)
+        self.assertEqual(res.get("skipped"), "no_position")
+
     def test_flat_and_no_pending_does_nothing(self):
         """既无持仓也无待成交 → 不动（那是 `_cleanup_orphan_protectors` 的活）。"""
         client = _Client(positions=[], protectors=[_prot(1, 30, created=1.0)])

@@ -84,12 +84,21 @@ def _pending_entry_size(executor: Any, symbol: str) -> int:
 
     入场单挂出后 1-3 秒保护单就一起挂上了 —— 此时还没持仓。所以
     「保护单该覆盖多少」= 持仓张数 + 待成交入场单张数。
+
+    **必须同时扫两类**：普通挂单（`limit`）与**条件单**里的入场类
+    （`stop_entry_*` 挂在 `/price_orders`）。只扫普通单会漏掉突破进场单 ——
+    实测 eth-disc 的入场单正是条件单，漏扫导致 `pending_size=0`、
+    对账直接跳过（保护单 30 张 vs 目标 0）。
+
+    这个坑在本项目里出现过三次（见 AGENTS.md 关于 `_has_pending_entry`
+    的两条记录），所以这里两类都扫，并有测试钉住。
     """
     total = 0
+    # 1) 普通挂单（limit 未成交的入场单）
     try:
         rows = executor._owned_open_orders(symbol, executor.label_prefix) or []
     except Exception:  # noqa: BLE001
-        return 0
+        rows = []
     for o in rows:
         if o.get("is_reduce_only"):
             continue
@@ -98,6 +107,25 @@ def _pending_entry_size(executor: Any, symbol: str) -> int:
             continue
         try:
             total += abs(int(float(o.get("size") or 0)))
+        except (TypeError, ValueError):
+            continue
+    # 2) 条件单里的入场类（stop_entry_*，非 reduce_only、未终结）
+    try:
+        conds = executor._owned_price_orders(symbol, executor.label_prefix) or []
+    except Exception:  # noqa: BLE001
+        conds = []
+    for p in conds:
+        try:
+            if executor._order_is_reduce_only(p):
+                continue
+        except Exception:  # noqa: BLE001
+            continue
+        status = str(p.get("status") or "").lower()
+        if status in ("cancelled", "finished", "filled", "triggered", "failed", "closed"):
+            continue
+        init = p.get("initial") or {}
+        try:
+            total += abs(int(float(init.get("size") or p.get("size") or 0)))
         except (TypeError, ValueError):
             continue
     return total
@@ -145,7 +173,8 @@ def reconcile_protectors(executor: Any, symbol: str) -> dict:
     pending_size = _pending_entry_size(executor, symbol)
     target_size = pos_size + pending_size
     if target_size <= 0:
-        return {"ok": True, "skipped": "no_position", "cancelled": []}
+        return {"ok": True, "skipped": "no_position", "cancelled": [],
+                "position_size": pos_size, "pending_size": pending_size}
 
     rows = [p for p in truth["protectors"] if _is_tp_sl(p)]
     if executor.label_prefix:
