@@ -13,6 +13,7 @@ from typing import Optional
 from .config import BotConfig
 from .executor import ExecReport, Executor
 from .gate_client import GateApiError
+from .monitoring.alerts import TYPE_PEAK_TRAIL
 from .schema import SchemaError, parse_signal
 
 log = logging.getLogger("omnialpha.watcher")
@@ -585,6 +586,84 @@ def _auto_protect_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict) -> i
     return done
 
 
+def _peak_trail_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict) -> int:
+    """单持仓峰值回撤 → 上移 SL（`account_risk.peak_trail` 逐 bot 开，默认关）。
+
+    与 `_auto_protect_sweep` 是一对：那个补**缺失**的保护，这个**上移**已有的保护。
+    两个都挂在扫描循环而不是 LLM 轮次上，理由相同 —— 浮盈回吐不等人，而且
+    LLM 进程死了这条保护必须还在跑（`trail` 追踪单在本项目搁置，所以这是
+    「防坐电梯」唯一的程序化手段）。
+
+    三种必须让人知道的结局（都按 `_AUTO_PROTECT_ALERT_SEC` 节流）：
+      - `error`           上移失败（挂新单没落地）→ 旧 SL 仍在，仓位不裸
+      - `trail_breached`  回撤已经越过目标价 → 只报不挂（此刻挂单会立刻成交，
+                          那是「市价平仓」，是另一个动作，不该由这条路径做掉）
+      - 正常上移          记 warning 日志
+    """
+    try:
+        client = bot.create_client()
+    except Exception:  # noqa: BLE001
+        return 0
+    executor = Executor(
+        client,
+        label_prefix=getattr(bot, "label_prefix", "") or bot.bot_id,
+        root=paths.root,
+        bot_id=bot.bot_id,
+        account=getattr(bot, "account", "") or "",
+        account_risk=getattr(bot, "account_risk", None),
+        alert_store=_alert_store(paths, bot.bot_id),
+    )
+    done = 0
+    for sym in (bot.symbols or []):
+        try:
+            out = executor.check_peak_trail(sym)
+        except Exception as e:  # noqa: BLE001 — 单个 symbol 失败不拖垮整轮扫描
+            log.warning("peak trail %s %s raised: %s", bot.bot_id, sym, e)
+            continue
+        if out.get("peak_trail") == "off" or out.get("skipped") == "no_position":
+            continue
+        if out.get("moved"):
+            done += 1
+            log.warning(
+                "peak trail %s %s: SL %s → %s (peak=%s mark=%s size=%s)",
+                bot.bot_id, sym, out["moved"]["from"], out["moved"]["to"],
+                out.get("peak"), out.get("mark"), out["moved"]["size"],
+            )
+            continue
+        if out.get("peak_trail") == "dry" and out.get("target_sl") is not None \
+                and not out.get("skipped"):
+            log.info(
+                "peak trail[dry] %s %s: 会挂 SL %s (peak=%s mark=%s atr%%=%s x%s)",
+                bot.bot_id, sym, out.get("target_sl"), out.get("peak"),
+                out.get("mark"), out.get("atr_pct"), out.get("atr_mult"),
+            )
+            continue
+        if not (out.get("error") or out.get("skipped") == "trail_breached"):
+            continue
+        key = f"{bot.bot_id}:{sym}"
+        now = time.time()
+        if now - float(alerted.get(key) or 0) < _AUTO_PROTECT_ALERT_SEC:
+            continue
+        alerted[key] = now
+        if out.get("error"):
+            detail = f"{sym} 峰值回撤上移 SL 失败：{out['error']}（旧 SL 仍在，未裸仓）"
+        else:
+            detail = (f"{sym} 峰值回撤已越过目标 {out.get('target_sl')}"
+                      f"（峰值 {out.get('peak')} / 现价 {out.get('mark')}）"
+                      f"，未挂单 —— 需人工或下一轮 plan 决定是否落袋")
+        log.error("peak trail %s %s: %s", bot.bot_id, sym, detail)
+        try:
+            if executor.alert_store is not None:
+                executor.alert_store.raise_alert(
+                    TYPE_PEAK_TRAIL, detail, symbol=sym,
+                    target_sl=out.get("target_sl"), peak=out.get("peak"),
+                    mark=out.get("mark"), peak_trail_error=out.get("error"),
+                )
+        except Exception:  # noqa: BLE001
+            pass
+    return done
+
+
 def select_bots(bots: dict[str, BotConfig], only: Optional[str] = None,
                 allow_disabled: bool = False) -> dict[str, BotConfig]:
     """挑出要跑执行循环的 bot。
@@ -614,6 +693,7 @@ def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[
     log.info("watching bots: %s (orphan sweep every %.0fs)", sorted(selected), orphan_sweep_sec)
     last_sweep = 0.0
     auto_protect_alerted: dict = {}
+    peak_trail_alerted: dict = {}
     while True:
         now = time.time()
         do_sweep = (now - last_sweep) >= orphan_sweep_sec
@@ -625,7 +705,10 @@ def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[
             except Exception as e:  # noqa: BLE001 — keep loop alive
                 log.exception("bot %s crashed: %s", bot.bot_id, e)
             if do_sweep:
-                # 顺序固定：**先对齐张数（有持仓）→ 再撤孤儿（无持仓）→ 最后补缺失（裸仓）**
+                # 顺序固定：**先对齐张数（有持仓）→ 再撤孤儿（无持仓）→ 补缺失（裸仓）
+                # → 最后上移已有保护（防坐电梯）**。
+                # 上移放最后：它读的是「现有 SL 在哪」，前面三步刚把 SL 集合收拾干净，
+                # 这时候的目标价才是稳的。
                 try:
                     _reconcile_sweep(bot, paths)
                 except Exception as e:  # noqa: BLE001
@@ -638,6 +721,10 @@ def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[
                     _auto_protect_sweep(bot, paths, auto_protect_alerted)
                 except Exception as e:  # noqa: BLE001
                     log.warning("auto protect sweep %s failed: %s", bot.bot_id, e)
+                try:
+                    _peak_trail_sweep(bot, paths, peak_trail_alerted)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("peak trail sweep %s failed: %s", bot.bot_id, e)
         if do_sweep:
             last_sweep = now
         time.sleep(max(0.2, interval))

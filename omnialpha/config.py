@@ -125,6 +125,8 @@ _RISK_CAP_KEYS = (
     "max_notional_pct", "max_total_notional_pct",
     "max_total_notional_usd", "max_notional_usd",
     "daily_loss_limit_usd", "max_leverage", "safe_mode_after_failures",
+    # 熔断阈值也是「越小越严」：账户级配 5% 时，bot 配 10% 应被收紧到 5%
+    "equity_deviation_halt_pct",
 )
 
 

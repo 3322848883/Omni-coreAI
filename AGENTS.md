@@ -134,7 +134,7 @@ LLM 策略另需 `OPENAI_BASE_URL` / `OPENAI_API_KEY`，然后：
 |------|------|------|
 | **告警落盘** | `data/bots/<id>/state/alerts.json` | 权益偏离/重复成交/孤儿保护单，自动写入 |
 | **成交推送** | 飞书彩色卡片 | 开/止盈/止损/平/减仓/改单；`config/alerts.yaml` 或 `FEISHU_*` 环境变量 |
-| **进程看门狗** | `python -m omnialpha watchdog` | 守护 `enabled: true` 的 bot，挂了补拉 |
+| **进程看门狗** | `python -m omnialpha watchdog` | 守护 `enabled: true` 的 bot + **显式 opt-in** 的 persona 组，挂了补拉 |
 | **单实例锁** | `state/plan.lock` / `run.lock` | OS 文件锁（msvcrt/flock），防 PID 复用/孤儿双开 |
 
 **bot 开关 = 唯一在管判据**：
@@ -145,17 +145,56 @@ enabled: true    # 看门狗守护、supervisor 拉起
 enabled: false   # 一律不管，绝不凭空开
 ```
 
+**组级进程的守护是另一套开关**（`config/persona_groups.yaml`）。`enabled` 只表示
+「这份组配置有效」，本机 9 个组都是 true —— 按 `enabled` 守护会让本地一启动
+watchdog 就拉起 9 个 persona-run（每个都在跑真实 LLM 分析）：
+
+```yaml
+  - name: eth-disc
+    enabled: true
+    runtime: {persona_run: true}   # ← 只有显式写这行的组才被 watchdog 守护
+```
+
+`broadcast` 只在 `config/broadcast.yaml` 里**至少有一条 `enabled: true` 的路由**时才守护。
+
 **告警类型**（`omnialpha.monitoring`）：
 
 | type | 触发 | 落盘 |
 |------|------|------|
 | `equity_deviation` | 权益相对日初偏离 >10% | alerts.json |
+| `equity_deviation_halt` | 权益**向下**偏离越过 `account_risk.equity_deviation_halt_pct` → 写熔断标记 | alerts.json + halt.json |
 | `dup_fill` | 同一 order_id 重复成交 | alerts.json |
 | `orphan_protector` | 平仓后遗留 reduce-only SL/TP | alerts.json |
 | `plan_fail` | plan 周期连续失败（LLM/解析），每 `error_warn`(5) 次一条 | alerts.json + 飞书 |
 | 成交卡片 | 开/平/减仓/改保护 | 飞书 |
 | 衰减 | 滚动胜率/Sharpe 跌破阈值 | 飞书 |
 | 进程事件 | 看门狗重启/停手 | 飞书 |
+
+**权益熔断**（`account_risk.equity_deviation_halt`，**逐 bot 配、默认关**）：
+`false`（默认）/ `"dry"`（只记日志）/ `true`（写 `halt.json`，当日有效、跨日自动复位）。
+与 `daily_loss_limit_usd` 的区别是**比例 vs 绝对值** —— 小资金账户配不出有意义的
+绝对额（$20 对 $84 权益是 24%），比例口径才能表达「亏一成停手」。只在向下偏离时触发。
+
+**峰值回撤保护**（`account_risk.peak_trail`，**逐 bot 配、默认关**）—— 防坐电梯：
+
+```yaml
+account_risk:
+  peak_trail: true        # false（默认）/ "dry"（只记「会挂哪」）/ true
+  peak_trail_atr: 1.5     # 距**价格峰值**回撤 k×ATR 时把 SL 上移（必须 > 0）
+  peak_trail_atr_period: 14   # 可选，ATR 回看根数（1h 周期），默认 14
+```
+
+为什么需要它：**止损挂上去就不动了** —— 它锚定的是挂单那一刻给定的价，价格涨上去
+再跌回来它管不了，那正是「坐电梯」。交易所侧的移动止盈（`trail`）在本项目搁置
+（需资金密码），所以这是防坐电梯**唯一**的程序化手段。
+
+口径是**逐仓 + 价格峰值**（只上不下），与入场价解耦 —— 所以浮盈仓和浮亏仓一视同仁，
+也不受出入金 / 其他 bot 已实现盈亏干扰。真动手时**先挂新、再撤旧**（挂失败时旧 SL
+还在，不会裸仓）。三条红线只报不挂：目标不比现有 SL 更保守（`sl_not_better`）、
+目标落在 mark 非法侧即回撤已发生（`trail_breached`）、没有本 bot 的 SL（`no_owned_sl`）。
+峰值状态落 `data/accounts/<name>/state/peak_trail.json`（无 `account:` 时落 bot 目录），
+**持仓消失 / 方向反转 / 入场价变化 / 观测间隔 > 900s** 四种情况重置。
+挂在 `run` 的 300s 扫描循环里（不是 LLM 轮次上 —— 浮盈回吐不等人）。
 
 `health.json` 的 `error_streak` **跨实例落盘**（`record_error()` 每次续算，不是实例内计数），
 所以每轮新建 `HealthMonitor(root, bot_id)` 也能累计；`llm_latency` 取 LLM 调用真实耗时。

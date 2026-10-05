@@ -102,7 +102,7 @@ groups:
   #   SMC      结构事件（BOS/CHoCH / 扫荡 / OB-FVG）
   #   Wyckoff  量价阶段（A–E 状态机 / 吸筹派发）
   # 实测（三人格真实行情对照）同一时点常给出不同甚至相反的结论 ——
-  # 这组就是让它们当面辩：3 轮（相互反驳 → 深化讨论 → 最终决策）后等权融合。
+  # 这组就是让它们当面辩：2 轮（相互反驳 → 最终决策）后等权融合。
   #
   # 成员必须是**单币**配置（smc-eth-live / orderflow-eth-live / wyckoff-eth-live）：
   # 快照按 symbols 注入行情，双币配置会让三个人格各说一个币，融合时串标的。
@@ -117,9 +117,18 @@ groups:
       weights: {smc-eth-live: 1, orderflow-eth-live: 1, wyckoff-eth-live: 1}
     on_conflict: hold
     enabled: true
+    # 交给 watchdog 守护：`persona-run` 是这组的大脑，它挂了意味着
+    # 「保护单有人管、但没人再决策」。**必须显式开**（默认关）——
+    # 只看 enabled 的话，本机 9 个组（含 4 个对照实验组）会全被拉起来烧钱。
+    runtime: {persona_run: true}
     discussion:
       enabled: true
-      rounds: 3
+      # 2 轮（2026-10-05 从 3 轮下调）：一次完整讨论的模型调用数 =
+      # 成员数 ×(1 次独立分析 + N 轮辩论)，3 人 3 轮 = 12 次、2 轮 = 9 次，
+      # 省掉 1/4 的调用开销。更重要的理由不是省钱：**轮数不是提高质量的旋钮**，
+      # 辩论收益很快平台化，而从众（sycophancy）会随轮数累积；提高质量要靠
+      # 增加**异质**成员（见 research/trading-system-design-upgrade/REPORT.md）。
+      rounds: 2
       timeout_sec: 120
-      # 不早退：即使首轮就一致也要跑满 3 轮，保留完整的辩论过程供审计
+      # 不早退：即使首轮就一致也要跑满 2 轮，保留完整的辩论过程供审计
       early_exit_on_agreement: false

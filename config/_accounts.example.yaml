@@ -18,9 +18,9 @@
 #
 # | 字段 | 合并方式 |
 # |---|---|
-# | `max_notional_pct` / `max_total_notional_pct` / `max_total_notional_usd` / `max_notional_usd` / `daily_loss_limit_usd` / `max_leverage` / `safe_mode_after_failures` | 取更小（更严） |
+# | `max_notional_pct` / `max_total_notional_pct` / `max_total_notional_usd` / `max_notional_usd` / `daily_loss_limit_usd` / `max_leverage` / `safe_mode_after_failures` / `equity_deviation_halt_pct` | 取更小（更严） |
 # | `halt` | 逻辑或（任一为 true 就停） |
-# | 其余（如 `risk_pct`、`auto_protect`） | bot 级优先 |
+# | 其余（如 `risk_pct`、`auto_protect`、`equity_deviation_halt`） | bot 级优先 |
 #
 # 也就是说：**账户级是硬底，bot 可以更保守但不能更激进。**
 
@@ -37,6 +37,10 @@ accounts:
       max_total_notional_pct: 10.0
       # 账户级日亏熔断：当日亏损达到此值即停手（日初权益按账户共享）
       daily_loss_limit_usd: 20
+      # 账户级权益熔断阈值（比例口径）：向下偏离日初超过此百分比即停手。
+      # 与 daily_loss_limit_usd 是**两个独立闸门**，哪个先到哪个先触发。
+      # 阈值越小越严 → 账户级可把 bot 的宽松阈值收紧。
+      equity_deviation_halt_pct: 10.0
       # 杠杆上限
       max_leverage: 50
       # 手动/自动熔断开关
