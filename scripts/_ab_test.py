@@ -65,11 +65,16 @@ def extract_skill_at(commit: str, rel: str, dest_root: Path) -> Path:
 
 
 def install_skill(src_dir: Path) -> int:
-    """把技能装到 skills/，并**断言装完与源一致**（防并发写入造成的错装）。"""
+    """把技能装到 skills/，并**断言装完与源一致**（防并发写入造成的错装）。
+
+    同时写 `.installed` 标记 —— 与 `omnialpha skill install` 一致（cli.py）。
+    少了它会让 `skills/` 看上去「不是 CLI 装的」，也失去可查的安装痕迹。
+    """
     dst = ROOT / "skills" / SKILL
     if dst.exists():
         shutil.rmtree(dst)
     shutil.copytree(src_dir, dst)
+    (dst / ".installed").write_text("ok\n", encoding="utf-8")
     src_body = (src_dir / "SKILL.md").read_bytes()
     dst_body = (dst / "SKILL.md").read_bytes()
     if src_body != dst_body:
@@ -184,20 +189,24 @@ def main() -> int:
     results: list[dict] = []
     plan_cfg = (("A-改造前", old_head, old_skill_src),
                 ("B-改造后", new_head, ROOT / "skills-src" / SKILL))
-    for cfg, head, skill_src in plan_cfg:
-        body_len = install_skill(skill_src)
-        prompt_mod.SYSTEM_PROMPT = head + prompt_mod.PLAN_SCHEMA_HINT
-        exp = len(prompt_mod.SYSTEM_PROMPT)
-        print("  [%s] 契约 %d 字符 + SKILL.md %d 字节 -> SYSTEM_PROMPT %d"
-              % (cfg, len(head), body_len, exp))
-        for rep in range(1, REPS + 1):
-            r = run_one(frozen, f"{cfg}-{rep}")
-            results.append(r)
-            print("  %s rep%d: %s 秒  CoT %d 字符  工具 %d 个  decision=%s"
-                  % (cfg, rep, r["secs"], r["cot_chars"], len(r["tools"]), r["decision"]))
-
-    prompt_mod.SYSTEM_PROMPT = new_sys
-    install_skill(ROOT / "skills-src" / SKILL)   # 复原
+    # **try/finally 复原**：本脚本会重写 `skills/`（gitignore，无版本兜底）。
+    # 中途异常若不复原，会把安装目录留在改造前那份旧技能上，且没有任何标记可查
+    # （独立评审指出）。
+    try:
+        for cfg, head, skill_src in plan_cfg:
+            body_len = install_skill(skill_src)
+            prompt_mod.SYSTEM_PROMPT = head + prompt_mod.PLAN_SCHEMA_HINT
+            exp = len(prompt_mod.SYSTEM_PROMPT)
+            print("  [%s] 契约 %d 字符 + SKILL.md %d 字节 -> SYSTEM_PROMPT %d"
+                  % (cfg, len(head), body_len, exp))
+            for rep in range(1, REPS + 1):
+                r = run_one(frozen, f"{cfg}-{rep}")
+                results.append(r)
+                print("  %s rep%d: %s 秒  CoT %d 字符  工具 %d 个  decision=%s"
+                      % (cfg, rep, r["secs"], r["cot_chars"], len(r["tools"]), r["decision"]))
+    finally:
+        prompt_mod.SYSTEM_PROMPT = new_sys
+        install_skill(ROOT / "skills-src" / SKILL)   # 复原
 
     # 配置差异断言：A 的 system 必须显著短于 B（旧契约 -511、旧技能正文短约 2,146）
     a_sys = [r["sys_len"] for r in results if r["tag"].startswith("A")]

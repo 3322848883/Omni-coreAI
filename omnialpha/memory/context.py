@@ -46,9 +46,16 @@ def build_context(
 
     # ── 动态后缀（缓存未命中区）───────────────────────
     order_block = _format_order_context(order_context)
-    recent_summaries = journal.read_recent_summaries(n_recent)
+    # 只读一次 journal：原先 `read_recent_summaries` 与 `read_recent(1)` 各做一次
+    # `read_text()`，每轮多读一遍整个文件（独立评审指出）。
+    recent_rows = journal.read_recent(n_recent)
+    recent_summaries = [
+        {"cycle_id": r.get("cycle_id", ""), "decision": r.get("decision", ""),
+         "reasoning": str(r.get("reasoning") or "")[:30]}
+        for r in recent_rows
+    ]
     recent_block = _format_recent(recent_summaries)
-    last_state = _format_last_plan_state(journal.read_recent(1))
+    last_state = _format_last_plan_state(recent_rows[-1:])
     last_state_block = f"\n[上轮方案状态]\n{last_state}\n" if last_state else ""
     snapshot_block = snapshot_text or _format_snapshot(snapshot or {})
 
