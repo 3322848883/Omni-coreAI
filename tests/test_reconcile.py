@@ -64,11 +64,15 @@ class TestReconcileProtectors(unittest.TestCase):
                         label_prefix="b1", bot_id="b1")
 
     def test_drops_excess_keeping_newest(self):
-        """持仓 4 张、保护单合计 30 张 → 保留最新的够 4 张，其余撤。"""
+        """持仓 4 张、保护单合计 30 张 → 保留最新的够 4 张，其余撤。
+
+        注意组间间隔要 **> 30 秒**（聚类窗口）—— 真实轮次间隔是 15-17 分钟，
+        这里用 60 秒模拟「不同轮次各留的一组」。
+        """
         client = _Client(
             positions=[_pos(4)],
-            protectors=[_prot(1, 12, created=1.0), _prot(2, 6, created=2.0),
-                        _prot(3, 4, created=3.0), _prot(4, 8, created=4.0)],
+            protectors=[_prot(1, 12, created=1000.0), _prot(2, 6, created=1060.0),
+                        _prot(3, 4, created=1120.0), _prot(4, 8, created=1180.0)],
         )
         res = reconcile_protectors(self._ex(client), "BTC_USDT")
         self.assertTrue(res["ok"])
@@ -98,8 +102,8 @@ class TestReconcileProtectors(unittest.TestCase):
         但「有 pending entry 就整体跳过」会让它永远清不掉。
         """
         client = _Client(positions=[], protectors=[
-            _prot(1, 7, created=1.0), _prot(2, 12, created=2.0),
-            _prot(3, 12, created=3.0)])
+            _prot(1, 7, created=1000.0), _prot(2, 12, created=1060.0),
+            _prot(3, 12, created=1120.0)])
         ex = self._ex(client)
         ex._owned_open_orders = lambda sym, prefix: [
             {"size": 7, "left": 7, "is_reduce_only": False}]
@@ -131,6 +135,38 @@ class TestReconcileProtectors(unittest.TestCase):
         # 新组整组保留（tp 3 + sl 4），旧组整组撤掉（1、2）
         self.assertEqual(sorted(client.cancelled), ["1", "2"])
         self.assertEqual(res["kept"], 2, "应保留整组（TP+SL）而不是单张 SL")
+
+    def test_group_across_seconds(self):
+        """TP 与 SL 相差 1-2 秒仍算同组（两次 API 调用，实测跨秒）。
+
+        实测踩到：账户上只剩 SL @2686，TP @2758 被对账撤了 —— 因为同秒判据
+        把一组拆成两组。所以聚类必须用**时间窗**。
+        """
+        client = _Client(positions=[], protectors=[
+            _prot(1, 10, tail="tp", created=1000.0),
+            _prot(2, 10, tail="sl", created=1001.7),   # 晚 1.7 秒
+        ])
+        ex = self._ex(client)
+        ex._owned_open_orders = lambda sym, prefix: [
+            {"size": 10, "left": 10, "is_reduce_only": False}]
+        res = reconcile_protectors(ex, "BTC_USDT")
+        self.assertEqual(client.cancelled, [], "同一组的 TP+SL 都不该被撤")
+        self.assertEqual(res["kept"], 2)
+
+    def test_far_apart_stays_separate(self):
+        """相隔超过时间窗的仍是两组。"""
+        client = _Client(positions=[], protectors=[
+            _prot(1, 10, tail="tp", created=1000.0),
+            _prot(2, 10, tail="sl", created=1000.0),
+            _prot(3, 5, tail="tp", created=1200.0),   # 3 分钟后另一组
+            _prot(4, 5, tail="sl", created=1200.0),
+        ])
+        ex = self._ex(client)
+        ex._owned_open_orders = lambda sym, prefix: [
+            {"size": 10, "left": 10, "is_reduce_only": False}]
+        res = reconcile_protectors(ex, "BTC_USDT")
+        # 新组（3、4，合计 10 张）覆盖目标 → 旧组（1、2）整组撤
+        self.assertEqual(sorted(client.cancelled), ["1", "2"])
 
     def test_flat_and_no_pending_does_nothing(self):
         """既无持仓也无待成交 → 不动（那是 `_cleanup_orphan_protectors` 的活）。"""

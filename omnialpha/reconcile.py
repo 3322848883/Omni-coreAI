@@ -161,13 +161,23 @@ def reconcile_protectors(executor: Any, symbol: str) -> dict:
             return 0.0
 
     # **按「组」保留，不按「单」** —— 一次 `_open`/`_stop_entry` 会连续挂出
-    # 一整组（TP 先、SL 后，相差不到 1 秒）。若按单倒序累加，最先被选中的是
-    # 最新的那张 SL，凑够张数就停 → **把同组的 TP 撤掉**，保护不完整。
-    # 所以先把同一秒内创建的单聚成一组，再按组倒序累加。
-    groups: dict[int, list[dict]] = {}
-    for p in rows:
-        groups.setdefault(int(_created(p)), []).append(p)
-    ordered_groups = [groups[k] for k in sorted(groups.keys(), reverse=True)]
+    # 一整组（TP 先、SL 后）。若按单倒序累加，最先被选中的是最新的那张 SL，
+    # 凑够张数就停 → **把同组的 TP 撤掉**，保护不完整。
+    #
+    # 聚类用**时间窗**而不是「同一秒」：挂 TP 与 SL 是两次 API 调用，实测跨
+    # 1-2 秒；同秒判据会把一组拆成两组，照样只留 SL 撤掉 TP（实测：账户上
+    # 只剩 SL @2686，TP @2758 被自己的对账撤了）。
+    #
+    # 窗口取 **30 秒** —— 量级由两侧夹定：远大于「挂一组 TP+SL 的耗时」（秒级），
+    # 远小于「两轮之间的间隔」（讨论组 17 分钟、单 bot 15 分钟）。
+    _GROUP_WINDOW_SEC = 30.0
+    ordered = sorted(rows, key=_created, reverse=True)
+    ordered_groups: list[list[dict]] = []
+    for p in ordered:
+        if ordered_groups and abs(_created(p) - _created(ordered_groups[-1][0])) <= _GROUP_WINDOW_SEC:
+            ordered_groups[-1].append(p)
+        else:
+            ordered_groups.append([p])
 
     kept: list[dict] = []
     dropped: list[dict] = []
