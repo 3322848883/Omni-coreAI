@@ -230,6 +230,35 @@ class TestSkillRefBinaryAndLarge(unittest.TestCase):
             self.assertIn("reference truncated", out)
             self.assertLess(len(out), 3000)
 
+    def test_cjk_reference_flag_matches_actual_cut(self):
+        """中文 reference：内容完整时不得标 truncated，真被切时才标。
+
+        `_estimate_tokens` 对中文约 1 token/字，所以 5,000 字符的中文文件估算 5,001 token
+        会超过默认 4,000 上限，而切点是 12,000 字符 —— 一个字都没丢却被标
+        `[reference truncated]`，既误导模型去找不存在的「后续内容」，也让 journal 统计失真。
+        判据必须与切点同口径（都按字符）。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            t = Path(td)
+            d = _mk(t, "cjk-ref", DESC)
+            refs = d / "references"
+            refs.mkdir()
+            reg = SkillRegistry()
+            reg.scan([t])
+
+            small = refs / "small.md"
+            small.write_text("价格行为学" * 1000, encoding="utf-8")  # 5,000 字符，全 CJK
+            out = run_skill_ref(reg, {"name": "cjk-ref", "path": "references/small.md"},
+                                bot_id="b", enabled_ids=["cjk-ref"], root=t)
+            self.assertNotIn("reference truncated", out)
+            self.assertIn("价格行为学", out)
+
+            big = refs / "big.md"
+            big.write_text("价格行为学" * 3000, encoding="utf-8")  # 15,000 字符 > 12,000 切点
+            out = run_skill_ref(reg, {"name": "cjk-ref", "path": "references/big.md"},
+                                bot_id="b", enabled_ids=["cjk-ref"], root=t)
+            self.assertIn("reference truncated", out)
+
     def test_directory_as_path_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             t = Path(td)

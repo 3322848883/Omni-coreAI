@@ -108,6 +108,13 @@ def _format_order_context(ctx: Optional[dict]) -> str:
     inv = ctx.get("invalidation") or []
     if inv:
         lines.append(f"失效标记: {len(inv)} 条")
+    # 模型声明的前提失效价（契约 Tier 1）—— 必须给**值**而不是计数：
+    # 上一轮它自己写了「跌破 X 即视为结构破坏」，这一轮要能照着它判断，
+    # 只报「N 条」等于没记。
+    pi = ctx.get("premise_invalidation") or {}
+    if pi.get("price") is not None:
+        note = f" — {pi['note']}" if pi.get("note") else ""
+        lines.append(f"前提失效: {pi['price']}（触及即视为结构破坏，须撤单或离场）{note}")
     return "\n".join(lines)
 
 

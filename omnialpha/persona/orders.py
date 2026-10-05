@@ -223,6 +223,28 @@ class SharedOrderStore:
             self._write(self._path(order_id), rec)
             return rec
 
+    def set_premise_invalidation(self, order_id: str, price: float,
+                                 note: str = "") -> dict:
+        """记录**模型声明**的前提失效价（契约 Tier 1，spec [S2]）。
+
+        与 `add_invalidation` 的区别：那个记的是**引擎检测到的字段变更**
+        （tp/sl 的 old→new 自动 diff）；这个记的是模型自己声明的「结构坏了」的价格位。
+        用途不同，所以分开存 —— 混在一起会让「谁判定的失效」无法区分，
+        而这两者的可信度与处置方式都不一样。
+        """
+        with self._lock_for(order_id):
+            rec = self.get(order_id)
+            if rec is None:
+                raise KeyError(f"order not found: {order_id}")
+            rec["premise_invalidation"] = {
+                "price": float(price),
+                "note": str(note or "")[:120],
+                "t": int(time.time()),
+            }
+            rec["updated_at"] = int(time.time())
+            self._write(self._path(order_id), rec)
+            return rec
+
     def refresh_recent_events(self, order_id: str) -> dict:
         """从 lifecycle 选 top-5 关键决策事件（FinMem top-K + 衰减）。"""
         with self._lock_for(order_id):
@@ -262,6 +284,8 @@ class SharedOrderStore:
             "recent_events": rec.get("recent_events", []),
             "memory_refs": rec.get("memory_refs", []),
             "invalidation": rec.get("invalidation", []),
+            # 模型声明的前提失效价（契约 Tier 1）—— 与上面的字段变更 diff 分开
+            "premise_invalidation": rec.get("premise_invalidation"),
         }
 
     def _write(self, path: Path, rec: dict) -> None:

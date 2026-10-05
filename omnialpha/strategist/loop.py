@@ -421,6 +421,7 @@ class PlanRunner:
                 prompt_cache_hit_tokens=cache_hit,
                 executed=bool(orders),
                 exec_result={"orders": len(orders), "trigger": trigger},
+                **self._tier1_journal_fields(plan),
             )
         except Exception:  # noqa: BLE001
             pass
@@ -466,6 +467,33 @@ class PlanRunner:
             "trigger": trigger,
         }
 
+
+    @staticmethod
+    def _tier1_journal_fields(plan: Any) -> dict:
+        """契约 Tier 1 字段进 journal（docs/compose/spec/pa-skills-upgrade.md [S2]）。
+
+        取首个 chip 的判定值 —— 单 bot 路径 `max_chips=1`，取到的就是本轮的方案。
+        全部可选：没填就不写键，**老 journal 的形态不变**（下游按 `.get()` 读，
+        不会因为多了键而改变行为）。
+        """
+        chips = getattr(plan, "chips", None) or []
+        if not chips:
+            return {}
+        c = chips[0]
+        out: dict[str, Any] = {}
+        if getattr(c, "region", ""):
+            out["region"] = c.region
+        if getattr(c, "rule_ids", None):
+            out["rule_ids"] = list(c.rule_ids)
+        if getattr(c, "risk_pct", None) is not None:
+            out["risk_pct"] = c.risk_pct
+        if getattr(c, "invalidation", None) is not None:
+            out["invalidation_price"] = c.invalidation
+        if getattr(c, "time_stop_bars", None) is not None:
+            out["time_stop_bars"] = c.time_stop_bars
+        if getattr(c, "give_back_pct", None) is not None:
+            out["give_back_pct"] = c.give_back_pct
+        return out
 
     def _skill_catalog(self) -> str:
         """SkillKit L1 catalog：仅 name+description，空则不渲染。"""

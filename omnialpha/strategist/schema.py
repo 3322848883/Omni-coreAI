@@ -24,6 +24,9 @@ CHIP_ACTIONS = {
 
 CHIP_ORDER_TYPES = {"market", "limit", "post_only", "ioc", "fok"}
 
+# 契约 Tier 1：区域三选一（见 docs/compose/spec/pa-skills-upgrade.md [S2]）
+REGIONS = {"trend", "range", "reversal"}
+
 # 模型常把「触发后按市价/限价成交」写成 stop_market / stop_limit，或把
 # tp_mode/sl_mode 的值（trigger）误写进 type。schema 用 `trigger_price` + `type`
 # 表达同一件事，所以这里把别名归一 —— 否则整笔信号会被 executor 拒掉。
@@ -82,6 +85,16 @@ class Chip:
     tp_mode: str = "trigger"  # trigger | limit_order
     sl_mode: str = "trigger"
     reasoning: str = ""
+    # ── 契约 Tier 1（docs/compose/spec/pa-skills-upgrade.md [S2]）──
+    # 全部 optional：缺省不改变任何现有行为。由策略层与记忆层消费；
+    # executor 忽略这些字段，下单映射与风控闸门完全不变。
+    region: str = ""                       # trend | range | reversal
+    invalidation: Optional[float] = None   # 前提失效价：触及即视为结构破坏
+    time_stop_bars: Optional[int] = None   # 最大持仓轮数
+    give_back_pct: Optional[float] = None  # 浮盈回撤阈值(%)
+    risk_pct: Optional[float] = None       # 本单实际风险占权益比例
+    rule_ids: list[str] = field(default_factory=list)
+    scenarios: dict = field(default_factory=dict)
 
     def to_signal_dict(self) -> dict:
         d: dict[str, Any] = {"action": self.action, "symbol": self.symbol, "type": self.order_type}
@@ -113,6 +126,20 @@ class Chip:
             d["tp_mode"] = self.tp_mode
         if self.sl_mode and self.sl_mode != "trigger":
             d["sl_mode"] = self.sl_mode
+        if self.region:
+            d["region"] = self.region
+        if self.invalidation is not None:
+            d["invalidation"] = self.invalidation
+        if self.time_stop_bars is not None:
+            d["time_stop_bars"] = self.time_stop_bars
+        if self.give_back_pct is not None:
+            d["give_back_pct"] = self.give_back_pct
+        if self.risk_pct is not None:
+            d["risk_pct"] = self.risk_pct
+        if self.rule_ids:
+            d["rule_ids"] = list(self.rule_ids)
+        if self.scenarios:
+            d["scenarios"] = dict(self.scenarios)
         if self.reasoning:
             d.setdefault("meta", {})["reasoning"] = self.reasoning
         return d
@@ -178,6 +205,26 @@ def parse_plan(data: Any) -> Plan:
         for name, m in (("tp_mode", tp_mode), ("sl_mode", sl_mode)):
             if m not in ("trigger", "limit_order", "limit"):
                 raise PlanError(f"chips[{i}].{name} unsupported: {m!r}")
+        # ── 契约 Tier 1（docs/compose/spec/pa-skills-upgrade.md [S2]）──
+        region = str(raw.get("region") or "").strip().lower()
+        if region and region not in REGIONS:
+            raise PlanError(
+                f"chips[{i}].region must be one of {'|'.join(sorted(REGIONS))}, "
+                f"got {raw.get('region')!r}")
+        tp2 = _f(raw.get("tp2"))
+        # 区域=区间 → 禁止 2R 目标。把提示词那条规则（「区间只做 scalp，
+        # 禁止持有 2R 目标」）从一句话变成程序约束 —— 否则区域判定只是模型
+        # 自己贴的标签，为用双止盈改判成趋势就绕过去了（实测发生过）。
+        if region == "range" and tp2 is not None:
+            raise PlanError(
+                f"chips[{i}].tp2 must be empty when region=range "
+                f"(区间只做 scalp，禁止持有 2R 目标)")
+        rule_ids_raw = raw.get("rule_ids") or []
+        if not isinstance(rule_ids_raw, list):
+            raise PlanError(f"chips[{i}].rule_ids must be an array")
+        scenarios_raw = raw.get("scenarios") or {}
+        if not isinstance(scenarios_raw, dict):
+            raise PlanError(f"chips[{i}].scenarios must be an object")
         chips.append(
             Chip(
                 symbol=_safe_symbol(symbol),
@@ -187,7 +234,7 @@ def parse_plan(data: Any) -> Plan:
                 size=int(raw["size"]) if raw.get("size") is not None else None,
                 tp=_f(raw.get("tp")),
                 sl=_f(raw.get("sl")),
-                tp2=_f(raw.get("tp2")),
+                tp2=tp2,
                 tp3=_f(raw.get("tp3")),
                 tp1_share=_f(raw.get("tp1_share")),
                 tp2_share=_f(raw.get("tp2_share")),
@@ -199,6 +246,14 @@ def parse_plan(data: Any) -> Plan:
                 tp_mode="limit_order" if tp_mode == "limit" else tp_mode,
                 sl_mode="limit_order" if sl_mode == "limit" else sl_mode,
                 reasoning=str(raw.get("reasoning") or ""),
+                region=region,
+                invalidation=_f(raw.get("invalidation")),
+                time_stop_bars=(int(raw["time_stop_bars"])
+                                if raw.get("time_stop_bars") is not None else None),
+                give_back_pct=_f(raw.get("give_back_pct")),
+                risk_pct=_f(raw.get("risk_pct")),
+                rule_ids=[str(x) for x in rule_ids_raw],
+                scenarios=dict(scenarios_raw),
             )
         )
     triggers = data.get("triggers") or []
