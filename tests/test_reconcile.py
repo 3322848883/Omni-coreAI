@@ -110,6 +110,28 @@ class TestReconcileProtectors(unittest.TestCase):
         # 最新的是 id=3（12 张 ≥ 7）→ 保留它，撤 2、1
         self.assertEqual(sorted(client.cancelled), ["1", "2"])
 
+    def test_group_is_kept_whole(self):
+        """同一组（同秒创建）必须整组保留 —— 不能只留 SL 把 TP 撤掉。
+
+        实测踩到：`_open` 连续挂 TP 再挂 SL（相差不到 1 秒），按单倒序累加时
+        最新的 SL 先被选中、凑够张数就停 → TP 被撤，保护不完整。
+        """
+        client = _Client(positions=[], protectors=[
+            # 旧组：tp + sl 同秒
+            _prot(1, 12, tail="tp", created=100.0),
+            _prot(2, 12, tail="sl", created=100.0),
+            # 新组：tp + sl 同秒（比旧组新）
+            _prot(3, 7, tail="tp", created=200.0),
+            _prot(4, 7, tail="sl", created=200.0),
+        ])
+        ex = self._ex(client)
+        ex._owned_open_orders = lambda sym, prefix: [
+            {"size": 7, "left": 7, "is_reduce_only": False}]
+        res = reconcile_protectors(ex, "BTC_USDT")
+        # 新组整组保留（tp 3 + sl 4），旧组整组撤掉（1、2）
+        self.assertEqual(sorted(client.cancelled), ["1", "2"])
+        self.assertEqual(res["kept"], 2, "应保留整组（TP+SL）而不是单张 SL")
+
     def test_flat_and_no_pending_does_nothing(self):
         """既无持仓也无待成交 → 不动（那是 `_cleanup_orphan_protectors` 的活）。"""
         client = _Client(positions=[], protectors=[_prot(1, 30, created=1.0)])

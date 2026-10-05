@@ -160,17 +160,24 @@ def reconcile_protectors(executor: Any, symbol: str) -> dict:
         except (TypeError, ValueError):
             return 0.0
 
-    rows.sort(key=_created, reverse=True)
+    # **按「组」保留，不按「单」** —— 一次 `_open`/`_stop_entry` 会连续挂出
+    # 一整组（TP 先、SL 后，相差不到 1 秒）。若按单倒序累加，最先被选中的是
+    # 最新的那张 SL，凑够张数就停 → **把同组的 TP 撤掉**，保护不完整。
+    # 所以先把同一秒内创建的单聚成一组，再按组倒序累加。
+    groups: dict[int, list[dict]] = {}
+    for p in rows:
+        groups.setdefault(int(_created(p)), []).append(p)
+    ordered_groups = [groups[k] for k in sorted(groups.keys(), reverse=True)]
+
     kept: list[dict] = []
     dropped: list[dict] = []
     acc = 0
-    for p in rows:
-        sz = _protector_size(p)
+    for grp in ordered_groups:
         if acc < target_size:
-            kept.append(p)
-            acc += sz
+            kept.extend(grp)
+            acc += sum(_protector_size(p) for p in grp)
         else:
-            dropped.append(p)
+            dropped.extend(grp)
 
     cancelled: list[str] = []
     for p in dropped:
