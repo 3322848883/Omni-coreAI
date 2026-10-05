@@ -1,5 +1,8 @@
 # 主题十七：连续性规则与价格行为跟踪
 
+> ⚠️ 本文件源自**人类工作流**。其中「写入 `logs/...`、更新 `memory/...`」一类是原工作流的**记录协议**；bot 没有文件工具，请改为把结论写进 chip 字段（`region` / `invalidation` / `time_stop_bars` / `give_back_pct` / `risk_pct` / `rule_ids` / `scenarios`），跨轮记忆由订单上下文与决策日志承担。
+
+
 > 本主题整合分析连续性规则和价格行为跟踪方法，确保每次分析都基于完整的历史上下文，避免独立分析问题。
 > 所有规则引用自已有知识文件，不创造新规则。
 
@@ -32,7 +35,7 @@
 
 ## 一、连续性规则
 
-> 来源：[references/analysis-continuity.md](../analysis-continuity.md)
+> 来源：references/analysis-continuity.md
 
 ### 1.1 分析前执行清单（Step 0）
 
@@ -93,7 +96,7 @@ Step 4: 更新记忆文件（如有新数据）
 
 ## 二、时间间隔规则
 
-> 来源：[references/analysis-continuity.md](../analysis-continuity.md) 第三节
+> 来源：references/analysis-continuity.md 第三节
 
 本规则将原 analysis-continuity.md 的 4 级时间矩阵简化为 **2 级模式**，便于快速决策：
 
@@ -156,7 +159,7 @@ Step 4: 更新记忆文件（如有新数据）
 
 ### 4.1 H1/L1→H2/L2 计数
 
-> 来源：[references/knowledge/theme3_pullbacks.md](theme3_pullbacks.md) Ch17
+> 来源：[references/knowledge/theme3_pullbacks.md](theme3_pullbacks_part1.md) Ch17
 
 **定义**：计算当前K线高点（或低点）超过前一根K线高点（或低点）的次数，用于识别回撤结束位置。
 
@@ -176,7 +179,7 @@ Step 4: 更新记忆文件（如有新数据）
 
 ### 4.2 双顶/双底
 
-> 来源：[references/knowledge/theme3_pullbacks.md](theme3_pullbacks.md) Ch12
+> 来源：[references/knowledge/theme3_pullbacks.md](theme3_pullbacks_part1.md) Ch12
 
 **双底多头旗（Double Bottom Bull Flag）**：
 - 多头趋势中的回撤以小空头趋势结束
@@ -195,7 +198,7 @@ Step 4: 更新记忆文件（如有新数据）
 
 ### 4.3 楔形（三推）
 
-> 来源：[references/knowledge/theme5_reversals.md](theme5_reversals.md) 第5章
+> 来源：[references/knowledge/theme5_reversals.md](theme5_reversals_part1.md) 第5章
 
 **特征**：
 - 三次推动（Three Push），每次推动力度递减
@@ -216,7 +219,7 @@ Step 4: 更新记忆文件（如有新数据）
 
 ### 4.4 突破确认与失败
 
-> 来源：[references/knowledge/theme4_breakouts.md](theme4_breakouts.md) 第2章、第5章
+> 来源：[references/knowledge/theme4_breakouts.md](theme4_breakouts_part1.md) 第2章、第5章
 
 **高概率突破的 5 条核心判定规则**：
 1. **突破K线体大** — 实体占K线高度的大部分
@@ -240,7 +243,7 @@ Step 4: 更新记忆文件（如有新数据）
 
 ## 五、趋势状态跟踪
 
-> 来源：[references/knowledge/theme2_trends.md](theme2_trends.md) 第19章
+> 来源：[references/knowledge/theme2_trends.md](theme2_trends_part1.md) 第19章
 
 ### 5.1 趋势强度分类
 
@@ -275,7 +278,7 @@ Step 4: 更新记忆文件（如有新数据）
 
 ## 六、step_checklist 使用说明
 
-> 来源：[assets/templates/step_checklist.md](../../assets/templates/step_checklist.md)
+> 来源：assets/templates/step_checklist.md
 
 ### 6.1 加载模板
 
@@ -325,7 +328,7 @@ Step 4: 更新记忆文件（如有新数据）
 
 ## 七、记忆触发条件表
 
-> 来源：[memory/README.md](../memory/README.md) 第七章
+> 来源：memory/README.md 第七章
 
 AI 按以下条件自动触发记忆文件更新，无需用户手动操作：
 
@@ -344,14 +347,14 @@ AI 按以下条件自动触发记忆文件更新，无需用户手动操作：
 ---
 
 > **引用索引**：
-> - 连续性规则 → [references/analysis-continuity.md](../analysis-continuity.md)
+> - 连续性规则 → references/analysis-continuity.md
 > - Bar 类型分类 → [references/knowledge/theme13_reading_bar_by_bar.md](theme13_reading_bar_by_bar.md)
-> - H1/L1→H2/L2 计数 & 双顶/双底 → [references/knowledge/theme3_pullbacks.md](theme3_pullbacks.md)
-> - 突破确认与失败 → [references/knowledge/theme4_breakouts.md](theme4_breakouts.md)
-> - 楔形（三推）→ [references/knowledge/theme5_reversals.md](theme5_reversals.md)
-> - 趋势状态与 Always In → [references/knowledge/theme2_trends.md](theme2_trends.md)
-> - Step Checklist → [assets/templates/step_checklist.md](../../assets/templates/step_checklist.md)
-> - 记忆触发条件 → [memory/README.md](../memory/README.md)
+> - H1/L1→H2/L2 计数 & 双顶/双底 → [references/knowledge/theme3_pullbacks.md](theme3_pullbacks_part1.md)
+> - 突破确认与失败 → [references/knowledge/theme4_breakouts.md](theme4_breakouts_part1.md)
+> - 楔形（三推）→ [references/knowledge/theme5_reversals.md](theme5_reversals_part1.md)
+> - 趋势状态与 Always In → [references/knowledge/theme2_trends.md](theme2_trends_part1.md)
+> - Step Checklist → assets/templates/step_checklist.md
+> - 记忆触发条件 → memory/README.md
 
 ---
 

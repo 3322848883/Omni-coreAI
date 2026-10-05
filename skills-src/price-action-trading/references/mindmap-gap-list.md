@@ -1,8 +1,8 @@
 # 思维导图对齐与差距清单（mindmap-gap-list）
 
-> **版本**：v34.2 | **配套**：[analysis-acceptance.md](analysis-acceptance.md) · [skill-pitfalls.md](skill-pitfalls.md)  
+> **版本**：35.0 | **配套**：[07-pitfalls-bans.md](07-pitfalls-bans.md)  
 > **冲突策略（强制）**：**Brooks 优先，导图降级**。与 Al Brooks 公开资料或本技能 `references/knowledge/` 原文冲突的导图条目 **不采纳** 为 G0/G1 强制规则；分析按技能规则引擎执行。  
-> **双轨说明**：导图可作为心法阅读；**不得**在验收表中声称「已按导图覆盖 Brooks 规则」。若用户点名「严格导图模式」，须在报告中单独标注偏离项，且仍不得伪造规则 ID。
+> **双轨说明**：导图可作为心法阅读；**不得**在 `rule_ids` 里声称「已按导图覆盖 Brooks 规则」。若用户点名「严格导图模式」，须单独标注偏离项，且仍不得伪造规则 ID。
 
 ---
 
@@ -117,7 +117,7 @@
 
 | 位置 | 新增 |
 |------|------|
-| `references/analysis-acceptance.md` | **G1-13** 周期四选一+混合；**G1-14** 20 根法则；**G1-15** 四技能自检；**G1-16** MM/目标类型 |
+| 决策自检（写进 `rule_ids`） | **G1-13** 周期四选一+混合；**G1-14** 20 根法则；**G1-15** 四技能自检；**G1-16** MM/目标类型 |
 | `assets/templates/price_action_analysis.md` | 周期 / 20根 / 四技能 / MM 占位小节 |
 | `assets/templates/step_checklist.md` | G1 统计四行；版本 v1.2 |
 | `references/SOUL.md` / `SKILL.md` | 索引 + 完整分析必含 G1-13～16；冲突 Brooks 优先 |
