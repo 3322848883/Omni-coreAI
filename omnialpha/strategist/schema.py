@@ -156,10 +156,31 @@ class Plan:
     raw: dict = field(default_factory=dict)
 
 
-def _f(v) -> Optional[float]:
+def _f(v, name: str = "", idx: Optional[int] = None) -> Optional[float]:
+    """把模型给的值转 float；**坏输入抛 `PlanError` 而不是 `ValueError`**。
+
+    调用方**只捕 `PlanError`**（`loop.py` 的 `except PlanError`；`__main__.cmd_plan`
+    连 try 都没有）。直转 `float()` 会把 `ValueError` 漏出去 —— 单次 `plan` 直接
+    traceback，`plan-loop` 虽被外层兜住却**绕过 `degraded` 与 `_record_cycle_failure`**，
+    于是 `plan_fail` 告警与 `error_streak` 静默不计数。实测来自独立评审（Critical 2）。
+    """
     if v is None or v == "":
         return None
-    return float(v)
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        where = f"chips[{idx}].{name}" if idx is not None else (name or "value")
+        raise PlanError(f"{where} must be a number, got {v!r}")
+
+
+def _int(v, name: str, idx: int) -> Optional[int]:
+    """同 `_f`，整数版。`time_stop_bars="8bars"` 这类输入必须走 PlanError。"""
+    if v is None or v == "":
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        raise PlanError(f"chips[{idx}].{name} must be an integer, got {v!r}")
 
 
 def parse_plan(data: Any) -> Plan:
@@ -186,7 +207,10 @@ def parse_plan(data: Any) -> Plan:
         symbol = str(raw.get("symbol") or "").strip()
         if not symbol:
             raise PlanError(f"chips[{i}].symbol required")
-        conf = float(raw.get("confidence") or 0)
+        try:
+            conf = float(raw.get("confidence") or 0)
+        except (TypeError, ValueError):
+            raise PlanError(f"chips[{i}].confidence must be a number, got {raw.get('confidence')!r}")
         if not 0 <= conf <= 1:
             if 0 < conf <= 100:
                 conf = conf / 100.0
@@ -211,7 +235,7 @@ def parse_plan(data: Any) -> Plan:
             raise PlanError(
                 f"chips[{i}].region must be one of {'|'.join(sorted(REGIONS))}, "
                 f"got {raw.get('region')!r}")
-        tp2 = _f(raw.get("tp2"))
+        tp2 = _f(raw.get("tp2"), "tp2", i)
         # 区域=区间 → 禁止 2R 目标。把提示词那条规则（「区间只做 scalp，
         # 禁止持有 2R 目标」）从一句话变成程序约束 —— 否则区域判定只是模型
         # 自己贴的标签，为用双止盈改判成趋势就绕过去了（实测发生过）。
@@ -230,28 +254,27 @@ def parse_plan(data: Any) -> Plan:
                 symbol=_safe_symbol(symbol),
                 action=action,
                 confidence=conf,
-                size_usd=_f(raw.get("size_usd")),
-                size=int(raw["size"]) if raw.get("size") is not None else None,
-                tp=_f(raw.get("tp")),
-                sl=_f(raw.get("sl")),
+                size_usd=_f(raw.get("size_usd"), "size_usd", i),
+                size=_int(raw.get("size"), "size", i),
+                tp=_f(raw.get("tp"), "tp", i),
+                sl=_f(raw.get("sl"), "sl", i),
                 tp2=tp2,
-                tp3=_f(raw.get("tp3")),
-                tp1_share=_f(raw.get("tp1_share")),
-                tp2_share=_f(raw.get("tp2_share")),
+                tp3=_f(raw.get("tp3"), "tp3", i),
+                tp1_share=_f(raw.get("tp1_share"), "tp1_share", i),
+                tp2_share=_f(raw.get("tp2_share"), "tp2_share", i),
                 order_type=order_type,
-                price=_f(raw.get("price")),
-                trigger_price=_f(raw.get("trigger_price")),
-                leverage=int(raw["leverage"]) if raw.get("leverage") is not None else None,
+                price=_f(raw.get("price"), "price", i),
+                trigger_price=_f(raw.get("trigger_price"), "trigger_price", i),
+                leverage=_int(raw.get("leverage"), "leverage", i),
                 side=side,
                 tp_mode="limit_order" if tp_mode == "limit" else tp_mode,
                 sl_mode="limit_order" if sl_mode == "limit" else sl_mode,
                 reasoning=str(raw.get("reasoning") or ""),
                 region=region,
-                invalidation=_f(raw.get("invalidation")),
-                time_stop_bars=(int(raw["time_stop_bars"])
-                                if raw.get("time_stop_bars") is not None else None),
-                give_back_pct=_f(raw.get("give_back_pct")),
-                risk_pct=_f(raw.get("risk_pct")),
+                invalidation=_f(raw.get("invalidation"), "invalidation", i),
+                time_stop_bars=_int(raw.get("time_stop_bars"), "time_stop_bars", i),
+                give_back_pct=_f(raw.get("give_back_pct"), "give_back_pct", i),
+                risk_pct=_f(raw.get("risk_pct"), "risk_pct", i),
                 rule_ids=[str(x) for x in rule_ids_raw],
                 scenarios=dict(scenarios_raw),
             )

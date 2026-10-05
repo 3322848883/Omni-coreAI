@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from omnialpha.memory import MemoryJournal  # noqa: E402
-from omnialpha.memory.context import _format_order_context  # noqa: E402
+from omnialpha.memory.context import _format_order_context, build_context  # noqa: E402
 from omnialpha.persona.orders import SharedOrderStore  # noqa: E402
 
 
@@ -98,6 +98,34 @@ class TestFormatOrderContext(unittest.TestCase):
     def test_no_premise_no_line(self):
         txt = _format_order_context({"order_id": "o-1", "symbol": "BTC_USDT", "side": "long"})
         self.assertNotIn("前提失效", txt)
+
+
+class TestLastPlanStateVisibleToSingleBot(unittest.TestCase):
+    """T4 后半必须在**单 bot 路径**可达（独立评审 Critical 3）。
+
+    订单记录只有 persona 组会写，单 bot（`plan-loop`，如 brooks-btc）从不写 ——
+    所以「模型声明的前提失效价」在单 bot 侧只能靠决策日志回看。没有这条，
+    规则 18 要求填的 invalidation 对 brooks-btc 等于白填。
+    """
+
+    def test_build_context_surfaces_last_invalidation(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            MemoryJournal(root, "b").append(
+                cycle_id="c1", decision="long", region="range",
+                invalidation_price=85200.0, time_stop_bars=12, give_back_pct=40.0)
+            ctx = build_context(root, "b", system_prompt="S", snapshot_text="SNAP")
+            self.assertIn("[上轮方案状态]", ctx["user"])
+            self.assertIn("85200.0", ctx["user"])
+            self.assertIn("区域=range", ctx["user"])
+            self.assertIn("12 轮", ctx["user"])
+
+    def test_absent_when_no_tier1_fields(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            MemoryJournal(root, "b").append(cycle_id="c1", decision="hold")
+            ctx = build_context(root, "b", system_prompt="S", snapshot_text="SNAP")
+            self.assertNotIn("[上轮方案状态]", ctx["user"])
 
 
 if __name__ == "__main__":

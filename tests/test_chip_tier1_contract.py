@@ -112,5 +112,42 @@ class TestChipDefaults(unittest.TestCase):
         self.assertEqual(c.scenarios, {})
 
 
+class TestBadInputRaisesPlanError(unittest.TestCase):
+    """坏输入必须抛 `PlanError`，不能漏出 `ValueError`/`TypeError`。
+
+    实测动因（独立评审 Critical 2）：调用方**只捕 `PlanError`**（`loop.py` 的
+    `except PlanError`、`__main__.cmd_plan` 连 try 都没有）。直转 `int()`/`float()`
+    会把 `ValueError` 漏出去 → `plan` 命令 traceback；`plan-loop` 虽被外层兜住，
+    但会**绕过 `degraded` 与 `_record_cycle_failure`** → `plan_fail` 告警静默不计数。
+
+    暴露面是**新增**的：改动前 `time_stop_bars` 这类字段根本不被解析（写什么都忽略），
+    而规则 18 现在要求模型填 `give_back_pct`/`risk_pct`（语义带 `(%)`，写 `"40%"` 即命中）。
+    """
+
+    def test_int_field_with_suffix(self):
+        with self.assertRaises(PlanError):
+            parse_plan({"chips": [_chip(time_stop_bars="8bars")]})
+
+    def test_int_field_with_list(self):
+        with self.assertRaises(PlanError):
+            parse_plan({"chips": [_chip(time_stop_bars=[])]})
+
+    def test_float_field_with_text(self):
+        with self.assertRaises(PlanError):
+            parse_plan({"chips": [_chip(risk_pct="abc")]})
+
+    def test_float_field_with_percent_sign(self):
+        """规则 18 把 `give_back_pct` 描述成「浮盈回撤阈值(%)」—— 模型可能写 `40%`。"""
+        with self.assertRaises(PlanError):
+            parse_plan({"chips": [_chip(give_back_pct="40%")]})
+
+    def test_existing_float_fields_also_guarded(self):
+        """老字段（tp/sl/size_usd…）此前也会漏 ValueError，一并收口。"""
+        for field in ("tp", "sl", "tp2", "price", "size_usd"):
+            with self.subTest(field=field):
+                with self.assertRaises(PlanError):
+                    parse_plan({"chips": [_chip(**{field: "not-a-number"})]})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -107,6 +107,12 @@ def freeze_snapshot() -> dict:
 def run_one(frozen: dict, tag: str) -> dict:
     paths = ProjectPaths(ROOT)
     bot = load_bot_config(paths.config_dir / f"{BOT}.yaml")
+    # **隔离被测变量**：brooks-btc 未声明 `strategist.skills` → 对**两个**技能都可见，
+    # 而 pa-analysis 的新 SKILL.md 也把 7 个字段列为必填 → 另一个技能的新契约会从
+    # 「旧配置」臂泄漏进来。独立评审实测：未隔离时 A 组有一次先调了 skill(pa-analysis)，
+    # 于是 A 组 1/2 次出现 region/rule_ids，因果归因失效。这里把白名单收到只留被测技能。
+    if isinstance(getattr(bot, "strategist", None), dict):
+        bot.strategist["skills"] = [SKILL]
     from omnialpha.__main__ import _build_plan_runner
     runner = _build_plan_runner(bot, paths)
 
@@ -128,9 +134,15 @@ def run_one(frozen: dict, tag: str) -> dict:
     chip = (plan.get("chips") or [{}])[0]
     raw = cap.get("text") or ""
     rc = list(getattr(runner.llm, "last_reasoning_chain", []) or [])
+    sys_txt = cap.get("system") or ""
     return {
         "tag": tag,
         "ok": bool((res or {}).get("ok")),
+        # 隔离校验：另一个技能不得出现在 L1 catalog 里（否则对照组被污染）
+        "catalog_isolated": ("pa-analysis" not in sys_txt),
+        "called_other_skill": any(
+            u["tool"] == "skill" and (u.get("args") or {}).get("name") == "pa-analysis"
+            for u in runner.tool_usage),
         "secs": round(dt, 1),
         "sys_len": len(cap.get("system") or ""),
         "cot_chars": sum(len(s) for s in rc),
@@ -217,7 +229,8 @@ def main() -> int:
     print("原始输出层面的信号")
     print("=" * 78)
     print("%-16s" % "指标" + "".join("%-14s" % r["tag"] for r in results))
-    for key, label in (("raw_has_region", "原始含 region"), ("raw_has_rule_ids", "原始含 rule_ids"),
+    for key, label in (("catalog_isolated", "catalog 已隔离"), ("called_other_skill", "调了另一技能"),
+                       ("raw_has_region", "原始含 region"), ("raw_has_rule_ids", "原始含 rule_ids"),
                        ("raw_has_range", "原始含 range"), ("raw_has_tp2_value", "原始含 tp2 非null"),
                        ("sys_len", "system 长度"), ("cot_chars", "CoT 字符"),
                        ("secs", "耗时秒")):

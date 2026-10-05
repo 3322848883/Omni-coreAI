@@ -178,6 +178,12 @@ class PersonaRunner:
             out["risk_pct"] = chip["risk_pct"]
         if chip.get("invalidation") is not None:
             out["invalidation_price"] = chip["invalidation"]
+        # 与 `loop.py::_tier1_journal_fields` 保持同一字段集 —— 两边不一致时
+        # 人格路径的 journal 会永远缺这两格（独立评审指出的近重复 helper 漂移）。
+        if chip.get("time_stop_bars") is not None:
+            out["time_stop_bars"] = chip["time_stop_bars"]
+        if chip.get("give_back_pct") is not None:
+            out["give_back_pct"] = chip["give_back_pct"]
         return out
 
     def _post_exec_hooks(self, order_id: Optional[str], fusion: dict,
