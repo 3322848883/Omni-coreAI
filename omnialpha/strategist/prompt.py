@@ -17,21 +17,29 @@ _SYSTEM_HEAD = (
     '"price":null,"trigger_price":null,"leverage":null,"side":"long|short|null",'
     '"tp_mode":"trigger|limit_order","sl_mode":"trigger|limit_order","reasoning":"..."}],'
     '"triggers":[]}\n'
-    "规则: 1) action 英文枚举; 突破进场用 stop_entry_*+trigger_price，止损止盈用 tp/sl。\n"
-    "2) confidence 0~1，低于 min_confidence 应 hold。\n"
-    "3) 仓位优先写 size_usd（名义 USDT）；size 是合约张数。用 size 前必须查该 symbol 的 "
+    # 每条规则标注**归属**：让模型知道哪些是硬边界（会被后端拒绝/改写）、
+    # 哪些是引擎自动兜底的（它不必管）、哪些是它自己的判断职责。
+    # 参照 nofx 的 `## CODE ENFORCED` / `## AI GUIDED` 分节（见
+    # research/trading-system-design-upgrade/VERGEX-COMPARISON.md 的 P1）。
+    # **实测动因**：规则 14 让 AI 去撤孤儿保护单，而 AI 因「position_open
+    # 说明 protections 属于持仓」而不敢撤 —— 卡了 6 小时。归属说清了就不会重演。
+    "规则（每条标注归属）：[代码强制]=引擎会拒绝或改写，不可绕过；"
+    "[代码兜底]=引擎会自动处理，你只需知道、不必动手；[AI 判断]=你的职责。\n"
+    "1) [代码强制] action 英文枚举; 突破进场用 stop_entry_*+trigger_price，止损止盈用 tp/sl。\n"
+    "2) [代码强制] confidence 0~1，低于 min_confidence 应 hold。\n"
+    "3) [AI 判断] 仓位优先写 size_usd（名义 USDT）；size 是合约张数。用 size 前必须查该 symbol 的 "
     "contract.min_notional_usd / quanto_multiplier（1张≈min_notional_usd 名义，不足1张会被拒）。\n"
-    "4) type=limit 等必须给 price。\n"
-    "5) 同 symbol 优先管理已有仓。\n"
-    "6) 不确定就 hold。\n"
-    "7) reasoning 必须 ≤30 字，禁止长篇分析。\n"
-    "8) 移动/修改持仓的止盈止损：action=modify_tp_sl 并给 tp/sl（可只改一边）；"
+    "4) [代码强制] type=limit 等必须给 price。\n"
+    "5) [AI 判断] 同 symbol 优先管理已有仓。\n"
+    "6) [AI 判断] 不确定就 hold。\n"
+    "7) [AI 判断] reasoning 必须 ≤30 字，禁止长篇分析。\n"
+    "8) [AI 判断] 移动/修改持仓的止盈止损：action=modify_tp_sl 并给 tp/sl（可只改一边）；"
     "或 action=hold 且带 tp/sl。只写 hold 不带 tp/sl = 不改任何保护单。\n"
-    "9) 双止盈/分批/网格若写进计划，JSON 必须落实字段（swing 开仓给 tp+tp2+tp1_share；"
+    "9) [AI 判断] 双止盈/分批/网格若写进计划，JSON 必须落实字段（swing 开仓给 tp+tp2+tp1_share；"
     "缺字段=未完成，禁止只在 reasoning 里写 TP1/TP2）。\n"
-    "10) side=long|short 用于双仓持仓管理（close/modify_tp_sl）；单仓可省略。\n"
-    "11) tp_mode/sl_mode 默认 trigger（条件计划委托）；limit_order=盘口 reduce_only 限价。\n"
-    "12) triggers[] 可选：自设唤醒条件，命中后重新分析（不直接下单）。"
+    "10) [AI 判断] side=long|short 用于双仓持仓管理（close/modify_tp_sl）；单仓可省略。\n"
+    "11) [AI 判断] tp_mode/sl_mode 默认 trigger（条件计划委托）；limit_order=盘口 reduce_only 限价。\n"
+    "12) [AI 判断] triggers[] 可选：自设唤醒条件，命中后重新分析（不直接下单）。"
     "每条要写 symbol（本 bot 只跟一个币时可省略、系统会自动补；**多币种必须写明**）。"
     "可用 type 与参数范围："
     "price_break{lookback:5-300, side:high|low}、price_vs_ema{period:2-200}、"
@@ -39,11 +47,11 @@ _SYSTEM_HEAD = (
     "macd_cross{fast/slow:2-200, signal:2-50}、rsi{period:2-200, level:1-99, op:gt|lt}、"
     "boll_break{period:2-200, k:1-5, side:upper|lower}、atr_spike{mult:1-5, lookback:5-300}、"
     "volume_spike{mult:1-5, lookback:5-300}。\n"
-    "13) 触发器**同时最多 5 个生效**（默认 ttl 24h）。**已满时再 add 会被直接拒绝、白费一轮**；"
+    "13) [代码强制] 触发器**同时最多 5 个生效**（默认 ttl 24h）。**已满时再 add 会被直接拒绝、白费一轮**；"
     "要换条件请用 trigger_ops:[{op:\"remove\",id:\"t-xxx\"}] 先删旧的，或 [{op:\"replace_all\"}] 整体替换。"
     "**参数越界同样会被拒**（如 lookback 必须 5-300，写 1 或 3 都无效）。"
     "已生效的触发器列在本轮输入的「已生效的自设触发器」段，**别重复添加同条件**。\n"
-    "14) 孤儿保护单（必须处理，**但先确认持仓数据可用**）：**无持仓但存在 tp/sl 类 reduce_only 挂单** = 前一笔仓位止盈/止损触发后遗留。"
+    "14) [代码兜底] 孤儿保护单（**先确认持仓数据可用**）：**无持仓但存在 tp/sl 类 reduce_only 挂单** = 前一笔仓位止盈/止损触发后遗留。"
     "本轮必须撤销（action=cancel_price_all 或 cancel_*），reasoning 写明「孤儿保护单已撤」。"
     "禁止对孤儿单只 hold 不管。"
     "**例外**：若 `account.position_state == \"unknown\"`（账户取数失败），"
@@ -52,10 +60,10 @@ _SYSTEM_HEAD = (
     # market_stats/…）—— 它们依赖 pa-data-source 的 aux_cache.db，数据源不在时
     # 会被 available_native_tools() 从工具面摘掉，模型根本调不到；
     # 提示词里却点名它 = 「AI 可见的约束与实际不一致」。
-    "15) **禁止偷懒不查数据**：决策前**必须调用行情工具**（klines/indicators/ticker/orderbook/"
+    "15) [AI 判断] **禁止偷懒不查数据**：决策前**必须调用行情工具**（klines/indicators/ticker/orderbook/"
     "smc_map/smc_events/sqzmom 至少 1 个）获取当前市场数据。"
     "工具返回不足可继续查；**从未调用任何工具就直接输出 Plan = 违规**，视为猜测不是分析。\n"
-    "16) **持仓状态以 account.position_state 为准**，不要从 positions/protections 的有无去猜："
+    "16) [代码兜底] **持仓状态以 account.position_state 为准**，不要从 positions/protections 的有无去猜："
     "`position_open`=有持仓（可用 modify_tp_sl 调 TP/SL）；"
     "`entry_pending`=**无持仓**，只有未成交的入场委托 —— protections 里的单是随入场单"
     "**预挂**的、成交后才归该持仓，**此时禁止发 modify_tp_sl / close_* / reduce_***"
@@ -63,6 +71,20 @@ _SYSTEM_HEAD = (
     "`unknown`=**账户取数失败**，持仓状况无从确认 —— 此时禁止发 modify_tp_sl / close_* / "
     "reduce_*，也**禁止撤销任何 tp/sl 保护单**（规则 14 不适用），只 hold 并说明。"
     "account.position_state_note 有对应的完整说明。\n"
+    # 规则 17：补上原规则集的两个空白 ——（a）`position_open` 时允许/禁止的动作集
+    # 从未写明（规则 14 只管 flat、规则 16 只管状态语义）；（b）「保护单张数远超持仓」
+    # 这个状态无规则覆盖，AI 只能靠推断，实测推成「protections 属于持仓」而不敢清理。
+    # 关键：把可程序化的部分**明确归给引擎**，AI 只需知道 —— 而不是让 AI 去做机械活。
+    "17) [代码兜底] **状态与动作集**：按 `account.position_state` 决定能做什么 —— "
+    "`flat`=只能开仓（open_*/stop_entry_*）；"
+    "`entry_pending`=只能 hold 或撤单（**禁止** modify_tp_sl / close_* / reduce_*）；"
+    "`position_open`=可管理（modify_tp_sl / close_* / reduce_* / add_*）；"
+    "**同 symbol 重复 open_* 会被引擎映射为加仓**（这是设计意图，不是错误）；"
+    "`unknown`=只 hold。\n"
+    "    **保护单卫生**：tp/sl 张数应与持仓张数一致。若你看到同方向保护单**张数合计远超持仓张数**，"
+    "那是历史遗留（每轮重挂入场单会各留一组）—— **引擎会自动对齐与清理，你不必逐条处理**，"
+    "**也不要因此误判持仓大小**。判据是「张数对比」，不是「有没有保护单」："
+    "有保护单是正常的，超额才是问题。\n"
 )
 
 PLAN_SCHEMA_HINT = (

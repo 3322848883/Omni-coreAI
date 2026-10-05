@@ -813,8 +813,36 @@ class Executor:
                 bad.append(f"{kind}={px:g} 需 < mark {ref:g}（rule=2 跌破触发）")
         return ("TRIGGER_PRICE_SIDE: " + "; ".join(bad)) if bad else None
 
+    def _check_safe_mode(self, action: str) -> None:
+        """安全模式：连续失败达阈值时**禁止开仓**（只允许平/减/改/观望）。
+
+        参照 nofx 的 `consecutiveAIFailures>=3` → 过滤掉所有 `open_*`、
+        保留 close/hold，且 AI 恢复后**自动退出**（`record_success` 会把
+        streak 清零，所以这里不需要额外的解除逻辑）。
+
+        动因：LLM 异常（超时/解析失败/工具循环超限）时，AI 仍可能输出看似
+        合理的开仓计划 —— 实测 eth-disc 在薄时段连续 17 轮挂同一个价位。
+        安全模式让「AI 不健康时只减不增」。
+
+        阈值配 `account_risk.safe_mode_after_failures`，**0 = 关闭（默认）**，
+        所以不配置的 bot 行为完全不变。
+        """
+        n = int((self.account_risk or {}).get("safe_mode_after_failures") or 0)
+        if n <= 0:
+            return
+        try:
+            from .monitoring.health import HealthMonitor
+            streak = HealthMonitor(self.root, self.bot_id).current_fail_streak()
+        except Exception:  # noqa: BLE001 — 读不到健康数据就不拦，保持原行为
+            return
+        if streak >= n:
+            raise GateApiError(
+                f"SAFE_MODE: 连续失败 {streak} 次 ≥ {n}，暂停开仓（只允许平/减/改/观望）"
+            )
+
     def _open(self, intent: Intent) -> StepResult:
         self._check_symbol(intent.symbol)
+        self._check_safe_mode(intent.action)
         self._check_open_sl(intent)
         self._check_account_risk(intent)
         meta = self.client.get_contract(intent.symbol)
@@ -941,11 +969,17 @@ class Executor:
             )
         return StepResult(intent.action, intent.symbol, True, detail=detail)
 
-    def _rollback_unprotected_entry(self, intent: Intent, entry_order: dict) -> str:
+    def _rollback_unprotected_entry(self, intent: Intent, entry_order: dict,
+                                    is_price_order: bool = False) -> str:
         """exits 挂失败后的兜底：不留无保护敞口。
 
         - 入场单**未成交** → 撤掉它，回到「什么都没挂」的干净状态（无副作用）
         - 入场单**已成交** → **只告警，不自动平仓**
+
+        `is_price_order=True` 用于 `stop_entry_*` —— 突破进场挂在 `/price_orders`，
+        撤单要用 `cancel_price_order`。该路径原先**完全没有兜底**：挂保护单失败
+        只返回错误、连告警都没有；若此刻条件单已被触发成交，就留下一个
+        **无人知晓的裸仓**。
 
         为什么已成交不自动平仓：这条路径新写、未在实盘验证过。若因误判而自动
         市价平仓，等于**主动扔掉策略本来想持有的仓位** —— 比原问题更主动、更难
@@ -964,7 +998,10 @@ class Executor:
             return "skip: 入场单无 id"
         if filled <= 0:
             try:
-                self.client.cancel_order(oid)
+                if is_price_order:
+                    self.client.cancel_price_order(oid)
+                else:
+                    self.client.cancel_order(oid)
                 return f"cancelled_entry:{oid}"
             except Exception as e:  # noqa: BLE001
                 return f"cancel_failed:{oid}:{str(e)[:90]}"
@@ -1343,6 +1380,14 @@ class Executor:
     def _stop_entry(self, intent: Intent) -> StepResult:
         """Breakout ENTRY: trigger then OPEN. Not stop-loss."""
         self._check_symbol(intent.symbol)
+        self._check_safe_mode(intent.action)
+        # 与 `_open` 完全同源的两道账户/计划闸门（原先只有 _check_symbol + _check_notional）。
+        # 缺 `_check_open_sl` / `_check_account_risk` 时，突破单可以绕过
+        # halt / daily_loss_limit / max_leverage / 总敞口闸门 / SL 必填 ——
+        # 而 eth-disc 实测 4 轮里 3 轮产出的正是 `stop_entry_long`，
+        # 等于账户级风控在多数单子上根本没生效。
+        self._check_open_sl(intent)
+        self._check_account_risk(intent)
         meta = self.client.get_contract(intent.symbol)
         # 与 `_open` 同源：先按「权益 × risk_pct ÷ 止损距离」反推名义，再做波动率调整。
         # 缺这两步时 stop_entry 的仓位只受 max_notional 限制 —— 风险公式被整个绕过。
@@ -1359,6 +1404,13 @@ class Executor:
                 if vol_note:
                     size_note = f"{size_note}; {vol_note}" if size_note else vol_note
         self._check_notional(intent.size_usd)
+        # 挂入场单前先验 TP/SL 触发价合法性：保护单挂不上时入场单已挂出 = 无保护挂单
+        # （与 `_open` 同源。**注意它校验的是保护单的触发价，不含 entry 的
+        #  `trigger_price`** —— 后者只有交易所会校验，见 UPGRADE-PLAN 待办）
+        side_err = self._precheck_exit_triggers(intent)
+        if side_err:
+            return StepResult(intent.action, intent.symbol, False,
+                              detail={"precheck": side_err}, error=side_err)
         if intent.size is not None:
             contracts = int(intent.size)
         else:
@@ -1447,6 +1499,11 @@ class Executor:
             detail["exit_errors"] = errs
             detail["hang_mode"] = "with_stop_entry"
             if errs:
+                # 与 `_open` 同源：保护单挂不上时不留无保护敞口。
+                # stop_entry 是条件单 —— 未触发则撤掉它；若已被触发成交，
+                # `_rollback_unprotected_entry` 会落盘告警（不自动平仓）。
+                detail["rollback"] = self._rollback_unprotected_entry(
+                    intent, order, is_price_order=True)
                 return StepResult(intent.action, intent.symbol, False, detail=detail,
                                   error="exit_not_placed: " + "; ".join(str(x) for x in errs))
         return StepResult(intent.action, intent.symbol, True, detail=detail)

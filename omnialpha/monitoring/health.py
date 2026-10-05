@@ -130,6 +130,20 @@ class HealthMonitor:
         except Exception:  # noqa: BLE001
             pass
 
+    def current_fail_streak(self) -> int:
+        """当前连续失败次数（plan 侧 error_streak 与 run 侧 exec_fail_streak 取大）。
+
+        供**执行层**做安全模式判定用 —— 原先这两个计数只有 `check()` 读，
+        而 `check()` 在生产里无人调用（见 `docs/compose/spec/agent-memory.md`
+        对 HealthMonitor 装饰性的记录）。安全模式需要一个「随时可查」的入口。
+        """
+        rec = self._load_merged()
+        try:
+            return max(int(rec.get("error_streak") or 0),
+                       int(rec.get("exec_fail_streak") or 0))
+        except (TypeError, ValueError):
+            return 0
+
     def check(self) -> list[str]:
         """返回告警消息列表（空 = 健康）。plan / run 两侧记录合并后判定。"""
         if not self.path.exists() and not self.run_path.exists():

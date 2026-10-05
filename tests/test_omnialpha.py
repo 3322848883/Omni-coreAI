@@ -867,6 +867,60 @@ class TestExecutor(unittest.TestCase):
         self.assertLessEqual(float(detail.get("size_usd") or 0), 10.0,
                              "名义硬顶必须钳制，不能整笔拒单")
 
+
+class TestStopEntrySharesOpenGates(unittest.TestCase):
+    """`stop_entry_*` 必须与 `open_*` 走**同一套**闸门。
+
+    回归背景（2026-10-05 架构盘点）：`_stop_entry` 原先只调 `_check_symbol`
+    + `_check_notional`，**不调** `_check_account_risk` / `_check_open_sl`
+    / `_precheck_exit_triggers` —— 突破单可以绕过 halt / 日亏熔断 / 杠杆上限 /
+    总敞口闸门 / SL 必填。而 eth-disc 实测 4 轮里 3 轮产出的正是
+    `stop_entry_long`，等于账户级风控在多数单子上根本没生效。
+    """
+
+    def _ex(self, client, **kw):
+        return Executor(client, symbols_whitelist=["BTC_USDT"], **kw)
+
+    def test_stop_entry_respects_halt(self):
+        """halt: true 时 stop_entry 也必须被拒（原先可绕过）。"""
+        client = FakeClient()
+        client.get_last_price = lambda s: 50000.0
+        ex = self._ex(client, require_sl=False, account_risk={"halt": True})
+        rep = ex.execute_signal(parse_signal({
+            "action": "stop_entry_long", "symbol": "BTC_USDT",
+            "size_usd": 100, "trigger_price": 51000,
+        }))
+        self.assertFalse(rep.ok, "halt 必须拦停突破单")
+        self.assertIn("HALT", (rep.results[0].error or "").upper())
+
+    def test_stop_entry_requires_sl(self):
+        """require_sl 时 stop_entry 无 sl 必须被拒（原先可绕过）。"""
+        client = FakeClient()
+        client.get_last_price = lambda s: 50000.0
+        ex = self._ex(client, require_sl=True)
+        rep = ex.execute_signal(parse_signal({
+            "action": "stop_entry_long", "symbol": "BTC_USDT",
+            "size_usd": 100, "trigger_price": 51000,
+        }))
+        self.assertFalse(rep.ok, "突破单也必须带止损")
+        self.assertIn("SL_REQUIRED", rep.results[0].error or "")
+
+    def test_stop_entry_checks_exit_trigger_side(self):
+        """TP/SL 触发价落在 mark 非法一侧时整笔中止（原先会挂出无保护的入场单）。
+
+        mark 50000 时，多头 SL 必须 < mark：给 51000（高于 mark）应被拦。
+        """
+        client = FakeClient()
+        client.get_last_price = lambda s: 50000.0
+        client.get_ticker = lambda s: {"mark_price": 50000.0}
+        ex = self._ex(client, require_sl=False)
+        rep = ex.execute_signal(parse_signal({
+            "action": "stop_entry_long", "symbol": "BTC_USDT",
+            "size_usd": 100, "trigger_price": 51000, "sl": 51000,
+        }))
+        self.assertFalse(rep.ok, "保护单触发价非法时应整笔中止")
+        self.assertIn("TRIGGER_PRICE_SIDE", rep.results[0].error or "")
+
     def test_cancel_all_own_scope_only_touches_label_prefix(self):
         """order_scope=own + explicit bot label must not wipe another bot's book (prelaunch M12)."""
         client = FakeClient()
