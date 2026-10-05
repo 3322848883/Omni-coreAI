@@ -5,7 +5,7 @@
 
 ## 订单类型 × 挂单时序（预挂架构 · 2026-09-12）
 
-节点3 已按 order_type 分流布防时序（spec: preplace-entry-architecture D1-D4，详见 `plan-schema.md`「订单类型 × 挂单时序」），本规范阶段 0/1 的适用范围随之分化：
+节点3 已按 order_type 分流布防时序（spec: preplace-entry-architecture D1-D4，详见 `plan-schema_part1.md`「订单类型 × 挂单时序」），本规范阶段 0/1 的适用范围随之分化：
 
 | order_type × 触发条件构成 | 阶段 0（触发前） | 阶段 1（触发确认） |
 |---|---|---|
@@ -110,7 +110,7 @@
 | 止损后 | 禁追回；二次机会条件；复盘+冷却 | BAN-11 / RM-01/03 |
 
 ## 内嵌 JSON（节点3 契约）
-每个方案的 plan-json 增加 `lifecycle` 对象（字段见 plan-schema.md），节点3 的 plan_watcher/position_manager 据此监控：
+每个方案的 plan-json 增加 `lifecycle` 对象（字段见 plan-schema_part1.md），节点3 的 plan_watcher/position_manager 据此监控：
 - `pre_trigger`：wait/approach/expire 规则（与 plan_watcher 状态机对齐）。
 - `post_entry_scenarios`：情形表，每条四要素（id→level→condition→action，rule_ref 可选；id 非空且计划内唯一，level ∈ auto/semi/log 与节点3 执行通道对齐——validate_report 第 41 项把关）。
 - `invalidation_handling`：失效→动作映射（fatal/warning）。

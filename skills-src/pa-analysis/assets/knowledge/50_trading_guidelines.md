@@ -1,7 +1,7 @@
 ﻿# AE. 78条交易指南（78 Trading Guidelines）
 
 > 来源：Al Brooks《价格行为交易三部曲》第三卷《反转》第25章（第410-421页）
-> 场记指南参考：pa-trading-field-guide.html AE章节
+> 场记指南（原文语料，未随技能打包）AE章节
 
 ## 概述
 

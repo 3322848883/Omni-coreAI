@@ -9,7 +9,7 @@
 ### 步骤 0.1 分析更高时间级别状态
 → [Theme8](theme8_daytrading_part1.md) Ch22
 
-> 详细HTF分析模板见 assets/templates/htf_analysis.md，以下为快速检查步骤：
+> 详细HTF分析模板见 多周期分析（`klines` 换 tf 多次调用），以下为快速检查步骤：
 
 - [ ] **查看日线图（Daily Chart）**：
   - [ ] 识别日线趋势方向（多头市场/空头市场/交易区间）

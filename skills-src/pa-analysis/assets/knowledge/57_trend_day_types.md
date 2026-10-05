@@ -1,7 +1,7 @@
 ﻿# AM. 趋势日类型分类（Trend Day Type Classification）
 
 > 来源：Al Brooks三部曲 + 开盘区间分析专题
-> 场记指南参考：pa-trading-field-guide.html AM章节
+> 场记指南（原文语料，未随技能打包）AM章节
 
 ---
 

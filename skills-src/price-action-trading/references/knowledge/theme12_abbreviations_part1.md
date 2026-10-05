@@ -3,7 +3,7 @@
 # Al Brooks 价格行为缩写速查手册 (Abbreviations Quick Reference)
 
 > 来源: 阿布缩写翻译及解释 PDF（20页，87个词条）
-> v8.0新增 | 2026-04-18
+> 新增 | 2026-04-18
 
 ---
 

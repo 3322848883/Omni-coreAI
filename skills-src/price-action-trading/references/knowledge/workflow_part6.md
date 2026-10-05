@@ -195,14 +195,14 @@
   - [ ] 需要特别注意：____
 
 
-> **v7新增参考**：
+> **参考**：
 > - 开盘反转定理：80%概率第一段走势会被反转，不要追第一段 → 参考 [theme8_daytrading.md](theme8_daytrading_part1.md)（开盘反转定理章节）
 > - BOM规则：60%概率BOM会失败，等待BOM回测再入场 → 参考 [theme8_daytrading.md](theme8_daytrading_part1.md)（BOM完整规则章节）
 > - 90分钟定理：开盘后90分钟决定当天方向 → 参考 [theme8_daytrading.md](theme8_daytrading_part1.md)（90分钟定理章节）
 > - 高开低开四种形态：60%缺口会回补 → 参考 [theme8_daytrading.md](theme8_daytrading_part1.md)（高开低开四种形态章节）
 
 ### 步骤 2.4 开盘区间逐棒分析
-→ 完整规则见 references/knowledge/source/V3_反转/V3_B06_P251-300.md P251-252
+→ 完整规则见 docs/pa-source/V3_反转/V3_B06_P251-300.md P251-252
 
 **目的**: 系统化分析开盘区间头5-10棒的微观结构，预判当日趋势类型
 

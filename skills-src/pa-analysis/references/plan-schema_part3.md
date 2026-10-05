@@ -1,8 +1,8 @@
-> 本文件是 `plan-schema.md` 的第 3/6 片（按 `##` 小节切分，内容未改动）。
+> 本文件是 `plan-schema_part1.md` 的第 3/6 片（按 `##` 小节切分，内容未改动）。
 
-## 信号K params 词表规范（signal_bar / sequence，与节点3 signal_eval.py 逐字一致）
+## 信号K params 词表规范（signal_bar / sequence，与执行侧枚举逐字一致）
 
-> 来源：align-signal-bar-coverage spec（信号K覆盖对齐 Task 4 契约硬化）。本节词表与节点3 `pa-executor/core/signal_eval.py` 实际枚举**逐字一致**——写计划时 pattern/sequence 名必须取自下表，**未登记名节点3 一律 manual（转监控员 AI），无 AI 时计划过期**。分工定纲：**程序能识别的 → 参数化全自动；程序不能判定的 → 明确标注 `ai_judged: true` 归口监控员 AI，不留灰色地带**。45 项知识库形态↔程序对照矩阵见 `references/pattern-catalog.md` 第五节。
+> 来源：align-signal-bar-coverage spec（信号K覆盖对齐 Task 4 契约硬化）。本节词表与执行侧实际枚举**逐字一致**——写计划时 pattern/sequence 名必须取自下表，**未登记名节点3 一律 manual（转监控员 AI），无 AI 时计划过期**。分工定纲：**程序能识别的 → 参数化全自动；程序不能判定的 → 明确标注 `ai_judged: true` 归口监控员 AI，不留灰色地带**。45 项知识库形态↔程序对照矩阵见 `references/pattern-catalog_part1.md` 第五节。
 
 ### signal_bar pattern 枚举（11 种）
 

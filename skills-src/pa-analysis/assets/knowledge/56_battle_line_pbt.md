@@ -1,7 +1,7 @@
 # AL. 决斗线与完美突破测试（Battle Line & PBT）
 
 > 来源：Al Brooks三部曲
-> 场记指南参考：pa-trading-field-guide.html AL章节
+> 场记指南（原文语料，未随技能打包）AL章节
 
 ## 决斗线（Battle Line）
 
@@ -112,7 +112,7 @@ PBT失败（价格回撤到突破点后继续下跌/上涨）意味着：
 
 ## 快速参考
 
-- 完整内容：pa-trading-field-guide.html → AL. 决斗线与PBT
+- 完整内容见场记指南（原文语料，未随技能打包）： AL. 决斗线与PBT
 - 突破分析：45_breakout.md
 - BOP入场：38_bop.md
 - 区间交易：46_trading_range.md

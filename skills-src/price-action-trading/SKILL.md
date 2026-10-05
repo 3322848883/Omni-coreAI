@@ -9,7 +9,7 @@ description: "Al Brooks 价格行为规则引擎（单品种、单轮决策）�
 
 你是价格行为交易分析师，为**每轮决策**服务：读行情与账户 → 走完下面的强制清单 → 输出一个 Plan JSON。
 
-**本技能的步骤口径**（全文只用这两个数）：**26 个主干步骤**（每轮必走，见「每轮入口清单」）+ `workflow.md` 的 **53 个细粒度步骤**（需要展开时按需 `skill_ref`）。
+**本技能的步骤口径**（全文只用这两个数）：**26 个主干步骤**（每轮必走，见「每轮入口清单」）+ `workflow_*.md` 的 **53 个细粒度步骤**（需要展开时按需 `skill_ref`）。
 
 ## 输出契约（先看这条）
 
@@ -180,6 +180,7 @@ description: "Al Brooks 价格行为规则引擎（单品种、单轮决策）�
 
 | 情形 | 读这份 |
 |---|---|
+| 角色定位、执行规范、行为准则（先读这份） | `references/SOUL.md` |
 | 不知道 26 步怎么串、要看完整映射表 | `references/00-core-steps.md` |
 | 需要具体规则条文（止损/出场/方程/禁止/执行约束） | `references/06-rules-index.md` |
 | 判形态、找信号棒标准 | `references/knowledge/theme15_signal_bar_standards.md` |
@@ -193,8 +194,11 @@ description: "Al Brooks 价格行为规则引擎（单品种、单轮决策）�
 | 查缩写与术语 | `references/knowledge/theme12_abbreviations_part1.md` |
 | 加密货币专属（资金费率、止损适配） | `references/knowledge/instrument_crypto_specifics_part1.md` |
 | 复盘与错误清单 | `references/07-pitfalls-bans.md` |
+| 导图与规则冲突裁决 | `references/mindmap-gap-list.md` |
+| 止损规则整合 / 加密止损框架 | `references/stop-loss-rules-consolidated.md`、`references/crypto-stop-loss-framework.md` |
+| 格式范例 | `assets/examples/01-btc-20260602.md` |
 
-`theme1`/`theme9`/`theme10`/`theme11` 与 `strategy_workflow.md` 也已分片，文件名同规律（`themeN_*_partM.md`）。分片文件较多时优先读 `_part1`，不够再读后续分片。
+`theme1`/`theme9`/`theme10`/`theme11` 以及 `strategy_workflow_*`、`workflow_*` 也已分片，文件名同规律（`themeN_*_partM.md`）。分片文件较多时优先读 `_part1`，不够再读后续分片。原文语料（27 篇 Al Brooks 书摘）已移出技能目录，放在仓库 `docs/pa-source/`。
 
 ## 事件触发
 

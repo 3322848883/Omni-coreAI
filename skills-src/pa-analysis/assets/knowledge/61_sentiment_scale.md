@@ -1,7 +1,7 @@
 ﻿# AS. 情绪追踪量表（Sentiment Tracking Scale）
 
 > 来源：Al Brooks 78条指南心理条目
-> 场记指南参考：pa-trading-field-guide.html AS章节
+> 场记指南（原文语料，未随技能打包）AS章节
 
 ## 5维度情绪记录
 
@@ -63,6 +63,6 @@
 
 ## 快速参考
 
-- 完整内容：pa-trading-field-guide.html → AS. 情绪追踪量表
+- 完整内容见场记指南（原文语料，未随技能打包）： AS. 情绪追踪量表
 - 心态管理：25_psychology.md
 - 78条交易指南：50_trading_guidelines.md

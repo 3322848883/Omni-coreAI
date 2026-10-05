@@ -1,7 +1,7 @@
 # AO. 限价单 vs 止损单决策矩阵（Limit vs Stop Order Matrix）
 
 > 来源：Al Brooks三部曲
-> 场记指南参考：pa-trading-field-guide.html AO章节
+> 场记指南（原文语料，未随技能打包）AO章节
 
 ## 核心概念
 
@@ -114,14 +114,14 @@
 
 ## 快速参考
 
-- 完整内容：pa-trading-field-guide.html → AO. 限价vs止损矩阵
+- 完整内容见场记指南（原文语料，未随技能打包）： AO. 限价vs止损矩阵
 - 入场方式：04_entry_execution.md
 - 止损单规则：55_stop_order_rules.md
 - 交易区间：46_trading_range.md
 
 ## 程序实现对照（节点3 预挂架构 · 2026-09-12）
 
-- 本矩阵已程序化落地：validate 门禁 29 几何主判——带中值在现价回调侧（多头带中<现价）must `limit`（本文「区间/通道/EMA 回撤限价」），突破侧 must `stop/stop_limit`（本文「突破/反转确认止损单」），与节点3 `plan_loader.infer_entry_type` 同口径。
+- 本矩阵已程序化落地：validate 门禁 29 几何主判——带中值在现价回调侧（多头带中<现价）must `limit`（本文「区间/通道/EMA 回撤限价」），突破侧 must `stop/stop_limit`（本文「突破/反转确认止损单」），与节点3 `执行侧入场类型推断` 同口径。
 - 布防时序（spec: preplace-entry-architecture D1/D4）：`limit` 计划布防即直挂 GTC 入场梯次（本文「预期位置提前挂单，以价格优势换成交确定性」的机械实现），不再等全条件确认；`stop` 计划仅 signal_bar/sequence 类条件作入场锚（信号K 另一端 1 tick），共识/RR/市场状态/量能类条件转观察数据。
 - 本文「市价单场景」仅适用 manage 型紧急平仓；节点3 entry 型不支持市价。
-- 运行时细节（挂单时序/撤单语义/保护单联动）见 `references/plan-schema.md`「订单类型 × 挂单时序」。
+- 运行时细节（挂单时序/撤单语义/保护单联动）见 `references/plan-schema_part1.md`「订单类型 × 挂单时序」。

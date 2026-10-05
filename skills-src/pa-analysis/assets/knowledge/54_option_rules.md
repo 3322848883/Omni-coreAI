@@ -1,7 +1,7 @@
 # AJ. 期权交易规则（Option Trading Rules）
 
 > 来源：Al Brooks《反转篇》第23章+第12章
-> 场记指南参考：pa-trading-field-guide.html AJ章节
+> 场记指南（原文语料，未随技能打包）AJ章节
 
 ## 概述
 
@@ -101,7 +101,7 @@ Delta中性 = 同时持有Call和Put，使总Delta接近0：
 
 ## 快速参考
 
-- 完整规则：pa-trading-field-guide.html → AJ. 期权交易规则
+- 完整规则见场记指南（原文语料，未随技能打包）： AJ. 期权交易规则
 - 风险逆转与代尔塔中性见原文
 - 价格行为入场：03_signal_confirmation.md
 - 仓位管理：05_position_management.md

@@ -1,4 +1,4 @@
-> 本文件是 `plan-schema.md` 的第 2/6 片（按 `##` 小节切分，内容未改动）。
+> 本文件是 `plan-schema_part1.md` 的第 2/6 片（按 `##` 小节切分，内容未改动）。
 
 ## order_type 语义（Gate 实现映射 · 0829 契约对齐）
 
@@ -7,20 +7,20 @@
 > **唯一权威字段**：订单类型以方案级 `order_type` 为准（`entry_zone` 不含 `type`，勿在此另写；节点3 已统一只读 `order_type`）。
 > **术语提醒**：`order_type=stop` 是「开仓条件触发单」（突破/延续入场），**不是**「止损离场单」；真正的止损离场单在 `exit_rules.stop_loss`（条件单 + `reduce_only=true`）。
 
-| order_type | Gate 实现 | 用途 | 节点3 布防形态 |
+| order_type | Gate 实现 | 用途 | 执行侧布防形态 |
 |---|---|---|---|
 | `limit`（现价单） | `/orders` 限价单（gtc） | 回踩/回抽入场 | 带内阶梯多档（距现价升序，权重分配） |
 | `stop`（开仓条件触发单，非止损离场单） | `/price_orders` 条件单（开仓触发单）：trigger{rule 1≥/2≤, price_type 最新价} + initial 限价=触发价 | 突破/突破延续入场（价格行为学最常用） | 单一触发档挂带沿，触发后限价成交 |
 | `stop_limit` | 同 `stop`（Gate 条件单原生即 stop-limit，别名归一化） | 同上（显式声明触发后限价） | 同 `stop` |
 | `market` | `/orders` 市价单（ioc） | **仅 manage**：紧急平仓；entry 型不支持 | — |
 
-开仓/平仓区分：平仓订单（止盈止损）为条件单 + `reduce_only=true` 且禁市价（限价+trigger-limit-price）；开仓条件单无 reduce_only、允许触发后市价。触发规则速查：做多止损（价跌触发）rule 2、做多止盈（价涨触发）rule 1、做空止损 rule 1、做空止盈 rule 2。详见节点1 `quick_order.py`（订单分类学唯一权威源）。
+开仓/平仓区分：平仓订单（止盈止损）为条件单 + `reduce_only=true` 且禁市价（限价+trigger-limit-price）；开仓条件单无 reduce_only、允许触发后市价。触发规则速查：做多止损（价跌触发）rule 2、做多止盈（价涨触发）rule 1、做空止损 rule 1、做空止盈 rule 2。详见节点1 `执行侧订单分类学`（订单分类学唯一权威源）。
 
-> **判侧口径（2026-09-10 增补）**：「回踩/回抽」与「突破」侧以带中值与现价相对位置判定（多头带中<现价=回调侧→limit；带中>现价=突破侧→stop/stop_limit，空头镜像），与节点3 `plan_loader.infer_entry_type`、validate_report.py 门禁 29 同口径。措辞约定：「回测/回踩」专指提前挂单的回调接货；信号K确认版突破回撤写「突破回撤/BOP/PBT」（突破族统一止损单，2026-09-09 裁定）。
+> **判侧口径（2026-09-10 增补）**：「回踩/回抽」与「突破」侧以带中值与现价相对位置判定（多头带中<现价=回调侧→limit；带中>现价=突破侧→stop/stop_limit，空头镜像），与节点3 `执行侧入场类型推断`、交付门禁 29 同口径。措辞约定：「回测/回踩」专指提前挂单的回调接货；信号K确认版突破回撤写「突破回撤/BOP/PBT」（突破族统一止损单，2026-09-09 裁定）。
 
 ### 订单类型 × 挂单时序（预挂架构运行时语义 · 2026-09-12）
 
-节点3 布防按 `entry_gate_mode` 分流（`pa-executor/core/signal_eval.py`，spec: preplace-entry-architecture D1/D4），**trigger_conditions 的运行时消费方式随订单类型不同**——节点2 字段写法不变，但报告叙事不得误述「全部触发条件确认后才挂单」：
+执行侧布防按 `entry_gate_mode` 分流（`执行侧序列判定`，spec: preplace-entry-architecture D1/D4），**trigger_conditions 的运行时消费方式随订单类型不同**——节点2 字段写法不变，但报告叙事不得误述「全部触发条件确认后才挂单」：
 
 | order_type × 触发条件构成 | 布防时序 | trigger_conditions 运行时消费 |
 |---|---|---|

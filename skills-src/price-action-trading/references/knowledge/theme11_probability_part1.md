@@ -3,7 +3,7 @@
 # 概率数据完整手册 (Probability Quick Reference)
 
 > 来源: Brooks Price Action概率总结 + 三部曲各章节概率数据
-> v8.0新增 | 2026-04-18
+> 新增 | 2026-04-18
 
 ---
 

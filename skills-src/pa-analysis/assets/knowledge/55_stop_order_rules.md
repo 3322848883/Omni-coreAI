@@ -1,7 +1,7 @@
 # AK. 止损单入场10条规则（10 Stop Order Entry Rules）
 
 > 来源：Al Brooks《区间篇》V2_B06 P267-268
-> 场记指南参考：pa-trading-field-guide.html AK章节
+> 场记指南（原文语料，未随技能打包）AK章节
 
 ## 概述
 
@@ -104,7 +104,7 @@
 
 ## 快速参考
 
-- 完整规则：pa-trading-field-guide.html → AK. 止损单入场10条规则
+- 完整规则见场记指南（原文语料，未随技能打包）： AK. 止损单入场10条规则
 - 入场方式：04_entry_execution.md
 - 限价vs止损矩阵：58_limit_vs_stop.md
 - 区间交易：46_trading_range.md
@@ -113,5 +113,5 @@
 
 - 本文件「信号K 高/低点上方 1 tick 挂止损单」已程序化：`order_type=stop/stop_limit` 且 trigger 含 signal_bar/sequence → 节点3 信号K 确认后挂触发单（触发价=信号K 另一端 1 tick，D4）；纯价格类 stop → 布防即直挂。
 - 本文件规则族（区间内 High2/Low2/双底双顶旗形）多配 sequence 类触发（high2/low2/dbl_bot/dbl_top 等 63 种登记枚举）——程序几何自足判定，不依赖 AI 在场。
-- 「区间内慎用止损单」（常见错误1）由 validate 门禁 29 几何主判把关：带中值在现价回调侧 must limit；突破侧 must stop。本文件规则 1/2/7/8 的「区间底部/顶部」信号K 确认版入场（非提前接货）仍为 stop，与几何主判不冲突——判侧以带中值与现价相对位置为准（见 `references/plan-schema.md`「订单类型 × 挂单时序」）。
+- 「区间内慎用止损单」（常见错误1）由 validate 门禁 29 几何主判把关：带中值在现价回调侧 must limit；突破侧 must stop。本文件规则 1/2/7/8 的「区间底部/顶部」信号K 确认版入场（非提前接货）仍为 stop，与几何主判不冲突——判侧以带中值与现价相对位置为准（见 `references/plan-schema_part1.md`「订单类型 × 挂单时序」）。
 - 撤单只认 fatal 失效线/计划到期（D2），信号K 不参与撤单；SL/TP 与入场单同批预挂（D3）。

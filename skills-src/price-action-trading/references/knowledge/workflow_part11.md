@@ -1,5 +1,5 @@
 
-> ⚠️ 本文件源自**人类工作流**。其中「写入 `logs/...`、更新 `memory/...`」一类是原工作流的**记录协议**；bot 没有文件工具，请改为把结论写进 chip 字段（`region` / `invalidation` / `time_stop_bars` / `give_back_pct` / `risk_pct` / `rule_ids` / `scenarios`），跨轮记忆由订单上下文与决策日志承担。
+> ⚠️ 本文件源自**人类工作流**，其中「写入日志文件 / 更新记忆文件」一类是原工作流的**记录协议**（bot 无文件系统，相关路径已改写为记忆承载物）；bot 没有文件工具，请改为把结论写进 chip 字段（`region` / `invalidation` / `time_stop_bars` / `give_back_pct` / `risk_pct` / `rule_ids` / `scenarios`），跨轮记忆由订单上下文与决策日志承担。
 
 > 本文件是 `workflow.md` 的第 11/19 片（按 `##` 小节切分，内容未改动）。
 
@@ -202,7 +202,7 @@
 
 #### 记录文件
 
-logs/orders/YYYY-MM-DD_orders.md
+订单上下文（当轮订单）
 
 ---
 

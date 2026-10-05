@@ -1,21 +1,16 @@
 # 交付门禁（44 项）
 
-> 从 `validate_report.py` 的模块说明提取。**bot 不产出报告，所以这些门禁不会在交付时自动跑** —— 它的价值在于：它逐条写明了「一个完整方案必须自洽到什么程度」，你可以把它当作**方案自检清单**用（尤其 25 链式不变式、28 RR 自洽、30 失效对应、33 时间口径、34 形态词表）。
+> 执行侧的 44 项交付门禁定义。**bot 不产出报告，所以这些门禁不会在交付时自动跑** —— 它的价值在于：它逐条写明了「一个完整方案必须自洽到什么程度」，你可以把它当作**方案自检清单**用（尤其 25 链式不变式、28 RR 自洽、30 失效对应、33 时间口径、34 形态词表）。
 
 ```
 pa-analysis 报告物理完整性验证器 — 交付前最后一道机器门禁（对应 verification-checklist.md A6）
 
-用法:
-    python validate_report.py <报告路径.html> [--profile full|plan]
-    python validate_report.py <plan.json>            # F10 计划阶段预检：裸 plan-json
-                                                     # 自动包装强制 plan 档（同口径）
-
-检查 44 项（full 档全跑；plan 档跳过 15 项 html 层=检查对象为 HTML 人读面/图面的项
-（1/2/7/8/12/13/14/15/19/21/22/23/24/27/32b），用于 auto 模式壳校验，plan 层 29 项硬门禁不变），
-全部 PASS 退出码 0；任一 FAIL 退出码 1（禁止交付）。
-仅用标准库。1-8 物理完整性；9-15 内容级存在性门禁（plan-json 顶层 11 字段缺失 / entry_reason_type 缺 / data_source 类型错 / 快照节缺 /
+检查 44 项：plan 层 29 项（检查对象在计划 JSON 内）+ html 层 15 项
+（1/2/7/8/12/13/14/15/19/21/22/23/24/27/32b，检查对象是报告人读面/图面 —— bot 无报告，这 15 项不适用）。
+plan 层 29 项对你有约束力：全部满足才算一个自洽方案，任一不满足即禁止交付。
+仅用标准库。1-8 物理完整性；9-15 内容级存在性门禁（计划顶层 11 字段缺失 / entry_reason_type 缺 / data_source 类型错 / 快照节缺 /
 交易者方程式缺 / 23 理由矩阵缺 / 映射表缺）；16 方案交接（重分析未逐方案对账旧版 / 首份未标注无前版）；17-19 执行链完整（
-exit_rules 六件套缺 / position 结构缺 / HTML 离场规则人读面缺——节点3 依赖执行链全字段）；
+exit_rules 六件套缺 / position 结构缺 / HTML 离场规则人读面缺——执行侧依赖执行链全字段）；
 20 量能门槛机器可读（trigger_conditions 正向下限或
 no_trade_conditions 负向否决皆可——冻结时段薄量信号默认假，SKILL.md 工作流步骤 11）；
 21 JSON↔HTML 关键价一致（active 方案执行链关键价必须
@@ -28,15 +23,15 @@ no_trade_conditions 负向否决皆可——冻结时段薄量信号默认假，
 plan_loader._validate_consistency 逐字一致；0827 事故：B方案 SL==带下沿被节点3整版拒绝）；
 26 manage 型方案规范（plan_type=manage 存量处置：方向校验改用现价、position.risk_pct=0 不新增风险、
 combination_rules.primary 不得指向 manage 方案——manage 不作主入场路由）。plan_type 缺省=entry（向后兼容）；
-27 图面质量（标准渲染器机读属性 data-vol/ema/candle-w/ann/zones/labels：图源必须为 scripts/chart_svg.py
-产物、量能条与EMA20全图强制、蜡宽≥6.5、事件标注框≥2、入场带≥1、训练层短标≥1——0829 事故：三个会话
-临场手写渲染脚本三代漂移，量能条/标注框/价签盒逐代丢失仍全过旧门禁；规范见 annotation-spec.md 绘制工具链；
+27 图面质量（**bot 无图，本项不适用**——原判据是渲染器机读属性 data-vol/ema/candle-w/ann/zones/labels：
+量能条与EMA20全图强制、蜡宽≥6.5、事件标注框≥2、入场带≥1、训练层短标≥1——0829 事故：三个会话
+临场手写渲染三代漂移，量能条/标注框/价签盒逐代丢失仍全过旧门禁；
 0829 二轮审计增补：时间锚定（最后K 须 ≤ data_time+1根——图面禁止含分析后行情，重绘必须传 end=data_time）、
 价签盒防重叠（垂直间距须 ≥16px，chart_svg 自动错开）——两项皆为纯几何检查，不判内容对错）；
 28-33 plan-json 自洽门禁（方案层内部一致性，非行情对错判断）：
 28 RR 自洽（risk_reward_check 声明的 min_rr 必须与带中值入场的关键价实算一致——RR 死锁=假优势计划）；
 29 订单类型语义（2026-09-10 重构为几何主判：带中值在现价回调侧须 limit、突破侧须
-stop/stop_limit——与节点3 plan_loader.infer_entry_type 同口径；突破族 sequence
+stop/stop_limit——与执行侧入场类型推断同口径；突破族 sequence
 （breakout_ignition/breakout_quality/breakout_pullback/pbt/trend_line_breakout）硬约束
 stop（2026-09-09 全网核实裁定：突破族统一止损单入场，覆盖 51 规则8 限价单旧表述）；
 关键词降级为措辞/几何交叉校验（纯突破词配回调侧带、纯回测/回调词配突破侧带均 FAIL）；
@@ -54,7 +49,7 @@ momentum_check/risk_reward_check 必须携带非空 params——缺 params 节�
 无 AI 时计划过期；signal_bar pattern 名须在 11 种登记枚举、sequence 名须在 63 种登记枚举
 （未登记名 → 程序 manual，绝不猜）；语境类形态（尖峰暂停/二次入场/最终旗形/区间陷阱/SPS 等，
 #20-#22/#24）须标注 ai_judged:true 归口监控员 AI——缺 ai_judged 仅记 warning 不阻断，
-缺 params/未登记形态名为 violation 阻断交付。词表与 pa-executor/core/signal_eval.py 逐字一致）；
+缺 params/未登记形态名为 violation 阻断交付。词表与执行侧枚举逐字一致）；
 32b HTML 模糊占位（2026-09-11 W6：正文数字+xx 式模糊占位（"78,3xx"）——真实数据须精确值，
 全表唯一占位式写法曾漏过旧占位扫描；扫正文（剥 script/style），与 32 的 plan-json 侧互补）；
 35-37 溯源/仓位/词表自洽门禁（2026-09-11 复核意见书 BLOCKER1/W7/W9 落地）：
@@ -81,7 +76,7 @@ manage 型 risk_pct=0 天然不占预算，watch 方案不布防不占预算）�
 41 场景 id 契约（post_entry_scenarios[].id 必填非空、计划内唯一——节点3
 close_reason="scenario:<id>" 的可追溯性依赖；09-15 六笔空名离场不可复盘）；
 42 premise_invalidation 契约（active entry 型方案必须含
-premise_invalidation.close_below —— 节点3 前提状态机的唯一机器锚，
+premise_invalidation.close_below —— 执行侧前提状态机的唯一机器锚，
 EMA20 回退已删除）；
 43 逆AIL结构互斥（2026-09-16 F7-1：always_in_consensus 失效条件
 params.expected 归一化后 == market_context.always_in → 条件入场即成立、

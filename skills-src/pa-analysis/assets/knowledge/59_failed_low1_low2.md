@@ -1,7 +1,7 @@
 # AP. 失败Low1/Low2（Failed Low1/Low2）
 
 > 来源：Al Brooks三部曲
-> 场记指南参考：pa-trading-field-guide.html AP章节
+> 场记指南（原文语料，未随技能打包）AP章节
 
 ## Low1/Low2/High1/High2 基础回顾
 
@@ -136,7 +136,7 @@ Low1/Low2失败
 
 ## 快速参考
 
-- 完整内容：pa-trading-field-guide.html → AP. 失败Low1/Low2
+- 完整内容见场记指南（原文语料，未随技能打包）： AP. 失败Low1/Low2
 - 失败处理：11_failure_handling.md
 - BOP入场：38_bop.md
 - 信号确认：03_signal_confirmation.md

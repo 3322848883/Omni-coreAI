@@ -1,7 +1,7 @@
 # AQ. 时间框架选择矩阵（Timeframe Selection Matrix）
 
 > 来源：Al Brooks《反转篇》第13章
-> 场记指南参考：pa-trading-field-guide.html AQ章节
+> 场记指南（原文语料，未随技能打包）AQ章节
 
 ## 核心原则
 
@@ -117,7 +117,7 @@ Brooks的三层时间框架体系：
 
 ## 快速参考
 
-- 完整内容：pa-trading-field-guide.html → AQ. 时间框架选择矩阵
+- 完整内容见场记指南（原文语料，未随技能打包）： AQ. 时间框架选择矩阵
 - 多时间框架：12_multi_timeframe.md
 - 逐bar分析：24_bar_by_bar.md
 - 交易日志：06_review_evolution.md

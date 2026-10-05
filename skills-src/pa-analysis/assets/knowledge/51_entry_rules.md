@@ -28,7 +28,7 @@
 | 11 | **趋势线突破入场** | 反转初期 | 止损单 | ★★★ | 当价格突破主要趋势线后，在突破K线极值外1tick挂止损单入场。要求：趋势线被明确突破，有后续K线确认。 |
 | 12 | **趋势通道线过冲入场** | 宽通道 | 限价单 | ★★★ | 当价格突破通道线后迅速返回通道内，在通道线处挂限价单入场。要求：通道线过冲后出现反转K线确认。 |
 
-> **规则 8 订单方式修订（2026-09-09 全网核实裁定）**：突破族（BOP/PBT/突破回撤确认）统一**止损单**入场——回撤到突破点 + 信号K确认后，在信号K极值外1tick挂 stop（依据 56_battle_line_pbt.md「反弹K线后1tick止损单」、58_limit_vs_stop.md「PBT用止损单入场」、Brooks 官方 signal-bar stop 默认手法）；规则 8 原文「限价单」为 Brooks 激进变体存档（提前在突破点挂限价、不等信号K确认），不再作为本系统下单口径。程序侧以 entry_playbook.py TRADE_INTENT（breakout_pullback/pbt → stop）与 validate_report.py 门禁 29（突破族 sequence 硬约束 stop）为准。
+> **规则 8 订单方式修订（2026-09-09 全网核实裁定）**：突破族（BOP/PBT/突破回撤确认）统一**止损单**入场——回撤到突破点 + 信号K确认后，在信号K极值外1tick挂 stop（依据 56_battle_line_pbt.md「反弹K线后1tick止损单」、58_limit_vs_stop.md「PBT用止损单入场」、Brooks 官方 signal-bar stop 默认手法）；规则 8 原文「限价单」为 Brooks 激进变体存档（提前在突破点挂限价、不等信号K确认），不再作为本系统下单口径。程序侧以 执行侧交易意图表 TRADE_INTENT（breakout_pullback/pbt → stop）与 交付门禁 29（突破族 sequence 硬约束 stop）为准。
 
 ### 区间交易类（规则13-14）
 

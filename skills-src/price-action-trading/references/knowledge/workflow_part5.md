@@ -207,7 +207,7 @@
   - [ ] 深回撤（10+根K线）→ 趋势弱或反转可能
 
 
-> **v7新增参考**：
+> **参考**：
 > - 四种市场周期模型：突破→窄通道→宽通道→震荡区间 → 参考 [theme10_market_cycle.md](theme10_market_cycle_part1.md)
 > - 二元决策框架：趋势还是震荡？突破还是通道？ → 参考 [strategy_workflow.md](strategy_workflow_part1.md)（二元决策框架章节）
 > - 市场惯性：80%打破惯性的尝试都会失败 → 参考 [theme10_market_cycle.md](theme10_market_cycle_part1.md)（市场惯性框架章节）
@@ -265,7 +265,7 @@
 - **收盘前30-60分钟**: 日线强趋势收盘规则生效
 
 ### 步骤 1.11 时间框架选择决策矩阵
-→ 完整规则见 references/knowledge/source/V3_反转/V3_B05_P201-250.md P205-207
+→ 完整规则见 docs/pa-source/V3_反转/V3_B05_P201-250.md P205-207
 
 **时间框架对比**（原文V3_B05 P205）:
 

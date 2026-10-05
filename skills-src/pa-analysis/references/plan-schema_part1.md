@@ -1,10 +1,10 @@
-> 本文件是 `plan-schema.md` 的第 1/6 片（按 `##` 小节切分，内容未改动）。
+> 本文件是 `plan-schema_part1.md` 的第 1/6 片（按 `##` 小节切分，内容未改动）。
 
 # 内嵌交易计划 JSON Schema（节点3 契约）
 
 报告内嵌 `<script type="application/json" id="plan-json">{...}</script>`。节点3 可据此适配执行。
-**本 schema 以 `assets/templates/plan-skeleton.json` 为结构基准（实例化源头）；本文示例与骨架冲突时以骨架为准。**
-> **auto 模式壳契约（2026-09-10）**：auto 模式产物 `assets/templates/plan-shell.html` 极简壳的 plan-json 字段与本 schema **零变化**，script 块属性顺序与 report-skeleton.html 逐字一致，节点3 plan_loader 提取正则不感知模式差异。
+**本 schema 以 `计划结构基准` 为实例化源头；本文示例与骨架冲突时以骨架为准。**
+> **auto 模式壳契约（2026-09-10）**：auto 模式产物的 plan-json 字段与本 schema **零变化**，script 块属性顺序与完整模式逐字一致，执行侧提取不感知模式差异。
 > **每方案独立运行契约（2026-09-13，per-plan-independent-runtime）**：swing/scalp × long/short 四方案 = **四个独立计划**——节点3 对 plans 数组中每个 **active entry 方案独立布防执行**（(symbol, plan_id) 复合键多运行时并存，无互斥关系：任何方案成交不触发其他方案撤单/失效）；`priority.primary` 降级为节点2 的**排名观点**（唯一性约束保留，validate 第 39 项把关），仅作 G7 预算截断时的布防顺序参考，**不再作执行路由**；`combination_rules` 的 overlap/switch_paths/mutex = **结构演化分析备忘**（节点3 永不消费，无执行语义，见下方说明）。
 > **fast-plan 战术计划契约（2026-09-15，node23-hf-tactical-upgrade）**：本 schema 主体描述节点2 深析计划；节点3 AI 产出的**战术计划（fast-plan）**走「子集 + 战术字段」的简化 schema，写入 `{plans_dir}/fast/{symbol}_{ts}.json`，经 plan_loader **fast gate 十项**机械校验后走同一条布防管线——完整契约见文末「fast-plan 战术计划 Schema」节。
 
@@ -21,7 +21,7 @@
   "indicators": { "ema20": { "1d": 0.0, "4h": 0.0, "1h": 0.0, "15m": 0.0, "5m": 0.0 }, "volume": "关键量能观察（高潮/冻结）", "custom": "其他指标" },
   "key_levels": { "magnets": [{"price": 0.0, "type": "支撑/阻力/磁体", "source": "前低/Mxx/图上对象"}], "day_levels": {"high": 0.0, "low": 0.0, "open": 0.0, "close_inprogress": 0.0} },
   "scenario_matrix": [ {"scenario_id": "S1", "description": "情景描述", "probability": "高/中/低", "plan_ids": ["A_…"]} ],
-  "plans": [ { "单个方案结构见下节；通常 4 个（swing/scalp × long/short）。plans 数组是规范形态，validate_report.py 与节点3 均读 plans。每个 active entry 方案将被节点3 独立布防执行（四方案=四个独立计划，无互斥关系）" }, "…" ],
+  "plans": [ { "单个方案结构见下节；通常 4 个（swing/scalp × long/short）。plans 数组是规范形态，交付门禁与执行侧均读 plans。每个 active entry 方案将被执行侧独立布防执行（四方案=四个独立计划，无互斥关系）" }, "…" ],
   "plan_matrix_notes": [ { "style": "scalp", "direction": "long", "reason": "豁免理由（可选顶层字段：plans 四格缺格豁免申报，语义见下方说明）" } ],
   "account_gate": { "status": "UNVERIFIED|VERIFIED|STALE|BLOCKED", "verified_at": "ISO时间或null", "balance": 0.0或null, "note": "状态说明；STALE 时注明快照时间与待修复事项" },
   "combination_rules": { "primary": "唯一 primary 方案 plan_id（= 节点2 排名观点，须与 priority=primary 方案一致，validate 第 39 项把关）", "overlap": [ {"plan_ids": ["A_…", "C_…"], "relation": "持仓管理/加仓/反手/切换/噪音", "reason": "理由（分析备忘：结构演化参考，节点3 永不消费）"} ], "switch_paths": [ {"from": "A_…", "to": "B_…", "condition": "切换条件（分析备忘，无执行语义）"} ], "mutex": [ {"plan_ids": ["A_…", "D_…"], "reason": "互斥理由（分析备忘——四方案独立运行，无互斥执行语义）"} ] },

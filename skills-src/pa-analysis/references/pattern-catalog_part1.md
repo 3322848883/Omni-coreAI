@@ -1,4 +1,4 @@
-> 本文件是 `pattern-catalog.md` 的第 1/2 片（按 `##` 小节切分，内容未改动）。
+> 本文件是 `pattern-catalog_part1.md` 的第 1/2 片（按 `##` 小节切分，内容未改动）。
 
 # 形态 / 结构 / 入场速查表（Pattern Catalog）
 

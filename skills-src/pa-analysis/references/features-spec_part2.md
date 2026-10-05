@@ -3,9 +3,9 @@
 ## 十一、趋势回调族原语（B类下沉批2，v6 新增）
 
 **定位**：同 §十——窗口级序列判定原语，输入整段已收盘K（最新在尾部），输出枚举/布尔/计数/None。
-供镜像 signal_eval.py 的 sequence 条件（high1/high2/low1/low2、retrace_shallow/normal/deep/over、
-pullback_L0..L5、two_leg，词表见 plan-schema.md）与 momentum_check 扩展（max_consecutive_bars、
-failed_h12）消费，与节点3 `pa-executor/core/features.py` 同名原语契约对拍
+供执行侧的 sequence 条件（high1/high2/low1/low2、retrace_shallow/normal/deep/over、
+pullback_L0..L5、two_leg，词表见 plan-schema_part1.md）与 momentum_check 扩展（max_consecutive_bars、
+failed_h12）消费，与执行侧原语 同名原语契约对拍
 （test_cross_copy_contract 把关）。边界纪律同 §一：只出几何事实/计数事实，禁方向观点/质量评价
 （h1/l1 等为结构计数命名，非交易建议；trend_bar_count 只报计数，"年轻/警惕"结论交上层门）。
 
@@ -28,8 +28,8 @@ failed_h12）消费，与节点3 `pa-executor/core/features.py` 同名原语契�
 ## 十二、突破族原语（B类下沉批3，v7 新增）
 
 **定位**：同 §十/§十一——窗口级序列判定原语，输入整段已收盘K（最新在尾部），输出枚举/布尔/None。
-供镜像 signal_eval.py 的 sequence 条件（breakout_ignition/breakout_quality/breakout_pullback/pbt，
-词表见 plan-schema.md）消费，与节点3 `pa-executor/core/features.py` 同名原语契约对拍
+供执行侧的 sequence 条件（breakout_ignition/breakout_quality/breakout_pullback/pbt，
+词表见 plan-schema_part1.md）消费，与执行侧原语 同名原语契约对拍
 （test_cross_copy_contract 把关）。边界纪律同 §一：只出几何事实，禁方向观点/质量评价
 （"true/weak/false"为结构分类命名，非交易建议）。
 
@@ -52,8 +52,8 @@ failed_h12）消费，与节点3 `pa-executor/core/features.py` 同名原语契�
 ## 十三、通道区间族原语（B类下沉批4，v8 新增）
 
 **定位**：同 §十/§十一/§十二——窗口级序列判定原语，输入整段已收盘K（最新在尾部），返回枚举/计数/None。
-供镜像 signal_eval.py 的 sequence 条件（channel_class/channel_overshoot/range_position/tight_range_duration，
-词表见 plan-schema.md）消费，与节点3 `pa-executor/core/features.py` 同名原语契约对拍
+供执行侧的 sequence 条件（channel_class/channel_overshoot/range_position/tight_range_duration，
+词表见 plan-schema_part1.md）消费，与执行侧原语 同名原语契约对拍
 （test_cross_copy_contract 把关）。边界纪律同 §一：只出几何事实/计数事实，禁方向观点/质量评价
 （narrow/wide/steep/flat 为通道结构分类命名，非交易建议）。
 
@@ -68,7 +68,7 @@ failed_h12）消费，与节点3 `pa-executor/core/features.py` 同名原语契�
 channel_classify/range_position 的分类枚举与 channel_overshoot/tight_range_duration 的计数是可判定结果。
 **params 覆盖预留未启用**：批4 词表 expect（narrow/wide/steep/flat、low/mid/high）、min/max 为实际消费词——
 阈值按 §三头部常量（CHANNEL_*/OVERSHOOT_*/RANGE_EDGE_PCT/TIGHT_RANGE_N）判定；铁丝网走新增
-condition type `market_state`（见 pattern-catalog.md「批4 特殊项」，非本节 sequence 原语）；
+condition type `market_state`（见 pattern-catalog_part1.md「批4 特殊项」，非本节 sequence 原语）；
 调整须改常量并走五步契约全同步（feature-addition-contract.md）。
 
 ---
@@ -76,8 +76,8 @@ condition type `market_state`（见 pattern-catalog.md「批4 特殊项」，非
 ## 十四、缺口磁铁族原语（B类下沉批5，v9 新增）
 
 **定位**：同 §十——窗口级序列判定原语，输入整段已收盘K（最新在尾部），返回枚举/布尔/排序表/None。
-供镜像 signal_eval.py 的 sequence 条件（gap_class/gap_strength/magnet_rank/vacuum，词表见 plan-schema.md）
-消费，与节点3 `pa-executor/core/features.py` 同名原语契约对拍（test_cross_copy_contract 把关）。
+供执行侧的 sequence 条件（gap_class/gap_strength/magnet_rank/vacuum，词表见 plan-schema_part1.md）
+消费，与执行侧原语 同名原语契约对拍（test_cross_copy_contract 把关）。
 边界纪律同 §一：只出几何事实，禁方向观点/质量评价（breakout/measured/exhaustion/common、
 strong/mid/weak 为缺口分类命名，非交易建议）。
 
@@ -101,8 +101,8 @@ expect_kind/max_dist_atr 为实际消费词（gap_class/gap_strength 比对 expe
 「单周期窗口序列原语」不同，它接受三层（HTF/MTF/LTF）已归一的方向 token
 （long/short/bull/bear/neutral/空），返回对齐等级枚举，不做「该不该交易」结论
 （等级为共振程度分级，方向限侧由上层 params.direction 表达）。供镜像
-signal_eval.py 的 sequence 条件 `tf_alignment`（词表见 plan-schema.md）消费，
-与节点3 `pa-executor/core/features.py` 同名原语契约对拍
+执行侧序列判定 的 sequence 条件 `tf_alignment`（词表见 plan-schema_part1.md）消费，
+与执行侧原语 同名原语契约对拍
 （test_cross_copy_contract 把关）。边界纪律同 §一：只出对齐等级，禁方向观点/
 质量评价（conflict/3aligned 等为共振等级命名，非交易建议）。
 

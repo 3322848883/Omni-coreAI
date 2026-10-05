@@ -1,15 +1,15 @@
-> 本文件是 `plan-schema.md` 的第 6/6 片（按 `##` 小节切分，内容未改动）。
+> 本文件是 `plan-schema_part1.md` 的第 6/6 片（按 `##` 小节切分，内容未改动）。
 
 ## 校验规则（AI 交付时自检）
 - active 的方案必须：交易链 7 段齐全、entry_zone/stop_loss/targets 非空、trigger 有 K 线证据、RR 与胜率假设不矛盾、来源在 plan_traceability 有标注。
-- **链条不变式（entry 型 active 方案，与节点3 plan_loader._validate_consistency 逐字一致）**：多头必须 `stop_loss < entry_zone.lower < entry_zone.upper < take_profit.target1.price`；空头必须 `stop_loss > entry_zone.upper > entry_zone.lower > target1.price`（严格不等，相等即断裂）。违反 → 该方案 active=false（降级观察）并注明断点。
+- **链条不变式（entry 型 active 方案，与执行侧方案加载._validate_consistency 逐字一致）**：多头必须 `stop_loss < entry_zone.lower < entry_zone.upper < take_profit.target1.price`；空头必须 `stop_loss > entry_zone.upper > entry_zone.lower > target1.price`（严格不等，相等即断裂）。违反 → 该方案 active=false（降级观察）并注明断点。
 - **manage 型 active 方案规范**：`entry_zone` 为处置参考带（informational，链条校验豁免）；方向校验改用现价——多头必须 `stop_loss < market_context.current_price < take_profit.target1.price`，空头镜像；exit_rules 六件套同 entry 要求；`position.risk_pct` 存量处置=0（不新增风险）；`combination_rules.primary` 必须指向 entry 型方案（manage 方案不作主入场路由）。
 - **active 的方案必须含完整 `exit_rules` 六件套**：stop_loss（price+type）/ take_profit（**数组** `[{price, close_pct}]`，有序即 TP1/TP2…）/ trailing_stop（enabled+method+stages，M13 七层）/ time_stop（enabled+rules，swing 24h 重估+72h 全平、scalp 45min 减半+90min 全平；规则单位 at_hours——节点3 双形态兼容 at_seconds/at_hours，节点2 统一落 at_hours）/ drawdown_stop（浮盈峰值回撤 50% 全平）/ scratch_exit（premise_invalid 前提否定打平）——节点3 离场执行全依赖此字段，缺任一 → active=false；方案级 stop_loss/take_profit 是"分析位"，exit_rules 里的同名子字段是"执行位"（含分批/类型），两者都必须有。
   - ⚠️ **执行位 `exit_rules.take_profit` 必须是数组 `[{price, close_pct}]`，禁止写成 dict（`{mode, target1, target2}`）。** 方案级 `plans[].take_profit` 才是 dict（含 mode/rr/description，供分析与 RR 校验）；执行位是它的**降维执行投影**，只保留可执行的价与比例。两者**层级不同、形态不同，不可混淆**——节点3 `position_adopt._manage_targets` / `position_manager._manage_exit_plan` 只认数组形态（`isinstance(er, list)`），写 dict 会被静默回退到 `tps`。（2026-09-20 P0 事故：此处契约曾误写 dict 而实际数据为 list，validate_report 第 21 项按 dict 解析在 list 上抛 AttributeError，因缺异常保护致第 21~44 项共 24 个门禁全部未执行、门禁静默失效。）
   - **单目标 vs 多目标**：单元素数组 `[{price, close_pct:100}]` = 原 `mode: single`；多元素 = 原 `mode: staged`，`close_pct` 之和 ≤100（其余走移动止损）。空数组非法（validate_report 第 17 项判 FAIL）。
-- **active 的 entry 型方案必须含 `premise_invalidation.close_below`**（机器失效位）——取本方案 fatal 失效条件首条的结构位，或信号K极值/突破点/区间边界；缺 → 交付门禁 FAIL（validate_report.py 第 42 项）。`confirm_bars` 缺省按周期取（swing 1h×3、scalp 5m×3）；`interval` 与方案 `timeframe` 一致（须与节点3 `_premise_interval` 口径相同：SWING→1h、SCALP→5m）。
+- **active 的 entry 型方案必须含 `premise_invalidation.close_below`**（机器失效位）——取本方案 fatal 失效条件首条的结构位，或信号K极值/突破点/区间边界；缺 → 交付门禁 FAIL（交付门禁第 42 项）。`confirm_bars` 缺省按周期取（swing 1h×3、scalp 5m×3）；`interval` 与方案 `timeframe` 一致（须与节点3 `_premise_interval` 口径相同：SWING→1h、SCALP→5m）。
   - **方向语义（最易误用，必读）**：`close_below` 对**多头** = 收盘**跌破**该位；对**空头** = 收盘**站上**该位。字段名是历史遗留，**不是方向限定**。
-  - **为什么必须写**：这是节点3 前提状态机（`position_manager._tick_premise`）的**唯一机器锚**。缺该字段时程序过去会回退到 EMA20——而 EMA20 被本体系明令排除在判断依据之外（`pa-analysis/SKILL.md:25` 逐字：「EMA20/ATR14 …… 均不构成入场信号」），且破位判据无强度要求，导致区间市连续 3 根小实体K 即判前提失效全平（实测 5/5 笔在 12 分钟内被全平，其中一笔距 TP1 仅 0.24%）。自 2026-09-16 起回退路径已删除：**无该字段 = 只能靠强度启发式识别质疑K**（容忍度显著降低，但不再是「收在均线下方 1 tick 即算否定」）。
+  - **为什么必须写**：这是执行侧前提状态机（`position_manager._tick_premise`）的**唯一机器锚**。缺该字段时程序过去会回退到 EMA20——而 EMA20 被本体系明令排除在判断依据之外（`pa-analysis/SKILL.md:25` 逐字：「EMA20/ATR14 …… 均不构成入场信号」），且破位判据无强度要求，导致区间市连续 3 根小实体K 即判前提失效全平（实测 5/5 笔在 12 分钟内被全平，其中一笔距 TP1 仅 0.24%）。自 2026-09-16 起回退路径已删除：**无该字段 = 只能靠强度启发式识别质疑K**（容忍度显著降低，但不再是「收在均线下方 1 tick 即算否定」）。
   - 与 `exit_rules.scratch_exit.rules[].rule="premise_invalid"`（纯文本描述）**并存不替代**：前者是机器判据，后者是语义说明。
 - **active 的方案必须含完整 `position` 结构**：pct_of_standard（AIL 共识降级时 <100）/ risk_pct / batch（swing [50,30,20]、scalp [100]）——UNVERIFIED 账户下仍须给出（基于假设资金的条件性输出），节点3 arm 前按 account_gate 复核。
 - active 的方案必须含 `alternative_hypothesis`（主假设失效后的去向）与 `evidence_chain`（四段式证据链）；缺任一 → 降级观察。
@@ -23,20 +23,20 @@
 - 不满足任一 → 该方案 active=false（降级观察），并注明原因。
 - account_gate.status=BLOCKED 时，所有 active 方案必须为 false。
 - **交付门禁 1（RR 自洽）**：含 risk_reward_check(params.min_rr) 的方案，实算 RR=(tp1-带中值)/(带中值-stop_loss)（空头镜像）不得小于 min_rr，否则 FAIL（防节点3实算死锁）。
-- **交付门禁 2（订单类型语义，2026-09-10 几何主判重构）**：带中值在现价回调侧（多头带中<现价，空头镜像）→ order_type 必须 limit（回调接货）；带中在突破侧 → 必须 stop/stop_limit（突破追认）——与节点3 plan_loader.infer_entry_type 同口径；触发条件含突破族 sequence（breakout_ignition/breakout_quality/breakout_pullback/pbt/trend_line_breakout）→ 必须 stop/stop_limit（2026-09-09 全网核实裁定：突破族统一止损单入场，覆盖 51 规则8 限价单旧表述）。措辞约定：「回测/回踩」专指提前挂单的回调接货入场，信号K确认版突破回撤写「突破回撤/BOP/PBT」——纯突破词配回调侧带、纯回测/回调词配突破侧带 = 措辞/几何冲突 FAIL。manage 型豁免；order_type 缺省或带位/现价数据不足跳过。
+- **交付门禁 2（订单类型语义，2026-09-10 几何主判重构）**：带中值在现价回调侧（多头带中<现价，空头镜像）→ order_type 必须 limit（回调接货）；带中在突破侧 → 必须 stop/stop_limit（突破追认）——与执行侧入场类型推断同口径；触发条件含突破族 sequence（breakout_ignition/breakout_quality/breakout_pullback/pbt/trend_line_breakout）→ 必须 stop/stop_limit（2026-09-09 全网核实裁定：突破族统一止损单入场，覆盖 51 规则8 限价单旧表述）。措辞约定：「回测/回踩」专指提前挂单的回调接货入场，信号K确认版突破回撤写「突破回撤/BOP/PBT」——纯突破词配回调侧带、纯回测/回调词配突破侧带 = 措辞/几何冲突 FAIL。manage 型豁免；order_type 缺省或带位/现价数据不足跳过。
 - **交付门禁 3（失效处理对应）**：invalidation_conditions 的 id 集合必须与 lifecycle.invalidation_handling 的 ref 集合相等。
 - **交付门禁 4（四格矩阵）**：plans 须覆盖 swing/scalp × long/short 四格（active 与 watch 均计入），缺失格须 plan_matrix_notes 申报豁免（style/direction/reason 三字段缺一不可）。
 - **交付门禁 5（占位残留）**：plan-json 全部字符串不得含 "X点/待填/TBD/TODO" 占位残留。
 - **交付门禁 6（时间口径）**：hold_time 上界 ≤ time_stop 首档 at_hours；swing 的 post_entry 不得出现"分钟未达"表述；scalp 的 time_stop 档位 <2 小时。
-- **以上 6 项已由 validate_report.py 程序化把关，AI 不得绕过。**
-- **边界标注**：形态类条件 params 词表规范已硬化为上方「信号K params 词表规范」节，validate_report.py 第 34 项程序化把关（缺 params / 未登记形态名 → violation 阻断；语境类形态缺 ai_judged:true → warning）；本节其余门禁只管数字/结构自洽。
+- **以上 6 项已由交付门禁程序化把关，AI 不得绕过。**
+- **边界标注**：形态类条件 params 词表规范已硬化为上方「信号K params 词表规范」节，交付门禁第 34 项程序化把关（缺 params / 未登记形态名 → violation 阻断；语境类形态缺 ai_judged:true → warning）；本节其余门禁只管数字/结构自洽。
 
 ## 节点2/节点3 职责划分
 
 | 职责 | 节点2 (pa-analysis) | 节点3 (pa-executor) |
 |---|---|---|
 | 计划详细度/完整性 | 全责：方案一次齐全，缺项即降级/交付门禁拦截 | 不补计划、不猜测语义 |
-| 计划数字自洽 | 交付门禁（validate_report.py 程序化把关，含上方 6 项） | 加载期 RR fail-fast 复核 |
+| 计划数字自洽 | 交付门禁（程序化把关，含上方 6 项） | 加载期 RR fail-fast 复核 |
 | 触发判定 | 输出结构化 params（机器可读触发参数） | 程序校验 + 监控员 AI 软否决 |
 | 订单类型语义 | 断言 order_type 与入场语义匹配 | 白名单归一化执行 |
 | 执行/风控/离场 | 输出 exit_rules 六件套 | 机械执行 |
