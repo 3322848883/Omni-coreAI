@@ -39,7 +39,11 @@ class BotConfig:
     # pre-trade: open/stop_entry must carry sl
     require_sl: bool = True
     # account-level risk: {halt, max_total_notional_usd, daily_loss_limit_usd, max_leverage}
+    # 声明 `account: <name>` 时会与 config/accounts.yaml 的账户级风控合并
+    # （上限类取更严的）—— 多 bot 共账户时的合并闸门。
     account_risk: dict = field(default_factory=dict)
+    # 所属账户名（config/accounts.yaml 的 key）；空 = 不参与账户级合并
+    account: str = ""
     # LLM strategist (per-bot strategy + risk)
     strategist: dict = field(default_factory=dict)
     # exchange adapter: gate | binance | okx | bybit | bitget | hyperliquid
@@ -111,7 +115,71 @@ def overlay_dir_for(config_dir: Path) -> Path:
     return Path(config_dir).parent / "bots.local"
 
 
-def load_bot_config(path: Path, overlay_dir: Optional[Path] = None) -> BotConfig:
+def accounts_path(config_dir: Path) -> Path:
+    return Path(config_dir).parent / "accounts.yaml"
+
+
+# 上限类字段：账户级与 bot 级取**更严**（更小）的值。
+# 非上限类（如 risk_pct）bot 级优先 —— bot 可以自己更保守，但不能比账户级更激进。
+_RISK_CAP_KEYS = (
+    "max_notional_pct", "max_total_notional_pct",
+    "max_total_notional_usd", "max_notional_usd",
+    "daily_loss_limit_usd", "max_leverage", "safe_mode_after_failures",
+)
+
+
+def load_accounts(config_dir: Path) -> dict[str, dict]:
+    """账户级配置（可选）。用于多 bot 共账户时的**合并风控闸门**。
+
+    背景（2026-10-05 架构盘点 S2/S6）：`account_risk` 逐 bot 配置、日初权益也
+    按 bot 落盘 —— 多 bot 共账户时各卡各自阈值，**合计敞口 ≈ N × 阈值**，
+    没有账户级合并闸门。
+
+    文件格式（`config/accounts.yaml`，**可选；不存在则全部走 bot 级、行为不变**）：
+
+        accounts:
+          gate-main:
+            api_key_env: GATE_API_KEY
+            account_risk: {max_total_notional_pct: 10.0, daily_loss_limit_usd: 20}
+            bots: [smc-eth-live, orderflow-eth-live]
+    """
+    p = accounts_path(config_dir)
+    if not p.is_file():
+        return {}
+    try:
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001
+        return {}
+    out: dict[str, dict] = {}
+    for name, cfg in (data.get("accounts") or {}).items():
+        if isinstance(cfg, dict):
+            out[str(name)] = dict(cfg)
+    return out
+
+
+def merge_account_risk(bot_risk: dict, acct_risk: dict) -> dict:
+    """bot 级与账户级风控合并。
+
+    规则：**上限类取更严的**（min）、`halt` 取逻辑或、其余 bot 级优先。
+    这样账户级是硬底，而 bot 自己可以更保守 —— 但**不能比账户级更激进**。
+    """
+    out = dict(acct_risk or {})
+    for k, v in (bot_risk or {}).items():
+        if k == "halt":
+            out[k] = bool(out.get(k)) or bool(v)
+            continue
+        if k in _RISK_CAP_KEYS and k in out:
+            try:
+                out[k] = min(float(out[k]), float(v))
+                continue
+            except (TypeError, ValueError):
+                pass
+        out[k] = v
+    return out
+
+
+def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
+                    accounts: Optional[dict] = None) -> BotConfig:
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(data, dict):
         raise GateApiError(f"bot config must be a mapping: {path}")
@@ -138,6 +206,14 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None) -> BotConfig
     if env not in ("live", "testnet", "paper"):
         raise GateApiError(f"env must be live|testnet in {path}")
     bot_id = data.get("bot_id") or path.stem
+    # 账户级风控合并：bot 声明 `account: <name>` 时，把账户级的 account_risk
+    # 合进来（上限类取更严的）。未声明 / 无 accounts.yaml → 保持原行为。
+    acct_name = str(data.get("account") or "").strip()
+    bot_risk = dict(data.get("account_risk") or {})
+    acct_risk: dict = {}
+    if acct_name and accounts:
+        acct_risk = dict((accounts.get(acct_name) or {}).get("account_risk") or {})
+    merged_risk = merge_account_risk(bot_risk, acct_risk) if acct_risk else bot_risk
     return BotConfig(
         bot_id=str(bot_id),
         enabled=enabled,
@@ -155,7 +231,8 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None) -> BotConfig
         default_replace=str(data.get("default_replace") or "none").strip().lower(),
         order_scope=str(data.get("order_scope") or "own").strip().lower(),
         require_sl=bool(data.get("require_sl", True)),
-        account_risk=dict(data.get("account_risk") or {}),
+        account=acct_name,
+        account_risk=merged_risk,
         strategist=dict(data.get("strategist") or {}),
         paper=dict(data.get("paper") or {}),
     )
@@ -167,9 +244,10 @@ def load_all_bots(config_dir: Path, overlay_dir: Optional[Path] = None) -> dict[
     if not config_dir.exists():
         return bots
     ov_dir = Path(overlay_dir) if overlay_dir else overlay_dir_for(config_dir)
+    accounts = load_accounts(config_dir)
     for path in sorted(config_dir.glob("*.yaml")):
         if path.name.startswith("_"):
             continue
-        cfg = load_bot_config(path, overlay_dir=ov_dir)
+        cfg = load_bot_config(path, overlay_dir=ov_dir, accounts=accounts)
         bots[cfg.bot_id] = cfg
     return bots

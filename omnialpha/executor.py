@@ -81,6 +81,37 @@ def _parse_symbol_positions(positions: list, symbol: str) -> list[dict]:
     return out
 
 
+# 执行优先级：数字越小越先执行。**先释放风险、再承担风险**。
+_INTENT_PRIORITY = {
+    # 1) 平仓：立刻释放保证金与风险
+    "close": 1, "close_all": 1, "flatten": 1, "close_long": 1, "close_short": 1,
+    # 2) 减仓：部分释放
+    "reduce": 2, "reduce_long": 2, "reduce_short": 2,
+    # 3) 撤单：腾出挂单额度（Gate 每合约有挂单上限）
+    "cancel_all": 3, "cancel_price_all": 3, "cancel_trail_all": 3,
+    # 4) 改保护：调整已有仓的保护，不改敞口
+    "modify_tp_sl": 4,
+    # 5) 开仓/加仓/突破进场：最后做
+    "open_long": 5, "open_short": 5, "add_long": 5, "add_short": 5,
+    "stop_entry_long": 5, "stop_entry_short": 5,
+    # 9) 观望
+    "hold": 9,
+}
+
+
+def _sort_intents_by_priority(intents: list) -> list:
+    """按「先平仓 → 减仓 → 撤单 → 改保护 → 开仓」排序。
+
+    参照 nofx 的 `sortDecisionsByPriority`（close=1 / open=2 / hold=3）。
+    稳定排序：同优先级保持信号里的原顺序，所以不会打乱同一动作的多腿。
+    未知动作排 6（在开仓之后、hold 之前）—— 宁可晚做，不要抢在平仓前面。
+    """
+    return sorted(
+        intents,
+        key=lambda i: _INTENT_PRIORITY.get(str(getattr(i, "action", "") or "").lower(), 6),
+    )
+
+
 class Executor:
     def __init__(
         self,
@@ -96,6 +127,7 @@ class Executor:
         alert_store: Optional[Any] = None,
         root: Optional[Path] = None,
         bot_id: str = "",
+        account: str = "",
     ):
         self.client = client
         self.symbols_whitelist = (
@@ -113,6 +145,10 @@ class Executor:
         # bot 隔离：日初权益等状态写 data/bots/<bot_id>/state/（勿用共享目录）
         self.root = Path(root) if root is not None else Path.cwd()
         self.bot_id = str(bot_id or "").strip()
+        # 所属账户（config/accounts.yaml 的 key）。非空时**日初权益走账户级共享路径**，
+        # 这样多个 bot 共账户时能形成**账户级**日亏熔断，而不是各算各的日初
+        # （架构盘点 S6：日初权益按 bot 落盘 → 同账户下各自独立触发，不是账户级阈值）。
+        self.account = str(account or "").strip()
         # bot namespace: order texts always under t-{label_prefix}*; signal labels cannot escape
         self.label_prefix = str(label_prefix or "").strip()
         # P0.4 告警落盘：权益偏离 / 孤儿保护单
@@ -131,7 +167,20 @@ class Executor:
         replace_mode = self._replace_mode(signal, intents)
         pre_owned = self._snapshot_owned(intents) if replace_mode != "none" else {}
 
+        # 排序：**先平仓、后开仓**（参照 nofx 的 `sortDecisionsByPriority`）。
+        # 先释放保证金再开新仓 —— 否则同轮换仓会因保证金不足被拒，或两笔叠加
+        # 撞上总量闸门。`sorted` 是稳定排序，同优先级保持信号里的原顺序。
+        intents = _sort_intents_by_priority(intents)
+
         for intent in intents:
+            # 优雅停机检查点：参照 nofx 的 `isRunning`（每轮开始 + **每条决策
+            # 执行前**都查）。我们原先只有进程级锁 —— 长批次执行中无法立即停手。
+            # 触发方式：创建 `data/bots/<id>/state/stop` 文件。
+            if self._stop_requested():
+                report.results.append(StepResult(
+                    intent.action, intent.symbol, False,
+                    error="STOP_REQUESTED: 收到停机请求，中止剩余 intent"))
+                break
             gate = self._entry_gate(intent)
             if gate:
                 map_note = self._map_open_to_add(intent)
@@ -538,14 +587,70 @@ class Executor:
                 "SL_REQUIRED: open/stop_entry requires sl (or set require_sl: false)"
             )
 
+    def _auto_halt_path(self) -> Path:
+        """自动熔断标记的位置：有 account 走账户级（跨 bot 共享），否则 bot 级。"""
+        if self.account:
+            return (Path(self.root) / "data" / "accounts" / self.account
+                    / "state" / "halt.json")
+        return (Path(self.root) / "data" / "bots" / (self.bot_id or "_unknown")
+                / "state" / "halt.json")
+
+    def _read_auto_halt(self) -> str:
+        """读自动熔断标记，返回原因（空 = 未熔断）。
+
+        **按 UTC 日自动复位**：标记里记了 `day`，跨日即视为失效 —— 所以
+        「日亏熔断」不需要任何定时任务来解除。人工 `halt: true` 仍然独立生效
+        （两者在 `_check_account_risk` 里取逻辑或）。
+        """
+        try:
+            import json as _json
+
+            p = self._auto_halt_path()
+            if not p.exists():
+                return ""
+            rec = _json.loads(p.read_text(encoding="utf-8"))
+            if not rec.get("halt"):
+                return ""
+            from datetime import datetime, timezone
+            today = datetime.now(timezone.utc).strftime("%Y%m%d")
+            if str(rec.get("day") or "") != today:
+                return ""
+            return str(rec.get("reason") or "halt")
+        except Exception:  # noqa: BLE001 — 读不到就当未熔断，保持原行为
+            return ""
+
+    def _write_auto_halt(self, reason: str) -> None:
+        """置位自动熔断（当日有效，跨日自动失效）。"""
+        try:
+            import json as _json
+            import time as _time
+            from datetime import datetime, timezone
+
+            p = self._auto_halt_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(_json.dumps({
+                "halt": True,
+                "reason": reason,
+                "day": datetime.now(timezone.utc).strftime("%Y%m%d"),
+                "ts": int(_time.time()),
+            }, ensure_ascii=False), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
+
     def _check_account_risk(self, intent: Intent) -> None:
         """Account-level halt / exposure / daily-loss limits (pre-trade, all configurable)."""
         ar = self.account_risk or {}
         action = (intent.meta or {}).get("requested_action") or intent.action
         manage = {"hold", "modify_tp_sl", "close", "close_all", "flatten", "cancel_all", "cancel_price_all",
                   "cancel_trail_all", "reduce", "reduce_long", "reduce_short"}
-        if ar.get("halt") and action not in manage:
-            raise GateApiError("HALTED: account_risk.halt=true; only close/cancel allowed")
+        # 人工 halt（yaml）与**自动熔断**（日亏触发、跨日自动复位）取逻辑或。
+        # 原先 halt 只能人工改 yaml —— 出了事要有人在场才停得下来。
+        auto_halt = self._read_auto_halt()
+        if (ar.get("halt") or auto_halt) and action not in manage:
+            raise GateApiError(
+                "HALTED: "
+                + ("account_risk.halt=true" if ar.get("halt") else f"auto halt ({auto_halt})")
+                + "; only close/cancel allowed")
         if action not in manage and action.startswith(("open", "add", "stop_entry")):
             # daily loss vs day-start equity (strategy-adjustable)
             dlimit = ar.get("daily_loss_limit_usd")
@@ -554,6 +659,12 @@ class Executor:
                     total = float((self.client.get_account() or {}).get("total") or 0)
                     start = self._day_start_equity(total)
                     if start > 0 and (start - total) > float(dlimit):
+                        # 落盘**自动熔断标记**：否则「日亏超限」只在有开仓意图时
+                        # 才拦，而 AI 改说 close/modify 就绕过去了 —— 下一轮再提
+                        # 开仓时又要重新算一遍（且日初权益可能已被别的 bot 改写）。
+                        # 置位后所有开仓类动作一律被 halt 挡住，跨日自动复位。
+                        self._write_auto_halt(
+                            f"daily_loss_limit {start - total:.2f} > {dlimit}")
                         raise GateApiError(
                             f"DAILY_LOSS_LIMIT: loss={start - total:.2f} > {dlimit} "
                             f"(day_start={start:.2f} now={total:.2f})"
@@ -639,12 +750,16 @@ class Executor:
         import json as _json
 
         day = datetime.now(timezone.utc).strftime("%Y%m%d")
-        try:
-            from .paths import bot_paths
+        if self.account:
+            # 账户级：多个 bot 共享同一份日初权益 → 日亏熔断是**账户级**的
+            base = Path(self.root) / "data" / "accounts" / self.account / "state"
+        else:
+            try:
+                from .paths import bot_paths
 
-            base = bot_paths(self.root, self.bot_id or "_unknown").state / "_account_risk"
-        except Exception:  # noqa: BLE001
-            base = Path(self.root) / "data" / "bots" / (self.bot_id or "_unknown") / "state" / "_account_risk"
+                base = bot_paths(self.root, self.bot_id or "_unknown").state / "_account_risk"
+            except Exception:  # noqa: BLE001
+                base = Path(self.root) / "data" / "bots" / (self.bot_id or "_unknown") / "state" / "_account_risk"
         path = base / f"equity_{day}.json"
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -813,6 +928,59 @@ class Executor:
                 bad.append(f"{kind}={px:g} 需 < mark {ref:g}（rule=2 跌破触发）")
         return ("TRIGGER_PRICE_SIDE: " + "; ".join(bad)) if bad else None
 
+    def _stop_requested(self) -> bool:
+        """优雅停机：`state/stop` 文件存在时中止执行。
+
+        参照 nofx 的 `isRunning` 检查点（每轮开始 + 每条决策执行前都查）。
+        我们原先只有进程级锁 —— 长批次执行中无法立即停手（要么等整批跑完，
+        要么 kill 进程留下半完成状态）。
+        """
+        if not self.bot_id:
+            return False
+        try:
+            return (Path(self.root) / "data" / "bots" / self.bot_id
+                    / "state" / "stop").exists()
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _check_no_flip(self, intent: Intent) -> None:
+        """禁止同轮反手：持多时不能直接 `open_short`（必须先平）。
+
+        参照 nofx 的 `tradeThrottleReason`（「已有仓位禁止反手开」）。
+        反手在同一轮里会先开反向仓、再平旧仓（或反之），保证金占用翻倍，
+        且两笔的先后顺序不确定 —— 拆成两轮（先平、下一轮再开）更安全。
+
+        开关 `account_risk.no_flip`，**默认开启**（这是更安全的一侧）。
+        想保留反手能力就在 bot 配置里写 `account_risk: {no_flip: false}`。
+        """
+        ar = self.account_risk or {}
+        if ar.get("no_flip") is False:
+            return
+        action = str(intent.action or "").lower()
+        if action in ("open_long", "add_long", "stop_entry_long"):
+            want = "long"
+        elif action in ("open_short", "add_short", "stop_entry_short"):
+            want = "short"
+        else:
+            return
+        try:
+            positions = self._symbol_positions(intent.symbol)
+        except Exception:  # noqa: BLE001 — 取不到持仓就不拦，保持原行为
+            return
+        for p in positions or []:
+            try:
+                psz = float(p.get("size") or 0)
+            except (TypeError, ValueError):
+                continue
+            if psz == 0:
+                continue
+            cur = "long" if psz > 0 else "short"
+            if cur != want:
+                raise GateApiError(
+                    f"NO_FLIP: 持有 {cur} 时不能直接开 {want}"
+                    f"（先 close，下一轮再开；或配 account_risk.no_flip: false 关闭此闸门）"
+                )
+
     def _check_safe_mode(self, action: str) -> None:
         """安全模式：连续失败达阈值时**禁止开仓**（只允许平/减/改/观望）。
 
@@ -843,6 +1011,7 @@ class Executor:
     def _open(self, intent: Intent) -> StepResult:
         self._check_symbol(intent.symbol)
         self._check_safe_mode(intent.action)
+        self._check_no_flip(intent)
         self._check_open_sl(intent)
         self._check_account_risk(intent)
         meta = self.client.get_contract(intent.symbol)
@@ -1381,6 +1550,7 @@ class Executor:
         """Breakout ENTRY: trigger then OPEN. Not stop-loss."""
         self._check_symbol(intent.symbol)
         self._check_safe_mode(intent.action)
+        self._check_no_flip(intent)
         # 与 `_open` 完全同源的两道账户/计划闸门（原先只有 _check_symbol + _check_notional）。
         # 缺 `_check_open_sl` / `_check_account_risk` 时，突破单可以绕过
         # halt / daily_loss_limit / max_leverage / 总敞口闸门 / SL 必填 ——
@@ -2223,11 +2393,21 @@ class Executor:
             order_type = intent.sl_type or "market"
             limit = intent.sl_limit_price
 
-        # size for close-trigger: opposite side contracts; 0 would mean full close —
-        # use explicit integer size of the opened contracts.
+        # size for close-trigger: 默认用**显式张数**（历史行为）。
+        #
+        # `account_risk.use_venue_close: true` 时改用 **venue-computed close**：
+        # Gate 的 `size=0` + `close=true`（dual 模式配 `auto_size=close_long|close_short`）
+        # 语义是「平掉该方向全部仓位」—— 于是保护单**不需要跟踪持仓张数**，
+        # 从根上消除「张数对齐」这个问题（实测 eth-disc 堆到 30 个 / 202 张
+        # vs 4 张持仓）。参照 NautilusTrader 把这类单白名单化、跳过数量检查的做法。
+        #
+        # **默认关闭**：需先在目标交易所实测 `price_orders` 是否接受这些字段。
         close_size = int(size)
         # API: buy to close short (positive), sell to close long (negative)
         api_size = -close_size if (intent.side or "long") == "long" else close_size
+        use_venue_close = bool((self.account_risk or {}).get("use_venue_close"))
+        if use_venue_close:
+            api_size = 0
 
         use_market = order_type == "market"
         if use_market:
@@ -2240,15 +2420,27 @@ class Executor:
             init_price = str(round_price(float(limit), meta))
             init_tif = "gtc"
 
+        init: dict[str, Any] = {
+            "contract": intent.symbol,
+            "size": api_size,
+            "price": init_price,
+            "tif": init_tif,
+            "reduce_only": True,
+            "text": f"t-{self._bot_tag(intent.label)}-{'tp' if is_tp else 'sl'}",
+        }
+        if use_venue_close:
+            init["close"] = True
+            # dual（双向持仓）模式必须指明平哪个方向；单向模式 close 即可
+            try:
+                dual = str(self.client.get_position_mode() or "").lower() == "dual"
+            except Exception:  # noqa: BLE001
+                dual = False
+            if dual:
+                init["auto_size"] = ("close_long" if (intent.side or "long") == "long"
+                                     else "close_short")
+
         body: dict[str, Any] = {
-            "initial": {
-                "contract": intent.symbol,
-                "size": api_size,
-                "price": init_price,
-                "tif": init_tif,
-                "reduce_only": True,
-                "text": f"t-{self._bot_tag(intent.label)}-{'tp' if is_tp else 'sl'}",
-            },
+            "initial": init,
             "trigger": {
                 "strategy_type": 0,
                 "price_type": PRICE_TYPE_MAP.get(intent.trigger_price_type, 0),

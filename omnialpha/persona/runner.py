@@ -416,6 +416,31 @@ class PersonaRunner:
         **调用方不能拿 0 顶替**（那会把盈利单记成胜率 0%）。
         """
         facts: dict = {"pnl": None, "entry_price": None}
+        # ── 1) 优先读**执行回执**（执行侧主动回传的结构化结果）──
+        # 回执按 (order_id, cycle) 存，这里扫目录找该 order_id 最新的一条。
+        # 它比扫 trades.jsonl 可靠：那条路径靠「尾 500 行」猜，实测漏记 458/459 笔。
+        try:
+            rd = self.root / "data" / "shared" / "receipts"
+            if rd.exists():
+                best: Optional[dict] = None
+                for p in rd.glob("*.json"):
+                    try:
+                        rec = json.loads(p.read_text(encoding="utf-8"))
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if str(rec.get("order_id") or "") != str(order_id):
+                        continue
+                    if best is None or int(rec.get("ts") or 0) > int(best.get("ts") or 0):
+                        best = rec
+                if best:
+                    if best.get("realized_pnl") is not None:
+                        facts["pnl"] = float(best["realized_pnl"])
+                    if best.get("entry_price") is not None:
+                        facts["entry_price"] = float(best["entry_price"])
+                    if facts["pnl"] is not None or facts["entry_price"] is not None:
+                        return facts
+        except Exception:  # noqa: BLE001
+            pass
         try:
             from ..paths import bot_paths
             p = bot_paths(self.root, target_account, create=False).logs / "trades.jsonl"

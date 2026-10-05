@@ -178,8 +178,11 @@ class TestSchema(unittest.TestCase):
             {"action": "modify_tp_sl", "symbol": "BTC_USDT", "sl": 84000},
         ]}))
         self.assertEqual(len(rep.results), 2, "后面的 intent 不应被 break 掉")
-        self.assertIn("gate_skipped", rep.results[0].detail)
-        self.assertEqual(rep.results[1].action, "modify_tp_sl")
+        # 执行顺序按优先级排（改保护 4 → 开仓 5），所以**按动作查**而不是按索引。
+        # 顺序本身由 `test_execution_priority.py` 覆盖。
+        by_action = {r.action: r for r in rep.results}
+        self.assertIn("gate_skipped", by_action["open_long"].detail)
+        self.assertIn("modify_tp_sl", by_action)
 
     def test_open_long_with_position_maps_to_add(self):
         """有同侧持仓时 open_long 映射成 add_long（带暴露上限）→ 真正下单，而不是被拒。"""

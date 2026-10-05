@@ -94,6 +94,93 @@ def _take_file(path: Path) -> Optional[Path]:
         return None
 
 
+def receipt_path(root: Path, key: str) -> Path:
+    """执行回执路径：`data/shared/receipts/<safe-key>.json`。
+
+    回执是**执行结果的正规回传通道**。原先 persona 侧只能异步扫目标账户的
+    `trades.jsonl` 尾 500 行来猜「这笔单成交了没、赚了多少」—— 取不到就跳过
+    记账（实测漏记 458/459 笔）。有了回执，产出侧能直接读到结构化结果。
+    """
+    import re as _re
+
+    safe = _re.sub(r"[^0-9A-Za-z_.-]", "_", str(key or ""))[:120] or "unknown"
+    return Path(root) / "data" / "shared" / "receipts" / f"{safe}.json"
+
+
+def write_receipt(root: Path, key: str, payload: dict) -> None:
+    """原子写回执（写失败不影响主流程）。"""
+    try:
+        p = receipt_path(root, key)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(f".{p.name}.writing")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+        os.replace(tmp, p)
+    except Exception as e:  # noqa: BLE001
+        log.warning("write receipt failed (%s): %s", key, e)
+
+
+def _signal_key(data: dict, name: str) -> str:
+    """信号的幂等键。
+
+    优先用 `meta` 里的 (order_id, cycle) —— 那标识「同一张单的同一轮决策」；
+    缺了就退回文件名（文件名本身带时间戳 + pid + ns，天然唯一）。
+    """
+    meta = data.get("meta") if isinstance(data, dict) else None
+    meta = meta or {}
+    oid = str(meta.get("order_id") or "")
+    cyc = str(meta.get("plan_cycle") or meta.get("cycle_id") or "")
+    if oid and cyc:
+        return f"{oid}|{cyc}"
+    return name
+
+
+def _idem_file(paths: ProjectPaths, bot_id: str) -> Path:
+    return paths.bot_paths(bot_id).state / "executed_signals.jsonl"
+
+
+def _already_executed(paths: ProjectPaths, bot_id: str, key: str) -> bool:
+    """该幂等键是否**已成功执行过**（只认 ok=True 的记录 —— 失败的允许重试）。"""
+    p = _idem_file(paths, bot_id)
+    if not p.exists():
+        return False
+    try:
+        lines = p.read_text(encoding="utf-8").splitlines()[-5000:]
+    except Exception:  # noqa: BLE001
+        return False
+    for ln in lines:
+        try:
+            rec = json.loads(ln)
+        except Exception:  # noqa: BLE001
+            continue
+        if str(rec.get("key") or "") == key and rec.get("ok"):
+            return True
+    return False
+
+
+def _mark_executed(paths: ProjectPaths, bot_id: str, key: str, ok: bool) -> None:
+    try:
+        p = _idem_file(paths, bot_id)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": int(time.time()), "key": key, "ok": bool(ok)}) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _archive_duplicate(paths: ProjectPaths, bot_id: str, tmp: Path,
+                       original_name: str, key: str, data: object = None) -> None:
+    """已执行过的信号 → archive/duplicate/（既不算成功也不算失败）。"""
+    dest = paths.bot_done(bot_id).parent / "duplicate" / original_name
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if tmp.exists():
+            os.replace(tmp, dest)
+    except OSError as e:  # noqa: BLE001
+        log.error("archive duplicate failed for %s: %s", original_name, e)
+    log.warning("duplicate %s/%s (key=%s) — skipped", bot_id, original_name, key)
+
+
 def process_file(path: Path, bot: BotConfig, paths: ProjectPaths, executor: Optional[Executor] = None) -> bool:
     """Process one JSON signal file. Returns True on success archive."""
     tmp = path
@@ -127,6 +214,15 @@ def process_file(path: Path, bot: BotConfig, paths: ProjectPaths, executor: Opti
         _archive_failed(paths, bot.bot_id, tmp, original_name, f"schema: {e}", data)
         return False
 
+    # ── 执行层幂等 ──
+    # 文件层的 `.taking` 重命名只能防「两个进程同时取件」，防不住「同一信号被
+    # 重复投递」（复制文件、上游重发、崩溃后重放）—— 而执行层原先**没有任何
+    # 幂等键**，重复投递就是重复下单。
+    sig_key = _signal_key(data, original_name)
+    if _already_executed(paths, bot.bot_id, sig_key):
+        _archive_duplicate(paths, bot.bot_id, tmp, original_name, sig_key, data)
+        return True
+
     if executor is None:
         try:
             client = bot.create_client()
@@ -146,6 +242,7 @@ def process_file(path: Path, bot: BotConfig, paths: ProjectPaths, executor: Opti
             alert_store=_alert_store(paths, bot.bot_id),
             root=paths.root,
             bot_id=bot.bot_id,
+            account=getattr(bot, "account", "") or "",
         )
 
     report: ExecReport = executor.execute_signal(signal)
@@ -169,6 +266,41 @@ def process_file(path: Path, bot: BotConfig, paths: ProjectPaths, executor: Opti
             json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         log.info("done %s/%s", bot.bot_id, original_name)
+        _mark_executed(paths, bot.bot_id, sig_key, True)
+        # 回执：把执行结果写回一个约定位置，供产出侧（plan / persona）直接读，
+        # 不必再去扫 trades.jsonl 猜结果。
+        try:
+            meta = signal.meta or {}
+            steps = result.get("steps") or []
+            realized = None
+            entry_px = None
+            for st in steps:
+                det = st.get("detail") or {}
+                if det.get("realized_pnl") is not None:
+                    try:
+                        realized = float(det["realized_pnl"])
+                    except (TypeError, ValueError):
+                        pass
+                if entry_px is None:
+                    px = det.get("entry_price") or det.get("fill_price") or det.get("avg_price")
+                    try:
+                        entry_px = float(px)
+                    except (TypeError, ValueError):
+                        pass
+            write_receipt(paths.root, sig_key, {
+                "key": sig_key,
+                "bot_id": bot.bot_id,
+                "order_id": str(meta.get("order_id") or ""),
+                "cycle_id": str(meta.get("plan_cycle") or meta.get("cycle_id") or ""),
+                "ts": int(time.time()),
+                "ok": True,
+                "realized_pnl": realized,
+                "entry_price": entry_px,
+                "steps": [{"action": s.get("action"), "ok": s.get("ok"),
+                           "error": s.get("error")} for s in steps],
+            })
+        except Exception as e:  # noqa: BLE001
+            log.warning("receipt build failed %s: %s", original_name, e)
         return True
 
     err = next((r.error for r in report.results if not r.ok), "unknown error")
@@ -270,6 +402,7 @@ def run_bot_once(bot: BotConfig, paths: ProjectPaths) -> dict:
                     alert_store=_alert_store(paths, bot.bot_id),
                     root=paths.root,
                     bot_id=bot.bot_id,
+                    account=getattr(bot, "account", "") or "",
                 )
             except GateApiError as e:
                 _archive_failed(paths, bot.bot_id, taken, path.name, f"credentials: {e}")
@@ -302,6 +435,45 @@ def _record_exec_latency(bot: BotConfig, paths: ProjectPaths, seconds: float,
         pass
 
 
+def _reconcile_sweep(bot: BotConfig, paths: ProjectPaths) -> int:
+    """保护单张数对账：同方向 tp/sl 合计 > 持仓张数时保留最新一组、撤其余。
+
+    与 `_orphan_sweep` 的分工：那个管「**无持仓**时的孤儿」，这个管
+    「**有持仓**但保护单张数超额」—— 后者是每轮重挂入场单的必然产物
+    （实测 eth-disc 6 小时堆到 30 个 / 202 张 vs 4 张持仓），而
+    `executor._resync_protectors` 只在平/减仓路径被调用，加仓路径没人管。
+
+    fail-closed：取不到交易所报告、无持仓、有未成交入场单 → 都不动。
+    """
+    from .reconcile import reconcile_protectors
+
+    try:
+        client = bot.create_client()
+    except Exception:  # noqa: BLE001
+        return 0
+    executor = Executor(
+        client,
+        label_prefix=getattr(bot, "label_prefix", "") or bot.bot_id,
+        root=paths.root,
+        bot_id=bot.bot_id,
+        account=getattr(bot, "account", "") or "",
+        alert_store=_alert_store(paths, bot.bot_id),
+    )
+    total = 0
+    for sym in (bot.symbols or []):
+        try:
+            res = reconcile_protectors(executor, sym)
+        except Exception as e:  # noqa: BLE001
+            log.warning("reconcile %s %s failed: %s", bot.bot_id, sym, e)
+            continue
+        n = len(res.get("cancelled") or [])
+        if n:
+            log.info("reconcile %s %s: 撤掉 %d 笔超额保护单（持仓 %s 张）",
+                     bot.bot_id, sym, n, res.get("position_size"))
+        total += n
+    return total
+
+
 def _orphan_sweep(bot: BotConfig, paths: ProjectPaths) -> int:
     """定期扫孤儿保护单（TP/SL 无对应持仓）。返回撤单数。
 
@@ -317,6 +489,7 @@ def _orphan_sweep(bot: BotConfig, paths: ProjectPaths) -> int:
         label_prefix=getattr(bot, "label_prefix", "") or bot.bot_id,
         root=paths.root,
         bot_id=bot.bot_id,
+        account=getattr(bot, "account", "") or "",
     )
     total = 0
     for sym in (bot.symbols or []):
@@ -360,6 +533,7 @@ def _auto_protect_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict) -> i
         label_prefix=getattr(bot, "label_prefix", "") or bot.bot_id,
         root=paths.root,
         bot_id=bot.bot_id,
+        account=getattr(bot, "account", "") or "",
         account_risk=getattr(bot, "account_risk", None),
         alert_store=_alert_store(paths, bot.bot_id),
     )
@@ -451,7 +625,11 @@ def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[
             except Exception as e:  # noqa: BLE001 — keep loop alive
                 log.exception("bot %s crashed: %s", bot.bot_id, e)
             if do_sweep:
-                # 先撤孤儿、再补缺失：顺序固定，免得刚变 flat 的 symbol 被抢跑
+                # 顺序固定：**先对齐张数（有持仓）→ 再撤孤儿（无持仓）→ 最后补缺失（裸仓）**
+                try:
+                    _reconcile_sweep(bot, paths)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("reconcile sweep %s failed: %s", bot.bot_id, e)
                 try:
                     _orphan_sweep(bot, paths)
                 except Exception as e:  # noqa: BLE001

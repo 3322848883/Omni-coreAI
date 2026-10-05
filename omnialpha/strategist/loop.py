@@ -765,6 +765,10 @@ class PlanRunner:
             return None
         if not raw:
             return None
+        # 讨论轮的 LLM 调用**落盘**。原先完全不落 —— 只有截断到 30 字的
+        # reasoning 进 `discussion_log`，事后无法核对「模型当时看到什么同伴
+        # 观点、回了什么」。这与「LLM 理由文本不是审计证据」直接冲突。
+        self._log_discussion_call(round_num, sys_prompt, user_prompt, raw)
         try:
             import json as _json
             import re as _re
@@ -807,6 +811,28 @@ class PlanRunner:
         """
         syms = getattr(self.cfg, "symbols", None) or []
         return str(syms[0]) if syms else ""
+
+    def _log_discussion_call(self, round_num: int, sys_prompt: str,
+                             user_prompt: str, raw: str) -> None:
+        """讨论轮的 LLM 调用留痕（append-only jsonl）。
+
+        与 `_save_thinking` 的区别：那个存的是**独立分析**轮的 CoT；
+        讨论轮走的是另一条调用路径（纯文本、无工具），原先两条都不落。
+        """
+        try:
+            out = self.history_dir
+            out.mkdir(parents=True, exist_ok=True)
+            rec = {
+                "ts": time.time(),
+                "round": int(round_num),
+                "system": sys_prompt,
+                "user": user_prompt,
+                "raw": str(raw),
+            }
+            with (out / "discussion_calls.jsonl").open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception:  # noqa: BLE001
+            pass
 
     @staticmethod
     def _discussion_chip(data: dict, decision: str, plan: dict,
@@ -874,7 +900,10 @@ class PlanRunner:
             "cycle_id": kw.get("cycle_id"),
             "trigger": kw.get("trigger"),
             "reasoning_chain": kw.get("reasoning") or [],
-            "content_head": (kw.get("content") or "")[:500],
+            # 正文（Plan JSON）**不截断**：原先截 500 字符，长 Plan 会被腰斩，
+            # 事后核对「模型到底输出了什么」时看不到尾部（实测踩到 —— 只有
+            # 500 字符的 Plan 无法判断字段是否完整）。留 64k 只是防极端膨胀。
+            "content_head": (kw.get("content") or "")[:65536],
             "tool_usage": list(self.tool_usage),  # 本轮工具使用明细（防偷懒）
             "tool_usage_summary": self._tool_usage_summary(),
         }

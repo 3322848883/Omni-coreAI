@@ -397,10 +397,88 @@ def cmd_broadcast(args) -> int:
                 print(f"  FAILED {rec.get('route')}/{rec.get('file')}: {rec.get('failed')}")
         # partial 也算失败（部分目标没收到，不可静默成功）
         return 0 if (s.get("failed", 0) == 0 and s.get("partial", 0) == 0) else 1
+    # 常驻模式加单实例锁。`broadcast` 原先全文无锁（对比 run/persona-run 都有），
+    # 双开会让**同一信号被重复扇出**到每个目标 inbox。
+    from .pidlock import PidLock
+
+    lock = PidLock(paths.root / "data" / "shared" / "broadcast.lock").acquire()
+    if lock is None:
+        print("broadcast already running")
+        return 3
     try:
         bc.run_forever()
     except KeyboardInterrupt:
         print("bye")
+    finally:
+        lock.release()
+    return 0
+
+
+def _persona_member_enabled_error(bots: dict, groups: list) -> str:
+    """persona 组成员 enabled: true 时返回错误说明（否则空串）。
+
+    这条约束原先只散落在 `watcher.select_bots` 的 docstring 里 —— 隐式约束靠
+    人记，漏了就双路下单：watchdog 拉起成员自己的 plan-loop（独立分析下单），
+    而讨论组又把融合单写进同一个账户，两路会互相撤单/重复下单。
+
+    显式校验后，`persona-run` 在启动时就会拒绝并给出修复指引。
+    """
+    for g in groups:
+        for b in g.members:
+            if getattr(bots.get(b), "enabled", False):
+                return (
+                    f"成员 {b} 是 enabled: true。\n"
+                    f"  watchdog 会同时拉起它自己的 plan-loop —— 那一路独立分析下单，\n"
+                    f"  与讨论组的融合单落在同一账户上，会互相撤单/重复下单。\n"
+                    f"  修复：在 config/bots.local/{b}.yaml 写 `enabled: false`"
+                )
+    return ""
+
+
+def cmd_health(args) -> int:
+    """统一健康视图：把散在 4 个文件里的健康信息合并成一份。
+
+    架构盘点 S21：`health.json`(plan) + `health.run.json`(run) + `alerts.json`
+    + `bots.db` heartbeat 四处分散，而 `status` 只出 inbox/done/failed 计数、
+    **完全不暴露健康**。这里给一个单一查询入口（结构化 JSON，便于面板/脚本消费）。
+    """
+    import logging
+
+    logging.basicConfig(level=logging.WARNING)
+    paths = ProjectPaths(_root_from_args(args))
+    from .config import load_all_bots
+    from .monitoring.alerts import read_alerts
+    from .monitoring.health import HealthMonitor
+
+    bots = load_all_bots(paths.config_dir)
+    only = str(getattr(args, "bot", "") or "")
+    out = []
+    for bid, bot in sorted(bots.items()):
+        if only and bid != only:
+            continue
+        h = HealthMonitor(paths.root, bid)
+        rec = h._load_merged()
+        alerts: list = []
+        try:
+            alerts = read_alerts(paths.root, bid) or []
+        except Exception:  # noqa: BLE001
+            pass
+        out.append({
+            "bot_id": bid,
+            "enabled": bool(getattr(bot, "enabled", False)),
+            "env": getattr(bot, "env", ""),
+            "account": getattr(bot, "account", ""),
+            "fail_streak": h.current_fail_streak(),
+            "error_streak": rec.get("error_streak"),
+            "exec_fail_streak": rec.get("exec_fail_streak"),
+            "llm_latency": rec.get("llm_latency"),
+            "last_heartbeat": rec.get("last_heartbeat"),
+            "health_check": h.check(),
+            "alert_count": len(alerts),
+            "alert_types": sorted({str(a.get("type")) for a in alerts if a.get("type")}),
+        })
+    print(json.dumps({"root": str(paths.root), "bots": out},
+                     ensure_ascii=False, indent=2, default=str))
     return 0
 
 
@@ -433,6 +511,17 @@ def cmd_persona_run(args) -> int:
             validate_group(g, known)
         except PersonaError as e:
             print(f"persona group error: {e}")
+            return 2
+
+    # 显式校验：persona 组成员**不能** enabled: true。
+    # 这条约束原先只散落在 `watcher.select_bots` 的 docstring 里（「组成员必须保持
+    # enabled: false，否则 watchdog 会拉起它们各自的 plan-loop，与讨论组的融合单
+    # 在同一账户上互相打架」）—— 隐式约束靠人记，漏了就双路下单。
+    _bots_check = load_all_bots(paths.config_dir)
+    for g in target_groups:
+        err = _persona_member_enabled_error(_bots_check, [g])
+        if err:
+            print(f"persona group error: {err}")
             return 2
 
     # 组内每个成员建 PlanRunner（独立分析器）
@@ -743,6 +832,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_tools.add_argument("--bot", default="", help="bot id (default: all bots)")
     p_tools.add_argument("--root", default=argparse.SUPPRESS)
     p_tools.set_defaults(func=cmd_tools)
+
+    p_health = sub.add_parser("health", help="unified health view (JSON)")
+    p_health.add_argument("--bot", default="", help="bot id (default: all bots)")
+    p_health.add_argument("--root", default=argparse.SUPPRESS)
+    p_health.set_defaults(func=cmd_health)
 
     p_persona = sub.add_parser("persona-run", help="multi-persona co-managed orders (fuse then execute)")
     p_persona.add_argument("--group", default="", help="persona group name (default: all enabled)")

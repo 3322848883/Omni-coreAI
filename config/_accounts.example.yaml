@@ -1,0 +1,49 @@
+# 账户级风控（可选）—— 多 bot 共账户时的**合并闸门**
+#
+# 复制为 config/accounts.yaml 才会生效（本文件是示例，不会被读取）。
+#
+# ## 为什么需要它
+#
+# `config/bots/*.yaml` 的 `account_risk` 是**逐 bot** 的：多 bot 共用一个账户时，
+# 各 bot 只卡自己的阈值 —— 三个 bot 各配 `max_total_notional_pct: 10`，
+# 合计敞口可以到 30× 权益，没有任何合并闸门。日亏熔断同理：
+# `_day_start_equity` 按 bot 落盘，同账户下各算各的日初，形不成账户级熔断。
+#
+# 本文件把「账户」提升为一等概念：bot 声明 `account: <name>` 后，
+# 账户级的 account_risk 会与该 bot 的合并 —— **上限类取更严的（min）**，
+# `halt` 取逻辑或，其余 bot 级优先。日初权益也改为账户级共享路径
+# （`data/accounts/<name>/state/`），所以日亏熔断是账户级的。
+#
+# ## 合并规则
+#
+# | 字段 | 合并方式 |
+# |---|---|
+# | `max_notional_pct` / `max_total_notional_pct` / `max_total_notional_usd` / `max_notional_usd` / `daily_loss_limit_usd` / `max_leverage` / `safe_mode_after_failures` | 取更小（更严） |
+# | `halt` | 逻辑或（任一为 true 就停） |
+# | 其余（如 `risk_pct`、`auto_protect`） | bot 级优先 |
+#
+# 也就是说：**账户级是硬底，bot 可以更保守但不能更激进。**
+
+accounts:
+  gate-main:
+    # 该账户下的 bot 用哪个密钥（仅作记录；实际取值仍在 bot 的 api_key_env）
+    api_key_env: GATE_API_KEY
+
+    # 账户级硬约束（跨该账户下所有声明了 `account: gate-main` 的 bot）
+    account_risk:
+      # 单笔名义 ≤ 权益 × 此倍数（账户级兜底；bot 级更严时取 bot 的）
+      max_notional_pct: 5.0
+      # 总敞口（持仓名义合计 + 本单）≤ 权益 × 此倍数
+      max_total_notional_pct: 10.0
+      # 账户级日亏熔断：当日亏损达到此值即停手（日初权益按账户共享）
+      daily_loss_limit_usd: 20
+      # 杠杆上限
+      max_leverage: 50
+      # 手动/自动熔断开关
+      halt: false
+
+    # 该账户下有哪些 bot（仅作记录，便于人工核对；程序按 bot 的 `account:` 字段归属）
+    bots:
+      - smc-eth-live
+      - orderflow-eth-live
+      - wyckoff-eth-live
