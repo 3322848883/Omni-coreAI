@@ -91,15 +91,33 @@ class TestReconcileProtectors(unittest.TestCase):
         self.assertEqual(client.cancelled, [])
         self.assertEqual(res.get("skipped"), "no_position")
 
-    def test_pending_entry_blocks(self):
-        """有未成交入场单 → 不动（预挂保护单撤了，委托一成交就是裸仓）。"""
-        client = _Client(positions=[_pos(4)],
-                         protectors=[_prot(1, 30, created=1.0), _prot(2, 30, created=2.0)])
+    def test_pending_entry_raises_target(self):
+        """待成交入场单也计入目标张数 —— 保护单要覆盖它（否则成交即裸仓）。
+
+        实测场景：0 持仓 + 7 张待成交入场单 + 31 张保护单 —— 保护单明显超额，
+        但「有 pending entry 就整体跳过」会让它永远清不掉。
+        """
+        client = _Client(positions=[], protectors=[
+            _prot(1, 7, created=1.0), _prot(2, 12, created=2.0),
+            _prot(3, 12, created=3.0)])
         ex = self._ex(client)
-        ex._has_pending_entry = lambda sym: True
+        ex._owned_open_orders = lambda sym, prefix: [
+            {"size": 7, "left": 7, "is_reduce_only": False}]
+        res = reconcile_protectors(ex, "BTC_USDT")
+        self.assertEqual(res["position_size"], 0)
+        self.assertEqual(res["pending_size"], 7)
+        self.assertEqual(res["target_size"], 7)
+        # 最新的是 id=3（12 张 ≥ 7）→ 保留它，撤 2、1
+        self.assertEqual(sorted(client.cancelled), ["1", "2"])
+
+    def test_flat_and_no_pending_does_nothing(self):
+        """既无持仓也无待成交 → 不动（那是 `_cleanup_orphan_protectors` 的活）。"""
+        client = _Client(positions=[], protectors=[_prot(1, 30, created=1.0)])
+        ex = self._ex(client)
+        ex._owned_open_orders = lambda sym, prefix: []
         res = reconcile_protectors(ex, "BTC_USDT")
         self.assertEqual(client.cancelled, [])
-        self.assertEqual(res.get("skipped"), "pending_entry")
+        self.assertEqual(res.get("skipped"), "no_position")
 
     def test_fail_closed_on_data_error(self):
         """取数失败 → 不动任何单（绝不把 unknown 当 flat）。"""

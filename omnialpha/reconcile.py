@@ -79,8 +79,32 @@ def _is_tp_sl(p: dict) -> bool:
     return tail in ("tp", "sl", "lp", "ls")
 
 
+def _pending_entry_size(executor: Any, symbol: str) -> int:
+    """待成交入场单的**张数合计**（保护单也该覆盖它们）。
+
+    入场单挂出后 1-3 秒保护单就一起挂上了 —— 此时还没持仓。所以
+    「保护单该覆盖多少」= 持仓张数 + 待成交入场单张数。
+    """
+    total = 0
+    try:
+        rows = executor._owned_open_orders(symbol, executor.label_prefix) or []
+    except Exception:  # noqa: BLE001
+        return 0
+    for o in rows:
+        if o.get("is_reduce_only"):
+            continue
+        left = o.get("left")
+        if left is not None and int(left) == 0:
+            continue
+        try:
+            total += abs(int(float(o.get("size") or 0)))
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
 def reconcile_protectors(executor: Any, symbol: str) -> dict:
-    """把该 symbol 的保护单**张数对齐到持仓张数**（保留最新的一组）。
+    """把该 symbol 的保护单**张数对齐到「持仓 + 待成交入场单」**（保留最新一组）。
 
     ## 为什么需要
 
@@ -93,15 +117,18 @@ def reconcile_protectors(executor: Any, symbol: str) -> dict:
 
     ## 判据
 
-    同方向保护单按 `create_time` **倒序**累加，凑够持仓张数即停：
-    已累加的那几笔保留（它们覆盖当前持仓），其余撤掉。
+    同方向保护单按 `create_time` **倒序**累加，凑够目标张数即停：
+    已累加的那几笔保留（它们覆盖当前敞口），其余撤掉。
+
+    **目标张数 = 持仓张数 + 待成交入场单张数**。后者不能漏：入场单挂出后
+    保护单就一起挂上了（那时还没持仓），只按持仓算会把预挂的保护单误判成
+    超额撤掉 —— 委托一成交就是裸仓。
 
     ## fail-closed
 
     - 取不到交易所报告 → **不动任何单**
-    - 该 symbol 无持仓 → **不动**（交给 `_cleanup_orphan_protectors`，
-      它有「有待成交入场单则豁免」的守卫，本函数不重复那套逻辑）
-    - 有未成交入场单 → **不动**（预挂保护单不能撤，撤了成交即裸仓）
+    - 目标张数为 0（既无持仓也无待成交入场单）→ **不动**（交给
+      `_cleanup_orphan_protectors`，那才是「全无对应」的孤儿）
     """
     if not symbol:
         return {"ok": False, "error": "symbol required"}
@@ -115,15 +142,10 @@ def reconcile_protectors(executor: Any, symbol: str) -> dict:
             pos_size += abs(int(float(p.get("size") or 0)))
         except (TypeError, ValueError):
             continue
-    if pos_size <= 0:
+    pending_size = _pending_entry_size(executor, symbol)
+    target_size = pos_size + pending_size
+    if target_size <= 0:
         return {"ok": True, "skipped": "no_position", "cancelled": []}
-
-    # 有未成交入场单时不动 —— 预挂的保护单撤了，委托一成交就是裸仓
-    try:
-        if executor._has_pending_entry(symbol):
-            return {"ok": True, "skipped": "pending_entry", "cancelled": []}
-    except Exception:  # noqa: BLE001
-        return {"ok": True, "skipped": "pending_check_failed", "cancelled": []}
 
     rows = [p for p in truth["protectors"] if _is_tp_sl(p)]
     if executor.label_prefix:
@@ -144,7 +166,7 @@ def reconcile_protectors(executor: Any, symbol: str) -> dict:
     acc = 0
     for p in rows:
         sz = _protector_size(p)
-        if acc < pos_size:
+        if acc < target_size:
             kept.append(p)
             acc += sz
         else:
@@ -165,16 +187,17 @@ def reconcile_protectors(executor: Any, symbol: str) -> dict:
         try:
             executor.alert_store.raise_alert(
                 "orphan_protector",
-                f"{symbol} 保护单张数超额已对齐：保留 {len(kept)} 笔覆盖 {pos_size} 张，"
-                f"撤掉 {len(cancelled)} 笔",
+                f"{symbol} 保护单张数超额已对齐：保留 {len(kept)} 笔覆盖 {target_size} 张"
+                f"（持仓 {pos_size} + 待成交 {pending_size}），撤掉 {len(cancelled)} 笔",
                 symbol=symbol, kept=len(kept), cancelled=len(cancelled),
-                position_size=pos_size,
+                position_size=pos_size, pending_size=pending_size,
             )
         except Exception:  # noqa: BLE001
             pass
 
     return {
         "ok": True, "symbol": symbol, "position_size": pos_size,
+        "pending_size": pending_size, "target_size": target_size,
         "kept": len(kept), "cancelled": cancelled,
     }
 
