@@ -144,6 +144,35 @@ class TestSync(unittest.TestCase):
             sync(root, BOT, _CloseClient([_close(1001, "2.0"), _close(1002, "3.0")]))
             self.assertAlmostEqual(stats(root, BOT)["worst"], 2.0)
 
+    def test_contracts_whitelist_filters_but_advances_cursor(self):
+        """白名单外的成交不计入统计，但**游标要推进**（否则每次重扫同一段）。
+
+        实测该账户的平仓历史里混着 `ETH_USDT` —— 全计入会让 brooks-btc 的
+        「历史表现」失真。
+        """
+        rows = [
+            _close(1001, "1.0", contract="BTC_USDT"),
+            _close(1002, "9.0", contract="ETH_USDT"),
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            out = sync(root, BOT, _CloseClient(rows), contracts=["BTC_USDT"])
+            self.assertEqual(out["added"], 1)
+            st = stats(root, BOT)
+            self.assertEqual(st["trades"], 1)
+            self.assertAlmostEqual(st["pnl"], 1.0)
+            self.assertEqual(load(root, BOT)["cursor"], "1002",
+                             "白名单外的成交也要推进游标")
+
+    def test_no_whitelist_counts_everything(self):
+        rows = [
+            _close(1001, "1.0", contract="BTC_USDT"),
+            _close(1002, "9.0", contract="ETH_USDT"),
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.assertEqual(sync(root, BOT, _CloseClient(rows))["added"], 2)
+
     def test_fills_capped_but_totals_unaffected(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

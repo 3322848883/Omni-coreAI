@@ -113,8 +113,16 @@ def _pnl_of(t: dict) -> Optional[float]:
 
 
 def sync(root: Path, bot_id: str, client, *, contract: Optional[str] = None,
-         limit: int = 100) -> dict:
+         contracts: Optional[list] = None, limit: int = 100) -> dict:
     """拉取平仓历史并幂等累积。返回本轮摘要。
+
+    `contract` 透传给交易所（按合约过滤**请求**）；`contracts` 是**统计白名单** ——
+    不在其中的平仓不计数，但游标照常推进。
+
+    两者分开是有原因的：游标是**全账户**的（`position_close` 没有单调 id，只能用
+    时间戳，而时间戳无法按 symbol 分段）。按 symbol 分别请求会让同一个 cursor 被
+    反复覆写；而多 bot 共账户时，每个 bot 又只该统计自己的 symbol —— 所以
+    「请求全账户 + 按白名单统计」是唯一同时满足两者的形状。
 
     只处理 `time_us > cursor` 的记录。数据源是交易所的 **`position_close`**
     （平仓历史，每笔带 `pnl`）—— 不是 `my_trades`：实测后者的字段里**没有 pnl**，
@@ -132,6 +140,7 @@ def sync(root: Path, bot_id: str, client, *, contract: Optional[str] = None,
         return {"ok": False, "error": str(e)[:160], "added": 0,
                 "trades": rec["totals"]["trades"]}
 
+    allow = {str(c) for c in (contracts or []) if str(c).strip()} or None
     fresh: list[dict] = []
     max_key = cursor
     for t in rows:
@@ -141,11 +150,13 @@ def sync(root: Path, bot_id: str, client, *, contract: Optional[str] = None,
         if key is None:
             continue
         if key > max_key:
-            max_key = key
+            max_key = key            # 游标在**所有**过滤之前推进（含白名单外的成交）
         if key <= cursor:
             continue
         pnl = _pnl_of(t)
         if pnl is None:
+            continue
+        if allow and str(t.get("contract") or "") not in allow:
             continue
         fresh.append({
             "key": str(key),

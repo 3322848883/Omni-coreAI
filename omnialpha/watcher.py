@@ -690,9 +690,11 @@ def _exchange_pnl_sweep(bot: BotConfig, paths: ProjectPaths) -> int:
 
     只对 **live** 跑：paper 的平仓本来就在本地账本里，`ledger_stats` 直接读它。
 
-    已知限制：多个 bot 共用一个账户时，每个 bot 都会统计到该账户的**全部**成交
-    （Gate 的成交 id 全局递增，「全账户一条游标」语义最简单；按 symbol 分别拉会让
-    同一个 cursor 被反复覆写）。当前 brooks-btc 独占账户，不受影响。
+    按 `bot.symbols` 做**统计白名单**：请求拉的是全账户（游标是全账户的 ——
+    `position_close` 没有单调 id，只能用时间戳，而时间戳无法按 symbol 分段；
+    按 symbol 分别请求会让同一个 cursor 被反复覆写），但只有本 bot 的 symbol 计入
+    画像。实测该账户的平仓历史里混着 `ETH_USDT`，全计入会让 brooks-btc 的
+    「历史表现」失真。
     """
     if str(getattr(bot, "env", "") or "") != "live":
         return 0
@@ -704,7 +706,8 @@ def _exchange_pnl_sweep(bot: BotConfig, paths: ProjectPaths) -> int:
     from .memory.exchange_pnl import sync as _sync
 
     try:
-        res = _sync(paths.root, bot.bot_id, client)
+        res = _sync(paths.root, bot.bot_id, client,
+                    contracts=list(bot.symbols or []))
     except Exception as e:  # noqa: BLE001
         log.warning("exchange pnl sync %s failed: %s", bot.bot_id, e)
         return 0
