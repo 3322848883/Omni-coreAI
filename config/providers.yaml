@@ -3,6 +3,12 @@
 #   llm:
 #     provider: deepseek-official
 #     model: deepseek-flash        # optional override
+#     fallback: gw-flash-sg        # optional: 覆盖该供应商的备用链
+#
+# `fallback`（供应商级或 bot 级，接受单个名字或列表）是**备用供应商链**：
+# 主供应商把自身重试耗完后按顺序切，而不是让整轮决策降级 hold。
+# 实测网关会返回 429 `usage exceeds frequency limit ... switch to the other models`
+# 与 503 `no_healthy_account` —— 这两条路原先都只通向「降级 hold」。
 
 default: deepseek-official
 
@@ -25,6 +31,20 @@ providers:
     model: global:deepseek-v4.1-flash
     # thinking 必须为 true：该模型本身就会推理，关掉会让 effective_max_tokens()
     # 回退到 8192（而非 65536），推理一超预算就截断，Plan JSON 根本写不出来
+    thinking: true
+    reasoning_effort: high
+    timeout_sec: 240
+    max_tokens: 8192
+    json_mode: true
+    # 同一个网关的另一个账号池。实测 2026-10-05：主池 429 限流到次日
+    # 08:39 UTC，网关回包自己提示「switch to the other models」，而 -sg 池正常。
+    fallback: gw-flash-sg
+
+  gw-flash-sg:
+    label: 自建网关 deepseek-v4.1-flash（SG 备用池）
+    base_url: http://69.12.85.185:7863/v1
+    api_key_env: OPENAI_API_KEY
+    model: global:deepseek-v4.1-flash-sg
     thinking: true
     reasoning_effort: high
     timeout_sec: 240
