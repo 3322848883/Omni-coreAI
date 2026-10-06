@@ -1,8 +1,8 @@
 # 思维导图对齐与差距清单（mindmap-gap-list）
 
-> **版本**：v34.2 | **配套**：[analysis-acceptance.md](analysis-acceptance.md) · [skill-pitfalls.md](skill-pitfalls.md)  
+> **版本**：35.0 | **配套**：[07-pitfalls-bans.md](07-pitfalls-bans.md)  
 > **冲突策略（强制）**：**Brooks 优先，导图降级**。与 Al Brooks 公开资料或本技能 `references/knowledge/` 原文冲突的导图条目 **不采纳** 为 G0/G1 强制规则；分析按技能规则引擎执行。  
-> **双轨说明**：导图可作为心法阅读；**不得**在验收表中声称「已按导图覆盖 Brooks 规则」。若用户点名「严格导图模式」，须在报告中单独标注偏离项，且仍不得伪造规则 ID。
+> **双轨说明**：导图可作为心法阅读；**不得**在 `rule_ids` 里声称「已按导图覆盖 Brooks 规则」。若用户点名「严格导图模式」，须单独标注偏离项，且仍不得伪造规则 ID。
 
 ---
 
@@ -12,7 +12,7 @@
 |------|------|------|
 | Brooks Trading Course 官网 | What is price action（6 aspects）· 10 best patterns · Glossary | 已用 webfetch 直取 |
 | `references/knowledge/theme11_probability.md` | 80/20、75%/70%/60% 概率分层 | 技能内原文整理 |
-| `references/knowledge/source/V1–V3` + theme2/3/4/5/6/10 | 趋势/回撤/突破/反转/磁铁/周期 | 书摘提取 |
+| `docs/pa-source/V1–V3` + theme2/3/4/5/6/10 | 趋势/回撤/突破/反转/磁铁/周期 | 书摘提取 |
 | 通用 WebSearch | 非官网第三方交叉 | **本机插件未开启时不可用**；开启后可二次核实，**不改变** Brooks 优先策略 |
 
 官网已确认（与技能一致）的核心命题包括：趋势中约 80% 反转尝试失败、交易区间中约 80% 突破失败、市场惯性、H2/L2、二次入场、楔形三推、测量移动、Always In、刮头皮高胜率门槛等。
@@ -91,14 +91,14 @@
 | 导图 | 上述精确数字 |
 | 核实 | 官网已取页面 + theme11 概率章 **未收录**该组精确表述 |
 | 技能约定 | **不写入**概率引擎；回撤深度用 theme3/strategy 第14章（浅/中/深）+ 概率表中**已有**条目 |
-| 分析写法 | 可用「浅回撤偏强、深回撤偏弱」等定性语言；**禁止**标注「Brooks：回调 50%=60%」除非 source/ 页码可证 |
+| 分析写法 | 可用「浅回撤偏强、深回撤偏弱」等定性语言；**禁止**标注「Brooks：回调 50%=60%」除非 docs/pa-source/ 页码可证 |
 
 ### NG-06 MM「均约 60% 抵达」
 
 | 项 | 内容 |
 |----|------|
 | 导图 | 多种 MM 一律约 60% |
-| 官方/技能 | 强突破到 MM **≥60%，有时 80%**（source/theme4）；惊喜 K+良好跟进 **70% MM**；2+ 连续大趋势棒几乎无重叠 **70% MM**（theme11） |
+| 官方/技能 | 强突破到 MM **≥60%，有时 80%**（docs/pa-source/theme4）；惊喜 K+良好跟进 **70% MM**；2+ 连续大趋势棒几乎无重叠 **70% MM**（theme11） |
 | 技能约定 | MM 概率**分档**引用；G1-16 要求写明 MM **类型**与算式；纯前高/整数须标「非 MM」 |
 | 分析写法 | 目标区写：类型 + 价位推导 +（可选）概率档位 |
 
@@ -117,9 +117,9 @@
 
 | 位置 | 新增 |
 |------|------|
-| `references/analysis-acceptance.md` | **G1-13** 周期四选一+混合；**G1-14** 20 根法则；**G1-15** 四技能自检；**G1-16** MM/目标类型 |
-| `assets/templates/price_action_analysis.md` | 周期 / 20根 / 四技能 / MM 占位小节 |
-| `assets/templates/step_checklist.md` | G1 统计四行；版本 v1.2 |
+| 决策自检（写进 `rule_ids`） | **G1-13** 周期四选一+混合；**G1-14** 20 根法则；**G1-15** 四技能自检；**G1-16** MM/目标类型 |
+| `assets/examples/01-btc-20260602.md` | 周期 / 20根 / 四技能 / MM 占位小节 |
+| `26 主干步骤自检（见 references/00-core-steps.md）` | G1 统计四行； |
 | `references/SOUL.md` / `SKILL.md` | 索引 + 完整分析必含 G1-13～16；冲突 Brooks 优先 |
 
 ---

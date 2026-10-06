@@ -46,8 +46,17 @@ def build_context(
 
     # ── 动态后缀（缓存未命中区）───────────────────────
     order_block = _format_order_context(order_context)
-    recent_summaries = journal.read_recent_summaries(n_recent)
+    # 只读一次 journal：原先 `read_recent_summaries` 与 `read_recent(1)` 各做一次
+    # `read_text()`，每轮多读一遍整个文件（独立评审指出）。
+    recent_rows = journal.read_recent(n_recent)
+    recent_summaries = [
+        {"cycle_id": r.get("cycle_id", ""), "decision": r.get("decision", ""),
+         "reasoning": str(r.get("reasoning") or "")[:30]}
+        for r in recent_rows
+    ]
     recent_block = _format_recent(recent_summaries)
+    last_state = _format_last_plan_state(recent_rows[-1:])
+    last_state_block = f"\n[上轮方案状态]\n{last_state}\n" if last_state else ""
     snapshot_block = snapshot_text or _format_snapshot(snapshot or {})
 
     user = f"""[订单上下文]
@@ -55,7 +64,7 @@ def build_context(
 
 [近况]
 {recent_block}
-
+{last_state_block}
 [本轮快照]
 {snapshot_block}
 
@@ -108,6 +117,13 @@ def _format_order_context(ctx: Optional[dict]) -> str:
     inv = ctx.get("invalidation") or []
     if inv:
         lines.append(f"失效标记: {len(inv)} 条")
+    # 模型声明的前提失效价（契约 Tier 1）—— 必须给**值**而不是计数：
+    # 上一轮它自己写了「跌破 X 即视为结构破坏」，这一轮要能照着它判断，
+    # 只报「N 条」等于没记。
+    pi = ctx.get("premise_invalidation") or {}
+    if pi.get("price") is not None:
+        note = f" — {pi['note']}" if pi.get("note") else ""
+        lines.append(f"前提失效: {pi['price']}（触及即视为结构破坏，须撤单或离场）{note}")
     return "\n".join(lines)
 
 
@@ -118,6 +134,31 @@ def _format_recent(summaries: list[dict]) -> str:
         f"{s.get('cycle_id', '')}: {s.get('decision', '')} — {s.get('reasoning', '')}"
         for s in summaries
     )
+
+
+def _format_last_plan_state(rows: list[dict]) -> str:
+    """上一轮方案的状态位（契约 Tier 1）。
+
+    **为什么单 bot 需要这一块**：`premise_invalidation` 走的是订单上下文，而订单记录
+    只有 persona 组会写（`data/shared/orders/`）—— 单 bot（`plan-loop`）**从不写**。
+    于是规则 18 要求模型填的 `invalidation`/`time_stop_bars`/`give_back_pct` 对
+    brooks-btc 这类 bot 等于白填：下一轮看不到。所以这里从**决策日志**回看上一轮，
+    让人格路径与单 bot 路径都能兑现「填了才有跨轮一致性」这句承诺。
+    （实测来源：独立评审 Critical 3）
+    """
+    if not rows:
+        return ""
+    r = rows[-1]
+    bits = []
+    if r.get("region"):
+        bits.append(f"区域={r['region']}")
+    if r.get("invalidation_price") is not None:
+        bits.append(f"前提失效={r['invalidation_price']}（触及即视为结构破坏，须撤单或离场）")
+    if r.get("time_stop_bars") is not None:
+        bits.append(f"最大持仓={r['time_stop_bars']} 轮")
+    if r.get("give_back_pct") is not None:
+        bits.append(f"浮盈回撤阈值={r['give_back_pct']}%")
+    return "；".join(bits)
 
 
 def _format_snapshot(snapshot: dict) -> str:

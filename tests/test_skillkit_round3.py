@@ -211,16 +211,43 @@ class TestCliLifecycle(unittest.TestCase):
             self.assertFalse((root / "skills" / "cli-test-skill").exists())
 
 
+def _skill_dir(name: str = "price-action-trading") -> Path:
+    return SKILLS / name
+
+
+def _any_ref(rel_dir: str = "references") -> str:
+    """动态挑一个真实 reference 路径。
+
+    **不写死路径**：技能内容会随升级变化，写死的测试会在技能改造时假失败 ——
+    实测 `references/SOUL.md` 被分片成 SOUL_part1/2 后，下面两条测试直接炸了。
+    """
+    d = _skill_dir() / rel_dir
+    files = sorted(p for p in d.rglob("*.md"))
+    if not files:
+        raise unittest.SkipTest(f"技能里没有 {rel_dir}/**/*.md")
+    return files[0].relative_to(_skill_dir()).as_posix()
+
+
+def _largest_ref() -> str:
+    d = _skill_dir()
+    files = sorted((p for p in d.rglob("*.md") if p.name != "SKILL.md"),
+                   key=lambda p: p.stat().st_size, reverse=True)
+    if not files:
+        raise unittest.SkipTest("技能里没有 reference 文件")
+    return files[0].relative_to(d).as_posix()
+
+
 class TestSkillRefL3(unittest.TestCase):
     """L3：skill_ref 按需读取捆绑资源。"""
 
     def test_read_reference(self):
         from omnialpha.strategist.tools import run_tool
+        rel = _any_ref()
         r = run_tool(None, "skill_ref",
-                     {"name": "price-action-trading", "path": "references/SOUL.md"},
+                     {"name": "price-action-trading", "path": rel},
                      bot_root=str(fixture_root()), bot_id="b", skill_ids=["price-action-trading"])
         self.assertIn("content", r)
-        self.assertIn("[skill_ref:price-action-trading:references/SOUL.md]", r["content"])
+        self.assertIn(f"[skill_ref:price-action-trading:{rel}]", r["content"])
 
     def test_path_escape_blocked(self):
         from omnialpha.strategist.tools import run_tool
@@ -253,7 +280,8 @@ class TestSkillRefL3(unittest.TestCase):
         from omnialpha.skillkit import SkillRegistry, run_skill_ref
         reg = SkillRegistry()
         reg.scan([SKILLS])
-        out = run_skill_ref(reg, {"name": "price-action-trading", "path": "references/SOUL.md"},
+        rel = _largest_ref()          # 取最大的那份，确保 150 字符切点必然触发
+        out = run_skill_ref(reg, {"name": "price-action-trading", "path": rel},
                             bot_id="b", enabled_ids=["price-action-trading"], root=fixture_root(),
                             max_ref_tokens=50)
         self.assertIn("reference truncated", out)

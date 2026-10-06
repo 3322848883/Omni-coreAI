@@ -15,7 +15,9 @@ _SYSTEM_HEAD = (
     'stop_entry_long|stop_entry_short|flatten|cancel_all|cancel_price_all|modify_tp_sl",'
     '"confidence":0.0,"size_usd":50,"tp":null,"tp2":null,"tp1_share":null,"sl":null,"type":"market|limit|post_only|ioc|fok",'
     '"price":null,"trigger_price":null,"leverage":null,"side":"long|short|null",'
-    '"tp_mode":"trigger|limit_order","sl_mode":"trigger|limit_order","reasoning":"..."}],'
+    '"tp_mode":"trigger|limit_order","sl_mode":"trigger|limit_order","reasoning":"...",'
+    '"region":"trend|range|reversal|null","invalidation":null,"time_stop_bars":null,'
+    '"give_back_pct":null,"risk_pct":null,"rule_ids":[],"scenarios":{}}],'
     '"triggers":[]}\n'
     # 每条规则标注**归属**：让模型知道哪些是硬边界（会被后端拒绝/改写）、
     # 哪些是引擎自动兜底的（它不必管）、哪些是它自己的判断职责。
@@ -85,6 +87,23 @@ _SYSTEM_HEAD = (
     "那是历史遗留（每轮重挂入场单会各留一组）—— **引擎会自动对齐与清理，你不必逐条处理**，"
     "**也不要因此误判持仓大小**。判据是「张数对比」，不是「有没有保护单」："
     "有保护单是正常的，超额才是问题。\n"
+    # 规则 18：契约 Tier 1（见 docs/compose/spec/pa-skills-upgrade.md [S2]）。
+    # **实测动因**：人格提示词一直要求「区域三选一必须显式写出」「结构改变就走」
+    # 「浮盈后锁住利润」「每次必须做仓位管理结论」，但契约里没有任何字段承载 ——
+    # 实测那轮模型在 CoT 里写了「跌破 85560 意味着多头腿结构被破坏 → 离场」，
+    # 这句话无处安放、随 CoT 一起消失。而且区域无字段时它只是一个标签：
+    # 模型为了能用双止盈把「区间」改判成「趋势」就绕过了「区间禁止 2R」这条规则。
+    # 所以 region 不只是记录 —— 它是**代码强制**的校验点。
+    "18) [代码强制] **区域与失效锚（建议每轮都填）**："
+    "`region` 三选一 trend|range|reversal，必须与你实际分析一致；"
+    "**region=range 时禁止给 tp2**（区间只做 scalp，2R 目标会被引擎直接拒绝）。"
+    "`invalidation`=前提失效价（触及即视为结构破坏）；"
+    "`time_stop_bars`=最大持仓轮数；`give_back_pct`=浮盈回撤阈值(%)；"
+    "`risk_pct`=本单实际风险占权益比例；"
+    "`rule_ids`=你依据的规则 ID 数组（如 BAN-01/SB-06/SA-05）；"
+    "`scenarios`=入场后情形→应对动作的对象。"
+    "这些字段会写入决策日志与订单上下文 —— **下一轮的你会看到本轮写了什么**，"
+    "填了才有跨轮一致性，不填等于每轮从零开始。\n"
 )
 
 PLAN_SCHEMA_HINT = (

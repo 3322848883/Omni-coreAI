@@ -1,5 +1,8 @@
 # 主题十七：连续性规则与价格行为跟踪
 
+> ⚠️ 本文件源自**人类工作流**，其中「写入日志文件 / 更新记忆文件」一类是原工作流的**记录协议**（bot 无文件系统，相关路径已改写为记忆承载物）；bot 没有文件工具，请改为把结论写进 chip 字段（`region` / `invalidation` / `time_stop_bars` / `give_back_pct` / `risk_pct` / `rule_ids` / `scenarios`），跨轮记忆由订单上下文与决策日志承担。
+
+
 > 本主题整合分析连续性规则和价格行为跟踪方法，确保每次分析都基于完整的历史上下文，避免独立分析问题。
 > 所有规则引用自已有知识文件，不创造新规则。
 
@@ -32,21 +35,20 @@
 
 ## 一、连续性规则
 
-> 来源：[references/analysis-continuity.md](../analysis-continuity.md)
-
+> 来源：本技能主题知识分片
 ### 1.1 分析前执行清单（Step 0）
 
 每次分析开始前，必须依次执行以下 4 步：
 
 ```
-Step 0-1: 读取 market_state.md
+Step 0-1: 读取 订单上下文（活跃计划）
    - 检查分析时间
    - 获取上次市场状态
    - 获取持仓状态（如有）
    - 获取关键价格位
 
 Step 0-2: 读取最近分析
-   - 读取最近 3 次分析记录（logs/analyses/）
+   - 读取最近 3 次分析记录（决策日志）
    - 获取历史分析结论
    - 识别市场状态变化
    - 检查是否有持仓
@@ -67,7 +69,7 @@ Step 0-4: 间隔判断
 每次分析完成后，必须依次执行以下 4 步：
 
 ```
-Step 1: 更新 market_state.md
+Step 1: 更新 订单上下文（活跃计划）
    - 更新分析时间
    - 更新当前价格
    - 更新市场状态
@@ -75,11 +77,11 @@ Step 1: 更新 market_state.md
    - 更新持仓状态（如有）
    - 更新关键价格位
 
-Step 2: 写入分析日志（logs/analyses/）
+Step 2: 写入分析日志（决策日志）
    - 文件名格式: YYYY-MM-DD_HHMM_品种.md
    - 内容: 简化版分析结论
 
-Step 3: 写入订单日志（logs/orders/）（如有交易）
+Step 3: 写入订单日志（订单上下文）（如有交易）
    - 文件名格式: YYYY-MM-DD_HHMM_品种_方向.md
    - 内容: 订单详情
 
@@ -93,9 +95,9 @@ Step 4: 更新记忆文件（如有新数据）
 
 ## 二、时间间隔规则
 
-> 来源：[references/analysis-continuity.md](../analysis-continuity.md) 第三节
+> 来源：本技能主题知识分片（第三节）
 
-本规则将原 analysis-continuity.md 的 4 级时间矩阵简化为 **2 级模式**，便于快速决策：
+本规则将原方案的 4 级时间矩阵简化为 **2 级模式**，便于快速决策：
 
 | 时间间隔 | 模式 | 处理方式 |
 |---------|------|---------|
@@ -112,7 +114,7 @@ Step 4: 更新记忆文件（如有新数据）
 ### 完整模式要点（≥ 1h）
 
 - 必须重新判断市场状态和趋势方向
-- 加载 assets/templates/step_checklist.md 逐步骤标记
+- 加载 26 主干步骤自检（见 references/00-core-steps.md） 逐步骤标记
 - 重新评估 SB 规则和交易者方程式
 - 如有持仓，重新校验止损位置
 
@@ -156,7 +158,7 @@ Step 4: 更新记忆文件（如有新数据）
 
 ### 4.1 H1/L1→H2/L2 计数
 
-> 来源：[references/knowledge/theme3_pullbacks.md](theme3_pullbacks.md) Ch17
+> 来源：[references/knowledge/theme3_pullbacks.md](theme3_pullbacks_part1.md) Ch17
 
 **定义**：计算当前K线高点（或低点）超过前一根K线高点（或低点）的次数，用于识别回撤结束位置。
 
@@ -176,7 +178,7 @@ Step 4: 更新记忆文件（如有新数据）
 
 ### 4.2 双顶/双底
 
-> 来源：[references/knowledge/theme3_pullbacks.md](theme3_pullbacks.md) Ch12
+> 来源：[references/knowledge/theme3_pullbacks.md](theme3_pullbacks_part1.md) Ch12
 
 **双底多头旗（Double Bottom Bull Flag）**：
 - 多头趋势中的回撤以小空头趋势结束
@@ -195,7 +197,7 @@ Step 4: 更新记忆文件（如有新数据）
 
 ### 4.3 楔形（三推）
 
-> 来源：[references/knowledge/theme5_reversals.md](theme5_reversals.md) 第5章
+> 来源：[references/knowledge/theme5_reversals.md](theme5_reversals_part1.md) 第5章
 
 **特征**：
 - 三次推动（Three Push），每次推动力度递减
@@ -216,7 +218,7 @@ Step 4: 更新记忆文件（如有新数据）
 
 ### 4.4 突破确认与失败
 
-> 来源：[references/knowledge/theme4_breakouts.md](theme4_breakouts.md) 第2章、第5章
+> 来源：[references/knowledge/theme4_breakouts.md](theme4_breakouts_part1.md) 第2章、第5章
 
 **高概率突破的 5 条核心判定规则**：
 1. **突破K线体大** — 实体占K线高度的大部分
@@ -240,7 +242,7 @@ Step 4: 更新记忆文件（如有新数据）
 
 ## 五、趋势状态跟踪
 
-> 来源：[references/knowledge/theme2_trends.md](theme2_trends.md) 第19章
+> 来源：[references/knowledge/theme2_trends.md](theme2_trends_part1.md) 第19章
 
 ### 5.1 趋势强度分类
 
@@ -275,15 +277,15 @@ Step 4: 更新记忆文件（如有新数据）
 
 ## 六、step_checklist 使用说明
 
-> 来源：[assets/templates/step_checklist.md](../../assets/templates/step_checklist.md)
+> 来源：26 主干步骤自检（见 references/00-core-steps.md）
 
 ### 6.1 加载模板
 
-在 **完整模式**（≥ 1h 间隔）下，分析开始时加载 `assets/templates/step_checklist.md`：
+在 **完整模式**（≥ 1h 间隔）下，分析开始时加载 `26 主干步骤自检（见 references/00-core-steps.md）`：
 
 ```
 分析开始时加载:
-  assets/templates/step_checklist.md
+  26 主干步骤自检（见 references/00-core-steps.md）
   → 填入品种和时间
   → 开始逐步骤标记
 ```
@@ -325,37 +327,37 @@ Step 4: 更新记忆文件（如有新数据）
 
 ## 七、记忆触发条件表
 
-> 来源：[memory/README.md](../memory/README.md) 第七章
+> 来源：决策日志（触发条件表） 第七章
 
 AI 按以下条件自动触发记忆文件更新，无需用户手动操作：
 
 | 触发事件 | 更新文件 | 更新内容 | 已有规则来源 |
 |---------|---------|---------|------------|
-| 26 步分析完成 | memory/market_state.md | 更新分析时间/状态/持仓/bar序列/形态/趋势 | analysis-continuity.md |
-| 交易关闭（止损/止盈） | memory/pattern_effectiveness.md | 更新对应设置的胜率/笔数/盈亏比 | trading_journal.md |
-| 交易关闭 + 触犯 BAN | memory/error_patterns.md | 更新错误频率 | trade_review.md |
-| 交易关闭 + 新发现 | memory/market_wisdom.md | 追加新条目 | trade_review.md |
-| 交易关闭 | memory/improvement_tracker.md | 更新改进计划进度 | trade_review.md |
-| 交易关闭 | memory/strategy_hypotheses.md | 更新验证进度 | trade_review.md |
-| 每日 UTC 00:00 | logs/analyses/ + memory/L2_daily/ | 生成日复盘 | daily_deep_review.md |
-| 周日 | memory/L3_weekly/ | 周度提炼 | memory/README.md |
-| 月末 | memory/L4_monthly/ | 月度审查 | memory/README.md |
+| 26 步分析完成 | 订单上下文（活跃计划） | 更新分析时间/状态/持仓/bar序列/形态/趋势 | — |
+| 交易关闭（止损/止盈） | 决策日志（设置胜率） | 更新对应设置的胜率/笔数/盈亏比 | 决策日志 |
+| 交易关闭 + 触犯 BAN | 决策日志（错误模式） | 更新错误频率 | 决策日志（复盘） |
+| 交易关闭 + 新发现 | 决策日志（已验证规律） | 追加新条目 | 决策日志（复盘） |
+| 交易关闭 | 决策日志（改进项） | 更新改进计划进度 | 决策日志（复盘） |
+| 交易关闭 | 决策日志（策略假设） | 更新验证进度 | 决策日志（复盘） |
+| 每日 UTC 00:00 | 决策日志 + 决策日志（日聚合） | 生成日复盘 | — |
+| 周日 | 决策日志（周聚合） | 周度提炼 | 决策日志（触发条件表） |
+| 月末 | 决策日志（月聚合） | 月度审查 | 决策日志（触发条件表） |
 
 ---
 
 > **引用索引**：
-> - 连续性规则 → [references/analysis-continuity.md](../analysis-continuity.md)
+> - 连续性规则 → 本文件
 > - Bar 类型分类 → [references/knowledge/theme13_reading_bar_by_bar.md](theme13_reading_bar_by_bar.md)
-> - H1/L1→H2/L2 计数 & 双顶/双底 → [references/knowledge/theme3_pullbacks.md](theme3_pullbacks.md)
-> - 突破确认与失败 → [references/knowledge/theme4_breakouts.md](theme4_breakouts.md)
-> - 楔形（三推）→ [references/knowledge/theme5_reversals.md](theme5_reversals.md)
-> - 趋势状态与 Always In → [references/knowledge/theme2_trends.md](theme2_trends.md)
-> - Step Checklist → [assets/templates/step_checklist.md](../../assets/templates/step_checklist.md)
-> - 记忆触发条件 → [memory/README.md](../memory/README.md)
+> - H1/L1→H2/L2 计数 & 双顶/双底 → [references/knowledge/theme3_pullbacks.md](theme3_pullbacks_part1.md)
+> - 突破确认与失败 → [references/knowledge/theme4_breakouts.md](theme4_breakouts_part1.md)
+> - 楔形（三推）→ [references/knowledge/theme5_reversals.md](theme5_reversals_part1.md)
+> - 趋势状态与 Always In → [references/knowledge/theme2_trends.md](theme2_trends_part1.md)
+> - Step Checklist → 26 主干步骤自检（见 references/00-core-steps.md）
+> - 记忆触发条件 → 决策日志（触发条件表）
 
 ---
 
-## v33 新增：计划跟踪与执行写入规则
+## 计划跟踪与执行写入规则
 
 ### 8.1 5路径分流规则
 
@@ -375,11 +377,11 @@ AI 按以下条件自动触发记忆文件更新，无需用户手动操作：
 
 | 路径 | 执行后写入文件 | 写入内容 |
 |------|--------------|---------|
-| D | market_state.md + logs/analyses/ + order_log.md + trade_review.md + memory/*.md | 市场状态+分析归档+修改记录+复盘+记忆更新 |
-| A1 | market_state.md + logs/analyses/ | 仅更新价格+简短记录 |
-| A2 | market_state.md + logs/analyses/ | 更新调整参数+调整原因 |
-| B | market_state.md + logs/analyses/ + logs/orders/ | 标记旧计划失效+新计划+订单详情 |
-| C | market_state.md + logs/analyses/ + logs/orders/ | 新计划+订单详情 |
+| D | 订单上下文（活跃计划） + 决策日志 + 订单上下文 + 决策日志（复盘） + 决策日志 | 市场状态+分析归档+修改记录+复盘+记忆更新 |
+| A1 | 订单上下文（活跃计划） + 决策日志 | 仅更新价格+简短记录 |
+| A2 | 订单上下文（活跃计划） + 决策日志 | 更新调整参数+调整原因 |
+| B | 订单上下文（活跃计划） + 决策日志 + 订单上下文 | 标记旧计划失效+新计划+订单详情 |
+| C | 订单上下文（活跃计划） + 决策日志 + 订单上下文 | 新计划+订单详情 |
 
 ### 8.3 记忆触发条件表扩展
 
@@ -387,10 +389,10 @@ AI 按以下条件自动触发记忆文件更新，无需用户手动操作：
 
 | 触发事件 | 更新文件 | 更新内容 |
 |---------|---------|---------|
-| Step 6.5 场景B下单成功 | logs/orders/ + memory/market_state.md | 订单详情+活跃计划→已触发 |
-| Step 6.5 场景C挂单管理 | logs/orders/ | 更新订单记录 |
-| Step 6.5 场景D止损/止盈调整 | assets/templates/order_log.md（阶段三） | 修改记录 |
-| Step 6.5 场景D平仓执行 | order_log.md（阶段四）+ trade_review.md + memory/*.md | 平仓+复盘+记忆更新 |
+| Step 6.5 场景B下单成功 | 订单上下文 + 订单上下文（活跃计划） | 订单详情+活跃计划→已触发 |
+| Step 6.5 场景C挂单管理 | 订单上下文 | 更新订单记录 |
+| Step 6.5 场景D止损/止盈调整 | 订单上下文（阶段三） | 修改记录 |
+| Step 6.5 场景D平仓执行 | 订单上下文（阶段四）+ 决策日志（复盘） + 决策日志 | 平仓+复盘+记忆更新 |
 
 ### 8.4 交易闭环监控规则（强制）
 
@@ -398,7 +400,7 @@ AI 按以下条件自动触发记忆文件更新，无需用户手动操作：
 
 #### 监控强制性声明
 
-1. 一旦 market_state.md 活跃计划状态 = "等待触发"，后续每次分析必须走路径A1/A2
+1. 一旦 订单上下文（活跃计划） 活跃计划状态 = "等待触发"，后续每次分析必须走路径A1/A2
 2. 一旦计划状态变为"已触发"（有持仓），后续每次分析必须走路径D
 3. 只有计划状态变为"已失效"/"已过期"/"已取消"/"已成交"时，才允许走路径B/C生成新计划
 4. 禁止在计划有效期间跳过 Step 0.5b 直接做完整分析

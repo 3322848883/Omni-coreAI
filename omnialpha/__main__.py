@@ -125,7 +125,14 @@ def cmd_plan(args) -> int:
     paths.ensure()
     bot = load_bot_config(paths.config_dir / f"{args.bot}.yaml")
     runner = _build_plan_runner(bot, paths)
-    result = runner.run_once()
+    # CLI 边界：给人可读的错误，不要甩 traceback。
+    # `run_once` 内部已捕 `PlanError` 走 degraded，但配置/凭据/客户端初始化等
+    # 仍可能抛出别的异常，而 `main()` 只捕 `GateApiError`（独立评审指出）。
+    try:
+        result = runner.run_once()
+    except Exception as e:  # noqa: BLE001
+        print(f"plan failed: {type(e).__name__}: {e}", file=sys.stderr)
+        return 2
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result.get("ok") else 2
 

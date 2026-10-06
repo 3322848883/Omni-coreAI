@@ -104,10 +104,15 @@ def run_skill_ref(
         raise SkillError(f"file not found in skill {name!r}: {rel}")
 
     text = target.read_text(encoding="utf-8", errors="replace")
-    truncated = False
-    if _estimate_tokens(text) > max_ref_tokens:
-        text = text[: max_ref_tokens * 3] + "\n\n[reference truncated]"
-        truncated = True
+    # 截断判据必须与切点同口径（都按字符）。原先是「token 估算判据 + 字符切点」：
+    # `_estimate_tokens` 对中文约 1 token/字，于是 4,000–12,000 字符的中文文件
+    # **内容一个字没丢，却被写上 `[reference truncated]`** —— 既误导模型去找并不存在的
+    # 「后续内容」，也让 journal 的 truncated 统计失去意义（实测 37 次 skill_ref 里
+    # 30 次被标截断，真被切的只有 >12,000 字符的那些）。
+    limit_chars = max_ref_tokens * 3
+    truncated = len(text) > limit_chars
+    if truncated:
+        text = text[:limit_chars] + "\n\n[reference truncated]"
 
     if root is not None:
         append_journal(root, {
