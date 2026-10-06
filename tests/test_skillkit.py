@@ -259,7 +259,7 @@ class TestToolsIntegration(unittest.TestCase):
         from omnialpha.strategist.tools import NATIVE_TOOLS, TOOL_NAMES
         self.assertIn("skill", TOOL_NAMES)
         self.assertIn("skill_ref", TOOL_NAMES)
-        self.assertEqual(len(NATIVE_TOOLS), 35)  # 27 基础 + 8 TV
+        self.assertEqual(len(NATIVE_TOOLS), 36)  # 28 基础 + 8 TV
 
     def test_prompt_catalog_slot(self):
         from omnialpha.strategist.prompt import build_system_prompt

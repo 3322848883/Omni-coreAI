@@ -27,6 +27,7 @@ from types import SimpleNamespace
 from omnialpha.memory import CacheGuard, MemoryJournal, MemoryProfile, run_gc
 from omnialpha.persona.orders import SharedOrderStore
 from omnialpha.persona.runner import PersonaRunner
+from omnialpha.strategist.tools import NATIVE_TOOLS, TOOL_NAMES, run_tool
 
 BOT = "wire-bot"
 OID = "o-wire0001"
@@ -238,6 +239,216 @@ class TestJournalAndCacheWiring(unittest.TestCase):
             self.assertTrue(g.check_prefix("同一段前缀"), "首次运行应视为稳定")
             self.assertTrue(g.check_prefix("同一段前缀"))
             self.assertFalse(g.check_prefix("换了前缀"), "前缀变了必须报不稳定")
+
+
+class TestMemoryRefsReachJournal(unittest.TestCase):
+    """模型输出的 `memory_refs` 必须真的落进 journal。
+
+    背景：模型每轮都在输出这个字段（实测 cycle 213 的原文
+    `"memory_refs": ["...212","...211","...210"]`），但 `schema.py` 的 `Plan`
+    没有这个字段、`parse_plan` 也不取 —— 它进了 `plan.raw` 就再没人看。
+    实测结果：`memory_journal.jsonl` 896 条记录，`memory_refs` 非空 **0 条**
+    （覆盖 148.6 小时）。同时 prompt 还在要求模型输出它 —— 「要求了但不消费」。
+    """
+
+    REPLY = json.dumps({
+        "cycle_id": "c-mem-1",
+        "reasoning": "r",
+        "memory_refs": ["c-old-1", "c-old-2"],
+        "chips": [{"symbol": "BTC_USDT", "action": "hold", "confidence": 0.9}],
+    })
+
+    def _last_journal(self, root: Path) -> dict:
+        p = root / "data" / "bots" / BOT / "state" / "memory_journal.jsonl"
+        return json.loads(p.read_text(encoding="utf-8").strip().splitlines()[-1])
+
+    def test_refs_land_in_journal(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _plan_runner(root, _RecordingLLM(reply=self.REPLY)).run_once()
+            self.assertEqual(self._last_journal(root)["memory_refs"], ["c-old-1", "c-old-2"],
+                             "模型输出的 memory_refs 没落进 journal")
+
+    def test_bad_type_degrades_to_empty(self):
+        """格式瑕疵不该毁掉整轮决策 —— 这是观测性字段，不是控制流。"""
+        reply = json.dumps({
+            "cycle_id": "c-mem-2", "reasoning": "r",
+            "memory_refs": "not-a-list",
+            "chips": [{"symbol": "BTC_USDT", "action": "hold", "confidence": 0.9}],
+        })
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _plan_runner(root, _RecordingLLM(reply=reply)).run_once()
+            self.assertEqual(self._last_journal(root)["memory_refs"], [])
+
+    def test_missing_field_is_empty(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _plan_runner(root, _RecordingLLM()).run_once()      # HOLD_PLAN 无该字段
+            self.assertEqual(self._last_journal(root)["memory_refs"], [])
+
+    def test_blank_entries_dropped(self):
+        reply = json.dumps({
+            "cycle_id": "c-mem-3", "reasoning": "r",
+            "memory_refs": ["c-a", "", None, "   ", "c-b"],
+            "chips": [{"symbol": "BTC_USDT", "action": "hold", "confidence": 0.9}],
+        })
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _plan_runner(root, _RecordingLLM(reply=reply)).run_once()
+            self.assertEqual(self._last_journal(root)["memory_refs"], ["c-a", "c-b"])
+
+
+class TestRecentWindowIsUsable(unittest.TestCase):
+    """近况窗口必须让模型看得到「最近做过什么」。
+
+    背景：`[近况]` 原先只回看 3 轮、每轮 `reasoning[:30]` —— 实测该段共 **171 字符**，
+    而模型每轮产出 6,286–76,211 字符的推理。148 小时的决策历史里，模型看不到自己
+    一小时之前做过什么。`journal.py` 存的是 `[:500]`，是 `context.py` 又砍了一刀。
+
+    修法是**索引而不是正文**：正文给最近几轮，更早的只留 `cycle_id + decision` 一行，
+    细节用 `journal_lookup` 按需取 —— 这样体积不随历史增长。
+    """
+
+    def _seed(self, root: Path, n: int, start: int = 0) -> None:
+        j = MemoryJournal(root, BOT)
+        for i in range(start, start + n):
+            j.append(cycle_id=f"c-{i:03d}", decision="hold",
+                     reasoning=f"第{i}轮推理" + "细节" * 40)
+
+    def _user(self, root: Path, **kw) -> str:
+        from omnialpha.memory import build_context
+        return build_context(root, BOT, system_prompt="SYS",
+                             snapshot_text="【市场与账户快照】\n{}", **kw)["user"]
+
+    def test_summary_not_truncated_to_30(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self._seed(root, 1)
+            # 断言 40 个字符的连续片段：`[:30]` 截断后只剩 30 字，必然找不到。
+            # （断言 "细节"*10 是假阳性 —— 截断后仍留 12 个。）
+            self.assertIn("细节" * 20, self._user(root),
+                          "近况摘要仍被硬截断到 30 字")
+
+    def test_index_lists_earlier_rounds(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self._seed(root, 25)                      # c-000 .. c-024
+            user = self._user(root)
+            # 索引层覆盖最近 20 轮（c-005..c-024）—— 比摘要层的 3 轮宽得多
+            self.assertIn("c-005", user, "索引层没覆盖最近 20 轮")
+            self.assertNotIn("c-000", user, "索引层超出了 n_index 窗口")
+            self.assertIn("journal_lookup", user, "索引层没告诉模型怎么取细节")
+
+    def test_block_size_does_not_grow_with_history(self):
+        """体积不随历史增长 —— 这是它替代「回看 N 轮」的关键。"""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self._seed(root, 10)
+            small = self._user(root)
+            self._seed(root, 500, start=10)
+            big = self._user(root)
+            self.assertLess(abs(len(big) - len(small)), 200,
+                            f"近况段随历史增长：10 轮 {len(small)} → 510 轮 {len(big)}")
+            self.assertLess(len(big), 2000, f"近况段过大：{len(big)} 字符")
+
+    def test_last_plan_state_survives(self):
+        """索引层不能把 [上轮方案状态] 挤掉（Tier 1 字段靠它跨轮）。"""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            MemoryJournal(root, BOT).append(
+                cycle_id="c-x", decision="hold", reasoning="r",
+                region="trend", invalidation_price=85550.0, time_stop_bars=10)
+            self.assertIn("前提失效=85550", self._user(root))
+
+
+class TestJournalLookupTool(unittest.TestCase):
+    """`journal_lookup` 让「记忆」可检索，而不是把 N 轮正文预载进 prompt。
+
+    索引层（`[近期决策索引]`）只给 `cycle_id + decision` 一行，模型要某轮细节时用这个
+    工具取回 —— 这是 `[近况]` 体积**不随历史增长**的前提。没有它，索引就只是一串
+    无法兑现的编号。
+    """
+
+    def test_returns_record_by_cycle_id(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            j = MemoryJournal(root, BOT)
+            j.append(cycle_id="c-a", decision="hold", reasoning="甲")
+            j.append(cycle_id="c-b", decision="open_long", reasoning="乙",
+                     exec_result={"orders": 1})
+            out = run_tool(_Client(), "journal_lookup", {"cycle_id": "c-a"},
+                           bot_root=root, bot_id=BOT)
+            self.assertEqual(out["decision"], "hold")
+            self.assertEqual(out["reasoning"], "甲")
+
+    def test_returns_exec_result_for_detail(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            MemoryJournal(root, BOT).append(
+                cycle_id="c-b", decision="open_long", exec_result={"orders": 1})
+            out = run_tool(_Client(), "journal_lookup", {"cycle_id": "c-b"},
+                           bot_root=root, bot_id=BOT)
+            self.assertEqual(out["exec_result"], {"orders": 1})
+
+    def test_unknown_cycle_id_returns_error_not_raise(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            MemoryJournal(root, BOT).append(cycle_id="c-a", decision="hold")
+            out = run_tool(_Client(), "journal_lookup", {"cycle_id": "c-nope"},
+                           bot_root=root, bot_id=BOT)
+            self.assertIn("error", out, "查不到时应返回结构化错误，而不是抛异常")
+            self.assertNotIn("decision", out)
+
+    def test_missing_cycle_id_returns_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = run_tool(_Client(), "journal_lookup", {},
+                           bot_root=Path(td), bot_id=BOT)
+            self.assertIn("error", out)
+
+    def test_tool_is_registered_in_schema_and_names(self):
+        """模型看不到就调不到 —— schema 与 TOOL_NAMES 两处都要有。"""
+        self.assertIn("journal_lookup", TOOL_NAMES)
+        names = [(t.get("function") or {}).get("name") for t in NATIVE_TOOLS]
+        self.assertIn("journal_lookup", names)
+
+
+class TestPromptTailIsNotDuplicated(unittest.TestCase):
+    """收尾指令只能出现一次。
+
+    背景：`prompt.py:209` 与 `context.py:71` 各写了一句，而 `build_context` 把
+    `build_user_prompt` 的**整个输出**当作 `snapshot_text` 塞进模板 —— 于是 user
+    prompt 末尾连着两句几乎一样的收尾指令（实测 2026-10-06 的 user prompt 原文）。
+    纯冗余，也让「到底该听哪句」变得含糊。
+    """
+
+    def test_single_tail_in_run_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            llm = _RecordingLLM()
+            _plan_runner(root, llm).run_once()
+            user = llm.users[-1]
+            self.assertEqual(
+                user.count("请输出"), 1,
+                f"收尾指令出现 {user.count('请输出')} 次（应只 1 次）：…{user[-200:]}")
+
+    def test_tail_still_asks_for_memory_refs(self):
+        """去重不能把 memory_refs 的要求一起删掉。"""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            llm = _RecordingLLM()
+            _plan_runner(root, llm).run_once()
+            self.assertIn("memory_refs", llm.users[-1],
+                          "去重时把 memory_refs 要求一起丢了")
+
+    def test_fallback_tail_when_snapshot_text_empty(self):
+        """`build_context` 的模板要能独立成立：snapshot_text 为空时补收尾句。"""
+        from omnialpha.memory import build_context
+
+        with tempfile.TemporaryDirectory() as td:
+            ctx = build_context(Path(td), BOT, system_prompt="SYS", snapshot_text="")
+            self.assertIn("Plan JSON", ctx["user"],
+                          "snapshot_text 为空时模板没有收尾指令，兜底路径会让模型不知该输出什么")
 
 
 # ── S2.7 遗忘 GC ────────────────────────────────────────────

@@ -163,6 +163,9 @@ TOOL_NAMES = (
 
     "smc_map", "smc_events", "sqzmom", "skill", "skill_ref",
 
+    # 记忆：按 cycle_id 取回某轮决策全文（`[近期决策索引]` 的配套检索入口）
+    "journal_lookup",
+
     # TV Pine 指标（真实指标名）
     "tv_linreg_trendlines", "tv_rsi_yata", "tv_lr_ha_candles",
     "tv_delta_flow_profile", "tv_oi_visible_range", "tv_vol_oi_footprint",
@@ -1166,6 +1169,33 @@ from ..skillkit.tool import SKILL_REF_TOOL_DEF as _SKILL_REF_TOOL_DEF  # noqa: E
 NATIVE_TOOLS.append(_SKILL_TOOL_DEF)
 NATIVE_TOOLS.append(_SKILL_REF_TOOL_DEF)
 
+# 记忆检索：按 cycle_id 取回某轮决策全文。prompt 的 `[近期决策索引]` 只给
+# cycle_id + decision 一行 —— 这个工具是它的兑现出口，也是「近况段体积不随
+# 历史增长」的前提（否则索引只是一串无法兑现的编号）。
+_JOURNAL_LOOKUP_TOOL_DEF = {
+    "type": "function",
+    "function": {
+        "name": "journal_lookup",
+        "description": (
+            "Look up one past decision cycle of THIS bot by cycle_id, returning its "
+            "decision / reasoning / execution result / referenced cycles. Use the "
+            "cycle_ids listed in the '[近期决策索引]' block of the prompt when you "
+            "need to know what an earlier round actually judged and did."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "cycle_id": {
+                    "type": "string",
+                    "description": "e.g. btc-pa-15m-20261006-213 (from [近期决策索引])",
+                },
+            },
+            "required": ["cycle_id"],
+        },
+    },
+}
+NATIVE_TOOLS.append(_JOURNAL_LOOKUP_TOOL_DEF)
+
 # TV Pine 指标工具（Linreg & Trendlines / RSI Yata / LR HA Candles）
 from .tv_tools import TV_TOOL_DEFS as _TV_TOOL_DEFS  # noqa: E402
 
@@ -1417,6 +1447,38 @@ def run_tool(
             "hint": "该工具被 strategist.tools 的 allow/deny 关掉了；请只用 available 里的工具",
         }
 
+
+    # journal_lookup: 记忆检索（不需要 gate client，只要 bot_root / bot_id）
+    if name == "journal_lookup":
+        from pathlib import Path as _P
+
+        cid = str(args.get("cycle_id") or "").strip()
+        if not cid:
+            return {"error": "cycle_id is required",
+                    "hint": "用 prompt 里 [近期决策索引] 列出的 cycle_id"}
+        if not bot_root or not bot_id:
+            return {"error": "journal unavailable: no bot context"}
+        try:
+            from ..memory.journal import MemoryJournal
+            rec = MemoryJournal(_P(bot_root), str(bot_id)).find(cid)
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"journal read failed: {e}"[:160]}
+        if rec is None:
+            return {"error": f"no journal record for cycle_id {cid!r}",
+                    "hint": "可能已被遗忘 GC 归档；请用 [近期决策索引] 里列出的 cycle_id"}
+        return {
+            "cycle_id": rec.get("cycle_id", ""),
+            "ts": rec.get("ts"),
+            "decision": rec.get("decision", ""),
+            "reasoning": rec.get("reasoning", ""),
+            "executed": rec.get("executed"),
+            "exec_result": rec.get("exec_result") or {},
+            "memory_refs": rec.get("memory_refs") or [],
+            # Tier 1 字段：跨轮一致性的依据（契约要求填了就要能回看）
+            "region": rec.get("region"),
+            "invalidation_price": rec.get("invalidation_price"),
+            "time_stop_bars": rec.get("time_stop_bars"),
+        }
 
     # skill: SkillKit L2 loading (no gate client needed)
     if name == "skill":

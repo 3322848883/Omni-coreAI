@@ -226,12 +226,13 @@ llm:
 | 落盘 | 每轮 **`state/*.thinking.json`**（思维链 reasoning_content） |
 | 账户 | **REST**：余额+持仓+open_orders+TP/SL（全 bot） |
 
-**35 个工具**（原生 function calling）：
+**36 个工具**（原生 function calling）：
 
 - 行情：`klines` `indicators` `ticker` `orderbook` `contract` `stats` `account` `smc_map` `smc_events` `sqzmom` `taker_delta`
 - aux：`trades_flow` `liquidations` `market_stats` `tech_analysis` `coin_info` `onchain` `social` `overview` `sentiment` `macro`
 - 订单流（pa-data-source 实采）：`orderflow_tape` `orderflow_footprint` `orderbook_state` `orderbook_walls`
 - skill：`skill` `skill_ref`（SkillKit）
+- 记忆：`journal_lookup`（按 `cycle_id` 取回某轮决策的 decision/reasoning/执行结果；prompt 里的 `[近期决策索引]` 靠它兑现——索引只给一行编号，细节按需取，所以近况段体积不随历史增长）
 - **TV 指标**：`tv_linreg_trendlines` `tv_rsi_yata` `tv_lr_ha_candles` `tv_delta_flow_profile` `tv_oi_visible_range` `tv_vol_oi_footprint` `tv_cdv` `tv_wyckoff`
 
 **SkillKit（可安装 skill）** —— 三级渐进披露：

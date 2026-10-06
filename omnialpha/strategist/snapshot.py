@@ -58,6 +58,18 @@ def _first(*vals: Any) -> Any:
     return None
 
 
+def _flag(*vals: Any) -> Optional[bool]:
+    """取第一个非 None 的布尔标记并归一化成 bool。
+
+    两种形状的取值不一样：Gate 用 `true`/`false`，paper 的 `reduce_only` 是 `0`/`1`。
+    原样透传会让 AI 看到混着的两种写法，还要自己再猜一层。
+    """
+    for v in vals:
+        if v is not None:
+            return bool(v)
+    return None
+
+
 def position_state(account: dict) -> tuple[str, str]:
     """给 AI 的持仓状态摘要：(state, note)。
 
@@ -95,7 +107,10 @@ def position_state(account: dict) -> tuple[str, str]:
         return "entry_pending", (
             "**无持仓**：只有未成交的入场委托。protections 里的单是随入场单预挂的，"
             "成交后才成为该持仓的保护 —— 此时**不要发 modify_tp_sl**（会 NO_POSITION），"
-            "也不要以为已有仓位"
+            "也不要以为已有仓位。"
+            "**判据**：protections 里 `is_reduce_only: true` 的是预挂保护单，"
+            "`is_reduce_only: false` 的是入场条件单（stop_entry）本身；"
+            "**预挂保护单不是孤儿单，不得撤销**（它们要等入场成交才生效）。"
         )
     return "flat", "无持仓、无待成交入场单"
 
@@ -282,6 +297,10 @@ def collect_snapshot(
                     "left": o.get("left"),
                     "status": o.get("status"),
                     "text": o.get("text"),
+                    # 普通挂单走 `list_orders()`，Gate 在这里**不给** `order_type`
+                    # （实测字段清单里没有），能区分委托类型的只有 `tif`。
+                    "tif": o.get("tif"),
+                    "is_reduce_only": _flag(o.get("is_reduce_only"), o.get("reduce_only")),
                 })
             account["open_orders"] = oos
         except Exception as e:  # noqa: BLE001
@@ -309,6 +328,19 @@ def collect_snapshot(
                         "rule": _first(trg.get("rule"), p.get("rule")),
                         "text": _first(ini.get("text"), p.get("text")),
                         "status": p.get("status"),
+                        # **入场条件单与预挂保护单都落在这个数组里** —— 执行器挂
+                        # stop_entry 时会把 TP/SL 一起挂上（`hang_mode: simultaneous`，
+                        # 成交即生效、零裸仓窗口，是刻意设计）。两者的 6 个老字段
+                        # 形状完全一样，AI 只能靠 `text` 后缀猜。
+                        # 实测 2026-10-06：AI 花了上千字猜「85850 那个单是 stop 还是
+                        # limit」，而 trades.jsonl 里 order_type 写得清清楚楚。
+                        # `is_reduce_only` 是唯一可靠的判据：true = 保护单，false = 入场单。
+                        "is_reduce_only": _flag(
+                            ini.get("is_reduce_only"), ini.get("reduce_only"),
+                            p.get("is_reduce_only"), p.get("reduce_only"),
+                        ),
+                        "direction": _first(p.get("direction"), ini.get("direction")),
+                        "order_type": _first(p.get("order_type"), ini.get("type")),
                     })
             account["protections"] = prot
         except Exception as e:  # noqa: BLE001

@@ -153,6 +153,10 @@ class Plan:
     triggers: list = field(default_factory=list)
     trigger_ops: list = field(default_factory=list)
     rejected_triggers: list = field(default_factory=list)
+    # 本轮引用了哪些历史决策（模型自报）。prompt 一直在要求它输出，但这里原先没有
+    # 这个字段、`parse_plan` 也不取 —— 于是它进了 `raw` 就再没人看，实测 896 条
+    # journal 里非空 0 条。是「要求了但不消费」的那类缺陷。
+    memory_refs: list = field(default_factory=list)
     raw: dict = field(default_factory=dict)
 
 
@@ -181,6 +185,24 @@ def _int(v, name: str, idx: int) -> Optional[int]:
         return int(v)
     except (TypeError, ValueError):
         raise PlanError(f"chips[{idx}].{name} must be an integer, got {v!r}")
+
+
+def _memory_refs(raw: Any) -> list[str]:
+    """规范化 `memory_refs`：只留非空字符串，最多 20 条。
+
+    **不抛 `PlanError`** —— 与 chips 的字段不同，这是**观测性**字段（记录本轮引用了
+    哪些历史决策），格式瑕疵不该让整轮决策作废。非法输入一律降级为 `[]`。
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for x in raw:
+        s = str(x or "").strip()
+        if s:
+            out.append(s)
+        if len(out) >= 20:
+            break
+    return out
 
 
 def parse_plan(data: Any) -> Plan:
@@ -291,6 +313,7 @@ def parse_plan(data: Any) -> Plan:
         chips=chips,
         triggers=triggers,
         trigger_ops=trigger_ops,
+        memory_refs=_memory_refs(data.get("memory_refs")),
         raw=data,
     )
 

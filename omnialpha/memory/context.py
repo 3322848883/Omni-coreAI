@@ -22,6 +22,7 @@ def build_context(
     snapshot: Optional[dict] = None,
     snapshot_text: str = "",
     n_recent: int = 3,
+    n_index: int = 20,
     extra_suffix: str = "",
 ) -> dict:
     """组装每轮主上下文。
@@ -48,13 +49,18 @@ def build_context(
     order_block = _format_order_context(order_context)
     # 只读一次 journal：原先 `read_recent_summaries` 与 `read_recent(1)` 各做一次
     # `read_text()`，每轮多读一遍整个文件（独立评审指出）。
-    recent_rows = journal.read_recent(n_recent)
+    # 一次读够索引层需要的条数，再切片 —— 摘要层与索引层共用这一份。
+    rows = journal.read_recent(max(n_recent, n_index))
+    recent_rows = rows[-n_recent:] if rows else []
     recent_summaries = [
         {"cycle_id": r.get("cycle_id", ""), "decision": r.get("decision", ""),
-         "reasoning": str(r.get("reasoning") or "")[:30]}
+         # **不再 [:30] 截断**：模型每轮写 6K–76K 字符的推理，而 `[近况]` 原先只
+         # 回看到 30 字（实测整段 171 字符）。journal 存的是 [:500]，是这里又砍了一刀。
+         "reasoning": str(r.get("reasoning") or "")}
         for r in recent_rows
     ]
     recent_block = _format_recent(recent_summaries)
+    index_block = _format_index(rows[-n_index:] if n_index else [])
     last_state = _format_last_plan_state(recent_rows[-1:])
     last_state_block = f"\n[上轮方案状态]\n{last_state}\n" if last_state else ""
     snapshot_block = snapshot_text or _format_snapshot(snapshot or {})
@@ -64,11 +70,16 @@ def build_context(
 
 [近况]
 {recent_block}
+{index_block}
 {last_state_block}
 [本轮快照]
-{snapshot_block}
-
-请输出 Plan JSON（含 memory_refs 引用历史决策）。"""
+{snapshot_block}"""
+    # 收尾指令由 `snapshot_text` 自带（`build_user_prompt` 的末尾）。两处都写会连着
+    # 出两句几乎一样的「请输出 Plan JSON」——实测 2026-10-06 的 user prompt 就是
+    # 「请输出本轮 Plan JSON。\n\n请输出 Plan JSON。」。只有快照缺席时（模板被独立
+    # 调用）才在这里补，免得兜底路径没有收尾指令。
+    if "Plan JSON" not in snapshot_block:
+        user += "\n\n请输出 Plan JSON（含 memory_refs 引用历史决策）。"
     if extra_suffix:
         user = user + "\n" + extra_suffix
 
@@ -134,6 +145,24 @@ def _format_recent(summaries: list[dict]) -> str:
         f"{s.get('cycle_id', '')}: {s.get('decision', '')} — {s.get('reasoning', '')}"
         for s in summaries
     )
+
+
+def _format_index(rows: list[dict]) -> str:
+    """最近 N 轮的一行索引（`cycle_id` + `decision`），不含推理正文。
+
+    **为什么要有这一层**：把 N 轮正文都塞进 prompt 是**线性成本**，而模型有 148 小时
+    的决策历史（实测 896 条 journal）。所以给**索引**而不是正文 —— 模型看得到
+    「最近哪些轮做了什么」，需要某轮细节时用 `journal_lookup(cycle_id)` 按需取。
+
+    这样段落体积不随历史增长，是它替代「回看 N 轮」的关键。
+    """
+    if not rows:
+        return ""
+    lines = "\n".join(
+        f"  {r.get('cycle_id', '')} {r.get('decision', '')}" for r in rows
+    )
+    return (f"\n[近期决策索引·最近 {len(rows)} 轮"
+            f"（要看某轮细节用 journal_lookup(cycle_id)）]\n{lines}")
 
 
 def _format_last_plan_state(rows: list[dict]) -> str:

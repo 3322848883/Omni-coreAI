@@ -206,7 +206,7 @@ def build_user_prompt(snapshot: dict[str, Any], risk: dict[str, Any], symbols: l
         + json.dumps(risk, ensure_ascii=False)
         + "\n\n【市场与账户快照】\n"
         + json.dumps(snapshot, ensure_ascii=False)
-        + "\n\n请输出本轮 Plan JSON。"
+        + "\n\n请输出本轮 Plan JSON（含 memory_refs 引用历史决策）。"
     )
 
 

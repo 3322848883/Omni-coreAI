@@ -416,6 +416,9 @@ class PlanRunner:
                 cycle_id=plan.cycle_id,
                 decision=",".join(acts) or "hold",
                 reasoning=plan.reasoning[:500],
+                # 模型自报的本轮引用（prompt 一直在要求它输出）。原先没传这个参数，
+                # 于是字段在 journal 里恒为空 —— 实测 896 条记录非空 0 条。
+                memory_refs=list(getattr(plan, "memory_refs", None) or []),
                 snapshot_digest=self.last_snapshot_digest,
                 llm_model=llm_model,
                 prompt_cache_hit_tokens=cache_hit,

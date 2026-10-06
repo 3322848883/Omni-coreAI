@@ -74,6 +74,32 @@ class MemoryJournal:
                 continue
         return out
 
+    def find(self, cycle_id: str) -> Optional[dict]:
+        """按 `cycle_id` 取回一条决策记录（找不到返回 None）。
+
+        `journal_lookup` 工具靠它：`[近期决策索引]` 只给 `cycle_id + decision` 一行，
+        模型要某轮细节时按需取回 —— 这样「记忆」是**可检索**的，而不是把 N 轮正文
+        都预载进 prompt（那是线性成本）。
+
+        同一 `cycle_id` 出现多次时取**最新**一条：journal 是 append-only，
+        同一轮重跑会再追加一行。
+        """
+        cid = str(cycle_id or "").strip()
+        if not cid or not self.path.exists():
+            return None
+        try:
+            lines = self.path.read_text(encoding="utf-8").strip().splitlines()
+        except Exception:  # noqa: BLE001
+            return None
+        for line in reversed(lines):
+            try:
+                rec = json.loads(line)
+            except Exception:  # noqa: BLE001
+                continue
+            if str(rec.get("cycle_id") or "") == cid:
+                return rec
+        return None
+
     def read_recent_summaries(self, n: int = 3) -> list[dict]:
         """读最近 n 条的摘要（进 prompt 的紧凑格式）。"""
         return [

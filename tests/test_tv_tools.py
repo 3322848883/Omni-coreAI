@@ -56,8 +56,8 @@ class TestTvToolRegistration(unittest.TestCase):
             self.assertIn(n, TOOL_NAMES)
 
     def test_tool_count(self):
-        # 27 基础（含 taker_delta + 4 个 orderflow）+ 8 TV
-        self.assertEqual(len(NATIVE_TOOLS), 35)
+        # 28 基础（含 taker_delta + 4 个 orderflow + journal_lookup）+ 8 TV
+        self.assertEqual(len(NATIVE_TOOLS), 36)
 
     def test_tool_names_exactly_match_native_tools(self):
         """`TOOL_NAMES` 是手写清单，必须与 `NATIVE_TOOLS` 完全一致。
