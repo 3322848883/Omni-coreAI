@@ -63,10 +63,38 @@ def _flag(*vals: Any) -> Optional[bool]:
 
     两种形状的取值不一样：Gate 用 `true`/`false`，paper 的 `reduce_only` 是 `0`/`1`。
     原样透传会让 AI 看到混着的两种写法，还要自己再猜一层。
+
+    **字符串必须单独认**：`bool("false")` 是 `True`。一旦某个数据源把布尔写成字符串，
+    `is_reduce_only` 就恒真 —— 而它正是人格第 25 条区分「预挂保护」与「入场条件单」的
+    唯一判据，判错会把入场单当保护单、或反过来撤掉真保护单。
     """
     for v in vals:
-        if v is not None:
-            return bool(v)
+        if v is None:
+            continue
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if not s:
+                continue                      # 空串视为没值，继续找下一个
+            return s not in ("0", "false", "no", "none", "null")
+        return bool(v)
+    return None
+
+
+def _side_of(size: Any) -> Optional[str]:
+    """由委托张数的符号推方向（正=买=long，负=卖=short）。
+
+    Gate 的条件单带 `direction`（long/short），paper 的扁平库行只有 `side`
+    （buy/sell）—— 字段名不同，但**符号一致**。所以缺失时从 size 派生，
+    比按名字映射 `side` 更可靠，也顺带覆盖了别的形状差异。
+    """
+    try:
+        n = float(size)
+    except (TypeError, ValueError):
+        return None
+    if n > 0:
+        return "long"
+    if n < 0:
+        return "short"
     return None
 
 
@@ -320,10 +348,11 @@ def collect_snapshot(
                     # 实测 2026-10-04 模型自己指出「their trigger prices are null in the data」。
                     ini = p.get("initial") or {}
                     trg = p.get("trigger") or {}
+                    size_v = _first(ini.get("size"), p.get("size"))
                     prot.append({
                         "contract": s,
                         "id": p.get("id"),
-                        "size": _first(ini.get("size"), p.get("size")),
+                        "size": size_v,
                         "trigger_price": _first(trg.get("price"), p.get("trigger_price")),
                         "rule": _first(trg.get("rule"), p.get("rule")),
                         "text": _first(ini.get("text"), p.get("text")),
@@ -339,7 +368,8 @@ def collect_snapshot(
                             ini.get("is_reduce_only"), ini.get("reduce_only"),
                             p.get("is_reduce_only"), p.get("reduce_only"),
                         ),
-                        "direction": _first(p.get("direction"), ini.get("direction")),
+                        "direction": _first(p.get("direction"), ini.get("direction"),
+                                            _side_of(size_v)),
                         "order_type": _first(p.get("order_type"), ini.get("type")),
                     })
             account["protections"] = prot

@@ -24,7 +24,7 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from omnialpha.strategist.snapshot import collect_snapshot, position_state
+from omnialpha.strategist.snapshot import _flag, collect_snapshot, position_state
 
 
 class _Client:
@@ -81,11 +81,13 @@ GATE_ENTRY_CONDITION = {
     "initial": {"size": 27, "is_reduce_only": False, "text": "t-brk"},
     "trigger": {"price": "86690.0", "rule": 1},
 }
-# paper：`_price_order_view` 是扁平库行，字段直接在顶层
+# paper：`_price_order_view` 是扁平库行，字段直接在顶层。
+# **注意它没有 `direction`** —— paper 存的是 `side`（buy/sell，见 `store.py:415`），
+# 所以方向必须从 size 符号派生，否则 paper 下这个字段恒为 null。
 PAPER_PROTECTION = {
-    "id": "po-sl-paper", "status": "open", "order_type": "price", "direction": "short",
+    "id": "po-sl-paper", "status": "open", "order_type": "price",
     "size": -27, "trigger_price": "85550.0", "rule": 2,
-    "text": "t-brk-sl", "reduce_only": 1,
+    "text": "t-brk-sl", "reduce_only": 1, "side": "sell",
 }
 # 普通挂单：Gate 的 list_orders() 返回里**没有** order_type，只有 tif
 GATE_OPEN_ORDER = {
@@ -123,6 +125,25 @@ class TestProtectionsCarryIdentity(unittest.TestCase):
         p = snap["account"]["protections"][0]
         self.assertIs(p["is_reduce_only"], True, f"paper 形状没认：{p}")
 
+    def test_paper_shape_direction_derived_from_size(self):
+        """paper 的库行**没有** `direction` 字段（它只有 `side`: buy/sell）。
+
+        方向必须从张数符号推出来 —— 否则 paper 下这个字段恒为 `null`，
+        而「两种形状都要认」是本条的验收标准。
+        """
+        snap = _snap(price_orders=[PAPER_PROTECTION])
+        p = snap["account"]["protections"][0]
+        self.assertEqual(p["direction"], "short",
+                         f"paper 形状的方向没从 size 符号派生出来：{p}")
+
+    def test_paper_shape_positive_size_is_long(self):
+        entry = dict(PAPER_PROTECTION, id="po-entry-paper", size=27,
+                     text="t-brk", reduce_only=0, side="buy")
+        snap = _snap(price_orders=[entry])
+        p = snap["account"]["protections"][0]
+        self.assertEqual(p["direction"], "long")
+        self.assertIs(p["is_reduce_only"], False)
+
     def test_existing_fields_not_lost(self):
         """只加不删：老字段必须原样还在（下游与测试都依赖）。"""
         snap = _snap(price_orders=[GATE_PROTECTION])
@@ -147,6 +168,36 @@ class TestOpenOrdersCarryIdentity(unittest.TestCase):
         o = snap["account"]["open_orders"][0]
         for k in ("contract", "id", "size", "price", "left", "status", "text"):
             self.assertIn(k, o, f"补字段时弄丢了 {k}")
+
+
+class TestFlagNormalisation(unittest.TestCase):
+    """布尔标记必须归一化，且**字符串形式要单独认**。
+
+    `bool("false")` 是 `True`。一旦某个数据源把布尔写成字符串，`is_reduce_only`
+    就恒真 —— 而它是人格第 25 条区分「预挂保护」与「入场条件单」的唯一判据，
+    判错会把入场单当保护单、或反过来撤掉真保护单。
+    """
+
+    def test_string_false_is_false(self):
+        for s in ("false", "False", "0", "no", "none", "null", " FALSE "):
+            with self.subTest(v=s):
+                self.assertIs(_flag(s), False)
+
+    def test_string_true_is_true(self):
+        for s in ("true", "1", "yes", " True "):
+            with self.subTest(v=s):
+                self.assertIs(_flag(s), True)
+
+    def test_empty_string_counts_as_absent(self):
+        self.assertIs(_flag("", True), True, "空串应视为没值，继续看下一个")
+        self.assertIs(_flag("   ", None), None)
+
+    def test_native_types(self):
+        self.assertIs(_flag(1), True)
+        self.assertIs(_flag(0), False)
+        self.assertIs(_flag(True), True)
+        self.assertIs(_flag(None, False), False)
+        self.assertIsNone(_flag(None, None))
 
 
 class TestPositionStateNoteTellsApart(unittest.TestCase):

@@ -298,6 +298,32 @@ class TestMemoryRefsReachJournal(unittest.TestCase):
             _plan_runner(root, _RecordingLLM(reply=reply)).run_once()
             self.assertEqual(self._last_journal(root)["memory_refs"], ["c-a", "c-b"])
 
+    def test_non_string_entries_dropped(self):
+        """非字符串元素直接丢，不 `str()` 强转 —— 引用的是 cycle_id，不是任意对象。
+
+        把 `{"a": 1}` 变成 `"{'a': 1}"` 只是往 journal 里塞垃圾。
+        """
+        reply = json.dumps({
+            "cycle_id": "c-mem-4", "reasoning": "r",
+            "memory_refs": ["c-a", 5, {"a": 1}, ["c-x"], "c-b"],
+            "chips": [{"symbol": "BTC_USDT", "action": "hold", "confidence": 0.9}],
+        })
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _plan_runner(root, _RecordingLLM(reply=reply)).run_once()
+            self.assertEqual(self._last_journal(root)["memory_refs"], ["c-a", "c-b"])
+
+    def test_refs_capped_at_20(self):
+        reply = json.dumps({
+            "cycle_id": "c-mem-5", "reasoning": "r",
+            "memory_refs": [f"c-{i}" for i in range(50)],
+            "chips": [{"symbol": "BTC_USDT", "action": "hold", "confidence": 0.9}],
+        })
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _plan_runner(root, _RecordingLLM(reply=reply)).run_once()
+            self.assertEqual(len(self._last_journal(root)["memory_refs"]), 20)
+
 
 class TestRecentWindowIsUsable(unittest.TestCase):
     """近况窗口必须让模型看得到「最近做过什么」。
@@ -351,6 +377,18 @@ class TestRecentWindowIsUsable(unittest.TestCase):
             self.assertLess(abs(len(big) - len(small)), 200,
                             f"近况段随历史增长：10 轮 {len(small)} → 510 轮 {len(big)}")
             self.assertLess(len(big), 2000, f"近况段过大：{len(big)} 字符")
+
+    def test_zero_recent_does_not_dump_everything(self):
+        """`rows[-0:]` 会返回**全部**行 —— `n_recent=0` 必须显式挡掉。
+
+        这是 Python 的 -0 切片陷阱：`rows[-0:]` == `rows[0:]`。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self._seed(root, 5)
+            user = self._user(root, n_recent=0)
+            self.assertNotIn("第0轮推理", user, "n_recent=0 时把全部历史倒进了 prompt")
+            self.assertNotIn("第4轮推理", user)
 
     def test_last_plan_state_survives(self):
         """索引层不能把 [上轮方案状态] 挤掉（Tier 1 字段靠它跨轮）。"""
@@ -449,6 +487,20 @@ class TestPromptTailIsNotDuplicated(unittest.TestCase):
             ctx = build_context(Path(td), BOT, system_prompt="SYS", snapshot_text="")
             self.assertIn("Plan JSON", ctx["user"],
                           "snapshot_text 为空时模板没有收尾指令，兜底路径会让模型不知该输出什么")
+
+    def test_tail_survives_snapshot_containing_the_words(self):
+        """收尾句的判据是「调用方有没有给渲染好的快照」，不是子串探测。
+
+        原先用 `"Plan JSON" not in snapshot_block`：快照正文里恰好出现这几个字
+        （某个字段值）时，兜底收尾句会被静默吞掉 —— 独立评审实测过这条路径。
+        """
+        from omnialpha.memory import build_context
+
+        with tempfile.TemporaryDirectory() as td:
+            ctx = build_context(Path(td), BOT, system_prompt="SYS", snapshot_text="",
+                                snapshot={"market": {"note": "Plan JSON"}})
+            self.assertEqual(ctx["user"].count("请输出"), 1,
+                             "快照正文含 'Plan JSON' 时兜底收尾句被吞掉了")
 
 
 # ── S2.7 遗忘 GC ────────────────────────────────────────────

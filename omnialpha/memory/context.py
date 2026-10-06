@@ -51,11 +51,13 @@ def build_context(
     # `read_text()`，每轮多读一遍整个文件（独立评审指出）。
     # 一次读够索引层需要的条数，再切片 —— 摘要层与索引层共用这一份。
     rows = journal.read_recent(max(n_recent, n_index))
-    recent_rows = rows[-n_recent:] if rows else []
+    # `n_recent=0` 时 `rows[-0:]` 会返回**全部**行（不是 0 行）—— 显式挡掉这个 -0 陷阱
+    recent_rows = rows[-n_recent:] if (rows and n_recent > 0) else []
     recent_summaries = [
         {"cycle_id": r.get("cycle_id", ""), "decision": r.get("decision", ""),
          # **不再 [:30] 截断**：模型每轮写 6K–76K 字符的推理，而 `[近况]` 原先只
-         # 回看到 30 字（实测整段 171 字符）。journal 存的是 [:500]，是这里又砍了一刀。
+         # 回看到 30 字（实测整段 171 字符）。journal 写入侧已截到 `[:200]`，
+         # 是这里又砍了一刀。
          "reasoning": str(r.get("reasoning") or "")}
         for r in recent_rows
     ]
@@ -76,9 +78,10 @@ def build_context(
 {snapshot_block}"""
     # 收尾指令由 `snapshot_text` 自带（`build_user_prompt` 的末尾）。两处都写会连着
     # 出两句几乎一样的「请输出 Plan JSON」——实测 2026-10-06 的 user prompt 就是
-    # 「请输出本轮 Plan JSON。\n\n请输出 Plan JSON。」。只有快照缺席时（模板被独立
-    # 调用）才在这里补，免得兜底路径没有收尾指令。
-    if "Plan JSON" not in snapshot_block:
+    # 「请输出本轮 Plan JSON。\n\n请输出 Plan JSON。」。
+    # 判据用**调用方有没有给渲染好的快照**，不用子串探测：快照正文里恰好出现
+    # 「Plan JSON」字样时，子串探测会静默吞掉兜底收尾句（独立评审实测过这条路径）。
+    if not snapshot_text:
         user += "\n\n请输出 Plan JSON（含 memory_refs 引用历史决策）。"
     if extra_suffix:
         user = user + "\n" + extra_suffix

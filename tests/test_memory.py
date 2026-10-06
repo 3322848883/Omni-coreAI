@@ -136,7 +136,9 @@ class TestJournal(unittest.TestCase):
             s = j.read_recent_summaries(1)
             self.assertEqual(len(s), 1)
             self.assertEqual(s[0]["decision"], "short")
-            self.assertLessEqual(len(s[0]["reasoning"]), 30)
+            # **不再 [:30] 截断** —— 那正是 [近况] 段只有 171 字符、而模型每轮写
+            # 6K–76K 字符推理的原因。写入侧已截到 [:200]，这里不再砍第二刀。
+            self.assertEqual(s[0]["reasoning"], "理由" * 20)
 
     def test_count(self):
         with tempfile.TemporaryDirectory() as td:

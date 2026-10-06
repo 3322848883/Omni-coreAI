@@ -1,6 +1,6 @@
 ---
 feature: strategist-context-integrity
-status: designed
+status: in-progress
 updated: 2026-10-06
 branch: master
 commits:
@@ -51,7 +51,7 @@ system prompt 里**没有「历史表现」这一段**。
 实测 `[近况]` 段共 **171 字符**，`[上轮方案状态]` 段 **73 字符**。
 
 模型每轮产出 6,286–76,211 字符的推理（实测区间），下一轮只回看到 30 字截断。
-`journal.py:47` 实际存的是 `[:500]`，是 `context.py` 又砍了一刀。
+`journal.py` 写入侧实际存的是 `[:200]`，是 `context.py` 又砍了一刀。
 
 ### P4 挂单类型不可辨，模型靠猜
 
@@ -119,7 +119,7 @@ system prompt 里**没有「历史表现」这一段**。
 
 `[近况]` 段改为两层：
 
-1. **摘要层**：最近 2 轮，每轮取模型自写的摘要（见下），不截断。
+1. **摘要层**：最近 3 轮（`n_recent=3`），每轮取模型自写的摘要（见下），不截断。
 2. **索引层**：最近 20 轮，每轮一行 `cycle_id decision`（不含推理文本）。
 
 摘要来源：直接用 `plan.reasoning`，**不引入新字段约定**——模型已经在写这个字段，长度也合适
@@ -198,14 +198,17 @@ system prompt 里**没有「历史表现」这一段**。
 
 ### S2.7 指令去重
 
-**删除 `context.py:71` 的重复句**（`请输出 Plan JSON（含 memory_refs 引用历史决策）。`），
-保留 `prompt.py:209` 的 `请输出本轮 Plan JSON。`。
+把 memory_refs 要求**合并进 `prompt.py:209`**（`请输出本轮 Plan JSON（含 memory_refs 引用历史决策）。`），
+`context.py` 的模板改为**条件兜底**：只在 `snapshot_text` 为空时才补收尾句。
 
 判据：`loop.py:325` 与 `loop.py:600` 两条路径（单 bot / 多人格）都先用 `build_user_prompt`
 生成 user——它已含 `prompt.py:209` 的收尾句——再经 `_assemble_prompt` → `build_context`
-包装（`:334` / `:610`）。所以删 `context.py` 那句，两条路径都仍有收尾句；
-反之若删 `prompt.py:209`，`build_context` 抛异常时的兜底分支（`loop.py:277`）
-会缺失收尾指令。
+包装（`:334` / `:610`）。所以正常路径只有一句；`build_context` 抛异常时的兜底分支
+（`loop.py:277`）拿到的仍是 `build_user_prompt` 的输出，收尾句不丢。
+
+**兜底判据用「调用方有没有给渲染好的快照」，不用子串探测**（`"Plan JSON" not in ...`）：
+后者在快照正文恰好含这几个字时会静默吞掉兜底收尾句（独立评审实测过该路径：
+`snapshot_text=""` + `snapshot={"market": {"note": "Plan JSON"}}` → 0 个收尾句）。
 
 ## [S3] Out of Scope
 
@@ -222,12 +225,12 @@ system prompt 里**没有「历史表现」这一段**。
 
 ## Tasks
 
-- [ ] T1: 补全挂单字段 — acceptance: 快照的 `protections` 每条含 `is_reduce_only`/`direction`/`order_type`，`open_orders` 每条含 `tif`/`is_reduce_only`；Gate 与 paper 两种形状取值都正确 (covers: S2.5)
-- [ ] T2: 人格第 25 条限定孤儿单范围 — acceptance: `prompts/brooks_btc_pa.md` 的孤儿单条款明确排除 `entry_pending` 预挂保护单，且撤单判据用 `is_reduce_only` (covers: S2.6; depends: T1)
-- [ ] T3: 指令去重 — acceptance: user prompt 末尾只出现一次收尾指令；`build_context` 异常兜底路径仍有收尾句 (covers: S2.7)
-- [ ] T4: `memory_refs` 贯通 — acceptance: 新写入的 `memory_journal.jsonl` 记录 `memory_refs` 非空且元素为 cycle_id 字符串；非 list 输入降级为 `[]` 不抛异常 (covers: S2.1)
-- [ ] T5: 近况摘要与索引 — acceptance: `[近况]` 段含最近 3 轮摘要（不再 `[:30]` 截断）+ 20 行索引（含 `journal_lookup` 提示）；该段体积 ≤2,000 字符且 journal 从 10 轮涨到 510 轮时体积差 <200 字符；`[上轮方案状态]` 仍在 (covers: S2.2; depends: T4)
-- [ ] T6: `journal_lookup` 工具 — acceptance: 模型可按索引层的 cycle_id 取回该轮 decision/reasoning/exec_result；未知 cycle_id 返回结构化错误 (covers: S2.3; depends: T5)
+- [x] T1: 补全挂单字段 — acceptance: 快照的 `protections` 每条含 `is_reduce_only`/`direction`/`order_type`，`open_orders` 每条含 `tif`/`is_reduce_only`；Gate 与 paper 两种形状取值都正确 (covers: S2.5)
+- [x] T2: 人格第 25 条限定孤儿单范围 — acceptance: `prompts/brooks_btc_pa.md` 的孤儿单条款明确排除 `entry_pending` 预挂保护单，且撤单判据用 `is_reduce_only` (covers: S2.6; depends: T1)
+- [x] T3: 指令去重 — acceptance: user prompt 末尾只出现一次收尾指令；`build_context` 异常兜底路径仍有收尾句 (covers: S2.7)
+- [x] T4: `memory_refs` 贯通 — acceptance: 新写入的 `memory_journal.jsonl` 记录 `memory_refs` 非空且元素为 cycle_id 字符串；非 list 输入降级为 `[]` 不抛异常 (covers: S2.1)
+- [x] T5: 近况摘要与索引 — acceptance: `[近况]` 段含最近 3 轮摘要（不再 `[:30]` 截断）+ 20 行索引（含 `journal_lookup` 提示）；该段体积 ≤2,000 字符且 journal 从 10 轮涨到 510 轮时体积差 <200 字符；`[上轮方案状态]` 仍在 (covers: S2.2; depends: T4)
+- [x] T6: `journal_lookup` 工具 — acceptance: 模型可按索引层的 cycle_id 取回该轮 decision/reasoning/exec_result；未知 cycle_id 返回结构化错误 (covers: S2.3; depends: T5)
 - [ ] T7: 交易所盈亏拉取 — acceptance: `gate_client.list_my_trades` 可拉取成交；`sync_exchange_pnl` 幂等（重复调用不重复计入）；拉取失败不动游标 (covers: S2.4)
 - [ ] T8: 画像接入交易所投影 — acceptance: `ledger_stats()` 在无 paper 账本时回退到 `exchange_pnl.json`，返回形状与 `realized_pnl_stats` 一致 (covers: S2.4; depends: T7)
-- [ ] T9: 端到端验证 — acceptance: 服务器部署后，四项均可从落盘产物观察到：(a) `memory_journal.jsonl` 新记录 `memory_refs` 非空；(b) `memory_profile.json` 出现且 `total_trades` 与交易所平仓笔数一致；(c) 连续 5 轮的 `[近况]` 段体积 ≤1,200 字符且含 20 行索引；(d) 某轮 `*.thinking.json` 的 `tool_usage` 出现 `journal_lookup` 且其 `result_len > 0` (covers: S2.1 S2.2 S2.3 S2.4 S2.5; depends: T1 T2 T3 T4 T5 T6 T7 T8)
+- [ ] T9: 端到端验证 — acceptance: 服务器部署后，四项均可从落盘产物观察到：(a) `memory_journal.jsonl` 新记录 `memory_refs` 非空；(b) `memory_profile.json` 出现且 `total_trades` 与交易所平仓笔数一致；(c) 连续 5 轮的 `[近况]` 段体积 ≤2,000 字符且含 20 行索引；(d) 某轮 `*.thinking.json` 的 `tool_usage` 出现 `journal_lookup` 且其 `result_len > 0` (covers: S2.1 S2.2 S2.3 S2.4 S2.5; depends: T1 T2 T3 T4 T5 T6 T7 T8)

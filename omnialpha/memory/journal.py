@@ -101,12 +101,17 @@ class MemoryJournal:
         return None
 
     def read_recent_summaries(self, n: int = 3) -> list[dict]:
-        """读最近 n 条的摘要（进 prompt 的紧凑格式）。"""
+        """读最近 n 条的摘要（进 prompt 的紧凑格式）。
+
+        **不再 `[:30]` 截断** —— 那正是 `[近况]` 段只有 171 字符、而模型每轮写
+        6K–76K 字符推理的原因。`build_context` 现在直接用 `read_recent` 自己组装，
+        这个方法留在公开面上；再截断会把同一个 bug 从别的调用点引回来。
+        """
         return [
             {
                 "cycle_id": r.get("cycle_id", ""),
                 "decision": r.get("decision", ""),
-                "reasoning": r.get("reasoning", "")[:30],
+                "reasoning": r.get("reasoning", ""),
             }
             for r in self.read_recent(n)
         ]

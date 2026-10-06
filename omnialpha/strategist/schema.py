@@ -188,16 +188,21 @@ def _int(v, name: str, idx: int) -> Optional[int]:
 
 
 def _memory_refs(raw: Any) -> list[str]:
-    """规范化 `memory_refs`：只留非空字符串，最多 20 条。
+    """规范化 `memory_refs`：只留非空**字符串**，最多 20 条。
 
     **不抛 `PlanError`** —— 与 chips 的字段不同，这是**观测性**字段（记录本轮引用了
     哪些历史决策），格式瑕疵不该让整轮决策作废。非法输入一律降级为 `[]`。
+
+    非字符串元素（数字/字典）**直接丢弃**而不是 `str()` 强转：引用的是 `cycle_id`，
+    把 `{"a": 1}` 变成 `"{'a': 1}"` 只是往 journal 里塞垃圾。
     """
     if not isinstance(raw, list):
         return []
     out: list[str] = []
     for x in raw:
-        s = str(x or "").strip()
+        if not isinstance(x, str):
+            continue
+        s = x.strip()
         if s:
             out.append(s)
         if len(out) >= 20:
