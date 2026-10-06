@@ -14,8 +14,20 @@ from typing import Any, Optional
 
 DEFAULT_ALLOW = (
     "price_break",
+    # —— EMA 家族 ——
+    # 状态：价格在 EMA 上/下
     "price_vs_ema",
+    # 事件：**价格穿越** EMA（原先缺这个类型，模型只能退而用 price_vs_ema 状态型，
+    # 而状态型配冷却等于定时器 —— 线上实测一个 bot 因此每 5 分钟被唤醒，占 43% 轮次）
+    "price_cross_ema",
+    # 事件：快 EMA 穿慢 EMA
     "ema_cross",
+    # 状态：价格 + 双 EMA 排列（多头/空头）
+    "ema_stack",
+    # 状态：价格偏离 EMA 超过 pct%（乖离）
+    "price_ema_dist",
+    # 状态：EMA 在最近 bars 根内上行/下行
+    "ema_slope",
     "macd_cross",
     "atr_spike",
     "rsi",
@@ -32,6 +44,8 @@ DEFAULT_LIMITS = {
     "signal": (2, 50),
     "level": (1.0, 99.0),
     "mult": (1.0, 5.0),
+    "pct": (0.05, 20.0),     # price_ema_dist 的偏离百分比
+    "bars": (1, 50),         # ema_slope 的回看根数
 }
 
 
@@ -102,7 +116,7 @@ def validate_trigger_payload(
 
     params: dict[str, Any] = {}
     for key in ("period", "fast", "slow", "signal", "lookback", "mult", "level",
-                "side", "dir", "op", "k", "ma", "candles"):
+                "side", "dir", "op", "k", "ma", "candles", "pct", "bars"):
         if key in raw and raw[key] is not None:
             params[key] = raw[key]
     # numeric limits: policy.limits overrides DEFAULT_LIMITS

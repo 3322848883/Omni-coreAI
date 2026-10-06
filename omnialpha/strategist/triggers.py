@@ -3,7 +3,11 @@
 Condition dict shapes (all optional fields documented in README):
 
   {"type": "kline_close"}                                  # handled by loop
-  {"type": "price_vs_ema", "symbol": "BTC_USDT", "period": 20, "side": "above"|"below"}
+  {"type": "price_vs_ema", "symbol": "BTC_USDT", "period": 20, "side": "above"|"below"}   # 状态
+  {"type": "price_cross_ema", "symbol": "BTC_USDT", "period": 20, "dir": "up"|"down"|"any"}  # 事件
+  {"type": "ema_stack", "symbol": "BTC_USDT", "fast": 20, "slow": 50, "dir": "bull"|"bear"}  # 状态
+  {"type": "price_ema_dist", "symbol": "BTC_USDT", "period": 20, "pct": 1.5, "side": "above"|"below"}  # 状态
+  {"type": "ema_slope", "symbol": "BTC_USDT", "period": 20, "bars": 3, "dir": "up"|"down"}   # 状态
   {"type": "ema_cross", "symbol": "BTC_USDT", "fast": 9, "slow": 21, "dir": "up"|"down"|"any"}
   {"type": "atr_spike", "symbol": "BTC_USDT", "period": 14, "mult": 1.5, "lookback": 20}
   {"type": "price_break", "symbol": "BTC_USDT", "lookback": 20, "side": "high"|"low"}
@@ -13,7 +17,9 @@ Condition dict shapes (all optional fields documented in README):
   {"type": "boll_break", "symbol": "BTC_USDT", "period": 20, "k": 2, "side": "upper"|"lower"}
   {"type": "volume_spike", "symbol": "BTC_USDT", "mult": 2, "lookback": 20}
 
-Each condition fires at most once per `cooldown_sec` (default 60) after it last fired.
+Each condition fires at most once per `cooldown_sec` (default 60) after it last fired,
+**and by default only on the False→True edge** (see `check_conditions` — without the edge,
+state-type conditions degenerate into a fixed-interval timer).
 """
 from __future__ import annotations
 
@@ -49,6 +55,10 @@ class ConditionError(ValueError):
 class ConditionState:
     last_fire: float = 0.0
     last_values: dict = field(default_factory=dict)
+    # 上一次求值的判定结果 —— **边沿触发**靠它识别 False→True 那一刻。
+    # 默认 False：进程刚起来时视为「尚未为真」，所以若此刻状态已成立会立刻报一次，
+    # 这正是想要的（这个状态对进程而言是新的）。
+    last_true: bool = False
 
 
 def parse_conditions(raw: Optional[list], _depth: int = 0) -> list[dict]:
@@ -162,6 +172,84 @@ def evaluate_condition(client, cond: dict, timeframe: str, now: Optional[float] 
         if side == "above":
             return last > e, f"last={last:.4f} ema{period}={e:.4f}"
         return last < e, f"last={last:.4f} ema{period}={e:.4f}"
+
+    if ctype == "price_cross_ema":
+        # 事件：**价格穿越** EMA（与 `price_vs_ema` 的区别就是「穿越」vs「在上下方」）。
+        # 补这个类型的原因：原先 9 个类型里没有任何一个表达「价格穿 EMA」——
+        # 模型想要这个语义时只能选 `price_vs_ema`（状态型），而状态型配冷却
+        # 等于定时器（实测线上一个 bot 因此每 5 分钟被唤醒一次，占 43% 轮次）。
+        period = int(cond.get("period") or 20)
+        direction = str(cond.get("dir") or "any").lower()
+        series = ema(closes, period)
+        if len(closes) < 2 or None in (series[-1], series[-2]):
+            return False, "ema not ready"
+        now_up = last > series[-1]
+        prev_up = closes[-2] > series[-2]
+        crossed_up = now_up and not prev_up
+        crossed_down = (not now_up) and prev_up
+        if direction == "up" and crossed_up:
+            return True, f"price cross up ema{period} last={last:.4f} ema={series[-1]:.4f}"
+        if direction == "down" and crossed_down:
+            return True, f"price cross down ema{period} last={last:.4f} ema={series[-1]:.4f}"
+        if direction == "any" and (crossed_up or crossed_down):
+            return True, (f"price cross {'up' if crossed_up else 'down'} ema{period} "
+                          f"last={last:.4f} ema={series[-1]:.4f}")
+        return False, f"last={last:.4f} ema{period}={series[-1]:.4f}"
+
+    if ctype == "ema_stack":
+        # 状态：价格 + 双 EMA 的**排列**（多头/空头）。趋势确认用。
+        fast_n = int(cond.get("fast") or 20)
+        slow_n = int(cond.get("slow") or 50)
+        direction = str(cond.get("dir") or "bull").lower()
+        f_s, s_s = ema(closes, fast_n), ema(closes, slow_n)
+        if None in (f_s[-1], s_s[-1]):
+            return False, "ema not ready"
+        bull = last > f_s[-1] > s_s[-1]
+        bear = last < f_s[-1] < s_s[-1]
+        info = f"price={last:.4f} ema{fast_n}={f_s[-1]:.4f} ema{slow_n}={s_s[-1]:.4f}"
+        if direction == "bull":
+            return bull, info
+        if direction == "bear":
+            return bear, info
+        return (bull or bear), info
+
+    if ctype == "price_ema_dist":
+        # 状态：价格**偏离** EMA 超过 pct%（乖离 / 超买超卖）。
+        period = int(cond.get("period") or 20)
+        side = str(cond.get("side") or "above").lower()
+        try:
+            pct = float(cond.get("pct") or 0.0)
+        except (TypeError, ValueError):
+            return False, "bad pct"
+        series = ema(closes, period)
+        e = series[-1]
+        if e is None or e <= 0:
+            return False, "ema not ready"
+        dist = (last - e) / e * 100.0
+        if pct <= 0:
+            return False, "pct must be > 0"
+        if side == "above":
+            return dist >= pct, f"dist={dist:+.2f}% (need >= +{pct:g}%)"
+        return dist <= -pct, f"dist={dist:+.2f}% (need <= -{pct:g}%)"
+
+    if ctype == "ema_slope":
+        # 状态：EMA 在最近 bars 根内**上行/下行**（趋势转向的早期信号）。
+        period = int(cond.get("period") or 20)
+        bars = int(cond.get("bars") or 3)
+        direction = str(cond.get("dir") or "up").lower()
+        series = ema(closes, period)
+        if len(series) < bars + 1:
+            return False, "not enough bars for ema_slope"
+        a, b = series[-1], series[-1 - bars]
+        if a is None or b is None:
+            return False, "ema not ready"
+        delta = a - b
+        info = f"ema{period} {bars}bar delta={delta:+.4f}"
+        if direction == "up":
+            return delta > 0, info
+        if direction == "down":
+            return delta < 0, info
+        return abs(delta) > 0, info
 
     if ctype == "ema_cross":
         fast_n = int(cond.get("fast") or 9)
@@ -298,7 +386,25 @@ def check_conditions(
     states: Optional[dict] = None,
     now: Optional[float] = None,
 ) -> list[dict]:
-    """Evaluate all conditions; return [{type, symbol, reason}] for newly fired ones."""
+    """Evaluate all conditions; return [{type, symbol, reason}] for newly fired ones.
+
+    **边沿触发（默认）**：只在判定 **False → True** 那一刻报一次，状态持续期间不重复报。
+
+    为什么必须这样：条件分两类 ——
+      - **事件型**（`price_break` / `price_cross_ema` / `ema_cross` / `macd_cross` /
+        `ma_cross` / `atr_spike` / `volume_spike` / `boll_break`）比较「现在 vs 上一根」，
+        True 本身就是一瞬间。
+      - **状态型**（`price_vs_ema` / `ema_stack` / `price_ema_dist` / `ema_slope` / `rsi`）
+        只看「现在是否成立」，成立期间**每次求值都为真**。
+
+    对状态型只按 `cooldown_sec` 去重，数学上等于一个定时器：价格持续在 EMA 一侧时
+    每 5 分钟唤醒一轮。线上实测一个 bot 因此 196 分钟里被 `price_vs_ema` 唤醒 35 次、
+    占全部轮次的 43%，2.5 小时烧掉约 1005 万 prompt token。
+
+    加上边沿后，`price_vs_ema{side:above}` 的语义变成「价格**穿到** EMA 上方时叫醒我」——
+    正是模型设它时想要的。想恢复旧的「持续成立就按冷却反复报」语义，
+    在该条件里写 `edge_trigger: false`（bot yaml 声明 conditions 时可用）。
+    """
     states = states if states is not None else {}
     ts = now if now is not None else time.time()
     fired = []
@@ -309,7 +415,11 @@ def check_conditions(
         if ts - st.last_fire < cooldown:
             continue
         ok, reason = evaluate_condition(client, cond, timeframe, now=ts)
-        if ok:
+        # 边沿触发：只在 **False → True** 那一刻报一次（见函数 docstring）。
+        # 状态持续期间 `st.last_true` 一直是 True，所以不会每过冷却就重报一遍。
+        _edge = cond.get("edge_trigger")
+        edge = True if _edge is None else bool(_edge)
+        if ok and (not edge or not st.last_true):
             st.last_fire = ts
             fired.append({
                 "type": cond.get("type"),
@@ -317,4 +427,5 @@ def check_conditions(
                 "reason": reason,
                 "key": key,
             })
+        st.last_true = ok
     return fired

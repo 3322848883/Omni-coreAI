@@ -38,6 +38,7 @@ paper:
 strategist:
   enabled: true
   prompt_file: prompts/rose_pa.md
+  skills: []          # 不使用技能：人格自带全部判据（`[]`=无技能可见；不写此键=全部可见）
   # 5m 背景；1m 找信号（extra_timeframes + 工具拉 1m）
   interval_sec: 900
   timeframe: 5m

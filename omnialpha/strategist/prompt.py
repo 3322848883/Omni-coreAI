@@ -17,7 +17,7 @@ _SYSTEM_HEAD = (
     '"price":null,"trigger_price":null,"leverage":null,"side":"long|short|null",'
     '"tp_mode":"trigger|limit_order","sl_mode":"trigger|limit_order","reasoning":"...",'
     '"region":"trend|range|reversal|null","invalidation":null,"time_stop_bars":null,'
-    '"give_back_pct":null,"risk_pct":null,"rule_ids":[],"scenarios":{}}],'
+    '"give_back_pct":null,"risk_pct":null}],'
     '"triggers":[]}\n'
     # 每条规则标注**归属**：让模型知道哪些是硬边界（会被后端拒绝/改写）、
     # 哪些是引擎自动兜底的（它不必管）、哪些是它自己的判断职责。
@@ -43,12 +43,20 @@ _SYSTEM_HEAD = (
     "11) [AI 判断] tp_mode/sl_mode 默认 trigger（条件计划委托）；limit_order=盘口 reduce_only 限价。\n"
     "12) [AI 判断] triggers[] 可选：自设唤醒条件，命中后重新分析（不直接下单）。"
     "每条要写 symbol（本 bot 只跟一个币时可省略、系统会自动补；**多币种必须写明**）。"
-    "可用 type 与参数范围："
-    "price_break{lookback:5-300, side:high|low}、price_vs_ema{period:2-200}、"
-    "ema_cross{fast/slow:2-200, dir:up|down|any}、ma_cross{fast/slow:2-200, ma:sma|ema}、"
+    "可用 type 与参数范围（**状态型只要成立就按冷却反复触发，事件型只在变化那一刻触发一次**）："
+    "price_break{lookback:5-300, side:high|low}、"
+    "price_vs_ema{period:2-200, side:above|below}（状态：价格在 EMA 上/下）、"
+    "price_cross_ema{period:2-200, dir:up|down|any}（事件：**价格穿越 EMA**）、"
+    "ema_cross{fast/slow:2-200, dir:up|down|any}（事件：快 EMA 穿慢 EMA）、"
+    "ema_stack{fast/slow:2-200, dir:bull|bear}（状态：价格与双 EMA 多头/空头排列）、"
+    "price_ema_dist{period:2-200, pct:0.05-20, side:above|below}（状态：偏离 EMA 超 pct%）、"
+    "ema_slope{period:2-200, bars:1-50, dir:up|down}（状态：EMA 上行/下行）、"
+    "ma_cross{fast/slow:2-200, ma:sma|ema}、"
     "macd_cross{fast/slow:2-200, signal:2-50}、rsi{period:2-200, level:1-99, op:gt|lt}、"
     "boll_break{period:2-200, k:1-5, side:upper|lower}、atr_spike{mult:1-5, lookback:5-300}、"
-    "volume_spike{mult:1-5, lookback:5-300}。\n"
+    "volume_spike{mult:1-5, lookback:5-300}。"
+    "**想「价格穿越 EMA 时叫醒我」用 price_cross_ema，不要用 price_vs_ema** —— "
+    "后者是状态型，价格持续在 EMA 一侧时会每 5 分钟唤醒一次。\n"
     "13) [代码强制] 触发器**同时最多 5 个生效**（默认 ttl 24h）。**已满时再 add 会被直接拒绝、白费一轮**；"
     "要换条件请用 trigger_ops:[{op:\"remove\",id:\"t-xxx\"}] 先删旧的，或 [{op:\"replace_all\"}] 整体替换。"
     "**参数越界同样会被拒**（如 lookback 必须 5-300，写 1 或 3 都无效）。"
@@ -94,16 +102,27 @@ _SYSTEM_HEAD = (
     # 这句话无处安放、随 CoT 一起消失。而且区域无字段时它只是一个标签：
     # 模型为了能用双止盈把「区间」改判成「趋势」就绕过了「区间禁止 2R」这条规则。
     # 所以 region 不只是记录 —— 它是**代码强制**的校验点。
-    "18) [代码强制] **区域与失效锚（建议每轮都填）**："
-    "`region` 三选一 trend|range|reversal，必须与你实际分析一致；"
-    "**region=range 时禁止给 tp2**（区间只做 scalp，2R 目标会被引擎直接拒绝）。"
+    "18) [代码强制] **区域与失效锚**："
+    "`region` 三选一 trend|range|reversal，**必须与你实际分析一致**；"
+    "**region=range 时禁止给 tp2** —— 这不是「拒绝那一档」，而是**整轮计划作废**"
+    "（区间只做 scalp，不持有 2R 目标；要给 tp2 就说明这不是区间）。"
     "`invalidation`=前提失效价（触及即视为结构破坏）；"
     "`time_stop_bars`=最大持仓轮数；`give_back_pct`=浮盈回撤阈值(%)；"
-    "`risk_pct`=本单实际风险占权益比例；"
-    "`rule_ids`=你依据的规则 ID 数组（如 BAN-01/SB-06/SA-05）；"
-    "`scenarios`=入场后情形→应对动作的对象。"
+    "`risk_pct`=本单实际风险占权益的**百分数**（`0.4` = 0.4%，不是 0.004）。"
+    # `rule_ids` 不再要求模型产出：它是**技能体系的产物**（BAN-01 / SB-06 那套编号），
+    # 而人格不使用技能时，提示词里没有任何编号体系 —— 无源可引。
+    # 实测（2026-10-06，同一份冻结行情各 3 次）：契约一旦要求这个字段，模型就会往里
+    # 塞东西。先编 `BEAR-FLAG` / `EMA20-FILTER` 这类假名字；把措辞改成「没编号体系
+    # 就留空 `[]`」之后，它又改成塞裸数字 `['3','11','17']` —— **措辞管不住，只能不要求**。
+    # 字段本身保留在 Chip 里（可选，默认 `[]`）：将来哪个人格真的列了编号，
+    # `loop.py` / `persona/runner.py` 仍会把它写进 journal 与订单上下文。
     "这些字段会写入决策日志与订单上下文 —— **下一轮的你会看到本轮写了什么**，"
     "填了才有跨轮一致性，不填等于每轮从零开始。\n"
+    # scenarios 曾列在 Tier-1 里，但**全仓没有任何地方读它**（spec 里写的
+    # 「进订单上下文」从未接线）—— 而它是嵌套对象，正是 JSON 解析失败的头号
+    # 来源。既然无人消费，就不再要求模型产出（schema 仍接受该字段，不影响旧数据）。
+    "**不要写 `scenarios`**：没有消费方，嵌套结构只会增加解析失败风险。"
+    "需要写情形应对就写进 `reasoning` 或 `meta`。\n"
 )
 
 PLAN_SCHEMA_HINT = (
