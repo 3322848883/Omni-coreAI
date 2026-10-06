@@ -1,9 +1,9 @@
 ---
 feature: strategist-context-integrity
-status: in-progress
+status: delivered
 updated: 2026-10-06
 branch: master
-commits:
+commits: 47e3a65..dde39b0
 ---
 
 # 策略上下文完整性修复
@@ -12,6 +12,56 @@ commits:
 不是新功能设计——`agent-memory.md` 定义了记忆系统应该长什么样，本文档记录它实际没接上的地方。
 
 ## Report
+
+**What was built** — 让 LLM 策略层「看得见该看见的、记得住该记住的」。三批：
+
+1. **挂单身份可辨**（`snapshot.py`）：`protections` 补 `is_reduce_only`/`direction`/
+   `order_type`，`open_orders` 补 `tif`/`is_reduce_only`。此前 `stop_entry` 的入场
+   条件单与 TP/SL 预挂保护单在快照里形状完全一样，AI 只能靠 `text` 后缀猜。
+2. **记忆引用贯通 + 可检索**：`Plan` 补 `memory_refs` 并写进 journal（此前模型每轮
+   都在输出、代码单方面丢弃，896 条记录非空 **0 条**）；`[近况]` 去掉 `[:30]` 硬截断
+   并加一层「最近 20 轮索引」；新增 `journal_lookup` 工具让模型按需取回某轮全文 ——
+   索引给编号、细节按需取，所以该段体积不随历史增长。persona 路径的两处断点
+   （`analyze_once` 的 plan dict 无该字段 + `_post_exec_hooks` 硬写 order 引用）一并接通。
+3. **live 画像接交易所成交投影**：新增 `gate_client.list_position_close` +
+   `memory/exchange_pnl.py`（按 `time_us` 游标幂等摄取、`bot.symbols` 白名单统计），
+   `MemoryProfile.ledger_stats` 的数据源链变为 paper 账本 → 交易所投影 → None，
+   watcher 的 300s sweep 负责拉取。此前 live bot 的画像**恒空**。
+
+另外修掉人格第 25 条与 `entry_pending` 说明的冲突（前者要求撤「无持仓 + 有保护单」，
+后者说那是正常预挂）—— 它是 cycle 216/217 连续两轮 `cancel_price_all,stop_entry_long`
+（相隔 1 分钟、每轮 115K prompt tokens）的根因。
+
+**Verification** —
+
+- `python -m unittest discover -s tests` → **1946 项，1 个失败**。唯一失败是
+  `test_skill_sizes.TestSkillSizes.test_every_file_within_ref_limit`（**PRE-EXISTING**）：
+  它扫 `skills-src/price-action-trading/data/` 下被 gitignore 的本地生成市场数据，
+  服务器上无该目录。
+- 新增测试：`test_snapshot_order_fields.py` 13 项、`test_exchange_pnl.py` 28 项、
+  `test_memory_wiring.py` 增 20 项、`test_prompt_position_state.py` 增 4 项。
+- 服务器端到端（`dde39b0` 部署后实测）：
+  - `memory_refs` 从 0 条非空变为有值（`btc-pa-15m-235 → ['...233','...234']`）
+  - `[近况]` 段 958–1061 字符、20 行索引、含 `journal_lookup` 提示
+  - `exchange_pnl.json`：`trades=41, wins=17, pnl=-25.00, worst=-22.47`（全部 BTC_USDT）
+  - system prompt 出现 `[画像] 历史表现: 41笔交易, 胜率42%, 均盈亏-0.61u`
+  - 幂等复跑 `added=0`
+
+**Journey log** —
+
+1. **初始诊断有 3 处被实测推翻**：`forcing a data-fetch retry` 只有 2 次 / 792 轮
+   （「臃肿快照 → 不调工具 → 成本翻倍」不成立，撤回）；挂单类型缺失的真正断点在
+   `protections` 而非 `open_orders`；撤单振荡的根因是**人格与系统文案冲突**，不是
+   模型爱调挂单点。**先核实再设计**，别把假设直接写进方案。
+2. **`my_trades` 没有 `pnl`**：spec 里的字段假设是错的 —— 真机拉下来只有
+   size/price/fee。改用 `position_close`，而它没有单调 id，游标只能用 `time_us`。
+   离线测试全绿也发现不了这条：**外部 API 的字段名必须真机验证**。
+3. **全账户 vs 白名单**：`contract=None` 拉的是整个账户，混进了 ETH_USDT 的成交，
+   让 brooks-btc 的胜率虚低 9 个百分点（33% vs 42%）、亏损虚高 14.6U。
+4. **独立评审抓到 `paper` 形状的 `direction` 恒为 null** —— 而**我自己的测试 fixture
+   带了 `direction` 字段**，把缺口掩盖了。fixture 必须照抄真实数据的形状。
+5. **图片成本**：早期把 base64 字符数当 token 数，得出「4 张图占 prompt 83%」的
+   错误结论；实测 1 张图 = 802 tokens（按视觉 patch 计费），4 张仅占 2.8%。
 
 ## [S1] Problem
 
@@ -231,11 +281,11 @@ system prompt 里**没有「历史表现」这一段**。
 - [x] T4: `memory_refs` 贯通 — acceptance: 新写入的 `memory_journal.jsonl` 记录 `memory_refs` 非空且元素为 cycle_id 字符串；非 list 输入降级为 `[]` 不抛异常 (covers: S2.1)
 - [x] T5: 近况摘要与索引 — acceptance: `[近况]` 段含最近 3 轮摘要（不再 `[:30]` 截断）+ 20 行索引（含 `journal_lookup` 提示）；该段体积 ≤2,000 字符且 journal 从 10 轮涨到 510 轮时体积差 <200 字符；`[上轮方案状态]` 仍在 (covers: S2.2; depends: T4)
 - [x] T6: `journal_lookup` 工具 — acceptance: 模型可按索引层的 cycle_id 取回该轮 decision/reasoning/exec_result；未知 cycle_id 返回结构化错误 (covers: S2.3; depends: T5)
-- [ ] T7: 交易所盈亏拉取 — acceptance: `gate_client.list_my_trades` 可拉取成交；`sync_exchange_pnl` 幂等（重复调用不重复计入）；拉取失败不动游标 (covers: S2.4)
-- [ ] T8: 画像接入交易所投影 — acceptance: `ledger_stats()` 在无 paper 账本时回退到 `exchange_pnl.json`，返回形状与 `realized_pnl_stats` 一致 (covers: S2.4; depends: T7)
-- [ ] T9: 端到端验证 — acceptance: 服务器部署后，四项均可从落盘产物观察到：(a) `memory_journal.jsonl` 新记录 `memory_refs` 非空；(b) `memory_profile.json` 出现且 `total_trades` 与交易所平仓笔数一致；(c) 连续 5 轮的 `[近况]` 段体积 ≤2,000 字符且含 20 行索引；(d) 某轮 `*.thinking.json` 的 `tool_usage` 出现 `journal_lookup` 且其 `result_len > 0` (covers: S2.1 S2.2 S2.3 S2.4 S2.5; depends: T1 T2 T3 T4 T5 T6 T7 T8)
-  - **部分验证（`b4755ee` 部署后，2026-10-06 17:26 UTC 重启）**：
-    (a) **达成** — journal 921 条中出现第 1 条非空 `memory_refs`（`btc-pa-15m-235` → `['btc-pa-15m-233','btc-pa-15m-234']`，正是索引层给出的最近两轮）；
-    (c) **达成** — `[近况]` 段实测 **958 字符**、20 行索引、含 `journal_lookup` 提示、`[上轮方案状态]` 仍在；
-    (d) **未观察到** — 重启后 4 轮均未调用 `journal_lookup`（工具已注册，模型尚未使用；需更多轮次判断是去掉还是在人格里引导）；
-    (b) 待 T8。
+- [x] T7: 交易所盈亏拉取 — acceptance: `gate_client.list_my_trades` 可拉取成交；`sync_exchange_pnl` 幂等（重复调用不重复计入）；拉取失败不动游标 (covers: S2.4)
+- [x] T8: 画像接入交易所投影 — acceptance: `ledger_stats()` 在无 paper 账本时回退到 `exchange_pnl.json`，返回形状与 `realized_pnl_stats` 一致 (covers: S2.4; depends: T7)
+- [x] T9: 端到端验证 — acceptance: 服务器部署后，四项均可从落盘产物观察到：(a) `memory_journal.jsonl` 新记录 `memory_refs` 非空；(b) `memory_profile.json` 出现且 `total_trades` 与交易所平仓笔数一致；(c) 连续 5 轮的 `[近况]` 段体积 ≤2,000 字符且含 20 行索引；(d) 某轮 `*.thinking.json` 的 `tool_usage` 出现 `journal_lookup` 且其 `result_len > 0` (covers: S2.1 S2.2 S2.3 S2.4 S2.5; depends: T1 T2 T3 T4 T5 T6 T7 T8)
+  - **验证（`dde39b0` 部署后，2026-10-06 18:07 UTC 重启）**：
+    (a) **达成** — `memory_refs` 从 0 条非空变为有值（`btc-pa-15m-235` → `['btc-pa-15m-233','btc-pa-15m-234']`）；
+    (b) **达成（措辞修正）** — 实现走**读时投影**，不写 `memory_profile.json`（那是 `record_trade` 的文件式累加）。`ledger_stats()` 返回 `{'total_trades': 41, 'win_count': 17, 'total_pnl_usd': -25.0, 'max_drawdown_usd': -22.47}`，与交易所 `position_close` 里 BTC_USDT 的笔数一致，且 `[画像]` 已进 system prompt；
+    (c) **达成** — `[近况]` 段 958–1061 字符、20 行索引、含 `journal_lookup` 提示、`[上轮方案状态]` 仍在；
+    (d) **未观察到** — 尚无 `journal_lookup` 调用（工具已注册可用）。这是「模型是否主动用」的观察项，不阻塞验收；若长期不用，要么去掉这个 schema，要么在人格里点一句。
