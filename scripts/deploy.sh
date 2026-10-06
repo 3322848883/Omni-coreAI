@@ -9,6 +9,10 @@
 #   ./scripts/deploy.sh --no-restart # 只同步不重启（先验证）
 #   ./scripts/deploy.sh --dry-run    # 只打印将执行的动作
 #
+# 第 7 步重启哪些服务：**自动挑出 ExecStart 里跑 `-m omnialpha` 的 systemd 单元，
+# 且只重启当前 active 的**（inactive 的不会被启动）。可用
+# `DEPLOY_RESTART_UNITS="a b"` 显式指定，或 `DEPLOY_RESTART_UNITS=none` 跳过。
+#
 # 关键安全：第 6 步测试失败 → 中止且【不重启】，保留旧进程继续跑。
 # 环境差异：config/bots.local/ 为 gitignore 的 overlay，pull 不会覆盖它。
 # ============================================================================
@@ -142,19 +146,70 @@ fi
 # ── 7) 重启 + 验证 ────────────────────────────
 echo
 echo "[7/7] 重启 + 验证"
-# 用文件检测而非 `systemctl list-unit-files | grep -q`：
-# 后者因 grep -q 提前退出触发 SIGPIPE，配合 set -o pipefail 会误判为失败。
-UNIT=/etc/systemd/system/omnialpha-watchdog.service
+
+# 重启判据（三条，都是踩过的坑）：
+#
+#   ① **不再硬编码 omnialpha-watchdog**。实盘可能是别的单元 —— 服务器上实盘是
+#      `omnialpha-brooks.service`（`supervisor --bot brooks-btc`），而 watchdog
+#      是 inactive。旧版跑完 deploy.sh：代码拉了，实盘继续跑旧代码，谁也不知道。
+#      这就是「改了没生效」那一类静默失效。
+#   ② 用 ExecStart 里有没有 `-m omnialpha` 挑单元，**不按名字前缀**：
+#      `omnialpha-kline-*` / `omnialpha-aux` 跑的是 pa-data-source 的另一个 venv
+#      与另一套代码，重启它们只会制造行情缺口。
+#   ③ **只重启 `is-active` 的**。`systemctl restart` 对 inactive 单元等于**启动**
+#      它 —— 旧版 `[ -f "$UNIT" ] && systemctl restart omnialpha-watchdog` 会在
+#      watchdog 本来没跑的时候把它拉起来（服务器上真发生过）。
+#
+# 覆盖：`DEPLOY_RESTART_UNITS="a b"`；跳过重启：`DEPLOY_RESTART_UNITS=none`
+pick_restart_units() {
+  local want="${DEPLOY_RESTART_UNITS:-}"
+  if [ -n "$want" ]; then
+    [ "$want" = "none" ] || echo "$want"
+    return 0
+  fi
+  local f u ex
+  for f in /etc/systemd/system/omnialpha-*.service; do
+    [ -e "$f" ] || continue
+    u=$(basename "$f" .service)
+    ex=$(systemctl show -p ExecStart --value "$u" 2>/dev/null || true)
+    case "$ex" in
+      *"-m omnialpha"*) echo "$u" ;;
+      *) echo "  # 跳过 $u（ExecStart 不是 omnialpha 代码）" >&2 ;;
+    esac
+  done
+}
+
 if [ "$NO_RESTART" = "1" ]; then
   echo "  (--no-restart：跳过重启)"
-elif [ -f "$UNIT" ] && command -v systemctl >/dev/null 2>&1; then
-  run systemctl restart omnialpha-watchdog
-  if [ "$DRY_RUN" = "0" ]; then
-    sleep 12
-    echo "  service: $(systemctl is-active omnialpha-watchdog)"
-  fi
+elif [ "${DEPLOY_RESTART_UNITS:-}" = "none" ]; then
+  echo "  (DEPLOY_RESTART_UNITS=none：跳过重启)"
+elif ! command -v systemctl >/dev/null 2>&1; then
+  echo "  (无 systemctl，跳过重启；手动：python -m omnialpha supervisor --bot <id>)"
 else
-  echo "  (未发现 $UNIT，跳过重启；如需手动：python -m omnialpha watchdog)"
+  RESTARTED=""
+  for u in $(pick_restart_units); do
+    act=$(systemctl is-active "$u" 2>/dev/null || true)
+    if [ "$act" != "active" ]; then
+      echo "  $u 未运行（$act）→ 不动它，也**不启动**"
+      continue
+    fi
+    run systemctl restart "$u"
+    RESTARTED="$RESTARTED $u"
+  done
+  if [ -z "$(echo "$RESTARTED" | tr -d '[:space:]')" ]; then
+    echo "  ⚠️ 没有任何正在运行的 omnialpha 服务被重启"
+    echo "     （若确有实盘在跑，它现在仍是旧代码 —— 检查它是否不由 systemd 管）"
+  elif [ "$DRY_RUN" = "0" ]; then
+    sleep 12
+    for u in $RESTARTED; do
+      act=$(systemctl is-active "$u" 2>/dev/null || true)
+      echo "  service: $u = $act"
+      if [ "$act" != "active" ]; then
+        echo "  ⛔ $u 重启后不是 active —— 旧进程可能已停、新进程没起来"
+        exit 1
+      fi
+    done
+  fi
 fi
 
 if [ "$DRY_RUN" = "0" ]; then
