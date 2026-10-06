@@ -72,10 +72,33 @@ def stats(root: Path, bot_id: str) -> Optional[dict]:
     }
 
 
-def _trade_id(raw: Any) -> Optional[int]:
-    """成交 id 归一化成 int（Gate 返回的是字符串数字）。"""
+def _int_or_zero(v: Any) -> int:
     try:
-        return int(str(raw).strip())
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return 0
+
+
+def _close_key(row: dict) -> Optional[int]:
+    """平仓记录的游标键 —— `time_us`（微秒时间戳）。
+
+    `position_close` **没有单调 id**（实测返回字段里只有 `time` 与 `time_us`），
+    所以游标只能用微秒时间戳。它足够唯一，且随时间单调递增。
+
+    **解析失败返回 None 而不是 0**：0 会被当成一个有效键参与 `> cursor` 比较，
+    把坏数据混进游标。
+    """
+    v = row.get("time_us")
+    if v is None:
+        v = row.get("time")
+        if v is None:
+            return None
+        try:
+            return int(float(v) * 1_000_000)      # 秒 → 微秒，与 time_us 对齐量级
+        except (TypeError, ValueError):
+            return None
+    try:
+        return int(str(v).strip())
     except (TypeError, ValueError):
         return None
 
@@ -90,53 +113,57 @@ def _pnl_of(t: dict) -> Optional[float]:
 
 
 def sync(root: Path, bot_id: str, client, *, contract: Optional[str] = None,
-         limit: int = 1000) -> dict:
-    """拉取成交明细并幂等累积。返回本轮摘要。
+         limit: int = 100) -> dict:
+    """拉取平仓历史并幂等累积。返回本轮摘要。
 
-    只处理 `id > cursor` 且 `pnl != 0` 的成交：`pnl == 0` 是开仓成交，不计入已实现
-    盈亏（与 `paper/store.py` 的 `realised_pnl != 0` 口径一致）。
+    只处理 `time_us > cursor` 的记录。数据源是交易所的 **`position_close`**
+    （平仓历史，每笔带 `pnl`）—— 不是 `my_trades`：实测后者的字段里**没有 pnl**，
+    只有 size/price/fee，推不出已实现盈亏。
+
+    `pnl == 0` 的平仓仍被跳过，与 `paper/store.py` 的 `realised_pnl != 0` 口径一致。
 
     **拉取失败不动游标** —— 否则那一段会被永久跳过，比不拉更糟。
     """
     rec = load(root, bot_id)
-    cursor = _trade_id(rec["cursor"]) or 0
+    cursor = _int_or_zero(rec["cursor"])
     try:
-        rows = client.list_my_trades(contract=contract, limit=limit) or []
+        rows = client.list_position_close(contract=contract, limit=limit) or []
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": str(e)[:160], "added": 0,
                 "trades": rec["totals"]["trades"]}
 
     fresh: list[dict] = []
-    max_id = cursor
+    max_key = cursor
     for t in rows:
         if not isinstance(t, dict):
             continue
-        tid = _trade_id(t.get("id"))
-        if tid is None:
+        key = _close_key(t)
+        if key is None:
             continue
-        if tid > max_id:
-            max_id = tid
-        if tid <= cursor:
+        if key > max_key:
+            max_key = key
+        if key <= cursor:
             continue
         pnl = _pnl_of(t)
         if pnl is None:
             continue
         fresh.append({
-            "id": str(t.get("id")),
+            "key": str(key),
             "pnl": round(pnl, 8),
             "contract": str(t.get("contract") or ""),
-            "create_time": t.get("create_time"),
+            "side": str(t.get("side") or ""),
+            "time": t.get("time"),
         })
 
     if not fresh:
         # 没有新的平仓，也要把游标推过去 —— 否则每次重复扫同一段
-        if max_id > cursor:
-            rec["cursor"] = str(max_id)
+        if max_key > cursor:
+            rec["cursor"] = str(max_key)
             _write(root, bot_id, rec)
         return {"ok": True, "added": 0, "trades": rec["totals"]["trades"],
                 "cursor": rec["cursor"]}
 
-    fresh.sort(key=lambda x: _trade_id(x["id"]) or 0)
+    fresh.sort(key=lambda x: _int_or_zero(x["key"]))
     t = rec["totals"]
     for f in fresh:
         t["trades"] += 1
@@ -146,7 +173,7 @@ def sync(root: Path, bot_id: str, client, *, contract: Optional[str] = None,
         if t["worst"] is None or f["pnl"] < t["worst"]:
             t["worst"] = f["pnl"]
     rec["totals"] = t
-    rec["cursor"] = str(max_id)
+    rec["cursor"] = str(max_key)
     rec["fills"] = (rec["fills"] + fresh)[-KEEP_FILLS:]
     _write(root, bot_id, rec)
     return {"ok": True, "added": len(fresh), "trades": t["trades"],

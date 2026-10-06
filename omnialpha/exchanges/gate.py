@@ -81,18 +81,16 @@ class GateExchange(ExchangeClient):
     def list_price_orders(self, contract: Optional[str] = None):
         return self._c.list_price_orders(self._s(contract) if contract else None)
 
-    def list_my_trades(self, contract: Optional[str] = None, limit: int = 1000,
-                       last_id: Optional[str] = None):
-        """已成交明细（live 画像的盈亏数据源）。`contract=None` 拉全账户。
+    def list_position_close(self, contract: Optional[str] = None, limit: int = 100):
+        """平仓历史（live 画像的盈亏数据源）。`contract=None` 拉全账户。
 
         **故意不进 `ExchangeClient` 基类**：只有 live 的画像投影用到它
         （`memory/exchange_pnl.py`），其余交易所的 live 未接 —— 进基类会强迫 5 个
         适配器写一遍 `NotImplementedError`，纯噪音。调用方按鸭子类型用，
         `exchange_pnl.sync` 对缺方法的客户端已经 try/except 兜住。
         """
-        return self._c.list_my_trades(
-            contract=self._s(contract) if contract else None,
-            limit=limit, last_id=last_id)
+        return self._c.list_position_close(
+            contract=self._s(contract) if contract else None, limit=limit)
 
     def cancel_order(self, order_id: str):
         return self._c.cancel_order(order_id)
