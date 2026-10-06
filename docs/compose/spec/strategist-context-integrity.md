@@ -234,3 +234,8 @@ system prompt 里**没有「历史表现」这一段**。
 - [ ] T7: 交易所盈亏拉取 — acceptance: `gate_client.list_my_trades` 可拉取成交；`sync_exchange_pnl` 幂等（重复调用不重复计入）；拉取失败不动游标 (covers: S2.4)
 - [ ] T8: 画像接入交易所投影 — acceptance: `ledger_stats()` 在无 paper 账本时回退到 `exchange_pnl.json`，返回形状与 `realized_pnl_stats` 一致 (covers: S2.4; depends: T7)
 - [ ] T9: 端到端验证 — acceptance: 服务器部署后，四项均可从落盘产物观察到：(a) `memory_journal.jsonl` 新记录 `memory_refs` 非空；(b) `memory_profile.json` 出现且 `total_trades` 与交易所平仓笔数一致；(c) 连续 5 轮的 `[近况]` 段体积 ≤2,000 字符且含 20 行索引；(d) 某轮 `*.thinking.json` 的 `tool_usage` 出现 `journal_lookup` 且其 `result_len > 0` (covers: S2.1 S2.2 S2.3 S2.4 S2.5; depends: T1 T2 T3 T4 T5 T6 T7 T8)
+  - **部分验证（`b4755ee` 部署后，2026-10-06 17:26 UTC 重启）**：
+    (a) **达成** — journal 921 条中出现第 1 条非空 `memory_refs`（`btc-pa-15m-235` → `['btc-pa-15m-233','btc-pa-15m-234']`，正是索引层给出的最近两轮）；
+    (c) **达成** — `[近况]` 段实测 **958 字符**、20 行索引、含 `journal_lookup` 提示、`[上轮方案状态]` 仍在；
+    (d) **未观察到** — 重启后 4 轮均未调用 `journal_lookup`（工具已注册，模型尚未使用；需更多轮次判断是去掉还是在人格里引导）；
+    (b) 待 T8。

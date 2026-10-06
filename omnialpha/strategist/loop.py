@@ -673,6 +673,9 @@ class PlanRunner:
                 "chips": chips_out,
                 "decision": chips_out[0]["action"] if chips_out else "hold",
                 "confidence": chips_out[0]["confidence"] if chips_out else 0.0,
+                # 模型自报的本轮引用 —— persona 路径的 journal 写入从这里取
+                # （`persona/runner.py::_post_exec_hooks`），否则那条路径拿不到它。
+                "memory_refs": list(getattr(plan, "memory_refs", None) or []),
             },
         }
 

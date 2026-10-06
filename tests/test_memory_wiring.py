@@ -647,6 +647,81 @@ class TestPersonaMemoryWiring(unittest.TestCase):
             self.assertEqual(rec["prompt_cache_hit_tokens"], 900)
 
 
+class TestPersonaMemoryRefsWiring(unittest.TestCase):
+    """persona 路径的 journal 也要带上模型自报的 `memory_refs`。
+
+    原先 `_post_exec_hooks` 只写 `order:{order_id}`，模型输出的那部分被丢掉 ——
+    与 plan-loop 路径是同一个缺口（那条已修）。这条路径还有第二个断点：
+    `analyze_once` 返回的 plan dict 里压根没有这个字段，所以先补在那里。
+    """
+
+    def test_analyze_once_exposes_memory_refs(self):
+        reply = json.dumps({
+            "cycle_id": "c-p-1", "reasoning": "r",
+            "memory_refs": ["c-old-1"],
+            "chips": [{"symbol": "BTC_USDT", "action": "hold", "confidence": 0.9}],
+        })
+        with tempfile.TemporaryDirectory() as td:
+            out = _plan_runner(Path(td), _RecordingLLM(reply=reply)).analyze_once()
+            self.assertEqual(out["plan"].get("memory_refs"), ["c-old-1"],
+                             "analyze_once 的 plan dict 没带 memory_refs，persona 取不到")
+
+    def test_model_refs_land_in_persona_journal(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            r = _persona_runner(root)
+            r._post_exec_hooks(
+                None,
+                {"action": "hold", "decision": "hold", "mode": "weighted_vote",
+                 "votes": {BOT: "hold"}},
+                {BOT: {"reasoning": "r", "memory_refs": ["c-old-1", "c-old-2"]}},
+                {"executed": False, "action": "hold", "decision": "hold"}, "c-new",
+            )
+            p = root / "data" / "bots" / BOT / "state" / "memory_journal.jsonl"
+            rec = json.loads(p.read_text(encoding="utf-8").strip().splitlines()[-1])
+            self.assertEqual(rec["memory_refs"], ["c-old-1", "c-old-2"])
+
+    def test_order_ref_and_model_refs_merged(self):
+        """有单时 order 引用与模型引用**并存**，不是二选一。"""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            r = _persona_runner(root)
+            r.orders.create({
+                "order_id": OID, "symbol": "BTC_USDT", "side": "long",
+                "members": [BOT], "target_account": BOT, "status": "open",
+            })
+            r._post_exec_hooks(
+                OID,
+                {"action": "open_long", "decision": "long", "mode": "weighted_vote",
+                 "votes": {BOT: "long"}},
+                {BOT: {"reasoning": "r", "memory_refs": ["c-old-1"]}},
+                {"executed": True, "action": "open_long", "decision": "long"}, "c-new",
+            )
+            p = root / "data" / "bots" / BOT / "state" / "memory_journal.jsonl"
+            rec = json.loads(p.read_text(encoding="utf-8").strip().splitlines()[-1])
+            self.assertIn(f"order:{OID}", rec["memory_refs"])
+            self.assertIn("c-old-1", rec["memory_refs"])
+
+    def test_duplicate_refs_deduped(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            r = _persona_runner(root)
+            r.orders.create({
+                "order_id": OID, "symbol": "BTC_USDT", "side": "long",
+                "members": [BOT], "target_account": BOT, "status": "open",
+            })
+            r._post_exec_hooks(
+                OID,
+                {"action": "open_long", "decision": "long", "mode": "weighted_vote",
+                 "votes": {BOT: "long"}},
+                {BOT: {"reasoning": "r", "memory_refs": [f"order:{OID}", "c-a"]}},
+                {"executed": True, "action": "open_long", "decision": "long"}, "c-new",
+            )
+            p = root / "data" / "bots" / BOT / "state" / "memory_journal.jsonl"
+            rec = json.loads(p.read_text(encoding="utf-8").strip().splitlines()[-1])
+            self.assertEqual(rec["memory_refs"].count(f"order:{OID}"), 1)
+
+
 # ── 回归钉：不许再变成「有模块、无调用点」 ───────────────────
 
 def _prod_call_files(target: str) -> set[str]:

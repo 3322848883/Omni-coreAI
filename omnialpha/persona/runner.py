@@ -240,11 +240,18 @@ class PersonaRunner:
             runner = (getattr(self, "plan_runners", None) or {}).get(source_bot)
             llm = getattr(runner, "llm", None)
             hit = int(llm.cache_hit_tokens()) if hasattr(llm, "cache_hit_tokens") else 0
+            # 模型自报的引用 + 本单的 order 引用**并存**（去重）。原先只写
+            # `order:{id}`，模型输出的那部分被丢掉 —— 与 plan-loop 路径同一个缺口。
+            refs: list[str] = [f"order:{order_id}"] if order_id else []
+            for r in (plan.get("memory_refs") or []):
+                s = str(r).strip()
+                if s and s not in refs:
+                    refs.append(s)
             journal.append(
                 cycle_id=cycle_id or f"c-{int(time.time())}",
                 decision=decision,
                 reasoning=str(plan.get("reasoning") or fusion.get("reason") or "")[:200],
-                memory_refs=[f"order:{order_id}"] if order_id else [],
+                memory_refs=refs,
                 snapshot_digest=str(getattr(runner, "last_snapshot_digest", "") or ""),
                 llm_model=str(getattr(llm, "last_model", "") or ""),
                 prompt_cache_hit_tokens=hit,
