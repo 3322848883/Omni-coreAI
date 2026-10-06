@@ -44,10 +44,18 @@ class MemoryProfile:
         改为**读时投影**：覆盖全部平仓、全部 bot，而且幂等 —— 不依赖任何触发点，
         也就不会再出现「某个路径忘了接线」。`by_action`/`avg_hold_rounds` 账本
         给不出来，仍由 `record_trade` 尽力而为。
+
+        **live bot 的回退**：它们没有 paper 账本，上面那条路会返回 None —— 原先到此
+        为止，于是 live 的画像恒空。现改为再试**交易所成交投影**
+        （`state/exchange_pnl.json`，见 `exchange_pnl.py`）：它同样覆盖交易所侧触发的
+        SL/TP 平仓，而那正是本地日志（`trades.jsonl` / `receipts/`）看不到的部分。
         """
         from ..paper.store import realized_pnl_stats
         st = realized_pnl_stats(
             self.root / "data" / "bots" / self.bot_id / "paper" / "account.db")
+        if not st:
+            from .exchange_pnl import stats as _exchange_stats
+            st = _exchange_stats(self.root, self.bot_id)
         if not st:
             return None
         return {

@@ -681,6 +681,43 @@ def select_bots(bots: dict[str, BotConfig], only: Optional[str] = None,
     return {k: v for k, v in bots.items() if v.enabled and (only is None or k == only)}
 
 
+def _exchange_pnl_sweep(bot: BotConfig, paths: ProjectPaths) -> int:
+    """把交易所成交里的已实现盈亏投影进画像（`state/exchange_pnl.json`）。
+
+    **为什么挂在 `run` 的 300s sweep 上、而不是 LLM 轮次上**：SL/TP 触发是交易所侧
+    成交，不等任何人；而画像的读侧（`MemoryProfile.ledger_stats`）在 plan-loop 进程
+    里每轮都读 —— 写侧只要保证「最终会写到」即可，不必与决策同频。
+
+    只对 **live** 跑：paper 的平仓本来就在本地账本里，`ledger_stats` 直接读它。
+
+    已知限制：多个 bot 共用一个账户时，每个 bot 都会统计到该账户的**全部**成交
+    （Gate 的成交 id 全局递增，「全账户一条游标」语义最简单；按 symbol 分别拉会让
+    同一个 cursor 被反复覆写）。当前 brooks-btc 独占账户，不受影响。
+    """
+    if str(getattr(bot, "env", "") or "") != "live":
+        return 0
+    try:
+        client = bot.create_client()
+    except Exception as e:  # noqa: BLE001
+        log.warning("exchange pnl sync %s: no client (%s)", bot.bot_id, e)
+        return 0
+    from .memory.exchange_pnl import sync as _sync
+
+    try:
+        res = _sync(paths.root, bot.bot_id, client)
+    except Exception as e:  # noqa: BLE001
+        log.warning("exchange pnl sync %s failed: %s", bot.bot_id, e)
+        return 0
+    if not res.get("ok"):
+        log.warning("exchange pnl sync %s: %s", bot.bot_id, res.get("error"))
+        return 0
+    added = int(res.get("added") or 0)
+    if added:
+        log.info("exchange pnl %s: +%d 笔平仓（累计 %d 笔）",
+                 bot.bot_id, added, res.get("trades"))
+    return added
+
+
 def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[str] = None,
                 orphan_sweep_sec: float = 300.0,
                 allow_disabled: bool = False) -> None:
@@ -725,6 +762,11 @@ def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[
                     _peak_trail_sweep(bot, paths, peak_trail_alerted)
                 except Exception as e:  # noqa: BLE001
                     log.warning("peak trail sweep %s failed: %s", bot.bot_id, e)
+                # 放最后：它只写画像投影，与上面四步的保护单无关，失败也不影响它们。
+                try:
+                    _exchange_pnl_sweep(bot, paths)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("exchange pnl sweep %s failed: %s", bot.bot_id, e)
         if do_sweep:
             last_sweep = now
         time.sleep(max(0.2, interval))

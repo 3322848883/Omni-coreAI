@@ -340,6 +340,25 @@ class GateClient:
             qs += f"&contract={contract}"
         return self.rest_signed_request("GET", f"{FUTURES_API}/price_orders", qs) or []
 
+    def list_my_trades(self, contract: Optional[str] = None,
+                       limit: int = 1000, last_id: Optional[str] = None) -> list:
+        """已成交明细 —— 每笔带 `pnl`（该笔的**已实现盈亏**）。
+
+        **为什么需要它**：交易所侧触发的 SL/TP 平仓**没有本地信号**，所以既不进
+        `logs/trades.jsonl`、也不进 `data/shared/receipts/`。实测某 bot 的 339 行
+        成交日志里只有 3 条带 `realized_pnl`、83 条执行回执里只有 4 条。要回答
+        「这个 bot 到底平了几笔、赚亏多少」，只能从交易所拉 —— `paper/store.py`
+        的 `realized_pnl_stats` docstring 也是这个口径。
+
+        `limit` 上限 1000；`last_id` 用于增量（只取 id 更大的成交）。
+        """
+        qs = f"limit={max(1, min(int(limit), 1000))}"
+        if contract:
+            qs += f"&contract={contract}"
+        if last_id:
+            qs += f"&last_id={last_id}"
+        return self.rest_signed_request("GET", f"{FUTURES_API}/my_trades", qs) or []
+
     def cancel_order(self, order_id: str) -> Any:
         return self.rest_signed_request("DELETE", f"{FUTURES_API}/orders/{order_id}")
 
