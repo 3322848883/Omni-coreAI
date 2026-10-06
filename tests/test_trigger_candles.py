@@ -214,8 +214,11 @@ class TestSystemPromptDocumentsTriggerLimits(unittest.TestCase):
     def test_ranges_documented(self):
         from omnialpha.strategist.prompt import SYSTEM_PROMPT
 
-        for frag in ("lookback:5-300", "period:2-200", "signal:2-50",
-                     "level:1-99", "mult:1-5"):
+        # `lookback` 下限 5→20：5~19 太小，破位太频繁（线上实测一个 bot 设 6，
+        # 15m 上只有 90 分钟，触发 22 次 / 196 分钟）。改范围必须同步这里 ——
+        # 这个测试就是防「代码改了、契约还写着旧范围」的护栏。
+        for frag in ("lookback:20-300", "period:2-200", "signal:2-50",
+                     "level:1-99", "mult:1-5", "pct:0.05-20", "bars:1-50"):
             with self.subTest(frag=frag):
                 self.assertIn(frag, SYSTEM_PROMPT)
 
@@ -229,9 +232,29 @@ class TestSystemPromptDocumentsTriggerLimits(unittest.TestCase):
         from omnialpha.strategist.prompt import SYSTEM_PROMPT
 
         for t in ("price_break", "rsi", "ma_cross", "macd_cross",
-                  "boll_break", "atr_spike", "volume_spike", "ema_cross"):
+                  "boll_break", "atr_spike", "volume_spike", "ema_cross",
+                  # EMA 家族补的 4 个（2026-10-06）
+                  "price_vs_ema", "price_cross_ema", "ema_stack",
+                  "price_ema_dist", "ema_slope"):
             with self.subTest(t=t):
                 self.assertIn(t, SYSTEM_PROMPT)
+
+    def test_allowed_types_match_policy(self):
+        """契约列的类型必须与 `DEFAULT_ALLOW` 一致 —— 防止「加了类型但契约没写」。"""
+        from omnialpha.strategist.prompt import SYSTEM_PROMPT
+        from omnialpha.strategist.trigger_store import DEFAULT_ALLOW
+
+        for t in DEFAULT_ALLOW:
+            with self.subTest(t=t):
+                self.assertIn(t, SYSTEM_PROMPT,
+                              f"{t} 在 DEFAULT_ALLOW 里但契约没写 —— 模型看不到就不会用")
+
+    def test_direction_params_marked_required(self):
+        """方向类参数必填这件事必须写进契约（否则模型省了会被拒、白烧一轮）。"""
+        from omnialpha.strategist.prompt import SYSTEM_PROMPT
+
+        self.assertIn("方向类参数", SYSTEM_PROMPT)
+        self.assertIn("side:above|below", SYSTEM_PROMPT)
 
 
 if __name__ == "__main__":

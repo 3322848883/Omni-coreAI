@@ -211,5 +211,76 @@ class TestPolicyRegistration(unittest.TestCase):
                 self._policy(), bot_symbols=["BTC_USDT"])
 
 
+class TestRequiredParamsAndLimits(unittest.TestCase):
+    """方向类参数必填 + lookback 下限。
+
+    两条都是「静默失效」的堵法：
+      - `side` 缺省会取一侧（price_vs_ema→above、price_break→high、boll_break→upper），
+        而两侧语义**相反** —— 取错一侧等于替模型做了方向决策，它却拿到「我写对了」的反馈。
+      - `lookback: 6`（15m 上只有 90 分钟）会让破位条件变成高频定时器。
+    """
+
+    def _pol(self):
+        return AITriggerPolicy(enabled=True, default_cooldown_sec=300.0)
+
+    def _ok(self, raw):
+        return validate_trigger_payload(raw, self._pol(), bot_symbols=["BTC_USDT"])
+
+    def _reject(self, raw):
+        with self.assertRaises(TriggerPolicyError):
+            self._ok(raw)
+
+    # ── side 必填 ──
+    def test_price_vs_ema_requires_side(self):
+        self._reject({"type": "price_vs_ema", "symbol": "BTC_USDT", "period": 20})
+
+    def test_price_vs_ema_with_side_ok(self):
+        out = self._ok({"type": "price_vs_ema", "symbol": "BTC_USDT",
+                        "period": 20, "side": "above"})
+        self.assertEqual(out["params"]["side"], "above")
+
+    def test_price_break_requires_side(self):
+        self._reject({"type": "price_break", "symbol": "BTC_USDT", "lookback": 40})
+
+    def test_price_break_with_side_ok(self):
+        out = self._ok({"type": "price_break", "symbol": "BTC_USDT",
+                        "lookback": 40, "side": "high"})
+        self.assertEqual(out["params"]["side"], "high")
+
+    def test_boll_break_requires_side(self):
+        self._reject({"type": "boll_break", "symbol": "BTC_USDT", "period": 20, "k": 2})
+
+    def test_types_without_side_are_unaffected(self):
+        """只有那三类要 side —— 其余类型不该被这条规则误伤。"""
+        for raw in ({"type": "ema_cross", "symbol": "BTC_USDT", "fast": 9, "slow": 21},
+                    {"type": "ema_stack", "symbol": "BTC_USDT", "fast": 20, "slow": 50},
+                    {"type": "price_cross_ema", "symbol": "BTC_USDT", "period": 20},
+                    {"type": "rsi", "symbol": "BTC_USDT", "period": 14, "level": 70},
+                    {"type": "atr_spike", "symbol": "BTC_USDT", "mult": 2.0, "lookback": 30}):
+            self._ok(raw)
+
+    # ── lookback 下限 ──
+    def test_lookback_below_floor_rejected(self):
+        """`lookback: 6` 是线上真实发生过的配置（触发了 22 次 / 196 分钟）。"""
+        self._reject({"type": "price_break", "symbol": "BTC_USDT",
+                      "lookback": 6, "side": "high"})
+
+    def test_lookback_at_floor_ok(self):
+        out = self._ok({"type": "price_break", "symbol": "BTC_USDT",
+                        "lookback": 20, "side": "low"})
+        self.assertEqual(out["params"]["lookback"], 20)
+
+    def test_lookback_above_ceiling_rejected(self):
+        self._reject({"type": "price_break", "symbol": "BTC_USDT",
+                      "lookback": 301, "side": "high"})
+
+    def test_atr_and_volume_spike_share_the_floor(self):
+        """同一个 `lookback` 键被三类共用 —— 下限对它们同样生效。"""
+        self._reject({"type": "atr_spike", "symbol": "BTC_USDT",
+                      "mult": 2.0, "lookback": 6})
+        self._reject({"type": "volume_spike", "symbol": "BTC_USDT",
+                      "mult": 2.0, "lookback": 6})
+
+
 if __name__ == "__main__":
     unittest.main()

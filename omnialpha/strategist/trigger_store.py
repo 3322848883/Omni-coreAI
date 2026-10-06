@@ -37,7 +37,10 @@ DEFAULT_ALLOW = (
 )
 
 DEFAULT_LIMITS = {
-    "lookback": (5, 300),
+    # `lookback` 下限从 5 抬到 20：5~19 根太小，破位发生得太频繁。
+    # 线上实测一个 bot 设 `lookback: 6`（15m 上只有 90 分钟），触发 22 次 /
+    # 196 分钟 —— 相当于又一个高频定时器。20 根在 15m 上是 5 小时，破位才有信息量。
+    "lookback": (20, 300),
     "period": (2, 200),
     "fast": (2, 200),
     "slow": (2, 200),
@@ -46,6 +49,17 @@ DEFAULT_LIMITS = {
     "mult": (1.0, 5.0),
     "pct": (0.05, 20.0),     # price_ema_dist 的偏离百分比
     "bars": (1, 50),         # ema_slope 的回看根数
+}
+
+# 每类型的**必填参数**（AI 自设触发器路径）。
+# 这些参数的两侧语义**相反**，缺了不能静默取一侧 —— 那是替模型做方向决策，
+# 而且它拿到的是「我写对了」的反馈。线上实测：契约漏写 `price_vs_ema` 的 `side`
+# → 模型必然不写 → 静默取 `above` → 价格持续在 EMA 上方时条件恒真 →
+# 每 300 秒冷却一到就再触发一次（196 分钟 35 次、占全部轮次 43%）。
+REQUIRED_PARAMS = {
+    "price_break": ("side",),      # high | low
+    "price_vs_ema": ("side",),     # above | below
+    "boll_break": ("side",),       # upper | lower
 }
 
 
@@ -127,6 +141,13 @@ def validate_trigger_payload(
             v = float(params[key])
             if v < lo or v > hi:
                 raise TriggerPolicyError(f"{key}={v} out of [{lo},{hi}]")
+    # 方向类参数必填：缺了不静默取默认值（取错一侧语义相反）
+    missing = [k for k in REQUIRED_PARAMS.get(ctype, ()) if k not in params]
+    if missing:
+        raise TriggerPolicyError(
+            f"{ctype} 缺少必填参数 {missing} —— 方向类参数的两侧语义相反，"
+            f"不能靠默认值蒙过去"
+        )
     cooldown = float(raw.get("cooldown_sec") or policy.default_cooldown_sec)
     ttl = float(raw.get("ttl_sec") or policy.default_ttl_sec)
     if cooldown < 1 or cooldown > 86400:
