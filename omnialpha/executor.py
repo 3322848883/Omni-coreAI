@@ -2116,7 +2116,16 @@ class Executor:
         + 未终结状态过滤），保证「补保护」与「上移保护」两条路径看到的是同一批单 ——
         判据漂移是这一族代码反复出问题的地方。张数取绝对值（多单的保护单 size 为负）。
         """
-        out: list[tuple[str, float, int]] = []
+        return [(pid, px, sz) for pid, px, sz, _s in self._owned_sl_orders_sided(symbol)]
+
+    def _owned_sl_orders_sided(self, symbol: str) -> list[tuple[str, float, int, str]]:
+        """同 `_owned_sl_orders`，但多带一个 `side`（这条 SL 保护的是哪个方向）。
+
+        **双向持仓必须靠它分腿**：保护单是 reduce-only，平多的 size 为负、平空为正，
+        符号即方向。若用「触发价相对 mark 的位置」去判，会在**回撤已经越过 SL** 时
+        误判 —— 那一刻 SL 恰好跑到 mark 的另一侧，正是最需要认对它的时候。
+        """
+        out: list[tuple[str, float, int, str]] = []
         for po in self._owned_price_orders(symbol, self._own_prefix("")):
             init = po.get("initial") or {}
             text = str(init.get("text") or po.get("text") or "")
@@ -2137,10 +2146,13 @@ class Executor:
             if not pid or px <= 0:
                 continue
             try:
-                sz = abs(int(init.get("size") or po.get("size") or 0))
+                raw_sz = int(init.get("size") or po.get("size") or 0)
             except (TypeError, ValueError):
-                sz = 0
-            out.append((str(pid), px, sz))
+                raw_sz = 0
+            if raw_sz == 0:
+                continue
+            side = "long" if raw_sz < 0 else "short"
+            out.append((str(pid), px, abs(raw_sz), side))
         return out
 
     def ensure_protection(self, symbol: str) -> dict:
@@ -2267,14 +2279,15 @@ class Executor:
 
     # ── 峰值回撤保护（防坐电梯）──────────────────────────
     def _peak_trail_path(self) -> Path:
-        """峰值状态的位置：有 account 走账户级（跨 bot 共享），否则 bot 级。
+        """峰值状态的位置：**恒为 bot 级**（`data/bots/<bot_id>/state/peak_trail.json`）。
 
-        必须账户级：持仓属于**账户**，同一账户下的 bot 看到的是同一条持仓与
-        同一张 SL。状态放 bot 级会让每个 bot 各算一份峰值、各撤各挂。
+        为什么不用账户级：`peak_trail` 是**逐 bot 的开关**，而状态按账户共享时，
+        同一账户下开了这个开关的 bot 会互相覆盖对方的峰值记录 —— 一个 bot 的
+        扫描把另一条腿的 peak 写坏，下一轮它就按错的基准挪止损。
+        保护单本身仍按 `label_prefix` 命名空间隔离（`_owned_sl_orders`），
+        所以「各算各的峰值、只挪自己的 SL」是自洽的；需要跨 bot 协同的是
+        `ensure_protection` 那条路，不是这条。
         """
-        if self.account:
-            return (Path(self.root) / "data" / "accounts" / self.account
-                    / "state" / "peak_trail.json")
         return (Path(self.root) / "data" / "bots" / (self.bot_id or "_unknown")
                 / "state" / "peak_trail.json")
 
@@ -2331,7 +2344,7 @@ class Executor:
         峰值**必须重置**的四种情况（否则会拿旧高点去卡一条新仓）：
           持仓消失 / 方向反转 / 入场价变了 / 上次观测太久远（`_PEAK_TRAIL_STALE_SEC`）。
         """
-        out: dict[str, Any] = {"symbol": symbol, "peak_trail": "off"}
+        out: dict[str, Any] = {"symbol": symbol, "peak_trail": "off", "sides": []}
         ar = self.account_risk or {}
         mode = ar.get("peak_trail", False)
         if not mode:
@@ -2358,16 +2371,35 @@ class Executor:
                 self._write_peak_trail(state)
             out["skipped"] = "no_position"
             return out
-        if len(positions) > 1:
-            # 双向持仓得先定跟踪哪条腿 —— 这不是「兜底」该猜的事，交给 AI
-            out["skipped"] = "ambiguous_side"
-            return out
+        # 双向持仓：**两条腿各自跟踪峰值、各自上移自己的 SL**。
+        # 旧版在这里 `ambiguous_side` 直接返回 —— 而「永远双向」的阶梯策略
+        # 恰恰长期双向，等于这条保护对它完全失效。key 本来就是 `symbol|side`，
+        # 状态天然按方向分开，所以逐腿处理不需要额外记账。
+        out["sides"] = []
+        for _pos in positions:
+            out["sides"].append(self._peak_trail_side(_pos, symbol, state, mult, dry))
+        live = {f"{symbol}|{p['side']}" for p in positions}
+        for _k in [k for k in state if k.split("|", 1)[0] == symbol and k not in live]:
+            state.pop(_k, None)
+        self._write_peak_trail(state)
+        if out["sides"]:
+            for _f in ("position_side", "position_size", "peak", "mark", "atr_pct",
+                       "target_sl", "current_sl", "moved", "skipped", "error"):
+                if _f in out["sides"][0]:
+                    out[_f] = out["sides"][0][_f]
+        return out
 
-        pos = positions[0]
+    def _peak_trail_side(self, pos: dict, symbol: str, state: dict,
+                         mult: float, dry: bool) -> dict:
+        """单条腿：峰值回撤 → 上移该腿的 SL。判据与旧版逐字相同。
+
+        `state` 由调用方持有并统一落盘（逐腿只改自己那个 `symbol|side` 键）。
+        """
         side = pos["side"]
         size = abs(int(pos["size"]))
         entry = float(pos.get("entry_price") or 0)
         key = f"{symbol}|{side}"
+        out: dict[str, Any] = {"position_side": side, "position_size": size}
 
         try:
             ticker = self.client.get_ticker(symbol) or {}
@@ -2397,13 +2429,12 @@ class Executor:
         # 方向反转：同一 symbol 的**旧方向**峰值必须清掉。留着的话反手回来时
         # key 又变回旧方向，会直接复用一个早已过期的历史高点。
         # （双向同时持仓的情况上面已经 `ambiguous_side` 返回了，走不到这里。）
-        for k in [k for k in state
-                  if k != key and k.split("|", 1)[0] == symbol]:
-            state.pop(k, None)
+        # 不再在这里清理「同 symbol 其他方向」—— 双向持仓下两条腿都要保留，
+        # 由调用方按「当前实际持仓」统一清理并落盘。
         state[key] = {"peak": peak, "entry": entry, "size": size, "ts": time.time()}
-        self._write_peak_trail(state)
 
-        atr_pct = self._atr_pct(symbol, int(ar.get("peak_trail_atr_period") or 14))
+        atr_pct = self._atr_pct(
+            symbol, int((self.account_risk or {}).get("peak_trail_atr_period") or 14))
         if atr_pct <= 0:
             out["error"] = "no atr"
             return out
@@ -2416,7 +2447,10 @@ class Executor:
             "target_sl": target,
         })
 
-        sls = self._owned_sl_orders(symbol)
+        # 双向持仓下两条腿的 SL 都会返回 —— 按保护单自身的方向挑出这一腿的
+        # （不能用「相对 mark 的位置」判：回撤越过 SL 时它已经跑到另一侧了）。
+        sls = [(pid, px, sz) for pid, px, sz, s in self._owned_sl_orders_sided(symbol)
+               if s == side]
         if not sls:
             out["skipped"] = "no_owned_sl"
             return out

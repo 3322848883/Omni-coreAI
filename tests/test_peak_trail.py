@@ -250,7 +250,11 @@ class TestPeakState(unittest.TestCase):
             _ex(client, root).check_peak_trail("ETH_USDT")
             self.assertEqual(list(_peak_state(root)), ["ETH_USDT|short"])
 
-    def test_account_scoped_state_path(self):
+    def test_state_path_is_bot_scoped(self):
+        """状态恒落 bot 级 —— 逐 bot 的开关配逐 bot 的状态，互不覆盖。
+
+        账户级共享时，同账户下开了这个开关的 bot 会互相写坏对方的峰值记录。
+        """
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             client = _Client(positions=_long_pos(), sls=[_sl()])
@@ -259,8 +263,9 @@ class TestPeakState(unittest.TestCase):
                           account="gate-main",
                           account_risk={"peak_trail": True, "peak_trail_atr": 1.5})
             ex.check_peak_trail("ETH_USDT")
-            self.assertIn("ETH_USDT|long", _peak_state(root, account="gate-main"))
-            self.assertEqual(_peak_state(root), {}, "不该同时写 bot 级路径")
+            self.assertIn("ETH_USDT|long", _peak_state(root, bot_id="b1"))
+            self.assertEqual(_peak_state(root, account="gate-main"), {},
+                             "不再写账户级路径")
 
 
 class TestNoActionPaths(unittest.TestCase):
@@ -318,13 +323,40 @@ class TestNoActionPaths(unittest.TestCase):
             self.assertGreater(out["target_sl"], out["mark"])
             self.assertEqual(client.calls, [])
 
-    def test_ambiguous_side_skips(self):
-        """双向持仓得先定跟踪哪条腿 —— 不猜。"""
+    def test_dual_side_trails_each_leg(self):
+        """双向持仓：两条腿各自跟踪峰值、各自上移自己的 SL。
+
+        旧版在 `len(positions) > 1` 时直接 `ambiguous_side` 返回 —— 而「永远双向」
+        的阶梯策略长期双向，等于这条保护对它完全失效。
+        """
         with tempfile.TemporaryDirectory() as td:
-            client = _Client(positions=_long_pos() + _short_pos(), sls=[_sl()])
-            out = _ex(client, Path(td)).check_peak_trail("ETH_USDT")
-            self.assertEqual(out["skipped"], "ambiguous_side")
-            self.assertEqual(client.calls, [])
+            root = Path(td)
+            client = _Client(positions=_long_pos() + _short_pos(),
+                             sls=[_sl(oid="1", price=2720.0, size=-10),
+                                  _sl(oid="2", price=2850.0, size=10)])
+            out = _ex(client, root).check_peak_trail("ETH_USDT")
+            self.assertEqual(len(out["sides"]), 2)
+            self.assertEqual({s["position_side"] for s in out["sides"]}, {"long", "short"})
+            self.assertEqual(sorted(_peak_state(root)),
+                             ["ETH_USDT|long", "ETH_USDT|short"],
+                             "两条腿的峰值各存各的键")
+            self.assertTrue(all(s.get("moved") for s in out["sides"]),
+                            "两条腿都该上移自己的 SL")
+
+    def test_dual_side_sl_matched_by_own_side(self):
+        """回撤越过 SL 时也要认对腿 —— 靠保护单自身的 size 符号，不是它相对 mark 的位置。
+
+        这一刻 SL 恰好跑到 mark 的另一侧，用位置判会把它认成对面那条腿的。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            # 峰值 2800、现价 2650（已跌破多单 SL 2720）→ 位置判会以为 2720 属于空腿
+            _seed(root, "ETH_USDT|long", peak=2800.0, entry=2700.0)
+            client = _Client(mark=2650.0, positions=_long_pos(),
+                             sls=[_sl(oid="1", price=2720.0, size=-10)])
+            out = _ex(client, root).check_peak_trail("ETH_USDT")
+            self.assertEqual(out["sides"][0].get("skipped"), "trail_breached",
+                             "该腿的 SL 必须被认出来（否则会误报 no_owned_sl）")
 
     def test_no_atr_errors(self):
         with tempfile.TemporaryDirectory() as td:

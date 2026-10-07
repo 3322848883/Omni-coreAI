@@ -622,45 +622,52 @@ def _peak_trail_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict) -> int
             continue
         if out.get("peak_trail") == "off" or out.get("skipped") == "no_position":
             continue
-        if out.get("moved"):
-            done += 1
-            log.warning(
-                "peak trail %s %s: SL %s → %s (peak=%s mark=%s size=%s)",
-                bot.bot_id, sym, out["moved"]["from"], out["moved"]["to"],
-                out.get("peak"), out.get("mark"), out["moved"]["size"],
-            )
-            continue
-        if out.get("peak_trail") == "dry" and out.get("target_sl") is not None \
-                and not out.get("skipped"):
-            log.info(
-                "peak trail[dry] %s %s: 会挂 SL %s (peak=%s mark=%s atr%%=%s x%s)",
-                bot.bot_id, sym, out.get("target_sl"), out.get("peak"),
-                out.get("mark"), out.get("atr_pct"), out.get("atr_mult"),
-            )
-            continue
-        if not (out.get("error") or out.get("skipped") == "trail_breached"):
-            continue
-        key = f"{bot.bot_id}:{sym}"
-        now = time.time()
-        if now - float(alerted.get(key) or 0) < _AUTO_PROTECT_ALERT_SEC:
-            continue
-        alerted[key] = now
-        if out.get("error"):
-            detail = f"{sym} 峰值回撤上移 SL 失败：{out['error']}（旧 SL 仍在，未裸仓）"
-        else:
-            detail = (f"{sym} 峰值回撤已越过目标 {out.get('target_sl')}"
-                      f"（峰值 {out.get('peak')} / 现价 {out.get('mark')}）"
-                      f"，未挂单 —— 需人工或下一轮 plan 决定是否落袋")
-        log.error("peak trail %s %s: %s", bot.bot_id, sym, detail)
-        try:
-            if executor.alert_store is not None:
-                executor.alert_store.raise_alert(
-                    TYPE_PEAK_TRAIL, detail, symbol=sym,
-                    target_sl=out.get("target_sl"), peak=out.get("peak"),
-                    mark=out.get("mark"), peak_trail_error=out.get("error"),
+        # 双向持仓时 `sides` 有两条腿 —— 逐腿判、逐腿报（每腿各有自己的
+        # peak / target_sl / moved）。旧版只看顶层字段，双向下等于只看一条。
+        for res in (out.get("sides") or []):
+            if res.get("moved"):
+                done += 1
+                log.warning(
+                    "peak trail %s %s/%s: SL %s → %s (peak=%s mark=%s size=%s)",
+                    bot.bot_id, sym, res.get("position_side"),
+                    res["moved"]["from"], res["moved"]["to"],
+                    res.get("peak"), res.get("mark"), res["moved"]["size"],
                 )
-        except Exception:  # noqa: BLE001
-            pass
+                continue
+            if out.get("peak_trail") == "dry" and res.get("target_sl") is not None \
+                    and not res.get("skipped"):
+                log.info(
+                    "peak trail[dry] %s %s/%s: 会挂 SL %s (peak=%s mark=%s atr%%=%s x%s)",
+                    bot.bot_id, sym, res.get("position_side"), res.get("target_sl"),
+                    res.get("peak"), res.get("mark"), res.get("atr_pct"),
+                    out.get("atr_mult"),
+                )
+                continue
+            if not (res.get("error") or res.get("skipped") == "trail_breached"):
+                continue
+            key = f"{bot.bot_id}:{sym}:{res.get('position_side')}"
+            now = time.time()
+            if now - float(alerted.get(key) or 0) < _AUTO_PROTECT_ALERT_SEC:
+                continue
+            alerted[key] = now
+            sname = res.get("position_side") or "?"
+            if res.get("error"):
+                detail = (f"{sym} {sname} 峰值回撤上移 SL 失败：{res['error']}"
+                          f"（旧 SL 仍在，未裸仓）")
+            else:
+                detail = (f"{sym} {sname} 峰值回撤已越过目标 {res.get('target_sl')}"
+                          f"（峰值 {res.get('peak')} / 现价 {res.get('mark')}）"
+                          f"，未挂单 —— 需人工或下一轮 plan 决定是否落袋")
+            log.error("peak trail %s %s: %s", bot.bot_id, sym, detail)
+            try:
+                if executor.alert_store is not None:
+                    executor.alert_store.raise_alert(
+                        TYPE_PEAK_TRAIL, detail, symbol=sym,
+                        target_sl=res.get("target_sl"), peak=res.get("peak"),
+                        mark=res.get("mark"), peak_trail_error=res.get("error"),
+                    )
+            except Exception:  # noqa: BLE001
+                pass
     return done
 
 
