@@ -415,7 +415,7 @@ class TestExecOutcomeVisibleInPrompt(unittest.TestCase):
             j = MemoryJournal(root, BOT)
             j.append(cycle_id="c-1", decision="open_short", reasoning="r",
                      exec_result={"orders": 1, "trigger": "kline_close"})
-            self.assertIn("[+1]", self._user(root), "近况没标出下单成功")
+            self.assertIn("[orders=1]", self._user(root), "近况没标出下单成功")
 
     def test_index_shows_order_count(self):
         with tempfile.TemporaryDirectory() as td:
@@ -427,16 +427,26 @@ class TestExecOutcomeVisibleInPrompt(unittest.TestCase):
                      exec_result={"orders": 2})
             u = self._user(root)
             idx = u[u.find("[近期决策索引"):u.find("[本轮快照]")]
-            self.assertIn("c-last open_short [+2]", idx, f"索引没标出下单数：{idx[-200:]}")
+            self.assertIn("c-last open_short [orders=2]", idx,
+                          f"索引没标出下单数：{idx[-200:]}")
 
     def test_hold_rows_have_no_tag(self):
-        """没下单就不加标记 —— 否则每行都拖一个 `[+0]`，纯噪音。"""
+        """没下单就不加标记 —— 否则每行都拖一个 `[orders=0]`，纯噪音。"""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             MemoryJournal(root, BOT).append(
                 cycle_id="c-h", decision="hold", reasoning="r",
                 exec_result={"orders": 0})
-            self.assertNotIn("[+0]", self._user(root))
+            self.assertNotIn("[orders=0]", self._user(root))
+
+    def test_tag_is_unambiguous(self):
+        """标记要自明 —— `[+1]` 被实测误读成仓位大小（`opened size +1?`）。"""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            MemoryJournal(root, BOT).append(
+                cycle_id="c-1", decision="open_short", reasoning="r",
+                exec_result={"orders": 1})
+            self.assertNotIn("[+1]", self._user(root))
 
     def test_missing_exec_result_is_safe(self):
         with tempfile.TemporaryDirectory() as td:

@@ -144,21 +144,26 @@ def _format_order_context(ctx: Optional[dict]) -> str:
 
 
 def _exec_tag(row: dict) -> str:
-    """执行标记：下出去几张就标 `[+N]`，没下单不标。
+    """执行标记：下出去几个单就标 `[orders=N]`，没下单不标。
 
     **为什么需要**：`[近况]` 与索引原先只给 `decision`，执行结果只躺在 journal 的
     `exec_result` 里。快照里的挂单能间接反映「成功」的情况，但**被拒的**（例如
     `TRIGGER_PRICE_SIDE: tp=... 需 > mark ...`）完全看不出来 —— 模型会把上一轮的
     意图当成已生效，继续在错误的前提上推理。
 
-    没下单时不标（而不是标 `[+0]`）：hold 轮占绝大多数，每行拖一个零标记只是噪音。
+    **为什么写成 `[orders=N]` 而不是更短的 `[+N]`**：实测 `[+1]` 会被误读成仓位大小
+    （「The past cycles opened size +1?」），模型得自己纠正过来。`orders=N` 无歧义，
+    而且模型本来就用英文思考。N 是**订单条数**，不是张数。
+
+    没下单时不标（而不是标 `[orders=0]`）：hold 轮占绝大多数，每行拖一个零标记只是
+    噪音。
     """
     ex = row.get("exec_result") or {}
     try:
         n = int(ex.get("orders") or 0)
     except (TypeError, ValueError):
         n = 0
-    return f" [+{n}]" if n else ""
+    return f" [orders={n}]" if n else ""
 
 
 def _format_recent(summaries: list[dict]) -> str:
