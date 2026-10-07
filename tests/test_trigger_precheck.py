@@ -21,7 +21,7 @@ from pathlib import Path
 
 from omnialpha.executor import Executor
 from omnialpha.monitoring import AlertStore, read_alerts
-from omnialpha.schema import Intent
+from omnialpha.schema import Intent, parse_signal
 
 
 class TriggerClient:
@@ -106,6 +106,50 @@ class TestTriggerPrecheck(unittest.TestCase):
         """取不到参考价时不拦，保持原行为。"""
         ex = self._ex(TriggerClient(ticker_error=True))
         self.assertIsNone(ex._precheck_exit_triggers(make_intent(tp=1.0, sl=2.0)))
+
+    def test_short_sl_above_mark_ok_when_rule_unset(self):
+        """回归（2026-10-07 实盘连续 49 次）：rule 缺省时必须按**持仓方向**推断。
+
+        `_parse_stop_entry` 曾经只设 `trigger_rule_tp`、把 `trigger_rule_sl` 留
+        None，预检的兜底 `or 2` 于是把做空的 SL（在 mark **上方**，合法 rule=1）
+        判成「需 < mark」→ 整笔中止，入场单也不下。
+        """
+        ex = self._ex(TriggerClient(mark=83594.4))
+        it = make_intent(action="stop_entry_short", side="short",
+                         tp=83190.0, sl=83730.0,
+                         trigger_rule_tp=None, trigger_rule_sl=None)
+        self.assertIsNone(ex._precheck_exit_triggers(it),
+                          "做空 SL 在上方是合法的，不该被兜底的 rule=2 拦下")
+
+    def test_long_sl_above_mark_still_blocked_when_rule_unset(self):
+        """同一兜底对多头必须仍然拦 —— 不能把真非法的也一并放行。"""
+        ex = self._ex(TriggerClient(mark=84000.0))
+        it = make_intent(action="stop_entry_long", side="long",
+                         tp=85000.0, sl=84560.0,
+                         trigger_rule_tp=None, trigger_rule_sl=None)
+        err = ex._precheck_exit_triggers(it)
+        self.assertIsNotNone(err)
+        self.assertIn("sl=84560", err)
+
+    def test_real_production_signal_passes_precheck(self):
+        """用生产失败信号原样走真实解析 + 真实预检（mark 取当时日志值）。
+
+        期望：预检放行（修复前逐字复现 `TRIGGER_PRICE_SIDE: sl=83730 需 <
+        mark 83594.4（rule=2 跌破触发）`）。
+        """
+        sig = parse_signal({
+            "replace": "symbol",
+            "orders": [{
+                "action": "stop_entry_short", "symbol": "BTC_USDT", "type": "market",
+                "size_usd": 454.69, "tp": 83190.0, "sl": 83730.0, "tp2": 82920.0,
+                "tp1_share": 0.5, "trigger_price": 83460.0, "leverage": 50,
+                "side": "short", "region": "trend", "invalidation": 83745.0,
+            }],
+        })
+        it = sig.intents[0]
+        self.assertEqual(it.trigger_rule_sl, 1)
+        ex = self._ex(TriggerClient(mark=83594.4))
+        self.assertIsNone(ex._precheck_exit_triggers(it))
 
 
 class TestRollbackUnprotectedEntry(unittest.TestCase):

@@ -985,14 +985,24 @@ class Executor:
 
         所以宁可不交易：任一腿触发价非法就整笔中止，连入场单也不下。
         """
+        # rule 缺省时按**持仓方向**推断，绝不盲猜：`intent.side` 是唯一的
+        # 真相来源，而兜底的 `or 1` / `or 2` 只对多头成立。曾经 `_parse_stop_entry`
+        # 漏设 `trigger_rule_sl`，兜底的 `or 2` 让每个 `stop_entry_short` 的 SL
+        # （在 mark 上方）被判成「需 < mark」→ 整笔中止（2026-10-07 实盘 49 次）。
+        open_action = "open_long" if (intent.side or "long") == "long" else "open_short"
         legs: list[tuple[str, float, int]] = []
         if intent.tp is not None and intent.tp_mode != "limit_order":
-            rule_tp = int(intent.trigger_rule_tp or 1)
+            rule_tp = intent.trigger_rule_tp
+            if rule_tp is None:
+                rule_tp = infer_trigger_rules(open_action, is_tp=True)
             for px in (intent.tp, intent.tp2, intent.tp3):
                 if px is not None:
-                    legs.append(("tp", float(px), rule_tp))
+                    legs.append(("tp", float(px), int(rule_tp)))
         if intent.sl is not None and intent.sl_mode != "limit_order":
-            legs.append(("sl", float(intent.sl), int(intent.trigger_rule_sl or 2)))
+            rule_sl = intent.trigger_rule_sl
+            if rule_sl is None:
+                rule_sl = infer_trigger_rules(open_action, is_tp=False)
+            legs.append(("sl", float(intent.sl), int(rule_sl)))
         if not legs:
             return None
         try:

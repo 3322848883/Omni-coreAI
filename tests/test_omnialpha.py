@@ -49,6 +49,28 @@ class TestSchema(unittest.TestCase):
         self.assertEqual(infer_trigger_rules("open_short", True), 2)
         self.assertEqual(infer_trigger_rules("open_short", False), 1)
 
+    def test_stop_entry_rules_follow_position_side(self):
+        """突破单的 TP/SL rule 只看持仓方向，与入场是突破还是限价无关。
+
+        回归背景（2026-10-07 实盘）：`infer_trigger_rules` 不认识
+        `stop_entry_*`，落到末尾 `else` 把做空的止损推成 rule=2（跌破触发）——
+        而做空止损在**上方**，合法 rule 是 1。
+        """
+        self.assertEqual(infer_trigger_rules("stop_entry_long", True), 1)
+        self.assertEqual(infer_trigger_rules("stop_entry_long", False), 2)
+        self.assertEqual(infer_trigger_rules("stop_entry_short", True), 2)
+        self.assertEqual(infer_trigger_rules("stop_entry_short", False), 1)
+
+    def test_stop_entry_parses_sl_rule(self):
+        """`stop_entry_*` 必须像 `open_*` 一样把 `trigger_rule_sl` 落定，不留 None。"""
+        sig = parse_signal({
+            "action": "stop_entry_short", "symbol": "BTC_USDT",
+            "size_usd": 100, "trigger_price": 83460, "tp": 83190, "sl": 83730,
+        })
+        it = sig.intents[0]
+        self.assertEqual(it.trigger_rule_sl, 1, "做空止损在上方 → rule=1 涨破触发")
+        self.assertEqual(it.trigger_rule_tp, 2, "做空止盈在下方 → rule=2 跌破触发")
+
     def test_flatten_empty_is_noop_success(self):
         class FlatClient(FakeClient):
             def close_position(self, contract, side=None, size=0):

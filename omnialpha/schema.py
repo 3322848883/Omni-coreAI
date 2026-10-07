@@ -147,10 +147,16 @@ def _i(value: Any, name: str) -> Optional[int]:
 
 
 def infer_trigger_rules(action: str, is_tp: bool) -> int:
-    """1 = price >= trigger, 2 = price <= trigger."""
-    if action in ("open_long", "grid"):
+    """1 = price >= trigger, 2 = price <= trigger.
+
+    `stop_entry_*` 与同名 `open_*` 同向：TP/SL 的合法一侧只由**持仓方向**决定，
+    与入场是限价还是突破无关。漏掉这两个名字时函数会落到末尾的 `else`，把
+    做空的止损推成 rule=2（跌破触发）—— 而做空止损在**上方**，交易所侧要求
+    rule=1。见 `_parse_stop_entry` 的说明。
+    """
+    if action in ("open_long", "grid", "stop_entry_long"):
         return 1 if is_tp else 2
-    if action == "open_short":
+    if action in ("open_short", "stop_entry_short"):
         return 2 if is_tp else 1
     return 1 if is_tp else 2
 
@@ -217,6 +223,15 @@ def _parse_stop_entry(data: dict, action: str, default_label: str) -> Intent:
         raise SchemaError(f"{action} requires size_usd, size_pct, margin_pct, or size")
     default_rule = 1 if action == "stop_entry_long" else 2
     rule = _i(data.get("trigger_rule"), "trigger_rule") or default_rule
+    # SL 的 rule 必须显式落定，不能留给下游兜底：做空止损在**上方**（rule=1
+    # 涨破触发），做多在**下方**（rule=2）。此前这里只设了 `trigger_rule_tp`，
+    # `trigger_rule_sl` 留 None，预检按 `or 2` 兜底 → 每个 `stop_entry_short`
+    # 都被判「sl 需 < mark」而整笔中止（2026-10-07 实盘连续 49 次）。
+    rule_sl = _i(data.get("trigger_rule_sl"), "trigger_rule_sl")
+    if rule_sl is None:
+        rule_sl = infer_trigger_rules(action, is_tp=False)
+    if rule_sl not in (1, 2):
+        raise SchemaError("trigger_rule_sl must be 1 or 2")
     trigger_price_type = str(data.get("trigger_price_type") or "mark").lower()
     if trigger_price_type not in PRICE_TYPES:
         raise SchemaError(f"trigger_price_type invalid: {trigger_price_type!r}")
@@ -238,6 +253,7 @@ def _parse_stop_entry(data: dict, action: str, default_label: str) -> Intent:
         tp2_share=_f(data.get("tp2_share"), "tp2_share"),
         trigger_price_tp=trigger_price,
         trigger_rule_tp=rule,
+        trigger_rule_sl=rule_sl,
         trigger_price_type=trigger_price_type,
         trigger_expiration=_i(data.get("trigger_expiration"), "trigger_expiration"),
         margin_mode=str(data["margin_mode"]).lower() if data.get("margin_mode") else None,
