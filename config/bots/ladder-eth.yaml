@@ -7,8 +7,10 @@
 bot_id: ladder-eth
 enabled: false
 env: live
-api_key_env: GATE_API_KEY
-api_secret_env: GATE_API_SECRET
+# 独立账户：与老账户（brooks-btc 用的 GATE_API_KEY）隔离。
+# 这两个变量在服务器 /opt/omnialpha/.env 里单独定义，老账户的变量一个字不动。
+api_key_env: GATE_GRID_API_KEY
+api_secret_env: GATE_GRID_API_SECRET
 
 symbols:
   - ETH_USDT
