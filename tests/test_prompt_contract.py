@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT))
 
 from omnialpha.strategist.prompt import SYSTEM_PROMPT  # noqa: E402
 
-RULE_COUNT = 17
+RULE_COUNT = 19
 
 
 class TestPromptContract(unittest.TestCase):
@@ -85,6 +85,30 @@ class TestTriggerParamRangesAreConsistent(unittest.TestCase):
     def test_no_stale_lower_bound(self):
         self.assertNotIn("5-300", SYSTEM_PROMPT,
                          "契约里还留着旧的 lookback 下限（已提到 20）")
+
+
+class TestOnlyManageOwnSymbols(unittest.TestCase):
+    """契约必须明确「只管理自己品种宇宙内的 symbol」。
+
+    实测（2026-10-07）：把品种换成 SOL 后，账户里遗留的 BTC 挂单被模型判为
+    「不属于当前宇宙的遗留单」，连续两轮发出 `cancel_all`。而账户可能是共享的
+    （多 bot 共账户）—— 宇宙外的单**本来就不是这个 bot 的**，撤它们会破坏别人。
+    """
+
+    def test_rule_exists(self):
+        self.assertIn("只管理自己的品种", SYSTEM_PROMPT)
+
+    def test_universe_is_named_as_the_boundary(self):
+        self.assertIn("【品种宇宙】", SYSTEM_PROMPT)
+
+    def test_forbids_every_mutating_action_on_others(self):
+        for act in ("cancel_", "close_", "reduce_", "modify_tp_sl", "flatten"):
+            with self.subTest(act=act):
+                self.assertIn(act, SYSTEM_PROMPT)
+
+    def test_says_ignore_rather_than_cleanup(self):
+        """不能只是「禁止」，还要给出替代行为 —— 否则模型可能改成别的清理动作。"""
+        self.assertIn("只忽略", SYSTEM_PROMPT)
 
 
 if __name__ == "__main__":
