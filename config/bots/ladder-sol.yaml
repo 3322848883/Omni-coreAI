@@ -1,0 +1,74 @@
+# 人格14 · 阶梯做T — SOL 单币
+# 策略：prompts/ladder_t_pa_sol.md（由 ladder_t_pa.md 派生，只换品种）
+#
+# ⚠ 粒度警告：SOL 1 张 = 121.8 USDT 名义（quanto 1.0），在 82U 账户上是权益的 1.47 倍
+#   → 2% 风险只容 ~2.7 档（ETH 同账户能容 ~12 档）。SOL 的粒度比 ETH 粗 4.5 倍。
+#   SOL 的 leverage_max 是 100（ETH 是 200）。
+
+bot_id: ladder-sol
+enabled: false
+env: live
+api_key_env: GATE_API_KEY
+api_secret_env: GATE_API_SECRET
+
+symbols:
+  - SOL_USDT
+
+max_notional_usd: 300
+max_orders_per_file: 20
+max_files_per_run: 20
+poll_interval_sec: 2
+label_prefix: lsol
+position_policy: free
+default_replace: none
+order_scope: own
+require_sl: true
+
+account_risk:
+  halt: false
+  max_leverage: 50
+  max_total_notional_usd: 600
+  max_notional_pct: 6.0
+  max_total_notional_pct: 10.0
+  daily_loss_limit_usd: 5
+
+strategist:
+  enabled: true
+  prompt_file: prompts/ladder_t_pa_sol.md
+  # 15m 一轮：SOL 的 15m ATR ≈0.44% 是往返成本 0.1% 的 4.4 倍（ETH 约 3.9 倍）。
+  # 1m 是 0.47 —— 每轮往返净亏，人格里已明令不碰。
+  interval_sec: 900
+  timeframe: 15m
+  event_on_kline_close: true
+  event_timeframe: 15m
+  candles: 200
+  write_hold: true
+  tools:
+    enabled: true
+    native: true
+    max_rounds: 8
+    allow:
+      - klines
+      - ticker
+      - contract
+      - smc_map
+      - smc_events
+  market:
+    mode: rest_only
+    indicators: [atr14]
+    timeframes: ["5m", "15m", "1h", "4h", "1d"]
+    extra_candles: 60
+  ai_triggers:
+    enabled: true
+    max_active: 5
+    default_cooldown_sec: 900
+  risk:
+    min_confidence: 0.55
+    max_chips: 14
+    max_notional_usd: 300
+  skills: []
+  llm:
+    provider: gw-flash
+    model: global:deepseek-v4.1-flash-sg
+    reasoning_effort: high
+    max_tokens: 32768

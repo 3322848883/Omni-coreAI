@@ -1,0 +1,94 @@
+# 人格14 · 阶梯做T — ETH 单币
+# 策略：prompts/ladder_t_pa.md
+#
+# 测试用配置：先跑 plan（只出 Plan、不执行）验证人格行为。
+# enabled: false —— 不会被 watchdog 拉起；跑 plan 不需要 enabled。
+
+bot_id: ladder-eth
+enabled: false
+env: live
+api_key_env: GATE_API_KEY
+api_secret_env: GATE_API_SECRET
+
+symbols:
+  - ETH_USDT
+
+max_notional_usd: 300
+max_orders_per_file: 20
+max_files_per_run: 20
+poll_interval_sec: 2
+label_prefix: lad
+# free：做T需要多档建仓 + 双向持仓，strict 会拦反向加仓
+position_policy: free
+# none：做T的挂单要留在市场上等成交，不能每轮被自动替换掉
+default_replace: none
+order_scope: own
+require_sl: true
+
+account_risk:
+  halt: false
+  # 50：双向网格两侧都占保证金，杠杆低了保证金先撞墙（风险由名义×止损距离决定，与杠杆无关）
+  max_leverage: 50
+  max_total_notional_usd: 600
+  # 单档名义上限（权益倍数）；多档合计靠 max_total_notional_* 兜
+  max_notional_pct: 6.0
+  max_total_notional_pct: 10.0
+  daily_loss_limit_usd: 5
+
+strategist:
+  enabled: true
+  prompt_file: prompts/ladder_t_pa.md
+  # 15m 一轮：作业尺度也是 15m（实测 15m ATR ≈0.39% ÷ 往返成本 0.1% = 3.9，往返空间充裕）。
+  # 1m 是 0.47 —— 每轮往返净亏，人格里已明令不碰。
+  interval_sec: 900
+  timeframe: 15m
+  event_on_kline_close: true
+  event_timeframe: 15m
+  # 做T要看结构，多给些 K 线
+  candles: 200
+  write_hold: true
+  # 关掉 vision：`vision.py` 默认会在图上叠加 EMA20（调用方不提供就自算一条），
+  # 而人格明令只用 SMC + Al Brooks、禁止引用传统指标——图会把 EMA20 塞回给模型
+  # （实测模型 reasoning 里出现 "from image: EMA20 at 2702"）。
+  # 结构靠 smc_map / smc_events 取，不需要图。
+  vision: false
+  tools:
+    enabled: true
+    native: true
+    # SMC/ICT + Al Brooks 两套体系：SMC 用专用工具，Brooks 直接读 klines 的 OHLC。
+    # 订单流 / 威科夫 / 传统指标的工具有意不给（人格里也不引用它们的术语）。
+    max_rounds: 8
+    allow:
+      - klines        # Brooks 信号 K 线 + 结构高低点，全靠它
+      - ticker        # 现价
+      - contract      # 最小下单量 / 张值 / 杠杆上限
+      - smc_map       # 结构地图：swing/internal 趋势、OB、FVG、premium-discount、EQL/EQH
+      - smc_events    # 结构事件流：扫荡 sweep、CHoCH/MSS、OB/FVG 生命周期
+      # 有意不给 indicators：ATR(14) 由 market.indicators 直接注入快照，
+      # 给了工具它就会顺手查 EMA/RSI/BOLL（实测精简后仍有 52 次传统指标引用）。
+  market:
+    mode: rest_only
+    # ATR 是做T的门槛校验输入，必须给
+    indicators: [atr14]
+    # 大周期定性需要日线与 4H
+    timeframes: ["5m", "15m", "1h", "4h", "1d"]
+    extra_candles: 60
+  ai_triggers:
+    enabled: true
+    max_active: 5
+    default_cooldown_sec: 900
+  risk:
+    min_confidence: 0.55
+    # 密集多层阶梯：一次要能出 10+ 层
+    # 4 个周期 × 每周期至少 3 档 = 至少 12 档，留出余量
+    max_chips: 20
+    max_notional_usd: 300
+  skills: []
+  llm:
+    # 主账号池被限流（429 soft_rate，配额 UTC+8 16:39 重置）。
+    # 临时切到 sg 节点（不同账号池）试跑；恢复后改回 gw-flash 默认模型。
+    provider: gw-flash
+    model: global:deepseek-v4.1-flash-sg
+    reasoning_effort: high
+    # 密集多层 + 长推理，默认 8192 容易撞上限导致 JSON 写不出来
+    max_tokens: 32768
