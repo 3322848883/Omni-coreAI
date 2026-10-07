@@ -58,7 +58,9 @@ def build_context(
          # **不再 [:30] 截断**：模型每轮写 6K–76K 字符的推理，而 `[近况]` 原先只
          # 回看到 30 字（实测整段 171 字符）。journal 写入侧已截到 `[:200]`，
          # 是这里又砍了一刀。
-         "reasoning": str(r.get("reasoning") or "")}
+         "reasoning": str(r.get("reasoning") or ""),
+         # 执行结果：只给「下出去几张」这一个数，够判断上轮意图是否生效
+         "exec_result": r.get("exec_result") or {}}
         for r in recent_rows
     ]
     recent_block = _format_recent(recent_summaries)
@@ -141,17 +143,36 @@ def _format_order_context(ctx: Optional[dict]) -> str:
     return "\n".join(lines)
 
 
+def _exec_tag(row: dict) -> str:
+    """执行标记：下出去几张就标 `[+N]`，没下单不标。
+
+    **为什么需要**：`[近况]` 与索引原先只给 `decision`，执行结果只躺在 journal 的
+    `exec_result` 里。快照里的挂单能间接反映「成功」的情况，但**被拒的**（例如
+    `TRIGGER_PRICE_SIDE: tp=... 需 > mark ...`）完全看不出来 —— 模型会把上一轮的
+    意图当成已生效，继续在错误的前提上推理。
+
+    没下单时不标（而不是标 `[+0]`）：hold 轮占绝大多数，每行拖一个零标记只是噪音。
+    """
+    ex = row.get("exec_result") or {}
+    try:
+        n = int(ex.get("orders") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    return f" [+{n}]" if n else ""
+
+
 def _format_recent(summaries: list[dict]) -> str:
     if not summaries:
         return "（无近期决策）"
     return "\n".join(
-        f"{s.get('cycle_id', '')}: {s.get('decision', '')} — {s.get('reasoning', '')}"
+        f"{s.get('cycle_id', '')}: {s.get('decision', '')}{_exec_tag(s)}"
+        f" — {s.get('reasoning', '')}"
         for s in summaries
     )
 
 
 def _format_index(rows: list[dict]) -> str:
-    """最近 N 轮的一行索引（`cycle_id` + `decision`），不含推理正文。
+    """最近 N 轮的一行索引（`cycle_id` + `decision` + 执行标记），不含推理正文。
 
     **为什么要有这一层**：把 N 轮正文都塞进 prompt 是**线性成本**，而模型有 148 小时
     的决策历史（实测 896 条 journal）。所以给**索引**而不是正文 —— 模型看得到
@@ -162,7 +183,7 @@ def _format_index(rows: list[dict]) -> str:
     if not rows:
         return ""
     lines = "\n".join(
-        f"  {r.get('cycle_id', '')} {r.get('decision', '')}" for r in rows
+        f"  {r.get('cycle_id', '')} {r.get('decision', '')}{_exec_tag(r)}" for r in rows
     )
     return (f"\n[近期决策索引·最近 {len(rows)} 轮"
             f"（要看某轮细节用 journal_lookup(cycle_id)）]\n{lines}")

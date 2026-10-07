@@ -400,6 +400,57 @@ class TestRecentWindowIsUsable(unittest.TestCase):
             self.assertIn("前提失效=85550", self._user(root))
 
 
+class TestExecOutcomeVisibleInPrompt(unittest.TestCase):
+    """近况与索引要能看出「上轮的单到底下出去没有」。
+
+    原先两处都只给 `decision`，执行结果只存在于 journal 的 `exec_result` 里 ——
+    模型不主动 `journal_lookup` 就不知道上轮意图是否生效。快照里的挂单能间接反映
+    「成功」的情况，但**被拒的**（如 `TRIGGER_PRICE_SIDE`）完全看不出来：模型会把
+    上轮意图当成已生效。
+    """
+
+    def test_recent_shows_order_count(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            j = MemoryJournal(root, BOT)
+            j.append(cycle_id="c-1", decision="open_short", reasoning="r",
+                     exec_result={"orders": 1, "trigger": "kline_close"})
+            self.assertIn("[+1]", self._user(root), "近况没标出下单成功")
+
+    def test_index_shows_order_count(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            j = MemoryJournal(root, BOT)
+            for i in range(25):
+                j.append(cycle_id=f"c-{i:03d}", decision="hold", reasoning="r")
+            j.append(cycle_id="c-last", decision="open_short", reasoning="r",
+                     exec_result={"orders": 2})
+            u = self._user(root)
+            idx = u[u.find("[近期决策索引"):u.find("[本轮快照]")]
+            self.assertIn("c-last open_short [+2]", idx, f"索引没标出下单数：{idx[-200:]}")
+
+    def test_hold_rows_have_no_tag(self):
+        """没下单就不加标记 —— 否则每行都拖一个 `[+0]`，纯噪音。"""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            MemoryJournal(root, BOT).append(
+                cycle_id="c-h", decision="hold", reasoning="r",
+                exec_result={"orders": 0})
+            self.assertNotIn("[+0]", self._user(root))
+
+    def test_missing_exec_result_is_safe(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            MemoryJournal(root, BOT).append(cycle_id="c-x", decision="hold")
+            self.assertIn("c-x", self._user(root))
+
+    @staticmethod
+    def _user(root: Path) -> str:
+        from omnialpha.memory import build_context
+        return build_context(root, BOT, system_prompt="SYS",
+                             snapshot_text="【市场与账户快照】\n{}")["user"]
+
+
 class TestJournalLookupTool(unittest.TestCase):
     """`journal_lookup` 让「记忆」可检索，而不是把 N 轮正文预载进 prompt。
 
