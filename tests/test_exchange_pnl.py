@@ -677,6 +677,30 @@ class TestClosedToSteps(unittest.TestCase):
         title = cards[0]["header"]["title"]["content"]
         self.assertIn("止盈", title, f"正盈亏该判为止盈，实际标题：{title}")
 
+    def test_time_comes_from_the_close_not_render_time(self):
+        """时间必须取平仓时刻 —— 放错层级会 fallback 成「当前时间」。
+
+        `notify._step_time` 依次读 `detail.order.create_time` → `detail.create_time`
+        → `s.create_time` → `s.ts`。把 ts 放进 `detail` 读不到，卡片上显示的就是
+        渲染时刻（实测 2026-10-07 卡片写着 22:50，而平仓发生在 13:38）。
+        """
+        from omnialpha.watcher import _steps_from_closed
+        from omnialpha.monitoring.notify import format_trade_card
+
+        close_ts = 1791380321
+        steps = _steps_from_closed([{"contract": "BTC_USDT", "side": "long",
+                                     "pnl": 1.0, "entry_price": "84000",
+                                     "size": "10", "time": close_ts}])
+        self.assertEqual(steps[0].get("ts"), close_ts, "ts 该在 step 层")
+        card = format_trade_card(BOT, steps)[0]
+        txt = " ".join(
+            f["text"]["content"]
+            for el in (card.get("elements") or [])
+            for f in (el.get("fields") or [])
+        )
+        expect = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(close_ts))
+        self.assertIn(expect[:13], txt, f"卡片时间不是平仓时刻：{txt}")
+
     def test_negative_pnl_is_stop_loss(self):
         from omnialpha.watcher import _steps_from_closed
         from omnialpha.monitoring.notify import format_trade_card

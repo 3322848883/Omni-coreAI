@@ -700,11 +700,15 @@ def _steps_from_closed(closed: list) -> list:
             "action": "close",
             "symbol": str(f.get("contract") or ""),
             "ok": True,
+            # 时间放在 **step 层**：`notify._step_time` 依次读
+            # `detail.order.create_time` → `detail.create_time` → `s.create_time`
+            # → **`s.ts`**，放进 `detail.ts` 读不到，会 fallback 成「当前时间」
+            # （实测卡片上显示的是渲染时刻，不是平仓时刻）。
+            "ts": f.get("time"),
             "detail": {
                 "realized_pnl": f.get("pnl"),
                 "entry_price": f.get("entry_price"),
                 "size": f.get("size"),
-                "ts": f.get("time"),
                 # 标明来源，便于日后区分「交易所侧触发」与「本地主动平仓」
                 "trigger_source": "exchange_position_close",
             },
