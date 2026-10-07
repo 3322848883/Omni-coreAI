@@ -716,5 +716,38 @@ class TestClosedToSteps(unittest.TestCase):
         self.assertEqual(_steps_from_closed([]), [])
 
 
+class TestPnlSweepHasOwnCadence(unittest.TestCase):
+    """平仓检测不能跟 300s 的保护单 sweep 同频。
+
+    用户反馈「300 秒太长了」：止盈触发了最多 5 分钟后才收到通知。而它只读交易所的
+    平仓历史，与保护单对账毫无关系 —— 没有理由共享节奏。
+    """
+
+    def test_signature_exposes_pnl_sweep_sec(self):
+        import inspect
+        from omnialpha.watcher import run_forever
+
+        sig = inspect.signature(run_forever)
+        self.assertIn("pnl_sweep_sec", sig.parameters)
+        self.assertLess(float(sig.parameters["pnl_sweep_sec"].default), 300.0,
+                        "平仓检测的默认周期不该是 300s")
+
+    def test_called_under_do_pnl_not_do_sweep(self):
+        """源码级回归钉：`_exchange_pnl_sweep` 必须挂在 `do_pnl` 分支里。
+
+        （`run_forever` 是无限循环，没法直接跑；用源码位置钉住结构。）
+        """
+        import inspect
+        from omnialpha.watcher import run_forever
+
+        src = inspect.getsource(run_forever)
+        i = src.index("_exchange_pnl_sweep")
+        head = src[:i]
+        self.assertIn("if do_pnl:", head, "平仓检测没挂在 do_pnl 上")
+        self.assertNotIn(
+            "if do_sweep:", head,
+            "平仓检测被放回 do_sweep 块了（那样又变回 300s 延迟）")
+
+
 if __name__ == "__main__":
     unittest.main()

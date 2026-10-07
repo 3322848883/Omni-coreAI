@@ -771,6 +771,7 @@ def _exchange_pnl_sweep(bot: BotConfig, paths: ProjectPaths) -> int:
 
 def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[str] = None,
                 orphan_sweep_sec: float = 300.0,
+                pnl_sweep_sec: float = 60.0,
                 allow_disabled: bool = False) -> None:
     paths.ensure()
     selected = select_bots(bots, only, allow_disabled)
@@ -778,13 +779,19 @@ def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[
         raise SystemExit("no enabled bots to run")
     # use max poll among bots as sleep base
     interval = min((b.poll_interval_sec for b in selected.values()), default=2.0)
-    log.info("watching bots: %s (orphan sweep every %.0fs)", sorted(selected), orphan_sweep_sec)
+    log.info("watching bots: %s (orphan sweep every %.0fs, pnl sweep every %.0fs)",
+             sorted(selected), orphan_sweep_sec, pnl_sweep_sec)
     last_sweep = 0.0
+    last_pnl = 0.0
     auto_protect_alerted: dict = {}
     peak_trail_alerted: dict = {}
     while True:
         now = time.time()
         do_sweep = (now - last_sweep) >= orphan_sweep_sec
+        # **平仓检测单独一个节奏**：它只读交易所的平仓历史，与保护单对账毫无关系。
+        # 挂在 300s 上意味着「止盈触发了，最多 5 分钟后才通知」——而止盈是用户最想
+        # 立刻知道的成交。1 分钟一次 `position_close` 请求，每天 1440 次，成本可忽略。
+        do_pnl = (now - last_pnl) >= pnl_sweep_sec
         for bot in selected.values():
             try:
                 stats = run_bot_once(bot, paths)
@@ -792,6 +799,11 @@ def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[
                     log.info("bot %s: %s", bot.bot_id, stats)
             except Exception as e:  # noqa: BLE001 — keep loop alive
                 log.exception("bot %s crashed: %s", bot.bot_id, e)
+            if do_pnl:
+                try:
+                    _exchange_pnl_sweep(bot, paths)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("exchange pnl sweep %s failed: %s", bot.bot_id, e)
             if do_sweep:
                 # 顺序固定：**先对齐张数（有持仓）→ 再撤孤儿（无持仓）→ 补缺失（裸仓）
                 # → 最后上移已有保护（防坐电梯）**。
@@ -813,11 +825,8 @@ def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[
                     _peak_trail_sweep(bot, paths, peak_trail_alerted)
                 except Exception as e:  # noqa: BLE001
                     log.warning("peak trail sweep %s failed: %s", bot.bot_id, e)
-                # 放最后：它只写画像投影，与上面四步的保护单无关，失败也不影响它们。
-                try:
-                    _exchange_pnl_sweep(bot, paths)
-                except Exception as e:  # noqa: BLE001
-                    log.warning("exchange pnl sweep %s failed: %s", bot.bot_id, e)
         if do_sweep:
             last_sweep = now
+        if do_pnl:
+            last_pnl = now
         time.sleep(max(0.2, interval))
