@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Optional
 
 from .gate_client import ContractMeta, GateApiError
+
+log = logging.getLogger(__name__)
 
 
 def vol_adjust_size(base_size_usd: float, atr_pct: float,
@@ -60,10 +63,17 @@ def usd_to_contracts(
     if lot > 1:
         contracts = (contracts // int(lot)) * int(lot)
     if contracts < 1:
-        raise GateApiError(
-            f"size_usd={size_usd} too small at price={entry_price} "
-            f"(need >= {entry_price * multiplier:.6f} USDT per 1 contract)"
+        # **兜底：抬到最小可下量，不抛错**。
+        # `size_usd` 是模型按「风险预算 ÷ 止损距离」反推的，小账户配远止损时
+        # 会算出小于 1 张的名义（实测 16.15 < 25.76）—— 抛错会让**整轮计划作废**
+        # 并回滚已挂的腿。抬到 1 张后风险略高于模型预期，但远小于「整轮不成交」
+        # 的代价；真正的风险闸门是 yaml 风控 + 账户级上限，不靠这一条拦。
+        floor_contracts = int(lot) if lot > 1 else 1
+        log.warning(
+            "size_usd=%.4f 不足 1 张（价 %.2f 需 >= %.4f），已抬到 %d 张",
+            size_usd, entry_price, entry_price * multiplier, floor_contracts,
         )
+        return floor_contracts
     return contracts
 
 

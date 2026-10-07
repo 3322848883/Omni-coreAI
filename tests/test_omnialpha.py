@@ -384,9 +384,13 @@ class TestSizing(unittest.TestCase):
     def test_usd_to_contracts(self):
         self.assertEqual(usd_to_contracts(100, 50000, self.meta()), 20)
 
-    def test_too_small(self):
-        with self.assertRaises(GateApiError):
-            usd_to_contracts(1, 50000, self.meta())
+    def test_too_small_floors_to_one_contract(self):
+        """不足 1 张 → 抬到 1 张，不抛错。
+
+        抛错会让整轮计划作废并回滚已挂的腿（实测发生过：模型按
+        「风险预算 ÷ 止损距离」反推出 16.15，比 1 张的最小名义 25.76 还小）。
+        """
+        self.assertEqual(usd_to_contracts(1, 50000, self.meta()), 1)
 
     def test_default_trigger_limit(self):
         self.assertAlmostEqual(default_trigger_limit_price(100, "long", True), 99.9)
