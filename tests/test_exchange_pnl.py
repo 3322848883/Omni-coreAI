@@ -16,18 +16,132 @@
 """
 from __future__ import annotations
 
+import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
-from omnialpha.memory.exchange_pnl import KEEP_FILLS, _close_key, load, stats, sync
+from omnialpha.memory.exchange_pnl import (KEEP_FILLS, _close_key, is_ours,
+                                           load, local_order_ids, stats, sync)
 
 BOT = "pnl-bot"
+LOCAL_ID = "999"          # 测试用的「本地已知条件单 id」
+
+
+def _sync(root: Path, client, **kw):
+    """测试用 sync：默认给一份含本地 id 的 `trades_log`、并关掉时间窗。
+
+    归属上线后，没带 `text`（或 text 不命中本地 id）的记录会被判为未归属而排除 ——
+    这是刻意的行为，所以这里统一补上最小可归属环境；要测排除逻辑的用例自己传参。
+
+    **用 `if` 而不是 `setdefault`**：`setdefault(k, v)` 的 `v` 总会被求值，于是
+    `_write_log` 会先跑一遍并**覆盖调用方刚写好的日志**（两者路径相同）。
+    """
+    if "trades_log" not in kw:
+        kw["trades_log"] = _write_log(root, [
+            {"steps": [{"detail": {"order": {"id": LOCAL_ID}}}]}])
+    kw.setdefault("first_run_ts", 0)
+    return sync(root, BOT, client, **kw)
+
+
+def _write_log(root: Path, rows: list) -> Path:
+    p = Path(root) / "logs" / "trades.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows),
+                 encoding="utf-8")
+    return p
+
+
+class TestLocalOrderIds(unittest.TestCase):
+    """本地订单 id 索引 —— **四个容器都要收**。
+
+    漏一个就让对应类型的单无法归属。实测教训：只收 `order` + `tp_orders`/`sl_orders`
+    时本地 id 是 369 个，与交易所 `ao-<id>` 的**交集为 0**；补上 `tp_placed`（即
+    `modify_tp_sl` 路径）后变成 681 个、交集 8 个。
+    """
+
+    @staticmethod
+    def _log(root: Path, rows: list) -> Path:
+        p = root / "logs" / "trades.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows),
+                     encoding="utf-8")
+        return p
+
+    def test_collects_all_containers(self):
+        rows = [
+            {"steps": [{"action": "open_short",
+                        "detail": {"order": {"id": "o1"}}}]},
+            {"steps": [{"action": "modify_tp_sl",
+                        "detail": {"tp_placed": {"id": "t1"},
+                                   "sl_placed": {"id": "s1"}}}]},
+            {"steps": [{"action": "open_short",
+                        "detail": {"tp_orders": [{"id": "t2"}],
+                                   "sl_orders": [{"id": "s2"}]}}]},
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            got = local_order_ids(self._log(Path(td), rows))
+            self.assertEqual(got, {"o1", "t1", "s1", "t2", "s2"})
+
+    def test_missing_file_returns_empty(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.assertEqual(local_order_ids(Path(td) / "nope.jsonl"), set())
+
+    def test_corrupt_lines_skipped(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "logs" / "trades.jsonl"
+            p.parent.mkdir(parents=True)
+            p.write_text('{bad json\n{"steps":[{"detail":{"order":{"id":"ok"}}}]}\n',
+                         encoding="utf-8")
+            self.assertEqual(local_order_ids(p), {"ok"})
+
+    def test_odd_shapes_do_not_raise(self):
+        rows = [
+            {"steps": None},
+            {"steps": [None, "x", {"detail": None}, {"detail": {"order": "notdict"}}]},
+            {"no_steps": 1},
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            self.assertEqual(local_order_ids(self._log(Path(td), rows)), set())
+
+
+class TestIsOurs(unittest.TestCase):
+    """归属判据：`ao-<id>` 且 id 在本地订单 id 里。"""
+
+    def test_ao_hit(self):
+        self.assertTrue(is_ours("ao-123", {"123"}))
+
+    def test_ao_miss(self):
+        self.assertFalse(is_ours("ao-999", {"123"}))
+
+    def test_api_never_ours(self):
+        """`api` / `-` 没有唯一性，认它们等于把别人的单也算进来。
+
+        实测 `api` 用 (时间 ±180s, accum_size == |size|) 只能匹配 1/5，且
+        `accum_size` 与单笔成交的 `size` 语义不同（35 vs 18）—— 模糊匹配不可靠。
+        """
+        self.assertFalse(is_ours("api", {"api"}))
+        self.assertFalse(is_ours("-", {"-"}))
+        self.assertFalse(is_ours("t-brk", {"t-brk"}))
+
+    def test_empty_forms(self):
+        self.assertFalse(is_ours(None, {"123"}))
+        self.assertFalse(is_ours("", {"123"}))
+        self.assertFalse(is_ours("ao-", {"123"}))
+        self.assertFalse(is_ours("ao-  ", {"123"}))
+
+    def test_empty_local_set(self):
+        self.assertFalse(is_ours("ao-123", set()))
 
 
 def _close(key: int, pnl: str, **kw) -> dict:
-    """一条平仓记录（形状照抄真机返回的关键字段）。"""
-    row = {"time_us": key, "pnl": pnl, "contract": "BTC_USDT", "side": "long"}
+    """一条平仓记录（形状照抄真机返回的关键字段）。
+
+    `text` 默认 `ao-<LOCAL_ID>` —— 归属判据只认这种形状，没有它一律判为未归属。
+    """
+    row = {"time_us": key, "pnl": pnl, "contract": "BTC_USDT", "side": "long",
+           "text": f"ao-{LOCAL_ID}", "time": int(time.time()) + 60}
     row.update(kw)
     return row
 
@@ -72,7 +186,7 @@ class TestSync(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            out = sync(root, BOT, _CloseClient(rows))
+            out = _sync(root, _CloseClient(rows))
             self.assertTrue(out["ok"])
             self.assertEqual(out["added"], 2)
             st = stats(root, BOT)
@@ -85,16 +199,16 @@ class TestSync(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             c = _CloseClient([_close(1002, "1.0")])
-            sync(root, BOT, c)
-            out2 = sync(root, BOT, c)
+            _sync(root, c)
+            out2 = _sync(root, c)
             self.assertEqual(out2["added"], 0, "重复同步不该重复计入")
             self.assertEqual(stats(root, BOT)["trades"], 1)
 
     def test_incremental_after_cursor(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            sync(root, BOT, _CloseClient([_close(1005, "1.0")]))
-            out = sync(root, BOT, _CloseClient([
+            _sync(root, _CloseClient([_close(1005, "1.0")]))
+            out = _sync(root, _CloseClient([
                 _close(1005, "1.0"), _close(1007, "-0.5")]))
             self.assertEqual(out["added"], 1)
             st = stats(root, BOT)
@@ -104,7 +218,7 @@ class TestSync(unittest.TestCase):
     def test_failure_does_not_advance_cursor(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            out = sync(root, BOT, _CloseClient(fail=True))
+            out = _sync(root, _CloseClient(fail=True))
             self.assertFalse(out["ok"])
             self.assertIn("error", out)
             self.assertEqual(load(root, BOT)["cursor"], "",
@@ -115,21 +229,21 @@ class TestSync(unittest.TestCase):
         """全是 pnl=0 时也要推游标，否则每次重复扫同一段。"""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            out = sync(root, BOT, _CloseClient([_close(4242, "0")]))
+            out = _sync(root, _CloseClient([_close(4242, "0")]))
             self.assertEqual(out["added"], 0)
             self.assertEqual(load(root, BOT)["cursor"], "4242")
 
     def test_rows_without_key_skipped(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            out = sync(root, BOT, _CloseClient([{"pnl": "1.0"}, _close(9, "2.0")]))
+            out = _sync(root, _CloseClient([{"pnl": "1.0"}, _close(9, "2.0")]))
             self.assertEqual(out["added"], 1)
 
     def test_worst_remembers_minimum_across_syncs(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            sync(root, BOT, _CloseClient([_close(1001, "-3.0")]))
-            sync(root, BOT, _CloseClient([_close(1001, "-3.0"), _close(1002, "5.0")]))
+            _sync(root, _CloseClient([_close(1001, "-3.0")]))
+            _sync(root, _CloseClient([_close(1001, "-3.0"), _close(1002, "5.0")]))
             self.assertAlmostEqual(stats(root, BOT)["worst"], -3.0,
                                    msg="worst 应记住最差那笔，不被后续盈利覆盖")
 
@@ -141,7 +255,7 @@ class TestSync(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            sync(root, BOT, _CloseClient([_close(1001, "2.0"), _close(1002, "3.0")]))
+            _sync(root, _CloseClient([_close(1001, "2.0"), _close(1002, "3.0")]))
             self.assertAlmostEqual(stats(root, BOT)["worst"], 2.0)
 
     def test_contracts_whitelist_filters_but_advances_cursor(self):
@@ -156,7 +270,7 @@ class TestSync(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            out = sync(root, BOT, _CloseClient(rows), contracts=["BTC_USDT"])
+            out = _sync(root, _CloseClient(rows), contracts=["BTC_USDT"])
             self.assertEqual(out["added"], 1)
             st = stats(root, BOT)
             self.assertEqual(st["trades"], 1)
@@ -171,13 +285,13 @@ class TestSync(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            self.assertEqual(sync(root, BOT, _CloseClient(rows))["added"], 2)
+            self.assertEqual(_sync(root, _CloseClient(rows))["added"], 2)
 
     def test_fills_capped_but_totals_unaffected(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             rows = [_close(1000 + i, "1.0") for i in range(1, KEEP_FILLS + 60)]
-            sync(root, BOT, _CloseClient(rows))
+            _sync(root, _CloseClient(rows))
             rec = load(root, BOT)
             self.assertEqual(len(rec["fills"]), KEEP_FILLS, "明细应被截断")
             self.assertEqual(stats(root, BOT)["trades"], KEEP_FILLS + 59,
@@ -201,7 +315,7 @@ class TestStats(unittest.TestCase):
         """形状必须与 `realized_pnl_stats` 一致 —— ledger_stats 把两者当同一数据源。"""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            sync(root, BOT, _CloseClient([_close(1001, "-1.0")]))
+            _sync(root, _CloseClient([_close(1001, "-1.0")]))
             self.assertEqual(set(stats(root, BOT)), {"trades", "wins", "pnl", "worst"})
 
 
@@ -251,7 +365,7 @@ class TestLedgerStatsFallsBackToExchange(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            sync(root, BOT, _CloseClient([_close(1001, "-1.0"), _close(1002, "3.0")]))
+            _sync(root, _CloseClient([_close(1001, "-1.0"), _close(1002, "3.0")]))
             st = MemoryProfile(root, BOT).ledger_stats()
             self.assertIsNotNone(st, "live bot 的画像仍为空 —— 交易所投影没接上")
             self.assertEqual(st["total_trades"], 2)
@@ -271,7 +385,7 @@ class TestLedgerStatsFallsBackToExchange(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            sync(root, BOT, _CloseClient([_close(1001, "2.0"), _close(1002, "-1.0")]))
+            _sync(root, _CloseClient([_close(1001, "2.0"), _close(1002, "-1.0")]))
             s = MemoryProfile(root, BOT).prompt_summary()
             self.assertTrue(s, "画像仍为空，prompt_summary 拿不到数据")
             self.assertIn("2笔交易", s)
@@ -312,6 +426,9 @@ class TestExchangePnlSweep(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
+            # 归属判据需要本地订单 id 索引，先造一份 trades_log
+            _write_log(root / "data" / "bots" / BOT, [
+                {"steps": [{"detail": {"order": {"id": LOCAL_ID}}}]}])
             n = _exchange_pnl_sweep(
                 self._bot(client=_CloseClient([_close(1001, "-1.0")])),
                 self._paths(root))
@@ -332,6 +449,101 @@ class TestExchangePnlSweep(unittest.TestCase):
             n = _exchange_pnl_sweep(
                 self._bot(client=_CloseClient(fail=True)), self._paths(Path(td)))
             self.assertEqual(n, 0)
+
+
+class TestAttributionInSync(unittest.TestCase):
+    """sync 的三条新逻辑：归属过滤、时间窗、排除留痕。
+
+    背景：原先只要 `contract ∈ bot.symbols` 就计入，于是画像混进了别的 bot
+    （`app`/`t-drive`）、启动前历史（09-07~09-25），以及无法归属的 `api`。
+    """
+
+    T0 = 1790871600          # 基准时间
+    LOG_ID = "2107498336587091968"
+
+    def _trades_log(self, root: Path, rows: list) -> Path:
+        p = root / "logs" / "trades.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows),
+                     encoding="utf-8")
+        return p
+
+    def _close(self, key: int, text: str, pnl: str, ts: int = None) -> dict:
+        # 时间戳必须与 first_run_ts 同量级，否则会被时间窗先滤掉
+        return {"time_us": key, "time": ts if ts is not None else self.T0 + 1,
+                "text": text, "pnl": pnl, "contract": "BTC_USDT", "side": "long"}
+
+    def test_attributed_counted_unattributed_skipped(self):
+        rows = [
+            self._close(1_000_000_000_000_000, f"ao-{self.LOG_ID}", "-1.5"),
+            self._close(1_000_000_001_000_000, "api", "9.9"),
+            self._close(1_000_000_002_000_000, "-", "9.9"),
+            self._close(1_000_000_003_000_000, "ao-888", "9.9"),
+            self._close(1_000_000_004_000_000, "t-drive", "9.9"),
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            log = self._trades_log(root, [
+                {"steps": [{"detail": {"tp_placed": {"id": self.LOG_ID}}}]}])
+            out = _sync(root, _CloseClient(rows), contracts=["BTC_USDT"],
+                       trades_log=log, first_run_ts=self.T0)
+            self.assertEqual(out["added"], 1, f"只有 ao-命中本地的那条该计入：{out}")
+            self.assertEqual(out["skipped_unattributed"], 4, f"其余四条该被排除：{out}")
+            self.assertEqual(stats(root, BOT)["trades"], 1)
+            self.assertAlmostEqual(stats(root, BOT)["pnl"], -1.5)
+
+    def test_before_first_run_excluded(self):
+        rows = [
+            self._close(1_000_000_000_000_000, f"ao-{self.LOG_ID}", "-1.5",
+                        ts=self.T0 - 86400),
+            self._close(1_000_000_001_000_000, f"ao-{self.LOG_ID}", "2.0",
+                        ts=self.T0 + 60),
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            log = self._trades_log(root, [
+                {"steps": [{"detail": {"tp_placed": {"id": self.LOG_ID}}}]}])
+            out = _sync(root, _CloseClient(rows), contracts=["BTC_USDT"],
+                       trades_log=log, first_run_ts=self.T0)
+            self.assertEqual(out["added"], 1, f"启动前那条该被排除：{out}")
+            self.assertEqual(out["skipped_before_start"], 1)
+
+    def test_excluded_list_recorded(self):
+        rows = [self._close(1_000_000_000_000_000, "api", "-0.5")]
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            out = _sync(root, _CloseClient(rows), contracts=["BTC_USDT"],
+                       trades_log=Path(td) / "nope.jsonl", first_run_ts=self.T0)
+            self.assertEqual(out["added"], 0)
+            rec = load(root, BOT)
+            self.assertEqual(len(rec["excluded"]), 1)
+            self.assertEqual(rec["excluded"][0]["text"], "api")
+
+    def test_active_close_from_trades_log(self):
+        """bot 主动平仓走本地日志（executor 回传的 realized_pnl）。"""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            log = self._trades_log(root, [
+                {"ts": "2026-10-07T00:00:00+00:00", "plan_cycle": "c-1",
+                 "steps": [{"action": "close", "detail": {"realized_pnl": -0.75}}]},
+            ])
+            out = _sync(root, _CloseClient([]), contracts=["BTC_USDT"],
+                       trades_log=log, first_run_ts=0)
+            self.assertEqual(out["added_active"], 1, f"主动平仓没被计入：{out}")
+            self.assertAlmostEqual(stats(root, BOT)["pnl"], -0.75)
+
+    def test_idempotent_with_attribution(self):
+        rows = [self._close(1_000_000_000_000_000, f"ao-{self.LOG_ID}", "1.0")]
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            log = self._trades_log(root, [
+                {"steps": [{"detail": {"tp_placed": {"id": self.LOG_ID}}}]}])
+            _sync(root, _CloseClient(rows), contracts=["BTC_USDT"],
+                 trades_log=log, first_run_ts=self.T0)
+            out2 = _sync(root, _CloseClient(rows), contracts=["BTC_USDT"],
+                        trades_log=log, first_run_ts=self.T0)
+            self.assertEqual(out2["added"], 0)
+            self.assertEqual(stats(root, BOT)["trades"], 1)
 
 
 if __name__ == "__main__":
