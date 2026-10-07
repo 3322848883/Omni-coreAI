@@ -1,14 +1,61 @@
 ---
 feature: trade-attribution
-status: in-progress
+status: delivered
 updated: 2026-10-07
 branch: master
-commits:
+commits: 00755fd..38eeabd
 ---
 
 # 交易归属：画像只统计本 bot 自己的单
 
 ## Report
+
+**What was built** — 画像不再统计「账户 + symbol 的全部平仓」，改为只统计本 bot 自己的交易。
+按**平仓的发起方式**分两个来源合并：
+
+1. **SL/TP 触发** —— 交易所 `position_close`，归属判据是 `text == ao-<id>` 且 `<id>` 命中
+   本地订单 id 集合（`is_ours`）。用官方 `pnl`（含手续费与资金费）。
+2. **bot 主动平仓** —— 本地 `trades.jsonl` 的 `detail.realized_pnl`（executor 回传）。
+
+外加一道 `first_run_ts` 时间窗（排除启动前历史）与一条去重（同一笔平仓两条路径都命中时
+以 `position_close` 为准）。无法归属的记录不计入，但计数进返回值、明细落 `excluded` 数组留痕。
+
+**决定性发现**：`ao-<id>` 的 id **就是条件单 id**，而条件单 id 在本地 `trades.jsonl` 里。
+之前交集为 0 是因为收集口径漏了容器 —— 条件单在 `modify_tp_sl` 路径下记在
+`detail.tp_placed.id`；补上后本地 id 369 → 681、交集 0 → 8。
+
+**Verification** —
+
+- `python -m unittest discover -s tests` → **1975 项，1 个失败**。唯一失败是
+  `test_skill_sizes.TestSkillSizes.test_every_file_within_ref_limit`（**PRE-EXISTING**）：
+  扫 `skills-src/price-action-trading/data/` 下被 gitignore 的本地生成市场数据。
+- `tests.test_exchange_pnl` → 45 项，OK。
+- 服务器实测（`38eeabd` 部署后，删除 `exchange_pnl.json` 重建）：
+  - 本地订单 id `681`；`first_run_ts=1790763364`（2026-09-30 10:16，取自 journal 首条）
+  - `trades=11, wins=6, pnl=-1.90, worst=-2.17`；来源分布 `{'trigger': 8, 'active': 3}`
+  - `excluded=5`（全是 `api`）；`prompt_summary='历史表现: 11笔交易, 胜率55%, 均盈亏-0.17u'`
+  - **`worst` 不再是 -22.47**（那条来自另一个 bot）
+
+**对比修复前**：41 笔 / 42% / -25.00U / worst -22.47 → **11 笔 / 55% / -1.90U / worst -2.17**。
+原先的 -25U 里 92% 是别人的亏损。
+
+**Journey log** —
+
+1. **归属信息只在 `my_trades` 里，不在 `position_close`**：后者的 `text` 被交易所改写
+   （`t-brk` → `ao-<id>` 或 `api`）且没有 `order_id`。但 `my_trades` 又没有 `pnl` ——
+   所以必须两个端点合起来用。
+2. **`ao-<id>` 一度看起来无法归属**：第一次算交集得 0，据此差点否掉整个方案。真因是
+   收集口径漏了 `tp_placed` 容器（`modify_tp_sl` 路径），补上后交集 8。**交集为 0 时先
+   怀疑自己的收集口径，别急着否定方案**。
+3. **自己算 pnl 不可行**：用 `my_trades` 的 `(close_size, price, fee)` 配合开仓均价复算，
+   与官方差 0.04–0.09，个别样本差 0.3（跨持仓周期时开仓均价失真）。且第一次算时把
+   `close_size` 的符号乘了两次导致双重负号 —— 官方值是权威口径，没理由复算。
+4. **独立评审抓到 2 个 critical**：`active` 路径绕过了 `first_run_ts`（本地日志含启动前
+   记录，会被静默计入）；去重条款被我在实现时以「两条路径天然互斥」为由跳过，而互斥
+   只是**今天的巧合**（`close_position` 走普通下单 → text 是 `api`），不是不变量。
+   **spec 写了的要求不能在实现时凭「应该不会发生」跳过**。
+5. **`excluded` 满了会永久冻结**（在 append 前判断长度）—— 它本该是「发现遗漏」的窗口，
+   冻结后这个作用就没了。凡是「留痕/观测」用的环形缓冲，都要保留**最新**的。
 
 ## [S1] Problem
 
@@ -128,9 +175,9 @@ S2.4 有遗漏，`excluded` 是唯一能发现的地方。
 
 ## Tasks
 
-- [ ] T1: 本地订单 id 索引 — acceptance: 四个容器（`order`/`tp_placed`/`sl_placed`/`tp_orders`/`sl_orders`）的 id 都被收集；对现有 `trades.jsonl` 收集数 ≥600；文件缺失/行损坏不抛异常 (covers: S2.2)
-- [ ] T2: 归属判据 — acceptance: `ao-<id>` 且 id 命中本地集合时判为归属；`api`/`-`/未命中一律判为未归属 (covers: S2.3)
-- [ ] T3: 主动平仓来源 — acceptance: 从 `trades.jsonl` 提取 `realized_pnl != null` 的步骤；与 T2 结果按 `(cycle_id, 时间)` 去重，冲突时以 `position_close` 为准 (covers: S2.4; depends: T2)
-- [ ] T4: 时间窗 — acceptance: `time < first_run_ts` 的记录被排除；`first_run_ts` 落在 `state/first_run.json`，首次 sync 写入且之后不再改变（journal 归档不影响它） (covers: S2.5; depends: T2)
-- [ ] T5: 排除留痕 — acceptance: `skipped_unattributed` 出现在 sync 返回值；`excluded` 数组落盘且不超过 200 条 (covers: S2.6; depends: T2)
-- [ ] T6: 重置与真机验证 — acceptance: 删除服务器 `exchange_pnl.json` 后重新同步，totals 只含归属成功的记录，`worst` 不再是 -22.47；主动平仓与 SL/TP 触发两类都有样本 (covers: S2.7; depends: T1 T2 T3 T4 T5)
+- [x] T1: 本地订单 id 索引 — acceptance: 四个容器（`order`/`tp_placed`/`sl_placed`/`tp_orders`/`sl_orders`）的 id 都被收集；对现有 `trades.jsonl` 收集数 ≥600；文件缺失/行损坏不抛异常 (covers: S2.2)
+- [x] T2: 归属判据 — acceptance: `ao-<id>` 且 id 命中本地集合时判为归属；`api`/`-`/未命中一律判为未归属 (covers: S2.3)
+- [x] T3: 主动平仓来源 — acceptance: 从 `trades.jsonl` 提取 `realized_pnl != null` 的步骤；与 T2 结果按 `(cycle_id, 时间)` 去重，冲突时以 `position_close` 为准 (covers: S2.4; depends: T2)
+- [x] T4: 时间窗 — acceptance: `time < first_run_ts` 的记录被排除；`first_run_ts` 落在 `state/first_run.json`，首次 sync 写入且之后不再改变（journal 归档不影响它） (covers: S2.5; depends: T2)
+- [x] T5: 排除留痕 — acceptance: `skipped_unattributed` 出现在 sync 返回值；`excluded` 数组落盘且不超过 200 条 (covers: S2.6; depends: T2)
+- [x] T6: 重置与真机验证 — acceptance: 删除服务器 `exchange_pnl.json` 后重新同步，totals 只含归属成功的记录，`worst` 不再是 -22.47；主动平仓与 SL/TP 触发两类都有样本 (covers: S2.7; depends: T1 T2 T3 T4 T5)
