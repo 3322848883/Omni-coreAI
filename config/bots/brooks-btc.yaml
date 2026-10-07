@@ -52,12 +52,17 @@ strategist:
   enabled: true
   prompt_file: prompts/brooks_btc_pa.md
   interval_sec: 900
-  timeframe: 15m
+  # 主周期 5m（2026-10-07 由 15m 下调）。原因：15m 上「回抽挂单」的机会窗口太长 ——
+  # 一根 K 就 15 分钟，等 4 根就是一小时，实测出现「挂单 10 小时不成交、期间价格
+  # 单边跌 2176 点却零成交」。5m 让信号、挂单与失效判断的节奏都跟上。
+  # 注意 `candles: 120` 在 5m 上是 **10 小时**（15m 时是 30 小时）—— 视野缩短是刻意的。
+  timeframe: 5m
   vision: true
   # 多周期图：5m / 15m / 1h / 4h 四张
   vision_timeframes: ["5m", "15m", "1h", "4h"]
   event_on_kline_close: true
-  event_timeframe: 15m
+  # K线收盘触发必须跟主周期走 —— 否则「主周期 5m、触发 15m」会让信号与唤醒错位
+  event_timeframe: 5m
   candles: 120
   write_hold: true
   tools:
@@ -67,8 +72,8 @@ strategist:
   market:
     mode: hybrid
     indicators: [ema20, atr14]
-    # 多周期图数据源
-    timeframes: ["5m", "1h", "4h"]
+    # 多周期数据源（主周期已改 5m，这里去掉 5m 避免与主周期重复取数）
+    timeframes: ["15m", "1h", "4h"]
     extra_candles: 80
   ai_triggers:
     enabled: true
