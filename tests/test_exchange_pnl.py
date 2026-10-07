@@ -532,6 +532,68 @@ class TestAttributionInSync(unittest.TestCase):
             self.assertEqual(out["added_active"], 1, f"主动平仓没被计入：{out}")
             self.assertAlmostEqual(stats(root, BOT)["pnl"], -0.75)
 
+    def test_active_path_respects_time_window(self):
+        """主动平仓来源也必须过 `first_run_ts`。
+
+        原先它只按 `active_cursor` 过滤 —— 而本地 `trades.jsonl` 里可能有 bot 启动前的
+        记录（实测 brooks-btc 的日志从 09-25 开始，而 `first_run_ts` 是 09-30），
+        那些窗口前的主动平仓会被静默计入。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            old = self.T0 - 86400
+            log = self._trades_log(root, [
+                {"ts": old, "plan_cycle": "c-old",
+                 "steps": [{"action": "close", "detail": {"realized_pnl": -99.0}}]},
+                {"ts": self.T0 + 60, "plan_cycle": "c-new",
+                 "steps": [{"action": "close", "detail": {"realized_pnl": -0.5}}]},
+            ])
+            out = _sync(root, _CloseClient([]), contracts=["BTC_USDT"],
+                        trades_log=log, first_run_ts=self.T0)
+            self.assertEqual(out["added_active"], 1, f"窗口前的主动平仓该被排除：{out}")
+            self.assertAlmostEqual(stats(root, BOT)["pnl"], -0.5)
+
+    def test_dedupe_prefers_position_close(self):
+        """同一笔平仓两条路径都命中时只计一次。
+
+        「天然互斥」只是今天的巧合（`close_position` 走普通下单 → text 是 `api`），
+        不是任何地方保证的不变量。这里直接构造重叠：`position_close` 里是
+        `ao-<本地id>`、本地日志里也有同一时刻的 `realized_pnl`。
+        """
+        ts = self.T0 + 60
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            log = self._trades_log(root, [
+                {"steps": [{"detail": {"order": {"id": LOCAL_ID}}}]},
+                {"ts": ts, "plan_cycle": "c-dup",
+                 "steps": [{"action": "close", "detail": {"realized_pnl": -1.0}}]},
+            ])
+            rows = [self._close(1_000_000_000_000_000, f"ao-{LOCAL_ID}", "-1.0", ts=ts)]
+            out = _sync(root, _CloseClient(rows), contracts=["BTC_USDT"],
+                        trades_log=log, first_run_ts=self.T0)
+            self.assertEqual(out["added"], 1, f"重复的平仓被计了两次：{out}")
+            self.assertEqual(out["added_active"], 0)
+            self.assertAlmostEqual(stats(root, BOT)["pnl"], -1.0)
+
+    def test_excluded_keeps_newest_when_full(self):
+        """`excluded` 满了之后要保留**最新**的，而不是冻结在最初那批。
+
+        原先在 append 前判断长度，一旦满了就再也不追加 —— 数组永久冻结，
+        `excluded` 作为「发现遗漏」的窗口就废了。
+        """
+        from omnialpha.memory.exchange_pnl import KEEP_EXCLUDED
+
+        rows = [self._close(1_000_000_000_000_000 + i, "api", "-1.0")
+                for i in range(KEEP_EXCLUDED + 20)]
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _sync(root, _CloseClient(rows), contracts=["BTC_USDT"],
+                  trades_log=Path(td) / "nope.jsonl", first_run_ts=self.T0)
+            rec = load(root, BOT)
+            self.assertEqual(len(rec["excluded"]), KEEP_EXCLUDED)
+            self.assertEqual(rec["excluded"][-1]["time"],
+                             rows[-1]["time"], "最新一条该在里面")
+
     def test_idempotent_with_attribution(self):
         rows = [self._close(1_000_000_000_000_000, f"ao-{self.LOG_ID}", "1.0")]
         with tempfile.TemporaryDirectory() as td:

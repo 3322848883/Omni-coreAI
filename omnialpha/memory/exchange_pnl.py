@@ -1,4 +1,4 @@
-"""从交易所成交明细投影已实现盈亏（live bot 的画像数据源）。
+"""投影**本 bot 自己的**已实现盈亏（live bot 的画像数据源）。
 
 **为什么不能只靠本地日志**：SL/TP 触发是交易所侧成交、**没有本地信号** —— 既不进
 `logs/trades.jsonl`，也不进 `data/shared/receipts/`。实测某 bot 的 339 行成交日志里
@@ -6,11 +6,24 @@
 而止损恰是负面样本 → 胜率被系统性抬高（`profile.py` 记过一次同类事故：459 笔真实
 平仓只记了 1 笔，漏掉的正好包含止损）。
 
-所以数据源只能是交易所的 `my_trades`。本模块按**游标幂等**摄取：只处理
-`id > cursor` 且 `pnl != 0` 的成交，累积落 `state/exchange_pnl.json`。
+**为什么也不能只用交易所的平仓历史**：那是**账户级**的，不区分来源。实测某账户的
+`position_close` 里混着别的 bot（`text` 为 `app`/`t-drive`/`t-l-close-*`）与无法归属的
+`api`/`-` —— 画像的「最差单笔 -22.47」就来自另一个 bot 的记录。
+
+所以按**平仓的发起方式**分两个来源合并：
+
+1. **SL/TP 触发** —— 交易所 `position_close`（每笔带官方 `pnl`，含手续费与资金费），
+   按 `text == ao-<本地条件单id>` 归属（`is_ours`），其余一律排除。
+2. **bot 主动平仓** —— 本地 `trades.jsonl` 的 `detail.realized_pnl`（executor 回传）。
+
+外加一道 `first_run_ts` 时间窗（排除 bot 启动前的历史）与一条**去重**（同一笔平仓
+两条路径都命中时以 `position_close` 为准）。累积落 `state/exchange_pnl.json`。
 
 统计形状与 `paper/store.py::realized_pnl_stats` 一致（`trades/wins/pnl/worst`），
 所以 `MemoryProfile.ledger_stats` 能把两者当同一个数据源用。
+
+**已知边界**：同账户同 symbol 的多个 bot 之间无法区分（交易所不提供身份信息）——
+时间窗只能排除「启动前」，排除不了「同期并行」。
 """
 from __future__ import annotations
 
@@ -22,8 +35,12 @@ from typing import Any, Optional
 # 保留的明细条数（供排查用）。统计走 totals，不受这个上限影响。
 KEEP_FILLS = 200
 
-# 未归属记录的留痕上限（超出按 FIFO 丢弃最旧的）。
+# 未归属记录的留痕上限（**保留最新的**，超出丢最旧的）。
 KEEP_EXCLUDED = 200
+
+# 两条来源路径的去重容差（秒）：同一笔平仓的时间戳不会完全相同
+# （`position_close` 用秒，`trades.jsonl` 用 ISO 微秒），留一点余量。
+_DEDUPE_TOL_SEC = 5
 
 
 def _path(root: Path, bot_id: str) -> Path:
@@ -101,8 +118,8 @@ def ensure_first_run(root: Path, bot_id: str, *, now: Optional[int] = None) -> i
     把 bot 真实运行期的历史全部排除 —— 静默丢样本。
 
     **为什么不每次从 `memory_journal.jsonl` 首条取**：journal 会被遗忘 GC 按 TTL
-    归档，首条会随归档前移，时间窗**逐月放宽**，历史污染悄悄回流。所以只在首次
-    借它定起点，之后以落盘值为准。
+    归档，而 GC 删的是**最旧的**行 —— 首条随之前移，起点变晚，时间窗**收紧**，
+    把 bot 真实运行期的历史静默丢掉。所以只在首次借它定起点，之后以落盘值为准。
     """
     p = first_run_path(root, bot_id)
     if p.is_file():
@@ -116,8 +133,11 @@ def ensure_first_run(root: Path, bot_id: str, *, now: Optional[int] = None) -> i
     ts = _journal_start_ts(root, bot_id) or int(now if now is not None else time.time())
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps({"first_run_ts": ts}, ensure_ascii=False),
-                     encoding="utf-8")
+        # 原子写：与 `_write` 同源，避免并发读到半个文件
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"first_run_ts": ts}, ensure_ascii=False),
+                       encoding="utf-8")
+        tmp.replace(p)
     except Exception:  # noqa: BLE001
         pass
     return ts
@@ -179,6 +199,10 @@ def _parse_ts(v: Any) -> int:
     s = str(v or "").strip()
     if not s:
         return 0
+    try:
+        return int(float(s))          # 数字字符串（'1790763364' / '1790763364.5'）
+    except (TypeError, ValueError):
+        pass
     try:
         from datetime import datetime
         return int(datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp())
@@ -359,7 +383,10 @@ def sync(root: Path, bot_id: str, client, *, contract: Optional[str] = None,
     local_ids = local_order_ids(log)
 
     # ── 来源 2：bot 主动平仓（本地日志，executor 回传）──
-    active = [x for x in local_realized_pnl(log) if x["ts"] > active_cursor]
+    # **时间窗也要过**：本地日志里可能有 bot 启动前的记录（实测 brooks-btc 的
+    # trades.jsonl 从 09-25 开始，而 first_run_ts 是 09-30）。
+    active = [x for x in local_realized_pnl(log)
+              if x["ts"] > active_cursor and (not start or x["ts"] >= start)]
 
     # ── 来源 1：SL/TP 触发（交易所）──
     try:
@@ -392,13 +419,16 @@ def sync(root: Path, bot_id: str, client, *, contract: Optional[str] = None,
             continue
         if not is_ours(t.get("text"), local_ids):
             skipped_unattr += 1
-            if len(excluded) < KEEP_EXCLUDED:
-                excluded.append({
-                    "text": str(t.get("text") or "")[:32],
-                    "pnl": t.get("pnl"),
-                    "contract": str(t.get("contract") or ""),
-                    "time": t.get("time"),
-                })
+            excluded.append({
+                "text": str(t.get("text") or "")[:32],
+                "pnl": t.get("pnl"),
+                "contract": str(t.get("contract") or ""),
+                "time": t.get("time"),
+            })
+            # **保留最新的**：满了就丢最旧的。原先在 append 前判断长度，一旦满了
+            # 就再也不追加 —— 数组永久冻结，`excluded` 作为「发现遗漏」的窗口就废了。
+            if len(excluded) > KEEP_EXCLUDED:
+                excluded = excluded[-KEEP_EXCLUDED:]
             continue
         pnl = _pnl_of(t)
         if pnl is None:
@@ -411,6 +441,16 @@ def sync(root: Path, bot_id: str, client, *, contract: Optional[str] = None,
             "time": t.get("time"),
             "source": "trigger",
         })
+
+    # ── 去重：同一条平仓若两条路径都命中，以 `position_close` 为准 ──
+    # 「天然互斥」是**今天**的巧合（`close_position` 走普通下单 → text 是 `api` →
+    # 被判未归属），不是任何地方保证的不变量：本地 id 索引里连平仓单的 id 都收
+    # （`detail.order.id`），将来若出现带 `realized_pnl` 的条件单平仓，就会双计。
+    # 判据用**时间接近**（`position_close` 没有 cycle_id，只能靠时间对齐）。
+    trigger_times = [int(f["time"]) for f in fresh if f.get("source") == "trigger"]
+    if trigger_times and active:
+        active = [a for a in active
+                  if not any(abs(a["ts"] - t) <= _DEDUPE_TOL_SEC for t in trigger_times)]
 
     for a in active:
         fresh.append({

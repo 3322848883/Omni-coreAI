@@ -1,6 +1,6 @@
 ---
 feature: trade-attribution
-status: designed
+status: in-progress
 updated: 2026-10-07
 branch: master
 commits:
