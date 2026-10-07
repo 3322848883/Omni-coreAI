@@ -433,13 +433,19 @@ def sync(root: Path, bot_id: str, client, *, contract: Optional[str] = None,
         pnl = _pnl_of(t)
         if pnl is None:
             continue
+        side_s = str(t.get("side") or "")
+        entry_raw = t.get("long_price") if side_s == "long" else t.get("short_price")
         fresh.append({
             "key": str(key),
             "pnl": round(pnl, 8),
             "contract": str(t.get("contract") or ""),
-            "side": str(t.get("side") or ""),
+            "side": side_s,
             "time": t.get("time"),
             "source": "trigger",
+            # 通知卡片要用的字段：`monitoring/notify.py` 的 `_CLOSE_ACTIONS` 分支
+            # 会读 `entry_price` / `size` 渲染「开仓价/仓位」。
+            "entry_price": entry_raw,
+            "size": t.get("accum_size"),
         })
 
     # ── 去重：同一条平仓若两条路径都命中，以 `position_close` 为准 ──
@@ -469,7 +475,7 @@ def sync(root: Path, bot_id: str, client, *, contract: Optional[str] = None,
                 rec["active_cursor"] = str(max(a["ts"] for a in active))
             rec["excluded"] = excluded[-KEEP_EXCLUDED:]
             _write(root, bot_id, rec)
-        return {"ok": True, "added": 0, "added_active": 0,
+        return {"ok": True, "added": 0, "added_active": 0, "closed": [],
                 "skipped_unattributed": skipped_unattr,
                 "skipped_before_start": skipped_before,
                 "trades": rec["totals"]["trades"], "cursor": rec["cursor"]}
@@ -492,6 +498,9 @@ def sync(root: Path, bot_id: str, client, *, contract: Optional[str] = None,
     _write(root, bot_id, rec)
     n_active = sum(1 for f in fresh if f.get("source") == "active")
     return {"ok": True, "added": len(fresh), "added_active": n_active,
+            # 只回交易所侧触发的平仓 —— 主动平仓已经由 executor 的 `steps` 通知过，
+            # 再发一次就是重复推送。调用方拿它去补发「止盈/止损触发」通知。
+            "closed": [f for f in fresh if f.get("source") == "trigger"],
             "skipped_unattributed": skipped_unattr,
             "skipped_before_start": skipped_before,
             "trades": t["trades"], "cursor": rec["cursor"]}

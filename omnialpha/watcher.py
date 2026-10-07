@@ -681,6 +681,37 @@ def select_bots(bots: dict[str, BotConfig], only: Optional[str] = None,
     return {k: v for k, v in bots.items() if v.enabled and (only is None or k == only)}
 
 
+def _steps_from_closed(closed: list) -> list:
+    """把投影检测到的平仓明细转成 `format_trade_card` 认得的 step 形状。
+
+    **为什么需要**：SL/TP 触发是**交易所侧**成交，没有 executor 的 `steps` ——
+    而 `monitoring/notify.py::format_trade_card` 正是从 `steps` 生成卡片的。
+    于是「改单、开仓有通知，止盈/止损触发没有」：前者是本地发起（有 steps），
+    后者不是。实测 2026-10-07 用户反馈「没有止盈通知」。
+
+    转成 `action="close"` 就会落进 `_CLOSE_ACTIONS` 分支，由 `detail.realized_pnl`
+    的正负自动判成「止盈 / 止损 / 平仓」，与本地平仓的卡片完全同款。
+    """
+    out = []
+    for f in (closed or []):
+        if not isinstance(f, dict):
+            continue
+        out.append({
+            "action": "close",
+            "symbol": str(f.get("contract") or ""),
+            "ok": True,
+            "detail": {
+                "realized_pnl": f.get("pnl"),
+                "entry_price": f.get("entry_price"),
+                "size": f.get("size"),
+                "ts": f.get("time"),
+                # 标明来源，便于日后区分「交易所侧触发」与「本地主动平仓」
+                "trigger_source": "exchange_position_close",
+            },
+        })
+    return out
+
+
 def _exchange_pnl_sweep(bot: BotConfig, paths: ProjectPaths) -> int:
     """把交易所成交里的已实现盈亏投影进画像（`state/exchange_pnl.json`）。
 
@@ -718,6 +749,19 @@ def _exchange_pnl_sweep(bot: BotConfig, paths: ProjectPaths) -> int:
     if added:
         log.info("exchange pnl %s: +%d 笔平仓（累计 %d 笔）",
                  bot.bot_id, added, res.get("trades"))
+
+    # ── 补发「止盈/止损触发」通知 ──
+    # 这类平仓没有 executor 的 steps，`run` 的成交卡片路径看不到它们。
+    closed = res.get("closed") or []
+    if closed:
+        try:
+            from .monitoring import notify_trade_events
+            notify_trade_events(bot.bot_id, _steps_from_closed(closed),
+                                root=paths.root,
+                                env=str(getattr(bot, "env", "") or "live"))
+            log.info("exchange pnl %s: 补发 %d 条平仓通知", bot.bot_id, len(closed))
+        except Exception as e:  # noqa: BLE001
+            log.warning("exchange pnl notify %s failed: %s", bot.bot_id, e)
     return added
 
 

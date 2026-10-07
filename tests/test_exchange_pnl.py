@@ -608,5 +608,89 @@ class TestAttributionInSync(unittest.TestCase):
             self.assertEqual(stats(root, BOT)["trades"], 1)
 
 
+class TestClosedCarriesNotifyFields(unittest.TestCase):
+    """投影检测到的平仓要带足够字段，才能复用成交卡片逻辑发通知。
+
+    背景：SL/TP 触发是**交易所侧**成交，没有 executor 的 `steps` —— 而
+    `monitoring/notify.py::format_trade_card` 正是从 `steps` 生成卡片的，所以
+    止盈/止损触发时**一条通知都没有**（改单、开仓都是本地发起，有 steps，正常）。
+    实测 2026-10-07 用户反馈「没有止盈通知」。
+    """
+
+    def test_closed_has_entry_price_and_size(self):
+        from omnialpha.memory.exchange_pnl import sync
+        rows = [{
+            "time_us": 1_000_000_000_000_000, "time": 1790871600 + 60,
+            "text": f"ao-{LOCAL_ID}", "pnl": "1.5", "contract": "BTC_USDT",
+            "side": "long", "long_price": "84000", "short_price": "0",
+            "accum_size": "41",
+        }]
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            out = sync(root, BOT, _CloseClient(rows), contracts=["BTC_USDT"],
+                       trades_log=_write_log(root, [
+                           {"steps": [{"detail": {"order": {"id": LOCAL_ID}}}]}]),
+                       first_run_ts=0)
+            closed = out.get("closed") or []
+            self.assertEqual(len(closed), 1, f"没返回可通知的平仓明细：{out}")
+            f = closed[0]
+            self.assertEqual(f["contract"], "BTC_USDT")
+            self.assertEqual(f["side"], "long")
+            self.assertEqual(f["entry_price"], "84000")
+            self.assertEqual(f["size"], "41")
+            self.assertAlmostEqual(f["pnl"], 1.5)
+
+    def test_active_closes_not_in_closed(self):
+        """主动平仓已由 executor 的 steps 通知，不能再发一次（会重复）。"""
+        from omnialpha.memory.exchange_pnl import sync
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            log = _write_log(root, [
+                {"ts": 1790871600 + 60, "plan_cycle": "c-1",
+                 "steps": [{"action": "close", "detail": {"realized_pnl": -0.75}}]},
+            ])
+            out = sync(root, BOT, _CloseClient([]), contracts=["BTC_USDT"],
+                       trades_log=log, first_run_ts=0)
+            self.assertEqual(out.get("added_active"), 1)
+            self.assertEqual(out.get("closed") or [], [],
+                             "主动平仓不该进 closed（会与 steps 通知重复）")
+
+
+class TestClosedToSteps(unittest.TestCase):
+    """平仓明细 → `format_trade_card` 认得的 step 形状。"""
+
+    def test_shapes_into_close_step(self):
+        from omnialpha.watcher import _steps_from_closed
+        from omnialpha.monitoring.notify import format_trade_card
+
+        closed = [{"contract": "BTC_USDT", "side": "long", "pnl": 1.5,
+                   "entry_price": "84000", "size": "41", "time": 1790871660}]
+        steps = _steps_from_closed(closed)
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0]["action"], "close")
+        self.assertEqual(steps[0]["symbol"], "BTC_USDT")
+        self.assertTrue(steps[0]["ok"])
+        self.assertEqual(steps[0]["detail"]["realized_pnl"], 1.5)
+
+        cards = format_trade_card(BOT, steps)
+        self.assertEqual(len(cards), 1, "卡片没生成 —— 形状对不上 format_trade_card")
+        title = cards[0]["header"]["title"]["content"]
+        self.assertIn("止盈", title, f"正盈亏该判为止盈，实际标题：{title}")
+
+    def test_negative_pnl_is_stop_loss(self):
+        from omnialpha.watcher import _steps_from_closed
+        from omnialpha.monitoring.notify import format_trade_card
+
+        steps = _steps_from_closed([{"contract": "BTC_USDT", "side": "short",
+                                     "pnl": -2.0, "entry_price": "84000",
+                                     "size": "10", "time": 1790871660}])
+        title = format_trade_card(BOT, steps)[0]["header"]["title"]["content"]
+        self.assertIn("止损", title)
+
+    def test_empty_is_safe(self):
+        from omnialpha.watcher import _steps_from_closed
+        self.assertEqual(_steps_from_closed([]), [])
+
+
 if __name__ == "__main__":
     unittest.main()
