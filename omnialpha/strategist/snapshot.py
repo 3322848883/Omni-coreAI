@@ -98,6 +98,28 @@ def _side_of(size: Any) -> Optional[str]:
     return None
 
 
+_TIF_KIND = {"gtc": "limit", "poc": "post_only", "ioc": "ioc", "fok": "fok"}
+
+
+def _order_kind(tif: Any, price: Any) -> Optional[str]:
+    """从 `tif`（必要时结合 price）派生委托类型。
+
+    **为什么需要**：Gate 的 `list_orders()` 返回里**没有 `order_type`**（实测字段
+    清单里就没有这个键），只有 `tif`。AI 于是只能猜「这个 84350 是限价单还是突破单」
+    —— 实测 2026-10-07 那轮，推理的前 23 行和后 10 行都在猜这件事，约占整段推理的
+    五分之一。把 `tif` 翻译成它想知道的词，这段猜测就可以整段消掉。
+    """
+    t = str(tif or "").strip().lower()
+    if t in _TIF_KIND:
+        return _TIF_KIND[t]
+    try:
+        if price is not None and float(price) == 0:
+            return "market"          # 无 tif 且价格为 0 = 市价
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
 def position_state(account: dict) -> tuple[str, str]:
     """给 AI 的持仓状态摘要：(state, note)。
 
@@ -139,6 +161,9 @@ def position_state(account: dict) -> tuple[str, str]:
             "**判据**：protections 里 `is_reduce_only: true` 的是预挂保护单，"
             "`is_reduce_only: false` 的是入场条件单（stop_entry）本身；"
             "**预挂保护单不是孤儿单，不得撤销**（它们要等入场成交才生效）。"
+            "**`account.open_orders` 与 `protections` 是两类不同的单**：前者是普通挂单"
+            "（限价/市价，看 `kind`），后者是交易所侧条件单。所以**在 open_orders 里"
+            "出现的就一定不是条件单**，不必再去猜它是 limit 还是 stop。"
         )
     return "flat", "无持仓、无待成交入场单"
 
@@ -328,6 +353,8 @@ def collect_snapshot(
                     # 普通挂单走 `list_orders()`，Gate 在这里**不给** `order_type`
                     # （实测字段清单里没有），能区分委托类型的只有 `tif`。
                     "tif": o.get("tif"),
+                    # `tif` 的翻译版 —— AI 想知道的就是这个词，省得它自己猜
+                    "kind": _order_kind(o.get("tif"), o.get("price")),
                     "is_reduce_only": _flag(o.get("is_reduce_only"), o.get("reduce_only")),
                 })
             account["open_orders"] = oos

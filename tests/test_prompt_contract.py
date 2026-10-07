@@ -71,5 +71,21 @@ class TestPromptContract(unittest.TestCase):
         self.assertIn("禁止撤销任何 tp/sl 保护单", SYSTEM_PROMPT)
 
 
+class TestTriggerParamRangesAreConsistent(unittest.TestCase):
+    """契约里同一个参数的范围只能有一个说法。
+
+    原先一处写 `price_break{lookback:20-300}`、另一处写「lookback 必须 5-300」——
+    模型看到两个范围，可能取 5–20 之间的值，然后被 `trigger_store` 的校验整条拒掉
+    （那个下限在 2026-10-06 已从 5 提到 20，当时只改了前一处）。
+    """
+
+    def test_lookback_lower_bound_documented_as_20(self):
+        self.assertIn("lookback 必须 20-300", SYSTEM_PROMPT)
+
+    def test_no_stale_lower_bound(self):
+        self.assertNotIn("5-300", SYSTEM_PROMPT,
+                         "契约里还留着旧的 lookback 下限（已提到 20）")
+
+
 if __name__ == "__main__":
     unittest.main()

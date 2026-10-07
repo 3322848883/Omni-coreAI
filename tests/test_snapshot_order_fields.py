@@ -24,7 +24,8 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from omnialpha.strategist.snapshot import _flag, collect_snapshot, position_state
+from omnialpha.strategist.snapshot import (_flag, _order_kind, collect_snapshot,
+                                           position_state)
 
 
 class _Client:
@@ -198,6 +199,43 @@ class TestFlagNormalisation(unittest.TestCase):
         self.assertIs(_flag(True), True)
         self.assertIs(_flag(None, False), False)
         self.assertIsNone(_flag(None, None))
+
+
+class TestOrderKindIsDerived(unittest.TestCase):
+    """`tif` 必须被翻译成 AI 想知道的词。
+
+    Gate 的 `list_orders()` **不返回 `order_type`**（实测字段清单里没有），只有 `tif`。
+    实测 2026-10-07 那轮，模型推理的前 23 行和后 10 行都在猜「84350 是限价单还是
+    突破单」，约占整段推理的五分之一 —— 纯属信息缺失导致的空转。
+    """
+
+    def test_tif_mapping(self):
+        for tif, want in (("gtc", "limit"), ("poc", "post_only"),
+                          ("ioc", "ioc"), ("fok", "fok"), ("GTC", "limit")):
+            with self.subTest(tif=tif):
+                self.assertEqual(_order_kind(tif, "84350"), want)
+
+    def test_zero_price_without_tif_is_market(self):
+        self.assertEqual(_order_kind(None, "0"), "market")
+        self.assertEqual(_order_kind("", 0), "market")
+
+    def test_unknown_returns_none(self):
+        self.assertIsNone(_order_kind(None, "84350"), "没 tif 不该乱猜")
+        self.assertIsNone(_order_kind("weird", "84350"))
+
+    def test_exposed_in_open_orders(self):
+        snap = _snap(orders=[GATE_OPEN_ORDER])
+        o = snap["account"]["open_orders"][0]
+        self.assertEqual(o["kind"], "limit", f"open_orders 没带派生的 kind：{o}")
+
+
+class TestEntryPendingNoteDistinguishesOrderKinds(unittest.TestCase):
+    """说明里要点明 open_orders 与 protections 是两类单 —— 否则 AI 还是会猜。"""
+
+    def test_note_names_both_containers(self):
+        _, note = position_state({"positions": [], "open_orders": [{"status": "open"}]})
+        self.assertIn("open_orders", note)
+        self.assertIn("protections", note)
 
 
 class TestPositionStateNoteTellsApart(unittest.TestCase):
