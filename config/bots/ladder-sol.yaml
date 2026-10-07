@@ -31,6 +31,10 @@ account_risk:
   max_notional_pct: 6.0
   max_total_notional_pct: 10.0
   daily_loss_limit_usd: 5
+  # 浮盈回撤保护：某腿浮盈后，价格从峰值回撤 peak_trail_atr×ATR(1h) 就把该腿 SL 上移
+  # （只上移不下移）。双向持仓下两条腿各自跟踪，状态按 bot 隔离。
+  peak_trail: true
+  peak_trail_atr: 2.0
 
 strategist:
   enabled: true
