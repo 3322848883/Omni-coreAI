@@ -87,6 +87,12 @@ class TestStopCheckpoint(unittest.TestCase):
             def get_positions(self):
                 return []
 
+            def list_orders(self, contract=None):
+                return []
+
+            def list_price_orders(self, contract=None):
+                return []
+
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             p = root / "data" / "bots" / "b1" / "state" / "stop"

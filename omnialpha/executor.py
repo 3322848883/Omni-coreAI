@@ -187,7 +187,8 @@ class Executor:
         # Snapshot owned resting orders before new placements (place-before-cancel).
         # Do NOT cancel here — new protection first, then withdraw old owned ones.
         replace_mode = self._replace_mode(signal, intents)
-        pre_owned = self._snapshot_owned(intents) if replace_mode != "none" else {}
+        # 无条件快照「本轮开始前」的本 bot 挂单 —— 回滚要用它当基线（见 _rollback_newly_placed）
+        pre_owned = self._snapshot_owned(intents)
 
         # 排序：**先平仓、后开仓**（参照 nofx 的 `sortDecisionsByPriority`）。
         # 先释放保证金再开新仓 —— 否则同轮换仓会因保证金不足被拒，或两笔叠加
@@ -240,6 +241,10 @@ class Executor:
             report.results.append(step)
             if not step.ok:
                 break
+
+        # 整轮失败 → 回滚本轮新挂的单，不留半成品（见 _rollback_newly_placed）
+        if not report.ok:
+            self._rollback_newly_placed(pre_owned, intents, report)
 
         # After successful steps: withdraw OLD owned orders (keep newly placed ids)
         if replace_mode != "none" and report.ok:
@@ -309,6 +314,81 @@ class Executor:
         except GateApiError:
             return []
         return [o for o in rows if self._text_owned(str(o.get("text") or ""), label)]
+
+    def _rollback_newly_placed(self, pre_owned: dict, intents: list, report: ExecReport) -> None:
+        """整轮失败时撤掉**本轮新挂出去**的单，不留半成品。
+
+        为什么需要：主循环里任一腿失败就 `break`，而**之前成功的腿已经挂在交易所上了**。
+        对阶梯策略尤其危险 —— 11 档挂出 5 档就断，留下一个缺腿的网格
+        （双向缺一侧 = 对冲不成立），而且 `report.ok=False` 会让「先挂后撤」那步
+        也不执行，等于**新旧叠加**。实测 2026-10-06 发生过两次：一次挂出前 4 条多腿
+        就被 SSL 掐断、一次只挂出第 1 条腿。
+
+        **判据：本轮新挂的 = 当前 owned − 开始前快照**。用集合差而不是解析
+        `step.detail` —— 各 action 的 detail 结构不同（`order` / `tp_orders` /
+        `sl_orders` / …），逐个解析必然漏，而漏掉的就是留在场上的垃圾。
+
+        **绝不碰两样东西**：
+        1. 快照里就存在的单（上一轮挂的，不归本轮管）；
+        2. **正在保护真实持仓的 reduce-only 单** —— 若某条腿已成交，撤掉它的
+           止损会留下**裸仓**，那比半成品严重得多。判据复用 `_live_protection_ids`
+           （与孤儿扫描同源）。持仓取不到时**整段跳过撤价单**，宁可不回滚也不冒裸仓风险。
+        """
+        # 先撤未成交的入场单（它们还在 list_orders(status=open) 里；已成交的不会出现）
+        cancelled = 0
+        for intent in intents:
+            if not intent.symbol:
+                continue
+            prefix = self._own_prefix(intent.label)
+            if not prefix:
+                continue
+            before = (pre_owned or {}).get(intent.symbol) or {}
+            pre_o = {str(x) for x in (before.get("order_ids") or ())}
+            for o in self._owned_open_orders(intent.symbol, prefix):
+                oid = str(o.get("id") or "")
+                if not oid or oid in pre_o:
+                    continue
+                try:
+                    self.client.cancel_order(oid)
+                    cancelled += 1
+                except GateApiError as e:
+                    report.results.append(StepResult(
+                        "rollback", intent.symbol, False,
+                        detail={"cancel_order": oid}, error=str(e)[:120]))
+
+        # 再撤保护单：跳过正在保护真实持仓的那些
+        positions, perr = self._positions_or_error()
+        if positions is None:
+            report.results.append(StepResult(
+                "rollback", "", False,
+                detail={"refused": "positions_unavailable"},
+                error=f"持仓查询失败，跳过保护单回滚（无法区分预挂保护与持仓保护）: {perr}"))
+        else:
+            for intent in intents:
+                if not intent.symbol:
+                    continue
+                prefix = self._own_prefix(intent.label)
+                if not prefix:
+                    continue
+                before = (pre_owned or {}).get(intent.symbol) or {}
+                pre_p = {str(x) for x in (before.get("price_ids") or ())}
+                rows = self._owned_price_orders(intent.symbol, prefix)
+                live = self._live_protection_ids(rows, positions)
+                for p in rows:
+                    pid = str(self._order_id(p) or "")
+                    if not pid or pid in pre_p or pid in live:
+                        continue
+                    try:
+                        self.client.cancel_price_order(pid)
+                        cancelled += 1
+                    except GateApiError as e:
+                        report.results.append(StepResult(
+                            "rollback", intent.symbol, False,
+                            detail={"cancel_price_order": pid}, error=str(e)[:120]))
+
+        report.results.append(StepResult(
+            "rollback", "", True,
+            detail={"rolled_back": cancelled, "reason": "本轮有腿失败，已撤掉本轮新挂的单"}))
 
     def _snapshot_owned(self, intents: list) -> dict:
         """{symbol: {"prefix": set(price_ids), "orders": set(order_ids)}}"""
