@@ -95,6 +95,13 @@ class Chip:
     risk_pct: Optional[float] = None       # 本单实际风险占权益比例
     rule_ids: list[str] = field(default_factory=list)
     scenarios: dict = field(default_factory=dict)
+    # ── 逐K形态读（人格可选产出，见 prompts/brooks_btc_pa.md）──
+    # 契约**不要求**这两个字段：只有明确要求它们的人格（当前是 brooks-btc）才会填，
+    # 其他 bot 留空，行为零变化。
+    # 它们**不进 `to_signal_dict`**（= 不进 inbox / 不进订单上下文）—— 每轮 ~1.2KB，
+    # 进了下一轮的 prompt 会污染缓存前缀。只作审计落 `thinking.json`。
+    kline_tf: str = ""                              # 读的是哪个周期：5m / 15m / 1h…
+    kline_read: list[str] = field(default_factory=list)   # 由新到旧的逐根定性
 
     def to_signal_dict(self) -> dict:
         d: dict[str, Any] = {"action": self.action, "symbol": self.symbol, "type": self.order_type}
@@ -210,6 +217,57 @@ def _memory_refs(raw: Any) -> list[str]:
     return out
 
 
+def _kline_read(raw: Any) -> list[str]:
+    """规范化逐K读：只留非空**字符串**，最多 30 条。
+
+    与 `_memory_refs` 同属**观测性**字段 —— 不参与下单、不影响风控，格式坏掉
+    不该让整轮降级成 hold，所以**不抛 `PlanError`**。非字符串元素直接丢弃。
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for x in raw:
+        if not isinstance(x, str):
+            continue
+        s = x.strip()
+        if s:
+            out.append(s)
+        if len(out) >= 30:
+            break
+    return out
+
+
+def extract_kline_reads(text: str) -> dict:
+    """从模型正文里轻量抽出逐K读，供 `thinking.json` 审计落盘。
+
+    为什么不复用 `parse_plan`：两个 `_save_thinking` 调用点都在 `parse_plan_text`
+    **之前**（见 `loop.run_once` / `analyze_once`），那时还没有 Plan 对象。而为了
+    这个审计字段去调整落盘顺序，会把「解析失败也要留下 CoT」这条现有行为改掉。
+
+    不抛异常：正文坏掉、没有该字段、chips 为空都返回 `{}`（调用方据此跳过落盘）。
+    返回 `{"kline_tf": str, "kline_read": [str]}`，两者皆空时返回 `{}`。
+    """
+    try:
+        data = _extract_json_object(text or "")
+    except Exception:  # noqa: BLE001 — 纯观测，任何异常都只是「这轮没抽到」
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    tf, bars = "", []
+    for c in (data.get("chips") or []):
+        if not isinstance(c, dict):
+            continue
+        if not tf:
+            tf = str(c.get("kline_tf") or "").strip()[:16]
+        got = _kline_read(c.get("kline_read"))
+        if got:
+            bars = got
+            break
+    if not bars and not tf:
+        return {}
+    return {"kline_tf": tf, "kline_read": bars}
+
+
 def parse_plan(data: Any) -> Plan:
     if not isinstance(data, dict):
         raise PlanError("plan must be a JSON object")
@@ -276,6 +334,8 @@ def parse_plan(data: Any) -> Plan:
         scenarios_raw = raw.get("scenarios") or {}
         if not isinstance(scenarios_raw, dict):
             raise PlanError(f"chips[{i}].scenarios must be an object")
+        # 逐K读是观测性字段，一律宽松处理（不抛 PlanError，见 _kline_read 说明）
+        kline_tf_raw = str(raw.get("kline_tf") or "").strip()[:16]
         chips.append(
             Chip(
                 symbol=_safe_symbol(symbol),
@@ -304,6 +364,8 @@ def parse_plan(data: Any) -> Plan:
                 risk_pct=_f(raw.get("risk_pct"), "risk_pct", i),
                 rule_ids=[str(x) for x in rule_ids_raw],
                 scenarios=dict(scenarios_raw),
+                kline_tf=kline_tf_raw,
+                kline_read=_kline_read(raw.get("kline_read")),
             )
         )
     triggers = data.get("triggers") or []

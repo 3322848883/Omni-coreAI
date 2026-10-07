@@ -22,7 +22,7 @@ from .llm_client import LLMClient, LLMConfig, LLMError
 from .market import MarketConfig
 from .prompt import build_system_prompt, build_user_prompt, load_strategy_prompt
 from .risk import RiskConfig, apply_risk
-from .schema import PlanError, normalize_chip_type, parse_plan_text
+from .schema import PlanError, extract_kline_reads, normalize_chip_type, parse_plan_text
 from .snapshot import collect_snapshot
 from .tools import NATIVE_TOOLS, TOOL_GUIDE, available_native_tools, extract_tool_calls, filter_tool_schemas, run_tool
 from .triggers import check_conditions, parse_conditions
@@ -941,6 +941,12 @@ class PlanRunner:
             "tool_usage": list(self.tool_usage),  # 本轮工具使用明细（防偷懒）
             "tool_usage_summary": self._tool_usage_summary(),
         }
+        # 逐K形态读（人格可选产出，见 prompts/brooks_btc_pa.md）：**非空才落**。
+        # 没被要求这个字段的 bot 不会填，于是它们的 thinking.json 与改动前逐字节一致
+        # —— 这是「只影响 brooks-btc」的落盘侧保证。
+        kline = extract_kline_reads(kw.get("content") or "")
+        if kline:
+            payload["kline"] = kline
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         # also into sqlite ledger
         try:

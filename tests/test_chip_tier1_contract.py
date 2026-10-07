@@ -7,14 +7,21 @@
 """
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from omnialpha.strategist.schema import Chip, PlanError, parse_plan  # noqa: E402
+from omnialpha.strategist.schema import (  # noqa: E402
+    Chip,
+    PlanError,
+    extract_kline_reads,
+    parse_plan,
+)
 
 
 def _chip(**over) -> dict:
@@ -147,6 +154,110 @@ class TestBadInputRaisesPlanError(unittest.TestCase):
             with self.subTest(field=field):
                 with self.assertRaises(PlanError):
                     parse_plan({"chips": [_chip(**{field: "not-a-number"})]})
+
+
+class TestKlineRead(unittest.TestCase):
+    """逐K形态读（`kline_tf` / `kline_read`）—— 人格可选产出，见 prompts/brooks_btc_pa.md。
+
+    与 Tier 1 那 7 个字段的**关键区别**：这两个字段刻意**不进 `to_signal_dict`**。
+    每轮约 1.2KB，进了订单上下文就会随下一轮注入，污染 prompt 与缓存前缀。
+
+    背景（2026-10-07 实测）：人格里「逐K分析最近20根（强制）」与契约规则 7
+    「reasoning 必须 ≤30 字」直接冲突，而 schema 里没有承载它的字段 —— 150 轮
+    里 11.3% 声称做过、0% 真逐根列举。给它一个字段后，本地 8/8 轮填满 20 条。
+    """
+
+    def test_parsed_when_present(self):
+        plan = parse_plan({"chips": [_chip(
+            kline_tf="15m",
+            kline_read=["18:45 O83286.2 H83369.1 L83280.1 C83355.1 小阳线",
+                        "18:30 O83328.0 H83349.1 L83260.3 C83286.3 内包K"],
+        )]})
+        c = plan.chips[0]
+        self.assertEqual(c.kline_tf, "15m")
+        self.assertEqual(len(c.kline_read), 2)
+
+    def test_defaults_empty_when_absent(self):
+        """没被要求这个字段的 bot 不填 → 空，行为零变化。"""
+        c = parse_plan({"chips": [_chip()]}).chips[0]
+        self.assertEqual(c.kline_tf, "")
+        self.assertEqual(c.kline_read, [])
+
+    def test_not_exported_to_signal(self):
+        """**关键回归**：不能进订单上下文（会污染下一轮 prompt 与缓存前缀）。"""
+        d = parse_plan({"chips": [_chip(kline_tf="5m", kline_read=["b1"])]}).chips[0].to_signal_dict()
+        self.assertNotIn("kline_tf", d)
+        self.assertNotIn("kline_read", d)
+        blob = json.dumps(d, ensure_ascii=False)
+        self.assertNotIn("kline_tf", blob)
+        self.assertNotIn("kline_read", blob)
+
+    def test_bad_shape_does_not_fail_the_plan(self):
+        """观测性字段：格式坏掉不该让整轮降级成 hold（对照 `memory_refs` 的先例）。"""
+        c = parse_plan({"chips": [_chip(kline_read="not-a-list")]}).chips[0]
+        self.assertEqual(c.kline_read, [])
+        c2 = parse_plan({"chips": [_chip(kline_read=[1, None, "ok", "  ", "b"])]}).chips[0]
+        self.assertEqual(c2.kline_read, ["ok", "b"])
+
+    def test_capped_at_30(self):
+        c = parse_plan({"chips": [_chip(kline_read=[f"bar{i}" for i in range(50)])]}).chips[0]
+        self.assertEqual(len(c.kline_read), 30)
+
+
+class TestExtractKlineReads(unittest.TestCase):
+    """`_save_thinking` 用的轻量抽取 —— 它在 `parse_plan_text` **之前**调用。"""
+
+    def test_extracts_from_fenced_json(self):
+        text = '```json\n{"chips":[{"kline_tf":"5m","kline_read":["b1","b2"]}]}\n```'
+        got = extract_kline_reads(text)
+        self.assertEqual(got["kline_tf"], "5m")
+        self.assertEqual(got["kline_read"], ["b1", "b2"])
+
+    def test_empty_when_absent(self):
+        self.assertEqual(extract_kline_reads('{"chips":[{"symbol":"BTC_USDT"}]}'), {})
+
+    def test_empty_on_garbage(self):
+        for bad in ("not json at all", "", "   ", "{broken"):
+            with self.subTest(bad=bad):
+                self.assertEqual(extract_kline_reads(bad), {})
+
+
+class TestSaveThinkingKline(unittest.TestCase):
+    """落盘侧：**非空才写** —— 其他 bot 的 thinking.json 与改动前逐字节一致。"""
+
+    def _runner(self, td: Path):
+        from omnialpha.strategist.loop import PlanRunner, StrategistConfig
+
+        return PlanRunner(
+            client=object(),
+            cfg=StrategistConfig(symbols=["BTC_USDT"]),
+            inbox=td / "inbox", history_dir=td / "hist", llm=object(),
+        )
+
+    def _read(self, td: Path) -> dict:
+        files = list((td / "hist").glob("*.thinking.json"))
+        self.assertEqual(len(files), 1, f"应恰好落一个 thinking.json: {files}")
+        return json.loads(files[0].read_text(encoding="utf-8"))
+
+    def test_written_when_present(self):
+        with tempfile.TemporaryDirectory() as t:
+            td = Path(t)
+            self._runner(td)._save_thinking(
+                cycle_id="c1", trigger="t",
+                content='{"chips":[{"kline_tf":"5m","kline_read":["b1","b2"]}]}',
+                reasoning=["cot"])
+            payload = self._read(td)
+            self.assertEqual(payload["kline"]["kline_tf"], "5m")
+            self.assertEqual(payload["kline"]["kline_read"], ["b1", "b2"])
+
+    def test_absent_key_when_not_emitted(self):
+        with tempfile.TemporaryDirectory() as t:
+            td = Path(t)
+            self._runner(td)._save_thinking(
+                cycle_id="c1", trigger="t",
+                content='{"chips":[{"symbol":"BTC_USDT","action":"hold"}]}',
+                reasoning=["cot"])
+            self.assertNotIn("kline", self._read(td))
 
 
 if __name__ == "__main__":
