@@ -830,6 +830,49 @@ class TestExecutor(unittest.TestCase):
         }))
         self.assertTrue(rep2.ok, rep2.to_dict())
 
+    def test_notional_pct_drift_is_clamped_not_rejected(self):
+        """顶格下单时权益微漂移不该整笔拒 —— 应钳到**当前**上限。
+
+        回归背景（2026-10-07 实盘，10 小时 8 次）：`loop._prompt_risk` 把
+        `min(配置上限, 权益×max_notional_pct)` 的**精确值**交给 AI，AI 就顶格用它
+        —— 思维链原话「max_notional_usd = 464.09. So size_usd = 464.09.
+        That's the guardrail」。而执行时 `_check_notional` 用**新拉的**权益重算上限，
+        权益在这 1–3 分钟里因浮盈漂移一点点，`size_usd > cap` 就成立 → 整笔被拒。
+        那 8 笔全是模型想开的仓（5×open_short + 2×stop_entry_short）。
+
+        注意与 `test_notional_pct_guard` 的区别：**大幅**越界仍必须拒单（那是计划
+        本身有问题）；只有 ≤1% 的微越界（取整 / 权益漂移）才钳。
+        """
+        client = FakeClient()
+        # 出价时权益 1000 → 上限 500.0；执行时跌到 999.8 → 上限 499.9
+        client.get_account = lambda: {"total": 999.8, "available": 999.8}
+        client.get_last_price = lambda s: 50000.0
+        ex = Executor(client, max_notional_usd=1e12,
+                      account_risk={"max_notional_pct": 0.5, "risk_pct": 0.01},
+                      require_sl=False)
+        rep = ex.execute_signal(parse_signal({
+            "action": "open_long", "symbol": "BTC_USDT", "size_usd": 500.0, "sl": 49900,
+        }))
+        self.assertTrue(rep.ok, "微越界应钳制而非拒单: %s" % (rep.to_dict(),))
+        got = float(rep.results[0].detail.get("size_usd") or 0)
+        self.assertLessEqual(got, 499.9 + 1e-6, "必须钳到当前上限以内")
+
+    def test_notional_pct_gross_overshoot_still_rejected(self):
+        """大幅越界仍要拒 —— 钳制只针对微越界，别把护栏磨平。
+
+        与上一条配对：同样是 pct 上限，越界 0.02% 钳、越界 1500% 拒。
+        """
+        client = FakeClient()
+        client.get_account = lambda: {"total": 1000.0, "available": 1000.0}
+        ex = Executor(client, max_notional_usd=1e12,
+                      account_risk={"max_notional_pct": 0.5, "risk_pct": 0.01},
+                      require_sl=False)
+        rep = ex.execute_signal(parse_signal({
+            "action": "open_long", "symbol": "BTC_USDT", "size_usd": 8000, "sl": 49900,
+        }))
+        self.assertFalse(rep.ok, "大幅越界必须拒单")
+        self.assertIn("MAX_NOTIONAL_PCT", rep.results[0].error or "")
+
     def test_size_clamped_to_risk_formula(self):
         """仓位验算：名义超过风险公式 1.3 倍时钳制。"""
         client = FakeClient()

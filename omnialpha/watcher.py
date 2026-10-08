@@ -671,6 +671,75 @@ def _peak_trail_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict) -> int
     return done
 
 
+def _give_back_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict) -> int:
+    """浮盈从峰值回撤 `give_back_pct`% → 平掉仓位（`account_risk.give_back` 逐 bot 开）。
+
+    与 `_peak_trail_sweep` 的区别：那个**上移 SL**（防坐电梯），这个**直接平仓**
+    （落袋）。阈值是**逐计划**的（模型每笔自己算），由 `Executor.remember_give_back`
+    在开仓/挂单时落进 `state/give_back.json`，这里按腿取用。
+
+    **挂在快扫描（60s）而不是 300s 的 do_sweep 上**：回撤保护对时间敏感 ——
+    300s 一次意味着价格可能已经多回撤一截，落袋价与目标差得远。
+
+    三种必须让人知道的结局（按 `_AUTO_PROTECT_ALERT_SEC` 节流）：
+      - `error`        平仓失败 → 仓位仍在，SL 仍有效，不是裸仓
+      - 正常平仓       记 warning 日志（含峰值/落袋价）
+      - `dry`          只记 info，说明「会平在哪」
+    """
+    mode = (getattr(bot, "account_risk", None) or {}).get("give_back", False)
+    if not mode:
+        return 0
+    dry = str(mode).lower() == "dry"
+    try:
+        client = bot.create_client()
+    except Exception:  # noqa: BLE001
+        return 0
+    executor = Executor(
+        client,
+        label_prefix=getattr(bot, "label_prefix", "") or bot.bot_id,
+        root=paths.root,
+        bot_id=bot.bot_id,
+        account=getattr(bot, "account", "") or "",
+        account_risk=getattr(bot, "account_risk", None),
+        alert_store=_alert_store(paths, bot.bot_id),
+    )
+    done = 0
+    for sym in (bot.symbols or []):
+        try:
+            out = executor.check_give_back(sym, dry=dry)
+        except Exception as e:  # noqa: BLE001 — 单个 symbol 失败不拖垮整轮扫描
+            log.warning("give back %s %s raised: %s", bot.bot_id, sym, e)
+            continue
+        for res in (out.get("sides") or []):
+            if res.get("closed"):
+                done += 1
+                log.warning(
+                    "give back %s %s/%s: 平仓 pnl=%.4f (peak=%.4f size=%s)",
+                    bot.bot_id, sym, res.get("position_side"),
+                    float(res["closed"].get("pnl") or 0),
+                    float(res["closed"].get("peak_pnl") or 0),
+                    res["closed"].get("size"),
+                )
+                continue
+            if dry and res.get("skipped") == "dry":
+                log.info(
+                    "give back[dry] %s %s/%s: 会平仓 pnl=%.4f (peak=%.4f trigger=%.4f 1R=%.4f)",
+                    bot.bot_id, sym, res.get("position_side"),
+                    float(res.get("cur_pnl") or 0), float(res.get("peak_pnl") or 0),
+                    float(res.get("trigger_pnl") or 0), float(res.get("r_usd") or 0),
+                )
+                continue
+            if not res.get("error"):
+                continue
+            key = f"{bot.bot_id}:{sym}:{res.get('position_side')}:giveback"
+            now = time.time()
+            if now - float(alerted.get(key) or 0) < _AUTO_PROTECT_ALERT_SEC:
+                continue
+            alerted[key] = now
+            log.error("give back %s %s: %s", bot.bot_id, sym, res["error"])
+    return done
+
+
 def select_bots(bots: dict[str, BotConfig], only: Optional[str] = None,
                 allow_disabled: bool = False) -> dict[str, BotConfig]:
     """挑出要跑执行循环的 bot。
@@ -792,6 +861,7 @@ def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[
     last_pnl = 0.0
     auto_protect_alerted: dict = {}
     peak_trail_alerted: dict = {}
+    give_back_alerted: dict = {}
     while True:
         now = time.time()
         do_sweep = (now - last_sweep) >= orphan_sweep_sec
@@ -811,6 +881,11 @@ def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[
                     _exchange_pnl_sweep(bot, paths)
                 except Exception as e:  # noqa: BLE001
                     log.warning("exchange pnl sweep %s failed: %s", bot.bot_id, e)
+                # 浮盈回撤平仓放**快扫描**：回撤保护对时间敏感，300s 一次太慢
+                try:
+                    _give_back_sweep(bot, paths, give_back_alerted)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("give back sweep %s failed: %s", bot.bot_id, e)
             if do_sweep:
                 # 顺序固定：**先对齐张数（有持仓）→ 再撤孤儿（无持仓）→ 补缺失（裸仓）
                 # → 最后上移已有保护（防坐电梯）**。

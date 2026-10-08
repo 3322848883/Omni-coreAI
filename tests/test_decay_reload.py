@@ -108,5 +108,54 @@ class TestDecayEquity(unittest.TestCase):
             {"account": {"total": "88.06", "error": "account: down"}}))
 
 
+class TestFlatWindowIsNotDecay(unittest.TestCase):
+    """空窗口（窗口内无盈亏变动）不该报衰减 —— 那是必然报警，不是信号。
+
+    机制：`_compute()` 里 `std == 0` 时 `sharpe = 0`（窗口全 0 → 必然 std=0），
+    而 `check()` 的判据是 `hist_sharpe > 0 and roll_sharpe < 0.5*hist_sharpe`
+    —— `0 < 0.5×正数` 恒成立 → **每轮都报**。
+
+    实盘佐证（2026-10-07，10 小时）：440 条 decay 告警占 1612 轮的 27%，其中
+    `n_trades: 0` 出现 381 次、`rolling_sharpe: 0` 出现 381 次。
+
+    同一个 `check()` 里 `win_rate` 那条早有 `n_trades >= 5` 的样本保护，sharpe 这条漏了。
+    """
+
+    def _det(self, td: Path) -> DecayDetector:
+        return DecayDetector(Path(td), "t", window=20)
+
+    def test_flat_window_does_not_alert(self):
+        with tempfile.TemporaryDirectory() as t:
+            td = Path(t)
+            det = self._det(td)
+            # 先来 40 笔有盈亏的（让历史 sharpe > 0）
+            for i in range(40):
+                det.record_cycle(cycle_id=f"h{i}", decision="open_long",
+                                 executed=True, pnl_usd=1.5 + (0.5 if i % 2 else -0.5))
+            # 再来 20 轮空窗口（盈亏全 0 = 没有成交）
+            for i in range(20):
+                det.record_cycle(cycle_id=f"z{i}", decision="hold",
+                                 executed=False, pnl_usd=0.0)
+            hist = det._historical()
+            self.assertGreater(hist.get("sharpe", 0), 0, "前置条件：历史 sharpe 应为正")
+            self.assertEqual(det._compute()["n_trades"], 0, "前置条件：窗口内应无成交")
+            self.assertIsNone(det.check(), "空窗口不该被判为策略衰减")
+
+    def test_real_decay_still_alerts(self):
+        """配对：真有盈亏且滚动 sharpe 掉下来时，仍必须报警 —— 别把告警磨平。"""
+        with tempfile.TemporaryDirectory() as t:
+            td = Path(t)
+            det = self._det(td)
+            for i in range(40):
+                det.record_cycle(cycle_id=f"h{i}", decision="open_long",
+                                 executed=True, pnl_usd=2.0 + (0.5 if i % 2 else -0.5))
+            # 窗口内全是亏损（有成交、有盈亏变动）
+            for i in range(20):
+                det.record_cycle(cycle_id=f"l{i}", decision="open_long",
+                                 executed=True, pnl_usd=-1.0 - (0.2 if i % 2 else 0.0))
+            self.assertGreater(det._compute()["n_trades"], 0, "前置条件：窗口内应有成交")
+            self.assertIsNotNone(det.check(), "真衰减仍要报")
+
+
 if __name__ == "__main__":
     unittest.main()

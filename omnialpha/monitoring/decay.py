@@ -109,11 +109,18 @@ class DecayDetector:
         hist = self._historical()
         alerts = []
         # 滚动 Sharpe 跌破历史一半（或历史为正但滚动为负）
+        #
+        # **样本不足时不判**：窗口内没有盈亏变动（`n_trades == 0`，即全是 hold）时
+        # `_compute()` 的 `std == 0` → `rolling_sharpe` 恒为 0，而 `0 < 0.5×正数`
+        # 永远成立 → **每轮都报**。实盘佐证（2026-10-07，10 小时）：440 条 decay 告警
+        # 占 1612 轮的 27%，其中 `n_trades: 0` 出现 381 次。这不是衰减，是没成交。
+        # 同一个 `check()` 里 `win_rate` 那条早有 `n_trades >= 5` 的保护，这条漏了。
         hist_sharpe = hist.get("sharpe", 0)
         roll_sharpe = metrics.get("rolling_sharpe", 0)
-        if hist_sharpe > 0 and roll_sharpe < 0.5 * hist_sharpe:
+        enough = metrics.get("n_trades", 0) >= 5
+        if enough and hist_sharpe > 0 and roll_sharpe < 0.5 * hist_sharpe:
             alerts.append(f"decay: rolling_sharpe {roll_sharpe:.2f} < 0.5*historical {hist_sharpe:.2f}")
-        elif hist_sharpe > 0 and roll_sharpe < 0:
+        elif enough and hist_sharpe > 0 and roll_sharpe < 0:
             alerts.append(f"decay: rolling_sharpe {roll_sharpe:.2f} turned negative (was {hist_sharpe:.2f})")
         # 胜率过低
         if metrics.get("n_trades", 0) >= 5 and metrics.get("win_rate", 1) < 0.3:

@@ -35,6 +35,10 @@ PRICE_TYPE_MAP = {"latest": 0, "mark": 1, "index": 2}
 # `_check_notional` 拒单，护栏不会被磨平。
 _NOTIONAL_DRIFT_TOL = 0.01
 
+# 浮盈回撤保护的观测过期时间：超过这么久没观测过，历史峰值不可信（进程停过 /
+# 扫描没跑到），重新起算。与 `_PEAK_TRAIL_STALE_SEC` 同口径。
+_GIVE_BACK_STALE_SEC = 900.0
+
 
 @dataclass
 class StepResult:
@@ -1345,6 +1349,10 @@ class Executor:
                 detail=detail,
                 error="exit_not_placed: " + "; ".join(str(x) for x in exit_errors or ["tp/sl missing"]),
             )
+        # 开仓成功 → 把计划给的浮盈回撤阈值记进状态，供扫描循环按腿取用
+        # （扫描是逐 bot 的，不知道当前持仓是哪一轮、按什么阈值开的）
+        self.remember_give_back(intent.symbol, intent.side or "long",
+                                intent.give_back_pct)
         return StepResult(intent.action, intent.symbol, True, detail=detail)
 
     def _rollback_unprotected_entry(self, intent: Intent, entry_order: dict,
@@ -1885,6 +1893,11 @@ class Executor:
                     intent, order, is_price_order=True)
                 return StepResult(intent.action, intent.symbol, False, detail=detail,
                                   error="exit_not_placed: " + "; ".join(str(x) for x in errs))
+        # 突破单已挂出（尚未成交）→ 先记下阈值。持仓出现时扫描循环就能按腿取到。
+        # 用 `intent.side`（`_parse_stop_entry` 必定设置），不要用上面那个只在该
+        # 分支里定义的 `pos_side` —— 无 SL/TP 时它不存在。
+        self.remember_give_back(intent.symbol, intent.side or "short",
+                                intent.give_back_pct)
         return StepResult(intent.action, intent.symbol, True, detail=detail)
 
     @staticmethod
@@ -2353,6 +2366,199 @@ class Executor:
                 ensure_ascii=False), encoding="utf-8")
         except Exception:  # noqa: BLE001
             pass
+
+    # ── 浮盈回撤保护（give_back_pct）─────────────────────────
+    def _give_back_path(self) -> Path:
+        """浮盈回撤状态：恒为 bot 级（与 `peak_trail` 同口径）。"""
+        if self.bot_id:
+            return (self.root / "data" / "bots" / str(self.bot_id)
+                    / "state" / "give_back.json")
+        return self.root / "state" / "give_back.json"
+
+    def _read_give_back(self) -> dict:
+        """读 `{"positions": {"SYMBOL|side": {...}}}`。读不到返回空 ——
+        「没有峰值」= 重新起算 = 不动作，是安全侧。"""
+        try:
+            import json as _json
+
+            p = self._give_back_path()
+            if not p.is_file():
+                return {}
+            rec = _json.loads(p.read_text(encoding="utf-8"))
+            return dict(rec.get("positions") or {})
+        except Exception:  # noqa: BLE001 — 状态坏了当没有，不阻塞扫描
+            return {}
+
+    def _write_give_back(self, state: dict) -> None:
+        try:
+            import json as _json
+
+            p = self._give_back_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(".json.tmp")
+            tmp.write_text(_json.dumps({"positions": state}, ensure_ascii=False,
+                                       indent=1), encoding="utf-8")
+            tmp.replace(p)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def remember_give_back(self, symbol: str, side: str, pct: Any) -> None:
+        """把**计划给的**浮盈回撤阈值记进状态（开仓 / 挂突破单时调用）。
+
+        为什么要这一步：`give_back_pct` 是**逐计划**的（模型每笔自己算），而扫描
+        循环是**逐 bot** 的 —— 它不知道当前持仓是哪一轮、按什么阈值开的。
+        所以开仓那一刻把值落到 `symbol|side` 上，扫描时按腿取。
+        """
+        try:
+            v = float(pct) if pct is not None else 0.0
+        except (TypeError, ValueError):
+            return
+        if v <= 0 or v >= 100:
+            return
+        state = self._read_give_back()
+        key = f"{symbol}|{side}"
+        rec = dict(state.get(key) or {})
+        rec["pct"] = v
+        state[key] = rec
+        self._write_give_back(state)
+
+    def check_give_back(self, symbol: str, dry: bool = False) -> dict:
+        """浮盈从峰值回撤 `pct`% → 平掉该仓位（阈值取自 `remember_give_back`）。
+
+        与 `check_peak_trail` 的区别：那个**上移 SL**（防坐电梯），这个**直接平仓**
+        （落袋）。两者都挂在扫描循环上，不依赖 LLM 轮次。
+
+        **武装条件：峰值浮盈 ≥ 1R**（R = |入场价 − 本 bot 的 SL| × 张数 × quanto）。
+        这等价于「TP1 之后才武装」——TP1 就设在 1R。没有这条，峰值只有 0.1R 时
+        回撤 40% 也会平，而锁定的那点利润还不够付往返手续费。
+
+        **平仓条件（三条都要满足）**：
+          ① 已武装
+          ② 当前浮盈 ≤ 峰值浮盈 × (1 − pct/100)
+          ③ **当前浮盈 > 0** —— 保本平仓，绝不亏着平
+
+        峰值**必须重置**的情况（与 `peak_trail` 同口径）：持仓消失 / 方向反转 /
+        入场价变了 / 上次观测太久远（`_GIVE_BACK_STALE_SEC`）。
+        """
+        out: dict[str, Any] = {"symbol": symbol, "give_back": "off", "sides": []}
+        out["give_back"] = "dry" if dry else "live"
+
+        positions = self._symbol_positions(symbol)
+        state = self._read_give_back()
+        if not positions:
+            # 持仓没了 → 清掉该 symbol 的峰值（留着会让下次开仓一上来就「已回撤」）
+            stale = [k for k in state if k.split("|", 1)[0] == symbol]
+            if stale:
+                for k in stale:
+                    state.pop(k, None)
+                self._write_give_back(state)
+            out["skipped"] = "no_position"
+            return out
+
+        for pos in positions:
+            out["sides"].append(self._give_back_side(pos, symbol, state, dry))
+        live = {f"{symbol}|{p['side']}" for p in positions}
+        for k in [k for k in state if k.split("|", 1)[0] == symbol and k not in live]:
+            state.pop(k, None)
+        self._write_give_back(state)
+        if out["sides"]:
+            for f in ("position_side", "position_size", "peak_pnl", "cur_pnl",
+                      "r_usd", "armed", "closed", "skipped", "error"):
+                if f in out["sides"][0]:
+                    out[f] = out["sides"][0][f]
+        return out
+
+    def _give_back_side(self, pos: dict, symbol: str, state: dict,
+                        dry: bool) -> dict:
+        side = str(pos.get("side") or "")
+        size = abs(int(pos.get("size") or 0))
+        entry = float(pos.get("entry_price") or 0)
+        key = f"{symbol}|{side}"
+        out: dict[str, Any] = {"position_side": side, "position_size": size}
+
+        rec = dict(state.get(key) or {})
+        try:
+            pct = float(rec.get("pct") or 0)
+        except (TypeError, ValueError):
+            pct = 0.0
+        if pct <= 0 or pct >= 100:
+            out["skipped"] = "no_pct"
+            return out
+
+        try:
+            ticker = self.client.get_ticker(symbol) or {}
+            mark = float(ticker.get("mark_price") or ticker.get("last") or 0)
+        except Exception as e:  # noqa: BLE001
+            out["error"] = f"no mark price: {e}"
+            return out
+        if mark <= 0 or entry <= 0 or size <= 0:
+            out["error"] = "no mark price"
+            return out
+
+        meta = self.client.get_contract(symbol)
+        quanto = float(getattr(meta, "quanto_multiplier", 0) or 0)
+        if quanto <= 0:
+            out["error"] = "no quanto_multiplier"
+            return out
+        # 浮盈（USD）：多单 (mark−entry)、空单 (entry−mark)，乘张数与合约乘数
+        cur_pnl = ((mark - entry) if side == "long" else (entry - mark)) * size * quanto
+        out["cur_pnl"] = round(cur_pnl, 4)
+
+        # 1R：用**本 bot 的 SL** 算。SL 被上移过就是更小的 R（风险已收紧），
+        # 这是想要的语义。没有 owned SL 就没法定义 R → 跳过。
+        sls = [(pid, px, sz) for pid, px, sz, s in self._owned_sl_orders_sided(symbol)
+               if s == side]
+        if not sls:
+            out["skipped"] = "no_owned_sl"
+            return out
+        best_sl = (max(p for _, p, _ in sls) if side == "long"
+                   else min(p for _, p, _ in sls))
+        r_usd = abs(entry - best_sl) * size * quanto
+        out["r_usd"] = round(r_usd, 4)
+        if r_usd <= 0:
+            out["skipped"] = "no_risk"
+            return out
+
+        peak = float(rec.get("peak_pnl") or 0)
+        same = (
+            rec.get("peak_pnl") is not None
+            and (time.time() - float(rec.get("ts") or 0)) <= _GIVE_BACK_STALE_SEC
+            and abs(float(rec.get("entry") or 0) - entry) <= max(abs(entry), 1.0) * 1e-6
+        )
+        peak = max(peak, cur_pnl) if same else cur_pnl
+        armed = bool(rec.get("armed")) if same else False
+        if not armed and peak >= r_usd:
+            armed = True                       # 峰值浮盈够 1R → 武装
+        state[key] = {"peak_pnl": peak, "armed": armed, "entry": entry,
+                      "size": size, "pct": pct, "ts": time.time()}
+        out["peak_pnl"] = round(peak, 4)
+        out["armed"] = armed
+
+        if not armed:
+            out["skipped"] = "not_armed"
+            return out
+        trigger = peak * (1 - pct / 100.0)
+        out["trigger_pnl"] = round(trigger, 4)
+        if cur_pnl > trigger:
+            out["skipped"] = "no_retrace"
+            return out
+        if cur_pnl <= 0:
+            # 已回撤到盈亏平衡以下 —— 此时平仓是「止损」，那是 SL 的职责。
+            # 这条路径只做「保本平仓」，不越权当止损用。
+            out["skipped"] = "not_profitable"
+            return out
+        if dry:
+            out["skipped"] = "dry"
+            return out
+        try:
+            oid = self.client.close_position(symbol, side=side, size=0).get("id")
+        except GateApiError as e:
+            out["error"] = str(e)[:160]
+            return out
+        state.pop(key, None)                   # 平掉了 → 清峰值
+        out["closed"] = {"order_id": oid, "pnl": round(cur_pnl, 4),
+                         "peak_pnl": round(peak, 4), "size": size}
+        return out
 
     def check_peak_trail(self, symbol: str) -> dict:
         """单持仓**价格峰值回撤** → 上移 SL（`account_risk.peak_trail` 逐 bot 开，默认关）。

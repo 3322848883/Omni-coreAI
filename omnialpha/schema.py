@@ -106,6 +106,10 @@ class Intent:
     price_offset: Optional[str] = None
     activation_price: Optional[str] = None
     trigger_price_tp: Optional[float] = None
+    # 浮盈回撤阈值(%)：浮盈从峰值回撤这么多就平掉仓位（`Executor.check_give_back`）。
+    # 此前这个字段只被策略层「要求填写 + 渲染进下一轮上下文」，执行侧完全不认 ——
+    # 属于本仓记录过的「要求了但不消费」。现在它真的会平仓。
+    give_back_pct: Optional[float] = None
     label: str = "signal"
     replace: str = "none"  # none | symbol | all — cancel old orders before this intent
     meta: dict = field(default_factory=dict)
@@ -256,6 +260,7 @@ def _parse_stop_entry(data: dict, action: str, default_label: str) -> Intent:
         trigger_rule_sl=rule_sl,
         trigger_price_type=trigger_price_type,
         trigger_expiration=_i(data.get("trigger_expiration"), "trigger_expiration"),
+        give_back_pct=_f(data.get("give_back_pct"), "give_back_pct"),
         margin_mode=str(data["margin_mode"]).lower() if data.get("margin_mode") else None,
         side="long" if action == "stop_entry_long" else "short",
         label=_safe_label(data.get("label") or default_label),
@@ -479,6 +484,7 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
         trigger_rule_tp=rule_tp,
         trigger_rule_sl=rule_sl,
         trigger_expiration=_i(data.get("trigger_expiration"), "trigger_expiration"),
+        give_back_pct=_f(data.get("give_back_pct"), "give_back_pct"),
         margin_mode=margin_mode,
         side="long" if action == "open_long" else "short",
         label=_safe_label(data.get("label") or default_label),
