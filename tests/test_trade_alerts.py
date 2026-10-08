@@ -15,7 +15,8 @@ class TestFormatTradeSteps(unittest.TestCase):
     def test_open_close_reduce_modify(self):
         steps = [
             {"action": "open_long", "ok": True, "symbol": "BTC_USDT",
-             "detail": {"price": 83000, "size_usd": 585}},
+             "detail": {"price": 83000, "size_usd": 585,
+                        "order": {"price": "83000", "status": "open", "fill_price": 0}}},
             {"action": "close", "ok": True, "symbol": "BTC_USDT",
              "detail": {"price": 83500, "realized_pnl": 1.2}},
             {"action": "reduce_long", "ok": True, "symbol": "BTC_USDT",
@@ -25,7 +26,8 @@ class TestFormatTradeSteps(unittest.TestCase):
         ]
         lines = format_trade_steps("bb", steps)
         self.assertEqual(len(lines), 4)
-        self.assertIn("开仓 BTC_USDT 多", lines[0])
+        # status=open + fill_price=0 → 是挂单，不是开仓
+        self.assertIn("挂单 BTC_USDT 多", lines[0])
         self.assertIn("83000", lines[0])
         self.assertIn("止盈", lines[1])
         self.assertIn("pnl=1.2", lines[1])
@@ -34,12 +36,23 @@ class TestFormatTradeSteps(unittest.TestCase):
         self.assertIn("TP=82560", lines[3])
         self.assertIn("SL=83720", lines[3])
 
+    def test_filled_open_says_open(self):
+        """已成交（status=finished）才写「开仓」。"""
+        lines = format_trade_steps("bb", [
+            {"action": "open_long", "ok": True, "symbol": "BTC_USDT",
+             "detail": {"price": 83000, "size_usd": 585,
+                        "order": {"price": "83000", "status": "finished",
+                                  "fill_price": "83010"}}},
+        ])
+        self.assertIn("开仓 BTC_USDT 多", lines[0])
+
     def test_short_side_labeled(self):
         lines = format_trade_steps("bb", [
             {"action": "open_short", "ok": True, "symbol": "BTC_USDT",
-             "detail": {"price": 83380, "size_usd": 585}},
+             "detail": {"price": 83380, "size_usd": 585,
+                        "order": {"price": "83380", "status": "open", "fill_price": 0}}},
         ])
-        self.assertIn("开仓 BTC_USDT 空", lines[0])
+        self.assertIn("挂单 BTC_USDT 空", lines[0])
 
     def test_hold_cancel_silent(self):
         steps = [

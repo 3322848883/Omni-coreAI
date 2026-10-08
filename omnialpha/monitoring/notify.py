@@ -325,7 +325,9 @@ def format_trade_steps(bot_id: str, steps: list) -> list[str]:
             sz, unit = _resolve_size(detail, s)
             sl_txt = _fmt_levels(_exit_levels(detail, s, "sl"))
             tp_txt = _fmt_levels(_exit_levels(detail, s, "tp"))
-            lines.append(f"{mark} 开仓 {sym} {side} @{px} size={sz}{unit} "
+            # 挂单 ≠ 开仓：GTC 限价单下出去时仓位还没建立
+            verb = "挂单" if _is_resting(detail, s) else "开仓"
+            lines.append(f"{mark} {verb} {sym} {side} @{px} size={sz}{unit} "
                          f"SL={sl_txt} TP={tp_txt}  [{tstamp}]")
         elif action in _CLOSE_ACTIONS:
             px = _entry_price(detail, s)
@@ -478,6 +480,27 @@ def _entry_price(detail: dict, s: dict) -> str:
         if src is not None and src != "" and str(src) != "0":
             return _fmt_num(src, 1)
     return "—"
+
+
+def _is_resting(detail: dict, s: dict) -> bool:
+    """这笔开仓是**挂在盘口等成交**，还是**已经成交**？
+
+    `open_*` 的 step 只表示「委托下出去了」—— GTC 限价单此时 `status=open`、
+    `fill_price=0`，仓位根本还没建立。旧文案一律写「开仓」，线上被误读成
+    「已经进场了」（用户反馈：通知里的开仓告警其实只是挂单）。
+
+    判据按可靠性排序：
+      1. `filled_size` / `fill_price` / `avg_price` 有值 → 已成交
+      2. `status` 为 finished/closed/filled → 已成交；`open` → 还挂着
+      3. 其余情况（字段缺失）按「挂着」处理 —— 宁可说轻，不要说成已进场
+    """
+    o = detail.get("order") or {}
+    if _first_val(o.get("filled_size"), o.get("fill_price"), o.get("avg_price")) is not None:
+        return False
+    st = str(o.get("status") or "").lower()
+    if st in ("finished", "closed", "filled"):
+        return False
+    return True
 
 
 def _first_val(*vals):
@@ -633,7 +656,14 @@ def format_trade_card(bot_id: str, steps: list) -> list[dict]:
             sl_txt = _fmt_levels(_exit_levels(detail, s, "sl"))
             tp_txt = _fmt_levels(_exit_levels(detail, s, "tp"))
             color = "green"
-            title = f"📈 开仓告警"
+            # 挂单 ≠ 开仓：GTC 限价单下出去时仓位还没建立，标题要如实说。
+            # **字段名保持「入场价」不变** —— 它是给消费方看的稳定契约，
+            # 只有标题与颜色随「挂着 / 已成交」变化。
+            if _is_resting(detail, s):
+                color = "blue"
+                title = "📋 挂单告警"
+            else:
+                title = "📈 开仓告警"
             fields = [
                 ("Bot", bot_id), ("币种", sym),
                 ("方向", f"开{side}"), ("入场价", px),
