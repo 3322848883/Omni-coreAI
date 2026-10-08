@@ -27,6 +27,14 @@ def _is_flat_error(e: Exception) -> bool:
 
 PRICE_TYPE_MAP = {"latest": 0, "mark": 1, "index": 2}
 
+# 权益比例上限（`account_risk.max_notional_pct`）的**微越界容差**。
+# `loop._prompt_risk` 把「权益 × pct」的精确值交给 AI，AI 会顶格用它；而权益在
+# 「出价 → 执行」之间会因浮盈/浮亏漂移，上限跟着收紧一点点 —— 顶格那笔就被
+# `_check_notional` 整笔拒掉（2026-10-07 实盘 10h 内 8 次，全是模型想开的仓）。
+# 只钳这个比例以内的越界（取整 / 权益漂移）；再大就是计划本身有问题，仍交给
+# `_check_notional` 拒单，护栏不会被磨平。
+_NOTIONAL_DRIFT_TOL = 0.01
+
 
 @dataclass
 class StepResult:
@@ -481,10 +489,19 @@ class Executor:
             cur_orders = {str(o.get("id") or ""): o
                           for o in self._owned_open_orders(sym, prefix)}
             pending_entry = self._has_pending_entry(sym)
+            # **本轮已给这个 symbol 重挂保护单时，旧的「预挂保护单」纯属多余**。
+            # 不加这个例外的话，`_should_keep_protection` 会因为「有待成交入场单」
+            # （replace 语义下恒为真）把上一轮的孤儿保护单全部保留 → 每轮累积一批 →
+            # 实测 8 小时触发 40 次 `orphan_protector` 对账告警。reconcile 每次都能
+            # 兜底清干净，但噪音会淹没真问题，且白费撤单调用。
+            # 安全性：本函数在**新单挂完之后**才跑（place-before-cancel），所以撤旧时
+            # 新保护单已就位；真有持仓对应的保护单仍由 `_should_keep_protection` 拦住。
+            fresh_protection = bool(keep_price.get(sym))
+            keep_pending = pending_entry and not fresh_protection
             cancelled = []
             skipped = []
             for pid in sorted(old_p):
-                if self._should_keep_protection(cur_price.get(str(pid)), positions, pending_entry):
+                if self._should_keep_protection(cur_price.get(str(pid)), positions, keep_pending):
                     skipped.append(("price", pid))
                     continue
                 try:
@@ -1007,7 +1024,27 @@ class Executor:
         if cap is not None and float(size_usd) > float(cap):
             # 没超过 target×1.3，但仍越过了名义硬顶 → 必须钳，否则 _check_notional 会拒
             return float(cap), f"size_capped {float(size_usd):.0f}->{float(cap):.0f} (max_notional_usd)"
+        # 权益比例上限此前**没有钳制路径**，只有 `_check_notional` 的拒单闸门 —— 见
+        # `_NOTIONAL_DRIFT_TOL` 的说明。这里只钳微越界。
+        pct_cap = self._notional_pct_cap(equity)
+        if pct_cap is not None:
+            s = float(size_usd)
+            if pct_cap < s <= pct_cap * (1 + _NOTIONAL_DRIFT_TOL):
+                return pct_cap, (
+                    f"size_capped {s:.2f}->{pct_cap:.2f} (max_notional_pct drift)"
+                )
         return float(size_usd), ""
+
+    def _notional_pct_cap(self, equity: float) -> Optional[float]:
+        """权益比例上限（`account_risk.max_notional_pct`）；未配置或权益无效返回 None。"""
+        pct = self.account_risk.get("max_notional_pct")
+        try:
+            pct = float(pct) if pct is not None else 0.0
+        except (TypeError, ValueError):
+            return None
+        if pct <= 0 or equity <= 0:
+            return None
+        return equity * pct
 
     def _atr_pct(self, symbol: str, lookback: int = 14) -> float:
         """近 lookback 根 K 线的 ATR%（=ATR/close×100）。取不到返回 0。"""

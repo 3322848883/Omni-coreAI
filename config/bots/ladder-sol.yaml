@@ -33,6 +33,10 @@ account_risk:
   max_notional_pct: 6.0
   max_total_notional_pct: 10.0
   daily_loss_limit_usd: 5
+  # 阶梯**永远双向**：持有多单时也必须能继续挂空腿。
+  # no_flip 默认开启（禁止反向开仓），实测 8 小时里 30 次执行失败全因它 ——
+  # 一旦有一侧成交，另一侧就再也挂不上，双向对冲退化成单边。
+  no_flip: false
   # 浮盈回撤保护：某腿浮盈后，价格从峰值回撤 peak_trail_atr×ATR(1h) 就把该腿 SL 上移
   # （只上移不下移）。双向持仓下两条腿各自跟踪，状态按 bot 隔离。
   peak_trail: true
@@ -45,7 +49,10 @@ strategist:
   # 1m 是 0.47 —— 每轮往返净亏，人格里已明令不碰。
   interval_sec: 900
   timeframe: 15m
-  event_on_kline_close: true
+  # 关掉 K 线收盘触发：它和 interval 是**两条各自 15 分钟的节拍**，相位错开后
+  # 合并成每 7.5 分钟一次（实测 8 小时 82 轮 ≈ 6.1 分钟/轮，成本 ×2.5）。
+  # 只留 interval 定时 + AI 价格触发（后者是真按行情变化叫醒）。
+  event_on_kline_close: false
   event_timeframe: 15m
   candles: 200
   write_hold: true
