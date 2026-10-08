@@ -685,7 +685,7 @@ class TestClosedToSteps(unittest.TestCase):
         渲染时刻（实测 2026-10-07 卡片写着 22:50，而平仓发生在 13:38）。
         """
         from omnialpha.watcher import _steps_from_closed
-        from omnialpha.monitoring.notify import format_trade_card
+        from omnialpha.monitoring.notify import _fmt_ts, format_trade_card
 
         close_ts = 1791380321
         steps = _steps_from_closed([{"contract": "BTC_USDT", "side": "long",
@@ -698,8 +698,14 @@ class TestClosedToSteps(unittest.TestCase):
             for el in (card.get("elements") or [])
             for f in (el.get("fields") or [])
         )
-        expect = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(close_ts))
+        # 期望值必须按**卡片用的时区**算。原先这里用 `time.localtime(close_ts)`，
+        # 等于假设「跑测试的机器也在 UTC+8」—— 服务器 TZ=UTC，算出来是 13:38，
+        # 而卡片按设计渲染北京时间 21:38 → 这条测试在服务器上**一直失败**，
+        # `deploy.sh` 第 6 步因此永远过不去（旧版本 f5f7136 上同样失败）。
+        expect = _fmt_ts(close_ts)
         self.assertIn(expect[:13], txt, f"卡片时间不是平仓时刻：{txt}")
+        self.assertNotIn(time.strftime("%H:%M", time.localtime()), txt,
+                         f"卡片显示的是渲染时刻而不是平仓时刻：{txt}")
 
     def test_negative_pnl_is_stop_loss(self):
         from omnialpha.watcher import _steps_from_closed
