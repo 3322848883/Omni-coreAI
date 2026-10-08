@@ -113,6 +113,11 @@ class Intent:
     label: str = "signal"
     replace: str = "none"  # none | symbol | all — cancel old orders before this intent
     meta: dict = field(default_factory=dict)
+    # 多级止盈：第 3 档份额 + 第 4 档起（`tp4`/`tp5`，见 `tp_fields`）。
+    # 追加在末尾 —— 改动字段顺序会悄悄影响按位置构造的调用方。
+    tp3_share: Optional[float] = None
+    tp_extra: list[float] = field(default_factory=list)
+    tp_extra_shares: list[Optional[float]] = field(default_factory=list)
 
     @property
     def needs_open(self) -> bool:
@@ -165,12 +170,84 @@ def infer_trigger_rules(action: str, is_tp: bool) -> int:
     return 1 if is_tp else 2
 
 
+# ── 多级止盈：**唯一字段清单** ─────────────────────────────────
+# 解析（`_parse_open` / `_parse_stop_entry` / `_parse_modify_tp_sl` / `_parse_grid`）、
+# 前置校验、挂腿、通知、归属全部从这一份取。
+#
+# 为什么要收敛：这份清单原先在 5 个地方各写一遍，`_parse_modify_tp_sl` 那份漏了
+# `tp2/tp3` —— 模型按开仓的格式传了双止盈，解析这步就丢掉了；下游 `_modify_tp_sl`
+# 又会撤掉所有旧 TP 只挂一条 → 双止盈在第一次改单后永久塌成单腿。实测 brooks-btc
+# 372 次改单里 **0 次**挂出 ≥2 条 TP，而开仓 169 次里 140 次是双止盈。
+#
+# `tp6+` 直接报错而不是忽略：**静默丢弃**正是上面这条 bug 的成因。
+TP_MAX_LEVELS = 5
+TP_LEVEL_KEYS = ("tp", "tp2", "tp3", "tp4", "tp5")
+
+
+def tp_fields(data: dict) -> dict:
+    """抽出多级止盈字段（**唯一来源**）→ 可直接展开进 `Intent` / `Chip`。
+
+    含第 4 档起的 `tp_extra` / `tp_extra_shares`（列表，与价格同序）。
+    """
+    out: dict[str, Any] = {
+        "tp": _f(data.get("tp"), "tp"),
+        "tp2": _f(data.get("tp2"), "tp2"),
+        "tp3": _f(data.get("tp3"), "tp3"),
+        "tp1_share": _f(data.get("tp1_share"), "tp1_share"),
+        "tp2_share": _f(data.get("tp2_share"), "tp2_share"),
+        "tp3_share": _f(data.get("tp3_share"), "tp3_share"),
+    }
+    extra: list[float] = []
+    extra_shares: list[Optional[float]] = []
+    for key in data:
+        name = str(key)
+        if not name.startswith("tp") or not name[2:].isdigit():
+            continue
+        level = int(name[2:])
+        if level > TP_MAX_LEVELS:
+            raise SchemaError(f"{name}: 最多支持 {TP_MAX_LEVELS} 档止盈")
+        if level < 4:
+            continue
+        px = _f(data.get(key), name)
+        if px is None:
+            continue
+        extra.append(px)
+        extra_shares.append(_f(data.get(f"{name}_share"), f"{name}_share"))
+    out["tp_extra"] = extra
+    out["tp_extra_shares"] = extra_shares
+    return out
+
+
+def tp_levels_of(intent: Any) -> list[tuple[float, Optional[float]]]:
+    """该意图的止盈档位 → `[(价格, 份额或 None)]`，按挂单顺序。
+
+    对 `Intent` 与策略层 `Chip` 通用（同名字段）。
+    """
+    prices = [intent.tp, intent.tp2, intent.tp3,
+              *(getattr(intent, "tp_extra", None) or [])]
+    shares = [intent.tp1_share, intent.tp2_share,
+              getattr(intent, "tp3_share", None),
+              *(getattr(intent, "tp_extra_shares", None) or [])]
+    out: list[tuple[float, Optional[float]]] = []
+    for i, px in enumerate(prices):
+        if px is None:
+            continue
+        out.append((float(px), shares[i] if i < len(shares) else None))
+    return out
+
+
 def _parse_modify_tp_sl(data: dict, default_label: str, requested_action: str = "modify_tp_sl") -> Intent:
-    """Move TP/SL on an existing position. Requires symbol and at least one of tp/sl."""
+    """Move TP/SL on an existing position. Requires symbol and at least one of tp/sl.
+
+    多级止盈走 `tp_fields()`（唯一字段清单）。原先这里只取 `tp`，`tp2/tp3` 在
+    **解析这一步就被静默丢掉**，而下游 `_modify_tp_sl` 会撤掉所有旧 TP 再挂新的
+    → **TP2 永久消失**（实测 372 次改单、0 次挂出 ≥2 条 TP）。
+    """
     symbol = data.get("symbol")
     if not symbol:
         raise SchemaError("modify_tp_sl requires symbol")
-    tp = _f(data.get("tp"), "tp")
+    tf = tp_fields(data)
+    tp = tf["tp"]
     sl = _f(data.get("sl"), "sl")
     if tp is None and sl is None:
         raise SchemaError("modify_tp_sl requires tp and/or sl")
@@ -187,9 +264,9 @@ def _parse_modify_tp_sl(data: dict, default_label: str, requested_action: str = 
     return Intent(
         action="modify_tp_sl",
         symbol=_check_symbol_token(symbol),
-        tp=tp,
         sl=sl,
         side=side,
+        **tf,
         tp_mode="limit_order" if tp_mode == "limit" else tp_mode,
         sl_mode="limit_order" if sl_mode == "limit" else sl_mode,
         tp_type=str(data.get("tp_type") or "market").lower(),
@@ -249,12 +326,8 @@ def _parse_stop_entry(data: dict, action: str, default_label: str) -> Intent:
         order_type=order_type,
         price=price,
         leverage=_i(data.get("leverage"), "leverage"),
-        tp=_f(data.get("tp"), "tp"),
         sl=_f(data.get("sl"), "sl"),
-        tp2=_f(data.get("tp2"), "tp2"),
-        tp3=_f(data.get("tp3"), "tp3"),
-        tp1_share=_f(data.get("tp1_share"), "tp1_share"),
-        tp2_share=_f(data.get("tp2_share"), "tp2_share"),
+        **tp_fields(data),
         trigger_price_tp=trigger_price,
         trigger_rule_tp=rule,
         trigger_rule_sl=rule_sl,
@@ -408,17 +481,14 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
         # allow explicit null; reject non-zero market price to avoid silent limit
         pass
 
-    tp = _f(data.get("tp"), "tp")
+    tf = tp_fields(data)
+    tp = tf["tp"]
     sl = _f(data.get("sl"), "sl")
     # default market: trigger → market fill (guaranteed exit). explicit limit still allowed
     tp_type = str(data.get("tp_type") or "market").lower()
     sl_type = str(data.get("sl_type") or "market").lower()
     tp_mode = str(data.get("tp_mode") or "trigger").lower()
     sl_mode = str(data.get("sl_mode") or "trigger").lower()
-    tp2 = _f(data.get("tp2"), "tp2")
-    tp3 = _f(data.get("tp3"), "tp3")
-    tp1_share = _f(data.get("tp1_share"), "tp1_share")
-    tp2_share = _f(data.get("tp2_share"), "tp2_share")
     for name, m in (("tp_mode", tp_mode), ("sl_mode", sl_mode)):
         if m not in ("trigger", "limit_order", "limit"):
             raise SchemaError(f"{name} must be trigger|limit_order")
@@ -468,12 +538,8 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
         order_type=order_type,
         price=price,
         leverage=leverage,
-        tp=tp,
         sl=sl,
-        tp2=tp2,
-        tp3=tp3,
-        tp1_share=tp1_share,
-        tp2_share=tp2_share,
+        **tf,
         tp_type=tp_type,
         sl_type=sl_type,
         tp_mode="limit_order" if tp_mode in ("limit_order", "limit") else "trigger",
@@ -514,11 +580,7 @@ def _parse_grid(data: dict, default_label: str) -> Intent:
         raise SchemaError(f"unsupported type: {order_type!r}")
 
     label = str(data.get("label") or default_label)
-    tp = _f(data.get("tp"), "tp")
-    tp2 = _f(data.get("tp2"), "tp2")
-    tp3 = _f(data.get("tp3"), "tp3")
-    tp1_share = _f(data.get("tp1_share"), "tp1_share")
-    tp2_share = _f(data.get("tp2_share"), "tp2_share")
+    tf = tp_fields(data)
     tp_scope = str(data.get("tp_scope") or "per_level").lower()
     sl_scope = str(data.get("sl_scope") or "per_level").lower()
     for nm, sc in (("tp_scope", tp_scope), ("sl_scope", sl_scope)):
@@ -548,12 +610,8 @@ def _parse_grid(data: dict, default_label: str) -> Intent:
         symbol=_check_symbol_token(symbol),
         side=side,
         order_type=order_type,
-        tp=tp,
-        tp2=tp2,
-        tp3=tp3,
-        tp1_share=tp1_share,
-        tp2_share=tp2_share,
         sl=sl,
+        **tf,
         tp_type=str(data.get("tp_type") or "limit").lower(),
         sl_type=str(data.get("sl_type") or "limit").lower(),
         tp_limit_price=_f(data.get("tp_limit_price"), "tp_limit_price"),
@@ -622,6 +680,8 @@ def expand_signal(signal: SignalFile) -> list[Intent]:
         total_size = sum(int(lv.get("size") or 0) for lv in levels)
         for i, lv in enumerate(levels):
             last = i == len(levels) - 1
+            # tp_scope=shared → 止盈只在末层挂一次（覆盖全部层），其余层不重复挂
+            keep_tp = intent.tp_scope != 'shared' or last
             out.append(
                 Intent(
                     action=open_action,
@@ -631,11 +691,14 @@ def expand_signal(signal: SignalFile) -> list[Intent]:
                     order_type=intent.order_type,
                     price=lv.get("price"),
                     leverage=intent.leverage,
-                    tp=intent.tp if (intent.tp_scope != 'shared' or last) else None,
-                    tp2=intent.tp2 if (intent.tp_scope != 'shared' or last) else None,
-                    tp3=intent.tp3 if (intent.tp_scope != 'shared' or last) else None,
+                    tp=intent.tp if keep_tp else None,
+                    tp2=intent.tp2 if keep_tp else None,
+                    tp3=intent.tp3 if keep_tp else None,
+                    tp_extra=list(intent.tp_extra) if keep_tp else [],
                     tp1_share=intent.tp1_share,
                     tp2_share=intent.tp2_share,
+                    tp3_share=intent.tp3_share,
+                    tp_extra_shares=list(intent.tp_extra_shares),
                     # 每层都带 sl（require_sl + 各层自保护）；shared 时末层再挂全量 SL
                     sl=intent.sl,
                     tp_size_override=total_size if (intent.tp and intent.tp_scope == 'shared' and last) else None,

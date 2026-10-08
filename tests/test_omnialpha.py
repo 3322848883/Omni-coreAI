@@ -577,6 +577,180 @@ class TestModifyTpSl(unittest.TestCase):
         with self.assertRaises(Exception):
             parse_signal({"action": "modify_tp_sl", "symbol": "BTC_USDT"})
 
+    def _modify(self, payload: dict):
+        client = self._client_with_pos()
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], order_scope="own",
+                      label_prefix="brk")
+        rep = ex.execute_signal(parse_signal(payload))
+        self.assertTrue(rep.ok, rep.to_dict())
+        return client, rep.results[0]
+
+    @staticmethod
+    def _leg_prices(step) -> list[float]:
+        return [float(((o.get("trigger") or {}).get("price"))) for o in step.detail["tp_orders"]]
+
+    @staticmethod
+    def _leg_sizes(step) -> list[int]:
+        return [abs(int((o.get("initial") or {}).get("size") or 0)) for o in step.detail["tp_orders"]]
+
+    def test_modify_tp2_places_two_legs(self):
+        """`modify_tp_sl` 带 tp2 时必须挂**两条** TP —— 否则双止盈在第一次改单后就塌成单腿。
+
+        回归背景（实盘核实，brooks-btc 全量日志）：模型在 27% 的 modify 里按开仓的
+        格式传了 `tp2` + `tp1_share`（372 次改单里 100 次），但 `_parse_modify_tp_sl`
+        只取 `tp` → tp2 在**解析这步**就被丢掉；下游 `_modify_tp_sl` 又撤掉**所有**
+        旧 TP、只挂一条新的 → **TP2 永久消失**。日志实证：372 次改单里 **0 次**
+        挂出 ≥2 条 TP（开仓 169 次里 140 次是双止盈）。
+        """
+        client, step = self._modify({
+            "action": "modify_tp_sl", "symbol": "BTC_USDT",
+            "tp": 85150, "tp2": 85600, "tp1_share": 0.5, "sl": 84400,
+        })
+        detail = step.detail
+        self.assertEqual(self._leg_prices(step), [85150.0, 85600.0], "两档 TP 都要挂出去")
+        self.assertEqual(self._leg_sizes(step), [44, 43], "按份额拆、合计=持仓 87 张")
+        # 与 `_open` 同字段：多腿走 tp_orders（卡片/exchange_pnl 归属都读它）
+        self.assertEqual(len(detail.get("sl_orders") or []), 1)
+        # 兼容字段：detail.tp 仍是第一档；多腿时不写单腿的 tp_placed
+        self.assertEqual(detail.get("tp"), 85150)
+        self.assertNotIn("tp_placed", detail)
+        # 旧 TP + 旧 SL 都撤（各 1 张），新挂 2 条 TP + 1 条 SL
+        self.assertEqual(len(client.cancelled), 2)
+
+    def test_modify_single_tp_still_one_leg(self):
+        """配对：只给 `tp` 一条时仍只挂一条 —— 没把「单止盈」也撑成两条。"""
+        client, step = self._modify({
+            "action": "modify_tp_sl", "symbol": "BTC_USDT", "tp": 85150, "sl": 84400,
+        })
+        detail = step.detail
+        self.assertEqual(self._leg_prices(step), [85150.0])
+        self.assertEqual(self._leg_sizes(step), [87], "单腿吃满整仓")
+        # 单腿保留 tp_placed（既有消费者直读它）
+        self.assertEqual((detail.get("tp_placed") or {}).get("price"), 85150)
+        self.assertEqual(len(client.cancelled), 2)
+
+    def test_modify_tp3_places_three_legs(self):
+        """第三档（tp3）同样要落地 —— 档位不是只有 tp2 有这个问题。"""
+        _client, step = self._modify({
+            "action": "modify_tp_sl", "symbol": "BTC_USDT",
+            "tp": 85150, "tp2": 85600, "tp3": 86000, "sl": 84400,
+        })
+        self.assertEqual(self._leg_prices(step), [85150.0, 85600.0, 86000.0])
+        self.assertEqual(sum(self._leg_sizes(step)), 87)
+
+    def test_modify_tp4_places_four_legs(self):
+        """第 4 档（`tp4`）—— 契约没宣传，但**写得出就必须挂得出**，不许静默丢档。"""
+        client, step = self._modify({
+            "action": "modify_tp_sl", "symbol": "BTC_USDT",
+            "tp": 85150, "tp2": 85600, "tp3": 86000, "tp4": 86500, "sl": 84400,
+        })
+        self.assertEqual(self._leg_prices(step),
+                         [85150.0, 85600.0, 86000.0, 86500.0])
+        self.assertEqual(sum(self._leg_sizes(step)), 87)
+        # 4 条 TP + 1 条 SL 都留在场上（撤的只有旧的 TP/SL，不含本轮新挂的）
+        self.assertEqual(len(client.price_orders), 2 + 5)
+
+    def test_tp_level_beyond_cap_rejected(self):
+        """超过档位上限 → **报错**而不是静默忽略（静默丢弃正是这个 bug 的成因）。"""
+        with self.assertRaises(Exception):
+            parse_signal({"action": "modify_tp_sl", "symbol": "BTC_USDT",
+                          "tp": 85150, "tp6": 87000})
+
+    def test_tp_legs_sizes_never_exceed_position(self):
+        """任意档位数 / 份额下：每腿 ≥1 张、合计 = 仓位，绝不超过（reduce-only 安全）。"""
+        from omnialpha.schema import Intent
+        ex = Executor(FakeClient(), symbols_whitelist=["BTC_USDT"], label_prefix="brk")
+        cases = [
+            Intent(action="open_long", tp=1, tp2=2),
+            Intent(action="open_long", tp=1, tp2=2, tp1_share=0.7),
+            Intent(action="open_long", tp=1, tp2=2, tp1_share=0.7, tp2_share=0.7),
+            Intent(action="open_long", tp=1, tp2=2, tp3=3, tp_extra=[4, 5]),
+            Intent(action="open_long", tp=1, tp2=2, tp3=3, tp1_share=0.5),
+        ]
+        for it in cases:
+            for size in (1, 2, 3, 7, 87):
+                legs = ex._tp_legs(it, size)
+                self.assertTrue(all(s >= 1 for _, s in legs), (it, size, legs))
+                self.assertLessEqual(sum(s for _, s in legs), size, (it, size, legs))
+                if size >= len(legs):
+                    self.assertEqual(sum(s for _, s in legs), size, (it, size, legs))
+        # 仓位比档位还少 → 退回单腿，不挂超过仓位的腿
+        legs = ex._tp_legs(cases[-1], 2)
+        self.assertEqual(len(legs), 1)
+        self.assertEqual(legs[0][1], 2)
+
+    def test_plan_chip_to_two_legs_end_to_end(self):
+        """模型 chip（hold + tp/tp2/tp1_share）→ bridge → inbox → 执行器 = 两条 TP 腿。
+
+        实盘这条链路上三段都曾把 tp2 丢掉（策略字段清单 / `_parse_modify_tp_sl` /
+        `_modify_tp_sl`），逐段单测过不了「整体是否还漏」，所以整条串起来钉住。
+        """
+        from omnialpha.strategist.bridge import chips_to_signal
+        from omnialpha.strategist.risk import RiskConfig, apply_risk
+        from omnialpha.strategist.schema import parse_plan
+
+        plan = parse_plan({"cycle_id": "e2e", "chips": [{
+            "symbol": "BTC_USDT", "action": "hold", "confidence": 0.6,
+            "tp": 85150, "tp2": 85600, "tp1_share": 0.5, "sl": 84400}]})
+        payload = chips_to_signal(plan, apply_risk(plan, RiskConfig(min_confidence=0.5)),
+                                  bot_id="brk")
+        item = payload["orders"][0]
+        self.assertEqual(item["action"], "modify_tp_sl", "hold+tp/sl 应映射成改单")
+        self.assertEqual(item.get("tp2"), 85600, "chip 侧不许丢档")
+
+        client = self._client_with_pos()
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], order_scope="own",
+                      label_prefix="brk")
+        rep = ex.execute_signal(parse_signal(payload))
+        self.assertTrue(rep.ok, rep.to_dict())
+        self.assertEqual(self._leg_prices(rep.results[0]), [85150.0, 85600.0])
+
+    def test_plan_chip_extra_levels_end_to_end(self):
+        """第 4/5 档（`tp4`/`tp5`）同样要一路走到挂单 —— 链路任一段掉档都算失败。"""
+        from omnialpha.strategist.bridge import chips_to_signal
+        from omnialpha.strategist.risk import RiskConfig, apply_risk
+        from omnialpha.strategist.schema import parse_plan
+
+        plan = parse_plan({"cycle_id": "e2e5", "chips": [{
+            "symbol": "BTC_USDT", "action": "hold", "confidence": 0.6,
+            "tp": 85150, "tp2": 85600, "tp3": 86000, "tp4": 86500, "tp5": 87000,
+            "sl": 84400}]})
+        payload = chips_to_signal(plan, apply_risk(plan, RiskConfig(min_confidence=0.5)),
+                                  bot_id="brk")
+        item = payload["orders"][0]
+        self.assertEqual([item.get(k) for k in ("tp3", "tp4", "tp5")],
+                         [86000, 86500, 87000])
+
+        client = self._client_with_pos()
+        ex = Executor(client, symbols_whitelist=["BTC_USDT"], order_scope="own",
+                      label_prefix="brk")
+        rep = ex.execute_signal(parse_signal(payload))
+        self.assertTrue(rep.ok, rep.to_dict())
+        self.assertEqual(self._leg_prices(rep.results[0]),
+                         [85150.0, 85600.0, 86000.0, 86500.0, 87000.0])
+        self.assertEqual(sum(self._leg_sizes(rep.results[0])), 87)
+
+    def test_modify_card_shows_all_legs(self):
+        """端到端：改单挂出两腿后，推送卡片/文案必须显示**两档**止盈。
+
+        这是修复的第一版留下的缺口：`_modify_tp_sl` 只写单腿的 `tp_placed`，
+        而卡片读 `tp_orders` → 挂的是两条、报的是一条。
+        """
+        from omnialpha.monitoring.notify import format_trade_card, format_trade_steps
+
+        _client, step = self._modify({
+            "action": "modify_tp_sl", "symbol": "BTC_USDT",
+            "tp": 85150, "tp2": 85600, "tp1_share": 0.5, "sl": 84400,
+        })
+        step_dict = {"action": step.action, "symbol": step.symbol,
+                     "ok": step.ok, "error": step.error, "detail": step.detail}
+        card = json.dumps(format_trade_card("brooks-btc", [step_dict])[0],
+                          ensure_ascii=False)
+        text = format_trade_steps("brooks-btc", [step_dict])[0]
+        self.assertIn("85150 / 85600", card, card)
+        self.assertIn("44/43", card, card)
+        self.assertIn("85150 / 85600", text)
+
     def test_hold_without_tpsl_still_noop(self):
         client = self._client_with_pos()
         ex = Executor(client, symbols_whitelist=["BTC_USDT"], label_prefix="brk")

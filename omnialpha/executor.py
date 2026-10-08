@@ -9,7 +9,13 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .gate_client import GateApiError, GateClient, resolve_symbol
-from .schema import Intent, SignalFile, expand_signal, infer_trigger_rules
+from .schema import (
+    Intent,
+    SignalFile,
+    expand_signal,
+    infer_trigger_rules,
+    tp_levels_of,
+)
 from .sizing import (
     default_trigger_limit_price,
     pct_to_size_usd,
@@ -1116,9 +1122,9 @@ class Executor:
             rule_tp = intent.trigger_rule_tp
             if rule_tp is None:
                 rule_tp = infer_trigger_rules(open_action, is_tp=True)
-            for px in (intent.tp, intent.tp2, intent.tp3):
-                if px is not None:
-                    legs.append(("tp", float(px), int(rule_tp)))
+            # 档位清单唯一来源：漏一档就等于放一腿非法触发价过关
+            for px, _share in tp_levels_of(intent):
+                legs.append(("tp", float(px), int(rule_tp)))
         if intent.sl is not None and intent.sl_mode != "limit_order":
             rule_sl = intent.trigger_rule_sl
             if rule_sl is None:
@@ -1404,35 +1410,45 @@ class Executor:
         return f"alert_only: 已成交 {filled}/{size} 但保护单未挂上（未自动平仓）"
 
     def _tp_legs(self, intent: Intent, exit_size: int) -> list[tuple[float, int]]:
-        """多级止盈腿：tp/tp2/tp3 → [(price, size)]。份额缺省 1/N。"""
-        prices = [p for p in (intent.tp, intent.tp2, intent.tp3) if p is not None]
-        if not prices or exit_size <= 0:
+        """多级止盈腿：任意档位 → `[(price, size)]`，尺寸合计 = `exit_size`。
+
+        档位来自 `schema.tp_levels_of()`（唯一来源），**不在这里重写一遍**：
+        这条路径原先只认 `tp/tp2/tp3` 三档，档位清单散落 5 处，多一档就少挂一腿。
+
+        份额规则：给了 `tpN_share` 的档按份额，没给的均分剩余；份额之和不为 1
+        一律归一化（不做「最后一档兜底吃掉全部」这种静默兜底）。
+        """
+        pairs = tp_levels_of(intent)
+        if not pairs or exit_size <= 0:
             return []
-        if len(prices) == 1:
-            return [(prices[0], int(exit_size))]
-        s1 = intent.tp1_share
-        s2 = intent.tp2_share
-        if s1 is None and s2 is None:
-            share = [1.0 / len(prices)] * len(prices)
+        n = len(pairs)
+        if n == 1 or exit_size < n:
+            # 拆不出「每腿 ≥1 张」时退回单腿（第一档全平）：宁可少一档，
+            # 也不要挂出合计超过持仓量的 reduce-only 单。
+            return [(pairs[0][0], int(exit_size))]
+        given = {i: min(1.0, max(0.0, float(s)))
+                 for i, (_, s) in enumerate(pairs) if s is not None}
+        if not given:
+            share = [1.0 / n] * n
         else:
-            s1 = float(s1 if s1 is not None else (1.0 / 3.0))
-            s2 = float(s2 if s2 is not None else (1.0 / 3.0))
-            s1 = min(1.0, max(0.0, s1))
-            s2 = min(1.0 - s1, max(0.0, s2))
-            rest = max(0.0, 1.0 - s1 - s2)
-            share = [s1, s2] + ([rest] if len(prices) > 2 else [])
-            if len(share) < len(prices):
-                share.append(0.0)
-            if abs(sum(share) - 1.0) > 1e-6 and len(prices) == 2:
-                share = [s1, 1.0 - s1]
-        legs = []
-        acc = 0
-        for i, px in enumerate(prices):
-            if i < len(prices) - 1:
-                sz = max(1, int(round(exit_size * share[i])))
-                acc += sz
+            total = sum(given.values())
+            free = [i for i in range(n) if i not in given]
+            if total > 1.0:
+                share = [(given.get(i, 0.0) / total) for i in range(n)]
             else:
-                sz = max(1, exit_size - acc)
+                each = ((1.0 - total) / len(free)) if free else 0.0
+                share = [given.get(i, each) for i in range(n)]
+        legs: list[tuple[float, int]] = []
+        remaining = int(exit_size)
+        for i, (px, _) in enumerate(pairs):
+            left = n - i
+            if left == 1:
+                sz = remaining
+            else:
+                sz = int(round(exit_size * share[i]))
+                # 给后面的腿各留 ≥1 张，避免前腿四舍五入把总额撑爆
+                sz = max(1, min(sz, remaining - (left - 1)))
+            remaining -= sz
             legs.append((float(px), int(sz)))
         return legs
 
@@ -1506,20 +1522,41 @@ class Executor:
         }
         errors: list[str] = []
 
-        for kind, price, mode in (
-            ("tp", intent.tp, intent.tp_mode),
-            ("sl", intent.sl, intent.sl_mode),
-        ):
-            if price is None:
-                detail[f"{kind}_skipped"] = True
-                continue
+        # 触发价合法性：与 `_open` / `_stop_entry` 同源前置校验。漏了这一步，
+        # 非法触发价会等到**逐腿挂单时**才被交易所拒（AUTO_TRIGGER_PRICE_*_MARK）——
+        # 那时前面的腿已挂上、旧腿已撤，于是双止盈塌成单腿（正是要修的那个症状），
+        # 整轮还被记成失败。先拦下来则**旧结构原样保留**（含 TP2），下一轮再调。
+        side_err = self._precheck_exit_triggers(intent)
+        if side_err:
+            return StepResult("modify_tp_sl", intent.symbol, False, error=side_err)
+
+        # TP 可能是**多腿**（任意档位）—— 与 `_open` 同源用 `_tp_legs` 展开。
+        # 原先这里只挂 `intent.tp` 一条，却在下面对**所有**旧 TP 执行撤单，
+        # 于是双止盈结构在第一次 modify 之后就塌成单腿（TP2 永久消失）。
+        # 实测：brooks-btc 372 次改单、**0 次**挂出 ≥2 条 TP（而开仓 169 次里 140 次双止盈）。
+        tp_legs = self._tp_legs(intent, size) if intent.tp is not None else []
+        planned: list[tuple[str, float, int, str]] = [
+            (f"tp{i + 1}" if len(tp_legs) > 1 else "tp", px, int(sz), intent.tp_mode)
+            for i, (px, sz) in enumerate(tp_legs)
+        ]
+        if intent.sl is not None:
+            planned.append(("sl", float(intent.sl), int(size), intent.sl_mode))
+
+        # `tp_orders` / `sl_orders` 与 `_open` / `_stop_entry` **同字段同形状** ——
+        # 通知卡片（`notify._exit_levels`）、`exchange_pnl` 归属、上线前脚本都按这两个
+        # 字段取「实际挂出的腿」。此前 modify 只写单腿的 `tp_placed`，多腿结构在
+        # 卡片上只显示第一档、TP2 的成交也归不了属。
+        tp_orders: list[dict] = []
+        sl_orders: list[dict] = []
+        for kind, price, leg_size, mode in planned:
+            is_tp = kind.startswith("tp")
             try:
                 rec_, err_ = self._place_exit_leg(
-                    lambda p=price, m=mode, k=kind: (
-                        self._place_limit_exit(intent, pos_side, p, is_tp=(k == "tp"), meta=meta, size=size)
+                    lambda p=price, m=mode, sz=leg_size, t=is_tp: (
+                        self._place_limit_exit(intent, pos_side, p, is_tp=t, meta=meta, size=sz)
                         if m == "limit_order"
                         else self._place_trigger(
-                            intent, trigger_side, p, is_tp=(k == "tp"), meta=meta, size=size
+                            intent, trigger_side, p, is_tp=t, meta=meta, size=sz
                         )
                     ),
                     kind=kind,
@@ -1532,12 +1569,28 @@ class Executor:
                 oid = str(order.get("id") or "")
                 if oid:
                     new_ids.add(oid)
-                detail[f"{kind}_placed"] = {"id": oid, "price": price, "check": rec_.get("check")}
-                # 统一字段名：与 open_* 的 detail.tp/detail.sl 对齐，供卡片/日志等消费者直读
-                detail[kind] = price
+                entry = {"id": oid, "price": price, "size": leg_size,
+                         "check": rec_.get("check")}
+                if is_tp:
+                    tp_orders.append(rec_)
+                else:
+                    sl_orders.append(rec_)
+                    detail["sl_placed"] = entry
+                # 统一字段名：与 open_* 的 detail.tp/detail.sl 对齐，供卡片/日志等消费者直读。
+                # 单腿时才写 `tp_placed` —— 多腿用 `tp_orders`（与 `_open` 同源）。
+                if is_tp and len(tp_legs) == 1:
+                    detail["tp_placed"] = entry
             else:
                 errors.append(f"{kind}: {err_}")
                 detail[f"{kind}_error"] = str(err_)
+        if tp_legs:
+            detail["tp"] = tp_legs[0][0]      # 兼容：多数消费者只看第一档
+            detail["tp_legs"] = [px for px, _ in tp_legs]
+        if tp_orders:
+            detail["tp_orders"] = tp_orders
+        if sl_orders:
+            detail["sl_orders"] = sl_orders
+            detail["sl"] = float(intent.sl)
 
         # cancel old owned TP/SL of the kinds we just replaced (never stop_entry)
         cancelled = []
