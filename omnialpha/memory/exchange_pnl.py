@@ -270,6 +270,9 @@ def _pnl_of(t: dict) -> Optional[float]:
 # ── 归属：哪些平仓是本 bot 自己的 ──────────────────────────────
 
 _ID_CONTAINERS = ("order", "tp_placed", "sl_placed")
+# `tp_orders` / `sl_orders` = 各动作**实际挂出**的整组保护腿。`modify_tp_sl` 现在
+# 与 `_open` / `_stop_entry` 同字段（改单也写这两个），所以经改单调过的 TP2/TP3
+# 一样能归属 —— 此前改单只写单腿的 `tp_placed`，多腿的 id 进不了索引。
 _ID_LISTS = ("tp_orders", "sl_orders")
 
 

@@ -28,7 +28,7 @@ require_sl: true
 
 account_risk:
   halt: false
-  max_leverage: 50
+  max_leverage: 100
   max_total_notional_usd: 600
   max_notional_pct: 6.0
   max_total_notional_pct: 10.0

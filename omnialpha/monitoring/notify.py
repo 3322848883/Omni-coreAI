@@ -543,7 +543,10 @@ def _exit_levels(detail: dict, s: dict, kind: str) -> list:
     if placed is not None:
         return [(placed, None)]
     if kind == "tp":
-        for key in ("tp", "tp2", "tp3"):
+        # 档位清单唯一来源（`omnialpha.schema.TP_LEVEL_KEYS`）—— 原先写死
+        # `tp/tp2/tp3`，第 4 档起在卡片上会凭空消失。
+        from ..schema import TP_LEVEL_KEYS
+        for key in TP_LEVEL_KEYS:
             v = _unwrap_price(_first_val(detail.get(key)))
             if v is not None:
                 out.append((v, None))

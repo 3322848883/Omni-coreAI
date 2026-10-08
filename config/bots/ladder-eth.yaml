@@ -30,7 +30,7 @@ require_sl: true
 account_risk:
   halt: false
   # 50：双向网格两侧都占保证金，杠杆低了保证金先撞墙（风险由名义×止损距离决定，与杠杆无关）
-  max_leverage: 50
+  max_leverage: 100
   max_total_notional_usd: 600
   # 单档名义上限（权益倍数）；多档合计靠 max_total_notional_* 兜
   max_notional_pct: 6.0

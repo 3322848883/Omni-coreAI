@@ -25,8 +25,21 @@ class RiskResult:
 
 def apply_risk(plan: Plan, risk: RiskConfig) -> RiskResult:
     out = RiskResult()
-    # hold / modify_tp_sl are manage-only (no new exposure) — not counted in max_chips
-    manage_actions = {"hold", "modify_tp_sl"}
+    # manage-only（不产生新敞口）——**不占 max_chips 名额**。
+    #
+    # `cancel_*` 必须在内：它只撤挂单/条件单，敞口只减不增。原先它被当成开仓类，
+    # 与 `open_*` / `stop_entry_*` 抢同一个名额并**按置信度排序**——而模型对「这单
+    # 该撤」的置信度天然更高（孤儿单场景 0.90~0.95，开仓只有 0.60~0.62），于是
+    # **撤单系统性挤掉开仓**。
+    #
+    # 实测（2026-09-30 ~ 10-08 全部 726 个归档计划）：70 轮（9.6%）被 max_chips 截断，
+    # 其中被拒的是开仓类 **67 次（93%）**，而抢到名额的 `cancel_*` 有 **67 次（96%）**，
+    # 开仓只赢了 3 次。后果是「撤旧 + 挂新」的两步决策永远只完成撤单那一步，下一轮
+    # 模型看到「无挂单」只好再决策一次 —— 8 天 67 次错失开仓 + 循环空转。
+    #
+    # 不含 `close_*` / `reduce_*`：它们虽也减敞口，但同轮出现「平 + 开」是换仓，
+    # 值得仍受名额约束；且 726 个计划里这两类从未被 max_chips 拒过，不动它们。
+    manage_actions = {"hold", "modify_tp_sl", "cancel_all", "cancel_price_all"}
     action_chips = [c for c in plan.chips if c.action not in manage_actions]
     action_chips.sort(key=lambda c: c.confidence, reverse=True)
     if risk.max_chips and len(action_chips) > risk.max_chips:

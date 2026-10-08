@@ -122,6 +122,47 @@ class TestRisk(unittest.TestCase):
         tradeable = [c for c in r.accepted if c.action != "hold"]
         self.assertLessEqual(len(tradeable), 1)
 
+    def test_cancel_does_not_consume_max_chips(self):
+        """`cancel_*` 是清理动作，不占 max_chips 名额 —— 否则「撤旧+挂新」永远只完成一半。
+
+        回归背景（2026-09-30 ~ 10-08 全部 726 个归档计划）：70 轮（9.6%）被 max_chips
+        截断，被拒的开仓类 67 次（93%），而抢到名额的 `cancel_*` 67 次（96%）——
+        因为 `cancel_*` 被当成开仓类、与开仓**按置信度排序**，而模型对「该撤」的
+        置信度天然更高（0.90~0.95 vs 开仓 0.60~0.62）。后果：8 天 67 次「想开仓没开成」
+        + 只撤不挂的循环空转。
+        """
+        plan = parse_plan({"chips": [
+            {"symbol": "BTC_USDT", "action": "cancel_all", "confidence": 0.95},
+            {"symbol": "BTC_USDT", "action": "stop_entry_short", "confidence": 0.62,
+             "size_usd": 240, "trigger_price": 80800, "sl": 81250, "tp": 80350, "tp2": 79900},
+        ]})
+        r = apply_risk(plan, RiskConfig(min_confidence=0.5, max_chips=1))
+        acts = [c.action for c in r.accepted]
+        self.assertIn("cancel_all", acts, "撤单不该被名额拒掉")
+        self.assertIn("stop_entry_short", acts, "开仓不该被撤单挤掉")
+        self.assertFalse(r.rejected)
+
+    def test_cancel_price_all_does_not_consume_max_chips(self):
+        plan = parse_plan({"chips": [
+            {"symbol": "BTC_USDT", "action": "cancel_price_all", "confidence": 0.9},
+            {"symbol": "BTC_USDT", "action": "open_long", "confidence": 0.62, "size_usd": 100},
+        ]})
+        r = apply_risk(plan, RiskConfig(min_confidence=0.5, max_chips=1))
+        acts = [c.action for c in r.accepted]
+        self.assertIn("cancel_price_all", acts)
+        self.assertIn("open_long", acts)
+
+    def test_max_chips_still_limits_multiple_openings(self):
+        """配对：名额只约束**新敞口** —— 两个开仓仍只放行一个，护栏没被磨平。"""
+        plan = parse_plan({"chips": [
+            {"symbol": "BTC_USDT", "action": "open_long", "confidence": 0.9, "size_usd": 100},
+            {"symbol": "ETH_USDT", "action": "open_long", "confidence": 0.8, "size_usd": 100},
+        ]})
+        r = apply_risk(plan, RiskConfig(min_confidence=0.5, max_chips=1))
+        self.assertEqual([c.action for c in r.accepted], ["open_long"])
+        self.assertEqual(len(r.rejected), 1)
+        self.assertIn("BTC_USDT", [c.symbol for c in r.accepted], "保留置信度更高的那个")
+
     def test_open_requires_size(self):
         plan = parse_plan({"chips": [{"symbol": "BTC_USDT", "action": "open_long", "confidence": 0.9}]})
         r = apply_risk(plan, RiskConfig(min_confidence=0.5))

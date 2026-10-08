@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from ..schema import SchemaError, tp_fields
+
 CHIP_ACTIONS = {
     "open_long",
     "open_short",
@@ -73,10 +75,15 @@ class Chip:
     size: Optional[int] = None
     tp: Optional[float] = None
     sl: Optional[float] = None
-    tp2: Optional[float] = None  # 多级止盈
+    # 多级止盈：档位清单与解析统一在 `omnialpha.schema.tp_fields`（唯一来源），
+    # 这里只做承载 —— 少了 tp_extra 就会把模型写的第 4 档起**静默丢掉**。
+    tp2: Optional[float] = None
     tp3: Optional[float] = None
     tp1_share: Optional[float] = None
     tp2_share: Optional[float] = None
+    tp3_share: Optional[float] = None
+    tp_extra: list[float] = field(default_factory=list)
+    tp_extra_shares: list[Optional[float]] = field(default_factory=list)
     order_type: str = "market"
     price: Optional[float] = None
     trigger_price: Optional[float] = None
@@ -123,6 +130,15 @@ class Chip:
             d["tp1_share"] = self.tp1_share
         if self.tp2_share is not None:
             d["tp2_share"] = self.tp2_share
+        if self.tp3_share is not None:
+            d["tp3_share"] = self.tp3_share
+        # 第 4 档起（tp4/tp5）—— 档位清单唯一来源，写得出就带得走
+        for idx, px in enumerate(self.tp_extra):
+            base = f"tp{idx + 4}"
+            d[base] = px
+            sh = self.tp_extra_shares[idx] if idx < len(self.tp_extra_shares) else None
+            if sh is not None:
+                d[f"{base}_share"] = sh
         if self.trigger_price is not None:
             d["trigger_price"] = self.trigger_price
         if self.leverage is not None:
@@ -320,11 +336,19 @@ def parse_plan(data: Any) -> Plan:
             raise PlanError(
                 f"chips[{i}].region must be one of {'|'.join(sorted(REGIONS))}, "
                 f"got {raw.get('region')!r}")
-        tp2 = _f(raw.get("tp2"), "tp2", i)
+        # 多级止盈：解析走 `omnialpha.schema.tp_fields`（唯一来源，含 tp3/tp4/tp5）。
+        # 原先这里自己写一份字段清单 —— 与执行侧那份不一致就是「静默丢档」的来源。
+        try:
+            tf = tp_fields(raw)
+        except SchemaError as e:
+            raise PlanError(f"chips[{i}].{e}") from e
+        tp2 = tf["tp2"]
         # 区域=区间 → 禁止 2R 目标。把提示词那条规则（「区间只做 scalp，
         # 禁止持有 2R 目标」）从一句话变成程序约束 —— 否则区域判定只是模型
         # 自己贴的标签，为用双止盈改判成趋势就绕过去了（实测发生过）。
-        if region == "range" and tp2 is not None:
+        # **第 2 档起全部算**：只挡 tp2 的话写 tp3 就绕过去了。
+        if region == "range" and (tf["tp2"] is not None or tf["tp3"] is not None
+                                  or tf["tp_extra"]):
             raise PlanError(
                 f"chips[{i}].tp2 must be empty when region=range "
                 f"(区间只做 scalp，禁止持有 2R 目标)")
@@ -343,12 +367,8 @@ def parse_plan(data: Any) -> Plan:
                 confidence=conf,
                 size_usd=_f(raw.get("size_usd"), "size_usd", i),
                 size=_int(raw.get("size"), "size", i),
-                tp=_f(raw.get("tp"), "tp", i),
                 sl=_f(raw.get("sl"), "sl", i),
-                tp2=tp2,
-                tp3=_f(raw.get("tp3"), "tp3", i),
-                tp1_share=_f(raw.get("tp1_share"), "tp1_share", i),
-                tp2_share=_f(raw.get("tp2_share"), "tp2_share", i),
+                **tf,
                 order_type=order_type,
                 price=_f(raw.get("price"), "price", i),
                 trigger_price=_f(raw.get("trigger_price"), "trigger_price", i),
