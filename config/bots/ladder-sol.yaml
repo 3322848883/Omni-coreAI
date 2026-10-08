@@ -81,7 +81,8 @@ strategist:
     max_notional_usd: 300
   skills: []
   llm:
+    # 用 gw-flash 的默认模型（global:deepseek-v4.1-flash）。
+    # 不再写 model 覆盖 —— sg 池（gw-flash-sg）已弃用。
     provider: gw-flash
-    model: global:deepseek-v4.1-flash-sg
     reasoning_effort: high
     max_tokens: 32768

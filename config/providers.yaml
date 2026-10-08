@@ -3,7 +3,7 @@
 #   llm:
 #     provider: deepseek-official
 #     model: deepseek-flash        # optional override
-#     fallback: gw-flash-sg        # optional: 覆盖该供应商的备用链
+#     fallback: gw-cn-flash       # optional: 覆盖该供应商的备用链
 #
 # `fallback`（供应商级或 bot 级，接受单个名字或列表）是**备用供应商链**：
 # 主供应商把自身重试耗完后按顺序切，而不是让整轮决策降级 hold。
@@ -14,9 +14,11 @@ default: deepseek-official
 
 providers:
   deepseek-official:
-    label: DeepSeek 官方
+    label: DeepSeek 官方（网关整体故障时的容灾）
     base_url: https://api.deepseek.com/v1
-    api_key_env: OPENAI_API_KEY
+    # 独立变量：网关用的是 OPENAI_API_KEY，官方 API 必须用自己的 key，
+    # 否则认证失败（且会掩盖「网关挂了但备用也没接住」的真相）。
+    api_key_env: DEEPSEEK_API_KEY
     model: deepseek-flash
     thinking: true
     reasoning_effort: max
@@ -36,15 +38,45 @@ providers:
     timeout_sec: 240
     max_tokens: 8192
     json_mode: true
-    # 同一个网关的另一个账号池。实测 2026-10-05：主池 429 限流到次日
-    # 08:39 UTC，网关回包自己提示「switch to the other models」，而 -sg 池正常。
-    fallback: gw-flash-sg
+    # 备用链：主池 429 限流时按顺序切。实测 2026-10-05 主池限流到次日
+    # 08:39 UTC，网关回包自己提示「switch to the other models」。
+    # 2026-10-08 起：首选 cn 池（`cn:deepseek-v4-flash`，实测 7/7 成功、
+    # 推理走中文；`global:deepseek-v4.1-flash` 12/12 成功，两者同量级）。
+    # sg 池（gw-flash-sg）已弃用，不再进备用链。
+    # 第二道是**真·跨供应商**（DeepSeek 官方 API）：网关整体故障时还能活。
+    # 它用自己的 DEEPSEEK_API_KEY，与网关的 OPENAI_API_KEY 分开 —— 共用会在
+    # 官方 API 上认证失败，还会掩盖「网关挂了备用也没接住」。
+    fallback: [gw-cn-flash, deepseek-official]
 
+  # ⚠️ 已弃用（2026-10-08）：不再进任何 fallback 链，ladder 系列也已改用主池默认模型。
+  # 保留定义只为不破坏仍在引用它的 `config/bots/pt-*.yaml`（压测用 bot）。
   gw-flash-sg:
-    label: 自建网关 deepseek-v4.1-flash（SG 备用池）
+    label: 自建网关 deepseek-v4.1-flash（SG 备用池，已弃用）
     base_url: http://69.12.85.185:7863/v1
     api_key_env: OPENAI_API_KEY
     model: global:deepseek-v4.1-flash-sg
+    thinking: true
+    reasoning_effort: high
+    timeout_sec: 240
+    max_tokens: 8192
+    json_mode: true
+
+  gw-cn-flash:
+    label: 自建网关 deepseek-v4-flash（cn 池）
+    base_url: http://69.12.85.185:7863/v1
+    api_key_env: OPENAI_API_KEY
+    model: cn:deepseek-v4-flash
+    thinking: true
+    reasoning_effort: high
+    timeout_sec: 240
+    max_tokens: 8192
+    json_mode: true
+
+  gw-hy4-preview:
+    label: 自建网关 hy4-preview-f（对比用）
+    base_url: http://69.12.85.185:7863/v1
+    api_key_env: OPENAI_API_KEY
+    model: global:hy4-preview-f
     thinking: true
     reasoning_effort: high
     timeout_sec: 240

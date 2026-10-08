@@ -99,10 +99,9 @@ strategist:
     max_notional_usd: 300
   skills: []
   llm:
-    # 主账号池被限流（429 soft_rate，配额 UTC+8 16:39 重置）。
-    # 临时切到 sg 节点（不同账号池）试跑；恢复后改回 gw-flash 默认模型。
+    # 用 gw-flash 的默认模型（global:deepseek-v4.1-flash）。
+    # 不再写 model 覆盖 —— sg 池（gw-flash-sg）已弃用。
     provider: gw-flash
-    model: global:deepseek-v4.1-flash-sg
     reasoning_effort: high
     # 密集多层 + 长推理，默认 8192 容易撞上限导致 JSON 写不出来
     max_tokens: 32768
