@@ -164,7 +164,7 @@ watchdog 就拉起 9 个 persona-run（每个都在跑真实 LLM 分析）：
 | `equity_deviation` | 权益相对日初偏离 >10% | alerts.json |
 | `equity_deviation_halt` | 权益**向下**偏离越过 `account_risk.equity_deviation_halt_pct` → 写熔断标记 | alerts.json + halt.json |
 | `dup_fill` | 同一 order_id 重复成交 | alerts.json |
-| `orphan_protector` | 平仓后遗留 reduce-only SL/TP | alerts.json |
+| `orphan_protector` | 保护单异常，两种情形共用这个 type：① **平仓后遗留**的 reduce-only SL/TP（`_cleanup_orphan_protectors`）；② **张数超额**——保护单张数多于「持仓 + 待成交入场单」，对账撤掉多余那批（`reconcile_protectors`，文案是「保护单张数超额已对齐」） | alerts.json |
 | `plan_fail` | plan 周期连续失败（LLM/解析），每 `error_warn`(5) 次一条 | alerts.json + 飞书 |
 | 成交卡片 | 开/平/减仓/改保护 | 飞书 |
 | 衰减 | 滚动胜率/Sharpe 跌破阈值 | 飞书 |
