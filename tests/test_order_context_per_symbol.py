@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from omnialpha.memory.context import _format_order_context  # noqa: E402
+from omnialpha.memory.context import _format_order_context, build_context  # noqa: E402
 from omnialpha.persona.orders import SharedOrderStore  # noqa: E402
 from omnialpha.persona.runner import PersonaRunner  # noqa: E402
 from omnialpha.strategist.loop import PlanRunner, StrategistConfig  # noqa: E402
@@ -149,6 +149,41 @@ class TestResolveOrderIdPerSymbol(unittest.TestCase):
             st.update(o_btc, group="g1")
             r = self._runner(st)
             self.assertIsNone(r._resolve_order_id("hold", {}, symbol="ETH_USDT"))
+
+
+class TestOrderContextBudget(unittest.TestCase):
+    """多币 prompt 的体积**有上限**（I10 成本有界）：币再多也不会线性堆进 prompt。"""
+
+    def test_order_context_capped_at_three(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            st = SharedOrderStore(root)
+            for i in range(6):                      # 6 个币各有持仓
+                _add_order(st, f"C{i}_USDT", 100.0 + i)
+            ctx = _loop_runner([f"C{i}_USDT" for i in range(6)])._order_context_for(
+                root, "b1", via_group=False)
+            self.assertEqual(len(ctx["orders"]), 3, "订单上下文按币取，但上限 3 张")
+
+    def test_recent_block_bounded_by_n_recent(self):
+        """近况条数由 `n_recent` 定，**不随币数增长**（只有行内信息变长）。"""
+        from omnialpha.memory.journal import MemoryJournal, tier1_journal_fields
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for c in range(6):
+                chips = [{"symbol": f"C{i}_USDT", "action": "hold"} for i in range(6)]
+                MemoryJournal(root, "b1").append(
+                    cycle_id=f"c{c}", decision=",".join(x["action"] for x in chips),
+                    reasoning="r", **tier1_journal_fields(chips))
+            ctx = build_context(root, "b1", system_prompt="SYS", n_recent=3, n_index=5)
+            # `[近况]` 段里只有 3 条（每条约一行）
+            body = ctx["user"].split("[近况]")[1].split("[本轮快照]")[0]
+            lines = [ln for ln in body.splitlines() if ln.startswith("c")]
+            self.assertLessEqual(len(lines), 3, body)
+            # 索引段同样只有 5 条
+            idx = ctx["user"].split("[近期决策索引")[1].split("\n\n")[0]
+            self.assertLessEqual(len([ln for ln in idx.splitlines() if ln.strip().startswith("c")]),
+                                 5)
 
 
 if __name__ == "__main__":
