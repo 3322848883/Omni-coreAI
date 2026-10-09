@@ -532,13 +532,13 @@ class PlanRunner:
         syms = list(self.cfg.symbols or [])
         chips = [Chip(symbol=s, action="hold", confidence=0.0,
                       reasoning="数据/模型异常，降级观望") for s in syms]
-        if not chips:
-            chips = [Chip(symbol="", action="hold", confidence=0.0,
-                          reasoning="数据/模型异常，降级观望；本 bot 未配置 symbols")]
+        # 宇宙为空（本 bot 未配置 symbols）时**不产出 chip**：一条 `symbol=""` 的 hold
+        # 会让下游以为「本轮对某个币表了态」，而那个币根本不存在。留痕走 `raw.degraded`。
         return Plan(
             cycle_id=cycle_id,
             reasoning=f"[降级] {reason[:60]}",
             chips=chips,
+            raw={"degraded": reason},
         )
 
     def _record_cycle_failure(self, root: Path, bid: str, detail: str) -> None:
@@ -573,13 +573,10 @@ class PlanRunner:
         稳定优先：一个成员失败不应让它整轮缺席（否则融合只剩少数人）。
         """
         log.warning("degrade to hold: %s", reason)
-        # 与 `_hold_plan` 同源：多币逐币一条 hold，宇宙为空时不猜 `BTC_USDT`
+        # 与 `_hold_plan` 同源：多币逐币一条 hold；宇宙为空时不产出 chip（留痕走 meta）
         syms = list(self.cfg.symbols or [])
         chips = [{"symbol": s, "action": "hold", "confidence": 0.0,
                   "reasoning": "数据/模型异常，降级观望"} for s in syms]
-        if not chips:
-            chips = [{"symbol": "", "action": "hold", "confidence": 0.0,
-                      "reasoning": "数据/模型异常，降级观望；本 bot 未配置 symbols"}]
         return {
             "ok": True,
             "degraded": reason,
@@ -589,6 +586,7 @@ class PlanRunner:
                 "cycle_id": cycle_id,
                 "reasoning": f"[降级] {reason[:40]}",
                 "chips": chips,
+                "meta": {"degraded": reason},
             },
         }
 
@@ -790,10 +788,21 @@ class PlanRunner:
 
         my_decision = plan.get("decision") or "hold"
         my_reasoning = str(plan.get("reasoning") or "")[:200]
+        # 单币宇宙：契约**逐字不变**（I11）—— 标的唯一，凭空加个 `symbol` 字段只会
+        # 让缓存前缀无谓变化。多币宇宙：必须写 `symbol` 并把可选值列出来，否则讨论
+        # 结论归不到任何一个币上（补错标的比少一条结论更危险）。
+        universe = [str(x) for x in (self.cfg.symbols or [])]
+        multi = len(universe) > 1
+        sym_field = ('"symbol":"%s",' % "|".join(universe)) if multi else ""
+        sym_rule = (
+            "；6) **symbol 必须写、且必须是【品种宇宙】里的那个**（%s）—— "
+            "讨论结论是针对哪个币的，缺了或写错整条就作废"
+            "（系统不会替你补，补错标的比少一条更危险）" % "、".join(universe)
+            if multi else ""
+        )
         sys_prompt = (
             "你是交易策略人格，参与多空讨论。只输出一个 JSON 对象，不要 Markdown 前后缀。\n"
-            '{"symbol":"<品种宇宙里的值>",'
-            '"decision":"open_long|open_short|close|reduce_long|reduce_short|hold|'
+            f'{{{sym_field}"decision":"open_long|open_short|close|reduce_long|reduce_short|hold|'
             'stop_entry_long|stop_entry_short",'
             '"confidence":0.0,"reasoning":"≤30字",'
             '"type":"limit|market|post_only|ioc|fok","price":0.0,"trigger_price":0.0,'
@@ -802,9 +811,8 @@ class PlanRunner:
             "规则：1) decision 用英文枚举；2) confidence 0~1；3) reasoning ≤30 字；"
             "4) **入场类（open_*/stop_entry_*）必须给出 sl 与可执行价位**"
             "（限价给 price，突破进场给 trigger_price）；"
-            "5) 给不出可执行价位就选 hold —— 讨论的结论要能直接执行，不是只表个态；"
-            "6) **symbol 必须写、且必须是【品种宇宙】里的那个** —— 讨论结论是针对哪个币的，"
-            "缺了或写错整条就作废（系统不会替你补，补错标的比少一条更危险）。"
+            "5) 给不出可执行价位就选 hold —— 讨论的结论要能直接执行，不是只表个态"
+            f"{sym_rule}。"
         )
         user_prompt = (
             f"我的当前决策：{my_decision}\n我的理由：{my_reasoning}\n\n"
@@ -844,14 +852,31 @@ class PlanRunner:
             # fuse_plans._norm_dir 与 _execute 都优先读 chips[0].action ——
             # 讨论结果根本进不了融合（线上实测：三人讨论后都改成 stop_entry_long，
             # 融合票却仍是讨论前的 hold/long/hold，讨论成了纯日志表演）。
-            chip = self._discussion_chip(data, decision, plan,
-                                         default_symbol=self._default_symbol(),
-                                         allowed=self.cfg.symbols)
-            if decision in ("open_long", "open_short", "stop_entry_long", "stop_entry_short") \
+            # 标的先独立判（不能只看 `_discussion_chip` 的返回值：**越界**与"缺 sl"
+            # 都表现为 None，而留痕需要区分原因）。取值链与 `_discussion_chip` 一致：
+            # 原 chip → 模型这次写的 → 无。缺或越界都退回 hold，不替它挑。
+            base_chips = plan.get("chips") or []
+            base_sym = (str((base_chips[0] or {}).get("symbol") or "")
+                        if base_chips and isinstance(base_chips[0], dict) else "")
+            given = str(data.get("symbol") or base_sym or "").strip().upper()
+            meta: Optional[dict] = None
+            if not given:
+                meta = {"reason": "symbol_missing"}
+            elif universe and given not in universe:
+                meta = {"reason": "symbol_not_in_universe", "corrected_from": given}
+            chip = None if meta else self._discussion_chip(
+                data, decision, plan, default_symbol=self._default_symbol(),
+                allowed=self.cfg.symbols)
+            if meta is not None:
+                decision = "hold"
+            elif decision in ("open_long", "open_short", "stop_entry_long", "stop_entry_short") \
                     and chip is None:
                 decision = "hold"   # 入场却给不出可执行价位 → 退回 hold，不假装能执行
-            return {"decision": decision, "confidence": conf,
-                    "reasoning": reasoning, "chip": chip}
+            out = {"decision": decision, "confidence": conf,
+                   "reasoning": reasoning, "chip": chip}
+            if meta:
+                out["meta"] = meta
+            return out
         except Exception:  # noqa: BLE001
             return None
 
@@ -917,13 +942,17 @@ class PlanRunner:
 
         chip = dict(base)
         chip["action"] = decision
-        chip["symbol"] = chip.get("symbol") or default_symbol
-        sym = str(chip.get("symbol") or "").strip()
+        # 标的取值链：**原 chip**（已有持仓/计划的标的）→ 模型这次写的 `data.symbol`
+        # → 调用方给的 default_symbol。漏掉中间这一环，模型在讨论里明确写的币会被
+        # 静默丢掉，再被 default_symbol 覆盖 —— 那正是"改口成别的币却没生效"。
+        chip["symbol"] = str(
+            chip.get("symbol") or data.get("symbol") or default_symbol or ""
+        ).strip().upper()
         universe = [str(x) for x in (allowed or [])]
-        if not sym:
-            return None                      # 缺 symbol 且宇宙不唯一 → 不猜
-        if universe and sym not in universe:
-            return None                      # 越界 → 拒绝，不做纠正
+        if universe and chip["symbol"] and chip["symbol"] not in universe:
+            return None          # 越界 → 拒绝，不做纠正（结论可能本来就是别的币的）
+        # 缺 symbol **不在这里拒**：本函数看不到调用方上下文，留空交调用方判定
+        # （`discuss` 会记 `symbol_missing` 并退回 hold）—— 补一个首币等于张冠李戴。
         if decision not in ("open_long", "open_short", "stop_entry_long", "stop_entry_short"):
             return chip          # close/reduce/modify 沿用原 chip 的执行字段
         sl = num("sl")

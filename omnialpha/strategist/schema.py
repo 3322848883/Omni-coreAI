@@ -543,8 +543,9 @@ def _looks_like_plan(obj) -> bool:
 def _extract_json_object(text: str):
     """从 LLM 输出提取 Plan JSON。
 
-    容错：Markdown 围栏 / 尾逗号 / 单引号 / 注释 / 截断 / **多个 JSON 对象**
-    （模型有时先吐一个 triggers 片段再吐主 Plan——优先选像 Plan 的那个）。
+    容错：Markdown 围栏 / 尾逗号 / 单引号 / 注释 / 截断 / **括号不全**（`_repair_json`
+    按栈补齐未闭合的 `{`/`[`）/ **多个 JSON 对象**（模型有时先吐一个 triggers 片段
+    再吐主 Plan——优先选像 Plan 的那个）。
     """
     import json
 

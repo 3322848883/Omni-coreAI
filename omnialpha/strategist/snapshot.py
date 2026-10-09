@@ -136,7 +136,8 @@ def _rows_for(rows: Any, symbols: Optional[list[str]]) -> list[dict]:
         return [r for r in (rows or []) if r]
     uni = _norm_symbols(symbols)
     return [r for r in (rows or [])
-            if r and str((r or {}).get("contract") or "").strip().upper() in uni]
+            if isinstance(r, dict)
+            and str(r.get("contract") or "").strip().upper() in uni]
 
 
 def position_state(account: dict, symbols: Optional[list[str]] = None) -> tuple[str, str]:

@@ -9,7 +9,7 @@ import os
 import sys
 from pathlib import Path
 
-from .config import load_all_bots, load_bot_config
+from .config import load_accounts, load_all_bots, load_bot_config
 from .gate_client import GateApiError
 from .watcher import ProjectPaths, process_file, run_bot_once, run_forever
 
@@ -44,6 +44,13 @@ def _build_plan_runner(bot, paths: ProjectPaths):
     from .strategist.loop import PlanRunner, StrategistConfig
     from .strategist.market import MarketConfig
     from .strategist.risk import RiskConfig
+
+    # 启动断言：strategist 看到的 account_risk 必须 == executor（run 路径）看到的。
+    # 两条路径入口不同（plan 走 load_bot_config，run 走 load_all_bots），历史上就是
+    # 这里漂移 —— plan 不合并 config/accounts.yaml，策略侧预算比闸门松（C-6）。
+    from .config import assert_account_risk_consistent
+
+    assert_account_risk_consistent(bot, paths.config_dir)
 
     s = dict(bot.strategist or {})
     risk = dict(s.get("risk") or {})
@@ -126,19 +133,15 @@ def _build_plan_runner(bot, paths: ProjectPaths):
 
 
 def _load_bot_consistent(paths: ProjectPaths, bot_id: str):
-    """加载 bot 配置，并断言它的 `account_risk` 与 accounts 合并结果一致（T4 / C-6）。
+    """加载 bot 配置，与 `run` 路径一致地合并 `config/accounts.yaml`（T4 / C-6）。
 
-    为什么需要：`run` 路径经 `load_all_bots`（会合并 `config/accounts.yaml`），
-    而 CLI 的 `plan`/`plan-loop` 曾经直接 `load_bot_config`（**不合并**）——
-    于是 strategist 拿到比执行闸门**更宽松**的预算，模型按大预算报量、被 executor 拒单
-    （实盘曾占失败的 1/7）。两处口径必须同源，不能靠"记得传 accounts"。
+    为什么必须一致：`run` 路径经 `load_all_bots`（会合并账户级风控），而 CLI 的
+    `plan`/`plan-loop` 曾经直接 `load_bot_config`（**不合并**）—— 于是 strategist
+    拿到比执行闸门**更宽松**的预算，模型按大预算报量、被 executor 拒单
+    （实盘曾占失败的 1/7）。一致性由 `_build_plan_runner` 里的启动断言兜住。
     """
-    from .config import assert_account_risk_consistent, load_accounts
-
-    bot = load_bot_config(paths.config_dir / f"{bot_id}.yaml",
-                          accounts=load_accounts(paths.config_dir))
-    assert_account_risk_consistent(bot, paths.config_dir)
-    return bot
+    return load_bot_config(paths.config_dir / f"{bot_id}.yaml",
+                           accounts=load_accounts(paths.config_dir))
 
 
 def cmd_plan(args) -> int:

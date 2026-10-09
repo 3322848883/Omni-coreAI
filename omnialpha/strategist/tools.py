@@ -1383,12 +1383,47 @@ def _f(v: Any) -> Optional[float]:
 
 
 
+def _coin_forms(sym: str) -> list[str]:
+    """同一个币在 aux_cache 里**可能出现的写法**：带下划线 / 无分隔 / 裸币名。
+
+    为什么要试多种：`fetch_aux.py` 写的是带下划线的合约名（`BTC_USDT`），但同一张表
+    历史上也可能存 `BTCUSDT` 或 `BTC`。工具原先只按**一种**形态查 —— 查不到就返回
+    `[]`，模型读成「这个币没数据」。**静默空比报错更难发现**（只有 `tech_analysis`
+    当时试了三种）。
+    """
+    s = str(sym or "").strip().upper()
+    if not s:
+        return []
+    flat = s.replace("_", "").replace("-", "")
+    base = flat.replace("USDT", "") or flat
+    out: list[str] = []
+    for k in (s, flat, f"{base}_USDT", base):
+        if k and k not in out:
+            out.append(k)
+    return out
+
+
+def _aux_query_forms(bot_root, sql: str, forms: list, tail: tuple = (),
+                     limit_cols=None) -> list:
+    """按**多种币名写法**逐个查，命中即返回。
+
+    全都没命中时返回最后一次的结果：`aux_cache.db` 不存在时那是错误体（要往上传），
+    币确实没数据时那是空列表（调用方据此判断「这个币没数据」）。
+    """
+    last: list = []
+    for k in (forms or []):
+        last = _aux_query(bot_root, sql, (k,) + tuple(tail), limit_cols=limit_cols)
+        if last and not (last[0] or {}).get("error"):
+            return last
+    return last
+
+
 # ── 需要 symbol 的工具（一处定义，T6）──────────────────────────
 # 这些工具的 symbol 缺省策略统一走 `strategist/symbols.py`（唯一解析来源）：
 # 单币宇宙自动补、多币/越界/未配置一律拒绝 —— **不再各自拿一个硬编码币兜底**。
 # 不在集合里的：与币无关（skill/skill_ref/journal_lookup/overview/macro）或自己处理
 # 多选（account，见其 schema 的 symbols）。
-_SYMBOL_TOOLS = frozenset({
+SYMBOL_TOOLS = frozenset({
     "klines", "indicators", "ticker", "orderbook", "contract", "stats", "taker_delta",
     "smc_map", "smc_events", "sqzmom",
     "trades_flow", "liquidations", "market_stats", "tech_analysis",
@@ -1486,7 +1521,7 @@ def run_tool(
     # symbol 的统一前置（T6）：解析结果**回填 args**，下游工具直接用。
     # 缺省策略见 `strategist/symbols.py` —— 关键是「不猜」：多币漏写会带宇宙拒绝，
     # 而不是静默拿另一个币的数据（`ticker` 空符号取 `raw[0]` 就是那种静默错币）。
-    if name in _SYMBOL_TOOLS:
+    if name in SYMBOL_TOOLS:
         _resolved, _note = resolve_symbol_arg(args, symbols, tool=name)
         if not _resolved:
             return symbol_error_payload(_note, symbols, tool=name)
@@ -2118,19 +2153,11 @@ def run_tool(
             lim = max(1, min(int(args.get("limit") or 50), 200))
 
 
-            rows = _aux_query(
-
-
+            rows = _aux_query_forms(
                 bot_root,
-
-
-                "SELECT time, contract, price, size FROM trades WHERE contract=? ORDER BY time DESC LIMIT ?",
-
-
-                (sym, lim),
-
-
-            )
+                "SELECT time, contract, price, size FROM trades "
+                "WHERE contract=? ORDER BY time DESC LIMIT ?",
+                _coin_forms(sym), (lim,))
 
 
             return {"symbol": sym, "trades": rows}
@@ -2148,22 +2175,11 @@ def run_tool(
             lim = max(1, min(int(args.get("limit") or 50), 200))
 
 
-            rows = _aux_query(
-
-
+            rows = _aux_query_forms(
                 bot_root,
-
-
                 "SELECT time, contract, size, order_size, order_price, fill_price FROM liquidations "
-
-
                 "WHERE contract=? ORDER BY time DESC LIMIT ?",
-
-
-                (sym, lim),
-
-
-            )
+                _coin_forms(sym), (lim,))
 
 
             return {"symbol": sym, "liquidations": rows}
@@ -2178,25 +2194,12 @@ def run_tool(
             sym = str(args.get("symbol") or args.get("contract") or args.get("sym") or "")
 
 
-            rows = _aux_query(
-
-
+            rows = _aux_query_forms(
                 bot_root,
-
-
                 "SELECT fetched_ts, contract, lsr_taker, lsr_account, long_liq_size, short_liq_size, "
-
-
                 "open_interest, open_interest_usd, top_lsr_account, mark_price "
-
-
                 "FROM market_stats_ts WHERE contract=? ORDER BY fetched_ts DESC LIMIT ?",
-
-
-                (sym, max(1, min(int(args.get("limit") or 5), 20))),
-
-
-            )
+                _coin_forms(sym), (max(1, min(int(args.get("limit") or 5), 20)),))
 
 
             return {"symbol": sym, "market_stats": rows}
@@ -2216,10 +2219,7 @@ def run_tool(
             # 少试一种就是「查不到却静默返回空」，比报错更难发现。
 
 
-            base = sym.replace("USDT", "")
-
-
-            keys = [k for k in (sym, f"{base}_USDT", base) if k] if sym else []
+            keys = _coin_forms(sym)
 
 
             rows = []
@@ -2264,22 +2264,11 @@ def run_tool(
             sym = str(args.get("symbol") or args.get("sym") or "").replace("_", "").upper()
 
 
-            rows = _aux_query(
-
-
+            rows = _aux_query_forms(
                 bot_root,
-
-
                 "SELECT fetched_ts, symbol, name, chain, category, market_value, sentiment_score "
-
-
                 "FROM coin_info_ts WHERE symbol=? ORDER BY fetched_ts DESC LIMIT 2",
-
-
-                (sym.replace("USDT", ""),),
-
-
-            )
+                _coin_forms(sym))
 
 
             return {"symbol": sym, "coin_info": rows}
@@ -2294,25 +2283,12 @@ def run_tool(
             token = str(args.get("token") or args.get("symbol") or "").replace("_", "").upper()
 
 
-            rows = _aux_query(
-
-
+            rows = _aux_query_forms(
                 bot_root,
-
-
                 "SELECT fetched_ts, token, chain, daily_active_addresses, daily_transfer_volume, "
-
-
                 "new_address_count_7d, holder_count, data_quality FROM onchain_ts "
-
-
                 "WHERE token=? ORDER BY fetched_ts DESC LIMIT 2",
-
-
-                (token.replace("USDT", ""),),
-
-
-            )
+                _coin_forms(token))
 
 
             return {"token": token, "onchain": rows}
@@ -2330,22 +2306,11 @@ def run_tool(
             lim = max(1, min(int(args.get("limit") or 10), 30))
 
 
-            rows = _aux_query(
-
-
+            rows = _aux_query_forms(
                 bot_root,
-
-
                 "SELECT fetched_ts, coin, author, content, upvotes, sentiment_label, sentiment_score "
-
-
                 "FROM social_posts_ts WHERE coin=? ORDER BY fetched_ts DESC LIMIT ?",
-
-
-                (coin.replace("USDT", ""), lim),
-
-
-            )
+                _coin_forms(coin), (lim,))
 
 
             return {"coin": coin, "social": rows}
@@ -2390,36 +2355,24 @@ def run_tool(
         if name == "sentiment":
 
 
-            coin = str(args.get("coin") or args.get("symbol") or "").replace("_", "").upper()
-
+            coin = str(args.get("coin") or args.get("symbol") or "").strip().upper()
 
             lim = max(1, min(int(args.get("limit") or 5), 20))
 
-
             q = ("SELECT fetched_ts, coin, mention_count, overall_sentiment, sentiment_label, "
-
-
                  "positive_ratio, neutral_ratio, negative_ratio FROM sentiment_ts")
 
-
-            if coin:
-
-
-                rows = _aux_query(bot_root, q + " WHERE coin=? ORDER BY fetched_ts DESC LIMIT ?",
-
-
-                                  (coin.replace("USDT", ""), lim))
-
-
-            else:
+            forms = _coin_forms(coin)
+            if not forms:
                 # 缺 symbol 不再退化成「全表最新 N 行」—— 那会返回**任意币**的数据，
                 # 而调用方无从察觉（这是本层唯一「缺 symbol 时静默取到别的币」的路径）。
                 return {"error": "symbol_required",
                         "message": "sentiment 需要 symbol（不再回退全表最新）",
                         "universe": sorted(str(x) for x in (symbols or []))}
-
-
-            return {"sentiment": rows}
+            rows = _aux_query_forms(
+                bot_root, q + " WHERE coin=? ORDER BY fetched_ts DESC LIMIT ?",
+                forms, (lim,))
+            return {"symbol": coin, "sentiment": rows}
 
 
 

@@ -301,7 +301,7 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
         acct_risk = dict((accounts.get(acct_name) or {}).get("account_risk") or {})
     merged_risk = merge_account_risk(bot_risk, acct_risk) if acct_risk else bot_risk
 
-    # ── symbol 归一 + 单 bot fail-fast（T4）─────────────────────────
+    # ── 币种：归一 / 去重 / 白名单自洽 / 显式不限制 ──
     # 币种是配置层的唯一权威（设计 S2.1 第③层）。这里不归一，下游每一处都要自己猜，
     # 而"猜错"在本仓的历史形态**全是静默的**：`symbols: [btc]` 会让快照 ticker 报错、
     # 让工具宇宙比对失配（`given not in uni`），看起来像"这个币没数据"。
@@ -314,9 +314,28 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
         raise GateApiError(
             f"{path.name}: symbols_unrestricted: true 与 symbols: [...] 语义矛盾 —— "
             f"放开品种限制就别再列白名单，只能给一个")
+    if not symbols and not unrestricted:
+        # 执行器把 `[]` 当 None = **不限制**（任意币可开仓），而守护扫描只遍历
+        # `bot.symbols`（零次迭代 = 零守护）。能力保留，但必须**显式**声明，
+        # 不再靠「空列表」暗示（那正是「配置看起来生效、实际不生效」）。
+        _fail_or_warn(
+            path,
+            "symbols 为空但未声明 symbols_unrestricted: true —— 空白名单等于"
+            "「任意币可开仓 + 零守护」；确实要放开请显式写 symbols_unrestricted: true",
+            enabled=enabled)
     strategist = dict(data.get("strategist") or {})
     if strategist.get("symbols") is not None:
         strategist["symbols"] = normalize_symbols(strategist["symbols"])
+    # 分析宇宙必须 ⊆ 执行白名单：超出部分会在执行层被拒单（白烧一轮），
+    # 而不是"模型想分析就分析"。
+    if symbols and strategist.get("symbols"):
+        outside = [s for s in strategist["symbols"] if s not in symbols]
+        if outside:
+            _fail_or_warn(
+                path,
+                f"strategist.symbols {outside} 不在 bot.symbols {symbols} 内"
+                f"（分析宇宙超出执行白名单，超出的币一律会被执行层拒单）",
+                enabled=enabled)
     scope = data.get("account_scope", "auto")
     if not isinstance(scope, str) or not scope.strip():
         raise GateApiError(f"{path.name}: account_scope 必须是 auto|bot|<账户名>")
@@ -326,12 +345,15 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
     # 取不到合约列表（离线/无凭据）就跳过 —— 配置校验不得变成"网络可达"的前置。
     if _contract_check_enabled(data) and symbols:
         available = _CONTRACT_FETCHER(exchange, env)
-        if available is not None:
+        if available is None:
+            log.info("%s: 合约列表不可得，跳过存在性校验", path.name)
+        else:
             missing = [s for s in symbols if s not in available]
             if missing:
-                raise GateApiError(
-                    f"{path.name}: {exchange} 上没有这些合约: {missing}"
-                    f"（改 symbols 或换 exchange）")
+                _fail_or_warn(
+                    path,
+                    f"exchange={exchange} 上没有这些合约: {missing}（拼错？或换 exchange）",
+                    enabled=enabled)
 
     return BotConfig(
         bot_id=str(bot_id),
@@ -359,40 +381,19 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
     )
 
 
-def _validate_cross_bot(bots: dict[str, BotConfig], config_dir: Path) -> None:
-    """跨 bot 校验：这些是「单独看每个 bot 都没问题、放在一起就出事」的形态。
+def check_label_prefixes(bots: dict[str, BotConfig]) -> None:
+    """`label_prefix` 全局唯一（C-7）：它是**归属判据**（订单 text `t-<prefix>`），
+    重名 = 两个 bot 的 `_text_owned` 互相命中 → 互相撤单/改单/对账。
 
-    为什么必须放在**一起**看：空白名单、宇宙超出白名单、`label_prefix` 重名，
-    三者都只有在多 bot 共存时才显形，而它们的后果全是实盘安全级
-    （任意币可开仓 + 零守护 / 白名单外动作被拒 / 两个 bot 互相撤单）。
+    为什么只在**看得到全部 bot** 的这一层做：单看每个 bot 都合法，放在一起才出事；
+    而且报错必须点出冲突双方，否则用户不知道改哪一个。
+
+    两条收敛口径：
+    - 空 prefix 不参与（它是「没声明命名空间」的历史默认值，多 bot 的测试目录普遍如此）；
+    - 只有**两个以上在跑**的 bot 共用才报错 —— 未启用的 bot 既不在下单，也不该拦住
+      别人的实验配置（仓库实况：`ofl`/`wyk`/`sc` 三对重名，每对只有一个在跑）。
     """
-    enabled = {bid: b for bid, b in bots.items() if b.enabled}
-
-    # ① 空 symbols：执行器把 `[]` 当成 None = **不限制**（任意币可开仓），
-    #    而 5 个守护扫描又都遍历 `bot.symbols`（零次迭代 = 零守护）——必须显式声明才放行。
-    for bid, b in enabled.items():
-        if not b.symbols and not b.symbols_unrestricted:
-            raise GateApiError(
-                f"{bid}: symbols 为空但未声明 symbols_unrestricted: true —— "
-                f"空白名单等于「任意币可开仓 + 零守护」；确实要放开请显式写 "
-                f"symbols_unrestricted: true")
-
-    # ② 分析宇宙必须 ⊆ 执行白名单：超出部分会在执行层被拒单（白烧一轮），
-    #    而不是"模型想分析就分析"。
-    for bid, b in bots.items():
-        universe = (b.strategist or {}).get("symbols")
-        if not universe or not b.symbols:
-            continue
-        outside = [s for s in universe if s not in b.symbols]
-        if outside:
-            _fail_or_warn(
-                config_dir / f"{bid}.yaml",
-                f"strategist.symbols {outside} 不在 bot.symbols {b.symbols} 内"
-                f"（分析宇宙超出执行白名单，超出的币一律会被执行层拒单）",
-                enabled=b.enabled)
-
-    # ③ label_prefix 唯一：它是归属判据（订单 text `t-<label>`），重名 =
-    #    两个 bot 的 `_text_owned` 互相命中 → 互相撤单/改单/对账。
+    running = {bid for bid, b in bots.items() if b.enabled}
     by_prefix: dict[str, list[str]] = {}
     for bid, b in bots.items():
         if b.label_prefix:
@@ -400,16 +401,19 @@ def _validate_cross_bot(bots: dict[str, BotConfig], config_dir: Path) -> None:
     for prefix, bids in sorted(by_prefix.items()):
         if len(bids) < 2:
             continue
-        running = sorted(x for x in bids if x in enabled)
+        active = sorted(x for x in bids if x in running)
         msg = (f"label_prefix {prefix!r} 重复: {sorted(bids)}"
                f"（重名会让两个 bot 互相撤单/改单）")
-        if len(running) >= 2:
-            raise GateApiError(msg)
+        if len(active) >= 2:
+            raise GateApiError(msg + f" —— 其中 {active} 都在启用状态，"
+                                     f"请在 config/bots.local/<bot>.yaml 里错开")
         # 仓库实况：三对重名里各只有一个在跑 —— 不误报，只留痕
-        log.warning("%s（只有 %s 在运行，仅告警）", msg, running)
+        log.warning("%s（只有 %s 在运行，仅告警；未启用的一侧若有存量挂单仍会被误撤）",
+                    msg, active or "无")
 
 
-def assert_account_risk_consistent(bot: BotConfig, config_dir: Path) -> None:
+def assert_account_risk_consistent(bot: BotConfig, config_dir: Path,
+                                   overlay_dir: Optional[Path] = None) -> None:
     """断言该 bot 看到的 `account_risk` 与「经 accounts 合并后」完全一致。
 
     为什么要断言：`run` 路径经 `load_all_bots`（合并 `config/accounts.yaml`），
@@ -417,8 +421,12 @@ def assert_account_risk_consistent(bot: BotConfig, config_dir: Path) -> None:
     会把比执行闸门**更宽松**的预算告诉模型，模型按大预算报量然后被拒单
     （实盘曾占失败的 1/7）。两处口径必须同源，不能靠"记得传 accounts"。
     """
+    path = Path(config_dir) / f"{bot.bot_id}.yaml"
+    if not path.is_file():
+        log.warning("account_risk 一致性断言跳过：找不到 %s（bot_id 与文件名不一致？）", path)
+        return
     accounts = load_accounts(Path(config_dir))
-    fresh = load_bot_config(Path(config_dir) / f"{bot.bot_id}.yaml", accounts=accounts)
+    fresh = load_bot_config(path, overlay_dir=overlay_dir, accounts=accounts)
     if dict(fresh.account_risk or {}) != dict(bot.account_risk or {}):
         raise GateApiError(
             f"{bot.bot_id}: account_risk 与 accounts 合并后的结果不一致 —— "
@@ -437,5 +445,5 @@ def load_all_bots(config_dir: Path, overlay_dir: Optional[Path] = None) -> dict[
             continue
         cfg = load_bot_config(path, overlay_dir=ov_dir, accounts=accounts)
         bots[cfg.bot_id] = cfg
-    _validate_cross_bot(bots, config_dir)
+    check_label_prefixes(bots)
     return bots

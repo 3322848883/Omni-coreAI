@@ -51,7 +51,13 @@ def resolve_symbol_arg(
 ) -> tuple[str, str]:
     """解析工具调用的 symbol → `(symbol, note)`；`symbol == ""` 表示**无法确定**。"""
     a = args or {}
-    given = str(a.get("symbol") or a.get("sym") or "").strip().upper()
+    # 别名也要认：aux 的 schema 用 `coin`/`token`，行情类历史上还出现过 `contract`。
+    # 只看 `symbol` 会把「写了别名」误判成「没写」—— 单币宇宙下静默换成唯一那个币、
+    # 多币宇宙下莫名报 symbol_required，两种都是把模型的意图读错。
+    given = str(
+        a.get("symbol") or a.get("sym") or a.get("coin")
+        or a.get("token") or a.get("contract") or ""
+    ).strip().upper()
     uni = _norm(universe)
     if given:
         if uni and given not in uni:

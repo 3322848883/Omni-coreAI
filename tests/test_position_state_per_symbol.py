@@ -15,6 +15,7 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
+from omnialpha.strategist.prompt import SYSTEM_PROMPT
 from omnialpha.strategist.snapshot import collect_snapshot, position_state
 
 BTC_POS = {"contract": "BTC_USDT", "size": 19, "entry_price": "84000", "mode": "dual", "leverage": 20}
@@ -203,6 +204,43 @@ class TestBySymbolGrouping(unittest.TestCase):
         snap = _snap(["BTC_USDT"], positions=[BTC_POS, ETH_POS])
         flat = len(snap["account"]["positions"])
         self.assertEqual(sum(len(v) for v in snap["account"]["positions_by_symbol"].values()), flat)
+
+
+class TestContractRulesArePerSymbol(unittest.TestCase):
+    """规则 14/16/17 必须按 chip 的 symbol 取状态（T5-c）。
+
+    光把快照改成按币分区还不够：契约仍写「以 `account.position_state` 为准」的话，
+    模型会把**账户级**值（= 任一币有仓）当成该币有仓，B-1 的误放行照旧。
+    """
+
+    @staticmethod
+    def _rule(n: int) -> str:
+        start = SYSTEM_PROMPT.index(f"\n{n}) ")
+        try:
+            end = SYSTEM_PROMPT.index(f"\n{n + 1}) ")
+        except ValueError:
+            end = len(SYSTEM_PROMPT)
+        return SYSTEM_PROMPT[start:end]
+
+    def test_each_rule_points_at_the_symbol_key(self):
+        for n in (14, 16, 17):
+            with self.subTest(rule=n):
+                self.assertIn("position_state[symbol]", self._rule(n),
+                              f"规则 {n} 没按 chip 的 symbol 取状态")
+
+    def test_fallback_to_account_level_is_documented(self):
+        for n in (14, 16, 17):
+            with self.subTest(rule=n):
+                self.assertIn("position_state_any", self._rule(n))
+
+    def test_warns_that_account_level_is_not_this_symbol(self):
+        """必须让模型理解「账户级值 ≠ 该币有仓」—— 否则 B-1 的误判会重演。"""
+        self.assertIn("账户级值 ≠ 该币有仓", self._rule(16))
+
+    def test_unknown_exception_is_scoped_to_that_symbol(self):
+        """规则 14 的例外必须挂在「该币」的 unknown 上，而不是账户级 unknown。"""
+        self.assertIn("该币", self._rule(14))
+        self.assertIn("禁止撤销任何 tp/sl 保护单", self._rule(14))
 
 
 if __name__ == "__main__":

@@ -95,8 +95,8 @@ _SYSTEM_HEAD = (
     # 从未写明（规则 14 只管 flat、规则 16 只管状态语义）；（b）「保护单张数远超持仓」
     # 这个状态无规则覆盖，AI 只能靠推断，实测推成「protections 属于持仓」而不敢清理。
     # 关键：把可程序化的部分**明确归给引擎**，AI 只需知道 —— 而不是让 AI 去做机械活。
-    "17) [代码兜底] **状态与动作集**：按**该 chip 的 symbol** 在 `account.position_state` 里的取值"
-    "决定能做什么（缺键回退 `account.position_state_any`）—— "
+    "17) [代码兜底] **状态与动作集**：按**该 chip 的 symbol** 取 `account.position_state[symbol]`"
+    "决定能做什么（缺这个键时回退账户级 `account.position_state_any`）—— "
     "`flat`=只能开仓（open_*/stop_entry_*）；"
     "`entry_pending`=只能 hold 或撤单（**禁止** modify_tp_sl / close_* / reduce_*）；"
     "`position_open`=可管理（modify_tp_sl / close_* / reduce_* / add_*）；"

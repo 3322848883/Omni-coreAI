@@ -87,8 +87,8 @@ def apply_risk(plan: Plan, risk: RiskConfig) -> RiskResult:
     action_chips.sort(key=lambda c: c.confidence, reverse=True)
     # ── 按币名额（T8/D8）──
     # 原先名额全局共享、跨币按置信度抢 → BTC 占满则其他币系统性出局（B-4）。
-    # 改成先按 symbol 分组、各组取 top-N（组序 = 该组最高置信度，故整体仍是置信度序），
-    # 全局 `max_chips` 保留为**总上限**。
+    # 改成先按 symbol 分组、各组取 top-N；全局 `max_chips` 保留为**总上限**
+    # （跨币仍按置信度竞争，故这一步要重排）。
     if risk.max_chips_per_symbol and _per_symbol_quota_active(risk, action_chips):
         groups: dict[str, list[Chip]] = {}
         for c in action_chips:
