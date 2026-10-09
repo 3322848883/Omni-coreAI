@@ -394,7 +394,15 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
     if _contract_check_enabled(data) and symbols:
         available = _CONTRACT_FETCHER(exchange, env)
         if available is None:
-            log.info("%s: 合约列表不可得，跳过存在性校验", path.name)
+            # 分清「取不到」与「这家所压根没接校验」：前者是故障（值得重试），
+            # 后者是已知状态（别让人去查一个不存在的能力）。
+            from .exchanges.coverage import supports_listing
+
+            if not supports_listing(exchange):
+                log.info("%s: %s 的合约存在性校验尚未接入（目前只有 gate），跳过",
+                         path.name, exchange)
+            else:
+                log.info("%s: 合约列表不可得，跳过存在性校验", path.name)
         else:
             missing = [s for s in symbols if s not in available]
             if missing:
