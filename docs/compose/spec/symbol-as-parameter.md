@@ -3,7 +3,7 @@ feature: symbol-as-parameter
 status: delivered
 updated: 2026-10-09
 branch: feat/symbol-as-parameter
-commits: 07ae1b0..ee9a1f3（22 commits / 82 文件 / +8913 −575）
+commits: 07ae1b0..e15089a（24 commits / 92 文件）
 ---
 
 # 币种作为可配置参数（可切换 / 可添加）
@@ -38,10 +38,37 @@ commits: 07ae1b0..ee9a1f3（22 commits / 82 文件 / +8913 −575）
 
 ### Verification
 
-- 全量 **2325 项 OK / 0 失败 / 1 skip**（worktree 内；每条提交后都跑过全量）
+- 全量 **2326 项 OK / 0 失败 / 1 skip**（worktree 内；每条提交后都跑过全量）
 - 新增多币测试 **106 项**（8 个文件）
 - **「不是假绿」实测**：临时删掉 `tier1_journal_fields` 的币维度后 4 项测试立刻失败
 - **生产路径接线**：`test_dull_action_scope` 全部从 `execute_signal` 触发，不只单测 helper
+
+### 独立评审与处置
+
+评审由一个**不知实现过程**的独立 agent 做（只给 spec、base/head SHA 与 diff 命令）。
+它交回 12 项，核心形态与我们的历史毛病同源：**「helper 与测试都写好了，生产调用点没接线」**。
+逐条处置见提交 `独立评审后的修复`：
+
+- **Critical**：`close_all` 的 `scope=account` 被二次白名单过滤**退化成 bot**、且全部跳过时
+  仍 `ok=True`（**静默 no-op**）。已修。
+- **Major**：`plans.symbols_json` 生产恒 NULL / **我引入的回归**（按币快照污染 equity 序列）/
+  `parse_plan_text`+`parse_conditions` 未传 symbols（宇宙闸门只在测试里生效）/
+  `status` 未接 aux 覆盖 / persona 风控**独立实现**（截断 ≠ live 的拒绝）/ `gate_client`
+  自己兜底 quanto 让 T20 的 raise 不可达。全部已修。
+- **Minor**：`resolve_symbol_arg` 未过归一（同一句话三层不同解）已修；其余三条
+  （decay 按币的已知限制、`*_by_symbol` 的体积成本、I11 例外清单不准）已如实记录。
+
+### I11「单币行为逐字不变」的**完整**例外清单
+
+评审指出 Report 初版只声明两处、实际不止 —— 这里补全（每条都有一句为什么）：
+
+1. 契约示例占位符化（T18）：写死币名会持续把模型往那个币引。
+2. 画像移出稳定前缀（T13）：画像每平一笔就变，放进 `system` 会让最长的一段缓存失效。
+3. 单币 journal 多出 `symbols`/`decisions`/`tier1` 三个**增量**键（值本身与单币一致）。
+4. 降级轮多出 `raw.degraded` / `plan.meta.degraded`（留痕；原先降级是无声的）。
+5. 钝动作缺 `scope` 时单币会**整轮失败并回滚** —— 这是收紧的代价（原先静默放大到全账户），
+   实盘两个 bot 都带 symbol，正常路径不变。
+6. 风控文案带 symbol（`NO_FLIP` / `MAX_NOTIONAL_PCT`）—— spec T9 明确要求。
 
 ### Journey log
 
@@ -54,8 +81,8 @@ commits: 07ae1b0..ee9a1f3（22 commits / 82 文件 / +8913 −575）
    `label_prefix` 时会撤掉别的 bot 的保护单）。
 4. **「越界 symbol 唯一解时纠正」被否决**：spec 要求**拒绝**该 chip（保留 `corrected_from`
    留痕）—— 纠正会把「模型当时写的是哪个币」这个事实丢掉。
-5. **I11 的两处有意例外**（均已在提交信息里标注）：契约示例占位符化（T18）、画像移出
-   稳定前缀（T13）。其余单币路径都有逐字 golden 断言钉住。
+5. **评审抓到的最大一类问题不是逻辑错、是没接线**：helper 与测试都在、生产调用点没接
+   （5 处）。这提示下次这类改造要把「接线断言」当验收的一部分，而不是靠实现者自觉。
 
 ## [S1] Problem
 
