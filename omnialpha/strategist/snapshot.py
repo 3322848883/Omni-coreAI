@@ -120,8 +120,30 @@ def _order_kind(tif: Any, price: Any) -> Optional[str]:
     return None
 
 
-def position_state(account: dict) -> tuple[str, str]:
+def _norm_symbols(symbols: Optional[list[str]]) -> set[str]:
+    return {str(s or "").strip().upper() for s in (symbols or []) if str(s or "").strip()}
+
+
+def _rows_for(rows: Any, symbols: Optional[list[str]]) -> list[dict]:
+    """按 symbols 过滤账户级行；`symbols=None` = 不过滤（旧行为）。
+
+    **为什么账户级的行必须能按币过滤**：`positions` / `open_orders` 是**账户**级的
+    （多 bot 共账户时还混着别人的单）。不按币过滤就把「账户里有仓」当成「这个币有仓」，
+    于是规则 16/17 会对没仓的币放行管理动作（→ `NO_POSITION` 白烧一轮），
+    而规则 14 反过来永远看不到「某币有孤儿保护单」的触发条件。
+    """
+    if symbols is None:
+        return [r for r in (rows or []) if r]
+    uni = _norm_symbols(symbols)
+    return [r for r in (rows or [])
+            if r and str((r or {}).get("contract") or "").strip().upper() in uni]
+
+
+def position_state(account: dict, symbols: Optional[list[str]] = None) -> tuple[str, str]:
     """给 AI 的持仓状态摘要：(state, note)。
+
+    `symbols` 非 None 时只看这些币的持仓/挂单（按币状态）；None 时看整个账户（旧语义，
+    即「任一币有仓」）。按币的调用点见 `collect_snapshot` 的 `position_state{symbol:…}`。
 
     **为什么需要**：执行器挂入场单后 1–3 秒就把 TP/SL 一起挂上（不等成交），所以
     「无持仓 + 有待成交入场单 + 有保护单」是**常态**。但 AI 看到 `protections` 里有单、
@@ -143,8 +165,8 @@ def position_state(account: dict) -> tuple[str, str]:
             "不得据此判定无持仓；不得发 modify_tp_sl / close_* / reduce_* / flatten；"
             "**尤其不得撤销 tp/sl 保护单**（规则 14 在此状态下不适用）。只 hold 并说明。"
         )
-    pos_n = len([p for p in acct.get("positions") or [] if p])
-    oo = acct.get("open_orders") or []
+    pos_n = len(_rows_for(acct.get("positions"), symbols))
+    oo = _rows_for(acct.get("open_orders"), symbols)
     pend_n = len([
         o for o in oo
         if str((o or {}).get("status") or "").lower() in ("open", "partially_filled")
@@ -166,6 +188,50 @@ def position_state(account: dict) -> tuple[str, str]:
             "出现的就一定不是条件单**，不必再去猜它是 limit 还是 stop。"
         )
     return "flat", "无持仓、无待成交入场单"
+
+
+def _group_by_symbol(rows: Any) -> dict[str, list[dict]]:
+    """把账户级行按 contract 分区（只做投影，**不丢行**）。
+
+    没有 contract 的行落 `""` 键而不是被丢掉 —— 本仓反复踩到「静默丢维度」，
+    分组视图漏行会让 AI 以为账户上没有这张单。
+    """
+    out: dict[str, list[dict]] = {}
+    for row in (rows or []):
+        if not isinstance(row, dict):
+            continue
+        out.setdefault(str(row.get("contract") or ""), []).append(row)
+    return out
+
+
+def _position_state_by_symbol(account: dict, symbols: Optional[list[str]]) -> tuple[dict, dict]:
+    """按币的 `(states, notes)`：键 = 宇宙 ∪ 账户上出现过的 symbol。
+
+    **为什么把宇宙外的币也列出来**：账户可能是共享的（多 bot 共账户），而规则 14/16/17
+    按币取值 —— **缺键就等于无从判断**（模型只能退回账户级值，正是要修的毛病）。
+    这些键的说明里显式写「不在宇宙内、只忽略」，与规则 19 一致。
+    """
+    universe = _norm_symbols(symbols)
+    keys: list[str] = [str(s or "").strip().upper() for s in (symbols or [])
+                       if str(s or "").strip()]
+    for field in ("positions", "open_orders", "protections"):
+        for row in (account.get(field) or []):
+            if not isinstance(row, dict):
+                continue
+            sym = str(row.get("contract") or "").strip().upper()
+            if sym and sym not in keys:
+                keys.append(sym)
+    states: dict[str, str] = {}
+    notes: dict[str, str] = {}
+    for sym in keys:
+        st, note = position_state(account, [sym])
+        if universe and sym not in universe:
+            note = note + (
+                "（**该 symbol 不在【品种宇宙】内**，不是你的 —— 只忽略、不得操作，见规则 19）"
+            )
+        states[sym] = st
+        notes[sym] = note
+    return states, notes
 
 
 def collect_snapshot(
@@ -403,8 +469,21 @@ def collect_snapshot(
         except Exception as e:  # noqa: BLE001
             account["protections"] = []
             meta["degraded"].append("protections")
-    # 显式标注持仓状态：AI 不必从 positions/protections 的有无去猜（见 position_state）
-    account["position_state"], account["position_state_note"] = position_state(account)
+    # ── 按币分区（T5-a，见 docs/compose/spec/symbol-as-parameter.md [S2.4③]）──
+    # 宇宙来自调用方的 symbols（唯一权威）。每行标 `in_universe`：账户可能是共享的，
+    # 别人的持仓/挂单混在同一份快照里 —— 把「忽略别的 bot 的单」从提示词自律下沉为字段。
+    universe = _norm_symbols(symbols)
+    for rows in (account.get("positions"), account.get("open_orders"), account.get("protections")):
+        for row in (rows or []):
+            row["in_universe"] = str(row.get("contract") or "").strip().upper() in universe
+    account["positions_by_symbol"] = _group_by_symbol(account.get("positions"))
+    account["open_orders_by_symbol"] = _group_by_symbol(account.get("open_orders"))
+    # 显式标注持仓状态：AI 不必从 positions/protections 的有无去猜（见 position_state）。
+    # 旧单值保留一版（`*_any` = 「任一币有仓」），人格里的旧引用仍读得到。
+    account["position_state_any"], account["position_state_note_any"] = position_state(account)
+    account["position_state"], account["position_state_note"] = _position_state_by_symbol(
+        account, symbols
+    )
 
     return {
         "interval": interval,

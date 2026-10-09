@@ -90,6 +90,11 @@ def _build_plan_runner(bot, paths: ProjectPaths):
             min_confidence=float(risk.get("min_confidence") or 0.75),
             max_notional_usd=float(risk["max_notional_usd"]) if risk.get("max_notional_usd") is not None else bot.max_notional_usd,
             max_chips=int(risk.get("max_chips") or 3),
+            max_chips_per_symbol=int(risk.get("max_chips_per_symbol") or 1),
+            # 品种宇宙 → plan 层闸门（T5-b）：宇宙外的 chip 在这里就被拒，不再等到
+            # 执行层白名单（那会白烧一轮）。`symbols: []` + `symbols_unrestricted: true`
+            # 的 bot 传 None = 不校验 —— 放开品种不该变成"一律拒绝"。
+            symbols=list(bot.symbols) or None,
             allow_actions=set(risk["allow_actions"]) if risk.get("allow_actions") else None,
         ),
         llm=LLMConfig(),
@@ -120,10 +125,26 @@ def _build_plan_runner(bot, paths: ProjectPaths):
     return PlanRunner(client, cfg, paths.bot_inbox(bot.bot_id), history, llm=LLMClient(cfg.llm))
 
 
+def _load_bot_consistent(paths: ProjectPaths, bot_id: str):
+    """加载 bot 配置，并断言它的 `account_risk` 与 accounts 合并结果一致（T4 / C-6）。
+
+    为什么需要：`run` 路径经 `load_all_bots`（会合并 `config/accounts.yaml`），
+    而 CLI 的 `plan`/`plan-loop` 曾经直接 `load_bot_config`（**不合并**）——
+    于是 strategist 拿到比执行闸门**更宽松**的预算，模型按大预算报量、被 executor 拒单
+    （实盘曾占失败的 1/7）。两处口径必须同源，不能靠"记得传 accounts"。
+    """
+    from .config import assert_account_risk_consistent, load_accounts
+
+    bot = load_bot_config(paths.config_dir / f"{bot_id}.yaml",
+                          accounts=load_accounts(paths.config_dir))
+    assert_account_risk_consistent(bot, paths.config_dir)
+    return bot
+
+
 def cmd_plan(args) -> int:
     paths = ProjectPaths(_root_from_args(args))
     paths.ensure()
-    bot = load_bot_config(paths.config_dir / f"{args.bot}.yaml")
+    bot = _load_bot_consistent(paths, args.bot)
     runner = _build_plan_runner(bot, paths)
     # CLI 边界：给人可读的错误，不要甩 traceback。
     # `run_once` 内部已捕 `PlanError` 走 degraded，但配置/凭据/客户端初始化等
@@ -148,7 +169,7 @@ def cmd_plan_loop(args) -> int:
     if lock is None:
         print(f"plan-loop already running for {args.bot}", flush=True)
         return 3
-    bot = load_bot_config(paths.config_dir / f"{args.bot}.yaml")
+    bot = _load_bot_consistent(paths, args.bot)
     runner = _build_plan_runner(bot, paths)
     try:
         runner.run_forever()
@@ -302,7 +323,7 @@ def cmd_process(args) -> int:
     if not cfg_path.exists():
         print(f"missing bot config: {cfg_path}", file=sys.stderr)
         return 1
-    bot = load_bot_config(cfg_path)
+    bot = _load_bot_consistent(paths, bot_id)
     src = Path(args.file).resolve()
     if not src.exists():
         print(f"missing file: {src}", file=sys.stderr)
