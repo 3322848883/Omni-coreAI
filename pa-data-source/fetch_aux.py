@@ -83,8 +83,42 @@ LOOP_INTERVAL = 5
 # 维护操作（purge）间隔，避免每次循环浪费
 MAINT_INTERVAL = 60
 
-# 合约市场结构数据按品种采集（与 watchlist.yaml symbols 一致）
-CONTRACTS = ["BTC_USDT", "ETH_USDT", "SOL_USDT", "XAU_USDT", "XAG_USDT"]
+# 合约市场结构数据按品种采集。**从 watchlist.yaml 读**，不再是第二份硬编码：
+# watchlist 已经是同一台机器上的**品种权威**（kline 采集器照它跑），aux 再写一份
+# 必然漂移 —— 加一个币要改两处，而漏改的那处**不报错、只是永远没数据**：
+# aux 工具静默返回空列表，模型读成「这个币没数据」（审计 A-7/A-8）。
+_DEFAULT_CONTRACTS = ["BTC_USDT", "ETH_USDT", "SOL_USDT", "XAU_USDT", "XAG_USDT"]
+
+
+def _watchlist_contracts() -> list:
+    """`CONTRACTS` 的来源：watchlist.yaml → 内置默认（读不到就回退并告警）。
+
+    `OMNIALPHA_WATCHLIST` 可指定别的 watchlist（多环境/测试用）。读不到、解析失败、
+    或里面没有 symbols 时**回退内置默认**：采集器不能因为一个配置文件就起不来
+    （那会让全部 aux 数据停摆，比少几个币严重得多）。
+    """
+    env = os.environ.get("OMNIALPHA_WATCHLIST") or os.environ.get("AUX_WATCHLIST")
+    path = env or os.path.join(os.path.dirname(os.path.abspath(__file__)), "watchlist.yaml")
+    _log = logging.getLogger("aux-info-feed")
+    try:
+        import yaml  # 可选依赖：没装就回退默认
+        with open(path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        syms: list = []
+        for item in (cfg.get("symbols") or []):
+            name = item.get("name") if isinstance(item, dict) else item
+            name = str(name or "").strip().upper()
+            if name and name not in syms:
+                syms.append(name)
+        if syms:
+            return syms
+        _log.warning("watchlist %s 里没有 symbols，回退内置默认：%s", path, _DEFAULT_CONTRACTS)
+    except Exception as e:  # noqa: BLE001 — 读不到不能让采集直接崩
+        _log.warning("watchlist 读取失败（%s: %s），回退内置默认品种", path, e)
+    return list(_DEFAULT_CONTRACTS)
+
+
+CONTRACTS = _watchlist_contracts()
 
 # 社区舆情查询词（symbol + 名称提升召回；XAU/XAG 为贵金属，用 gold/silver）
 XPOST_QUERIES = {
@@ -1502,7 +1536,9 @@ def run_once():
         if _due("social", sched, now):
             sp_ok, sp_new = [], 0
             for contract in CONTRACTS:
-                query = XPOST_QUERIES.get(contract, contract)
+                # 表里没有的币（watchlist 新加的）回退到**裸币名** —— 用
+                # `DOGE_USDT` 当查询词召回过低，等于新币的舆情永远是空的。
+                query = XPOST_QUERIES.get(contract) or str(contract).split("_")[0]
                 coin = contract.split("_")[0]
                 sp = _fetch_xposts(query)
                 _write_snapshot("social.json", "news/feed/search-ugc", sp)

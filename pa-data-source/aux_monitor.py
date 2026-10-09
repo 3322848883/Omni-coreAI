@@ -21,8 +21,76 @@ SCHEMA_VERSION = fetch_aux.SCHEMA_VERSION
 TS_GAP_TOLERANCE = 300
 
 
-def read_aux_status(status_path):
-    """读取并解析 aux_status.json；文件缺失/损坏返回 present=False 结构"""
+# aux 各表用来对币的列（必须与 `omnialpha/strategist/tools.py` 的查询一致，
+# 否则统计的是「别的东西有没有数据」而不是这个币）。
+SYMBOL_TABLES = (
+    ("trades", "contract"),
+    ("liquidations", "contract"),
+    ("market_stats_ts", "contract"),
+    ("coin_info_ts", "symbol"),
+    ("onchain_ts", "token"),
+    ("social_posts_ts", "coin"),
+    ("sentiment_ts", "coin"),
+)
+
+
+def symbol_coverage(db_path, contracts):
+    """每个币在 aux 各表里的行数 → `{symbol: {table: rows}}`；读不到返回 `{}`。
+
+    **为什么必须按币**：`interfaces[...].status` 只给**整体** ok/fail —— 5 个币里
+    1 个全空也照样报 ok（只要别的币有数据）。而「新增/切换的币永远没数据」正是这种
+    形态：aux 工具静默返回空列表，模型读成「这个币没数据」（审计 A-7/A-8，
+    静默空比报错更难发现）。
+
+    零脚本原则：只数行数，不下任何分析结论。
+    """
+    if not db_path or not os.path.exists(db_path):
+        return {}
+    import sqlite3
+
+    out = {}
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % db_path, uri=True)
+        try:
+            have = {r[0] for r in con.execute(
+                "select name from sqlite_master where type='table'")}
+            for sym in (contracts or []):
+                key = str(sym or "").strip().upper()
+                if not key:
+                    continue
+                per = {}
+                for table, col in SYMBOL_TABLES:
+                    if table not in have:
+                        continue
+                    try:
+                        n = con.execute(
+                            "select count(*) from %s where upper(%s)=?" % (table, col),
+                            (key,)).fetchone()[0]
+                    except sqlite3.Error:
+                        continue  # 该表缺列/结构不同 → 跳过，不当成「零数据」
+                    per[table] = int(n or 0)
+                if per:
+                    out[key] = per
+        finally:
+            con.close()
+    except Exception:  # noqa: BLE001 — 只读统计，失败就当没有这一层
+        return out
+    return out
+
+
+def zero_coverage_symbols(coverage):
+    """**所有表都零行**的币 —— 这些币的 aux 数据等于不存在（要么去采、要么告警）。"""
+    return sorted(sym for sym, per in (coverage or {}).items()
+                  if per and all(int(v or 0) == 0 for v in per.values()))
+
+
+def read_aux_status(status_path, db_path=None, contracts=None):
+    """读取并解析 aux_status.json；文件缺失/损坏返回 present=False 结构
+
+    可选 `db_path` + `contracts`：给了就附上**按币覆盖**（`symbol_coverage` /
+    `zero_coverage`），用于回答「这个币的 aux 到底有没有数据」。
+    两个都不给时行为与改动前完全一致。
+    """
     if not os.path.exists(status_path):
         return {"present": False, "note": "aux_status.json 不存在"}
     try:
@@ -115,7 +183,14 @@ def read_aux_status(status_path):
     if schema_version != SCHEMA_VERSION:
         inconsistencies.append("schema_version 异常: %s" % schema_version)
 
-    return {
+    # 按币覆盖（可选层）：整体 ok 只说明「有数据」，说不出**哪个币**没数据 ——
+    # 而「新增/切换的币永远没数据」正是整体 ok 掩盖的那种形态（A-7）。
+    coverage = symbol_coverage(db_path, contracts) if db_path else {}
+    zero = zero_coverage_symbols(coverage)
+    for sym in zero:
+        inconsistencies.append("%s 在 aux 各表全为零行（这个币的 aux 数据等于不存在）" % sym)
+
+    out = {
         "present": True,
         "last_fetch_ts": ts_int,
         "last_fetch_at": data.get("fetched_at"),
@@ -127,3 +202,7 @@ def read_aux_status(status_path):
         "consistent": len(inconsistencies) == 0,
         "inconsistencies": inconsistencies,
     }
+    if db_path:
+        out["symbol_coverage"] = coverage
+        out["zero_coverage"] = zero
+    return out
