@@ -134,5 +134,68 @@ class TestNoHardcodedSymbolLeft(unittest.TestCase):
         self.assertIn("symbols", sig.parameters)
 
 
+class TestUnifiedPrecheck(unittest.TestCase):
+    """T6：**全部**需要 symbol 的工具都走统一前置（不再各自 `or "BTC_USDT"`）。
+
+    此前只有 3 个 smc 工具 + 全部 tv_* 接了统一解析，其余（7 个行情 + 10 个 aux +
+    4 个 orderflow）只做 `args.get("symbol") or ""` —— 于是单币漏写不会自动补、
+    多币漏写不会拒绝，`BTC`/`BTCUSDT` 这类写法还会静默命中 0 行。
+    """
+
+    NEEDS_SYMBOL = (
+        "klines", "indicators", "ticker", "orderbook", "contract", "stats", "taker_delta",
+        "trades_flow", "liquidations", "market_stats", "tech_analysis",
+        "coin_info", "onchain", "social", "sentiment",
+        "orderflow_tape", "orderflow_footprint", "orderbook_state", "orderbook_walls",
+    )
+
+    def test_multi_universe_rejects_missing_symbol(self):
+        for tool in self.NEEDS_SYMBOL:
+            out = run_tool(None, tool, {}, symbols=MULTI)
+            self.assertEqual(out.get("error"), "symbol_required", (tool, out))
+            self.assertEqual(out.get("universe"), MULTI, tool)
+
+    def test_out_of_universe_rejected(self):
+        for tool in ("klines", "ticker", "sentiment", "trades_flow", "orderflow_tape"):
+            out = run_tool(None, tool, {"symbol": "SOL_USDT"}, symbols=MULTI)
+            self.assertEqual(out.get("error"), "symbol_not_in_universe", (tool, out))
+
+    def test_auto_fill_reaches_klines_fetch(self):
+        import omnialpha.strategist.tools as T
+
+        seen: list = []
+        orig = T.resolve_candles
+        T.resolve_candles = lambda client, sym, tf, lim, **kw: (seen.append(sym), _FakeRes())[1]
+        try:
+            run_tool(None, "klines", {}, symbols=["ETH_USDT"])
+        finally:
+            T.resolve_candles = orig
+        self.assertEqual(seen, ["ETH_USDT"], "单币自动补必须真的传到取数层")
+
+    def test_contract_tool_returns_min_notional(self):
+        """`contract` 的描述与 AGENTS.md 规则 #1 都承诺给「最小名义」，实现此前没给。"""
+        from types import SimpleNamespace
+
+        class _C:
+            def get_contract(self, s):
+                return SimpleNamespace(quanto_multiplier=0.0001, order_size_round=1.0,
+                                       order_price_round=0.1, leverage_max=100)
+
+            def get_last_price(self, s):
+                return 80000.0
+
+        out = run_tool(_C(), "contract", {"symbol": "BTC_USDT"}, symbols=["BTC_USDT"])
+        self.assertAlmostEqual(float(out["min_notional_usd"]), 8.0, places=6)
+
+    def test_account_symbols_intersected_with_universe(self):
+        out = run_tool(None, "account", {"symbols": ["FAKE_USDT"]}, symbols=MULTI)
+        self.assertEqual(out.get("error"), "symbol_not_in_universe", out)
+
+    def test_sentiment_no_longer_falls_back_to_all(self):
+        """缺 symbol 不再返回「全表最新 N 行」（那是**任意币**的数据）。"""
+        out = run_tool(None, "sentiment", {}, symbols=MULTI)
+        self.assertEqual(out.get("error"), "symbol_required", out)
+
+
 if __name__ == "__main__":
     unittest.main()

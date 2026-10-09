@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from .symbols import resolve_symbol_arg, symbol_error_payload  # noqa: E402
 from typing import Any, Optional
 
 ORDERFLOW_TOOL_NAMES = (
@@ -24,7 +25,7 @@ ORDERFLOW_TOOL_NAMES = (
     "orderbook_walls",
 )
 
-_SYM = {"type": "string", "description": "e.g. BTC_USDT"}
+_SYM = {"type": "string", "description": "币种（取【品种宇宙】里的值）"}
 _LIMIT = {"type": "integer", "minimum": 1, "maximum": 500,
           "description": "how many recent rows (default 60)"}
 
@@ -155,16 +156,19 @@ def _q(bot_root, sql: str, params: tuple = ()) -> list:
         return [{"error": f"orderflow query failed: {e}"}]
 
 
-def _sym(args: dict) -> str:
-    return str(args.get("symbol") or args.get("contract") or args.get("sym") or "")
+def run_orderflow_tool(bot_root, name: str, args: dict,
+                       symbols: Optional[list] = None) -> Any:
+    """执行订单流工具。
 
-
-def run_orderflow_tool(bot_root, name: str, args: dict) -> Any:
-    """执行订单流工具。"""
+    symbol 走 `strategist/symbols.py`（唯一解析来源，T6）：单币宇宙自动补，
+    多币/越界/未配置一律拒绝。原来只判"非空"，于是 `BTC` / `BTCUSDT` 这类写法
+    会命中 0 行、**静默返回空**（看起来像"这个币没有订单流数据"）。
+    """
     args = dict(args or {})
-    sym = _sym(args)
+    sym, _note = resolve_symbol_arg(args, symbols, tool=name)
     if not sym:
-        return {"error": "symbol required"}
+        return symbol_error_payload(_note, symbols, tool=name)
+    args["symbol"] = sym
 
     if name == "orderflow_tape":
         lim = max(1, min(int(args.get("limit") or 60), 500))

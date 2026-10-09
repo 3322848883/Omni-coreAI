@@ -595,7 +595,9 @@ NATIVE_TOOLS = [
                 "properties": {
 
 
-                    "symbol": {"type": "string", "description": "optional; default uses positions/open orders symbols"}
+                    "symbol": {"type": "string", "description": "optional; default uses positions/open orders symbols"},
+                    "symbols": {"type": "array", "items": {"type": "string"},
+                                "description": "可选：只看这些币（取值见【品种宇宙】）；留空=本 bot 的品种"},
 
 
                 },
@@ -1381,6 +1383,36 @@ def _f(v: Any) -> Optional[float]:
 
 
 
+# ── 需要 symbol 的工具（一处定义，T6）──────────────────────────
+# 这些工具的 symbol 缺省策略统一走 `strategist/symbols.py`（唯一解析来源）：
+# 单币宇宙自动补、多币/越界/未配置一律拒绝 —— **不再各自拿一个硬编码币兜底**。
+# 不在集合里的：与币无关（skill/skill_ref/journal_lookup/overview/macro）或自己处理
+# 多选（account，见其 schema 的 symbols）。
+_SYMBOL_TOOLS = frozenset({
+    "klines", "indicators", "ticker", "orderbook", "contract", "stats", "taker_delta",
+    "smc_map", "smc_events", "sqzmom",
+    "trades_flow", "liquidations", "market_stats", "tech_analysis",
+    "coin_info", "onchain", "social", "sentiment",
+    "orderflow_tape", "orderflow_footprint", "orderbook_state", "orderbook_walls",
+})
+
+
+def _min_notional_usd(client, sym: str, cm) -> Optional[float]:
+    """1 张的名义（USDT）= 最新价 × quanto_multiplier；取不到价就返回 None。
+
+    为什么单独一个函数：`contract` 工具与快照都要这个口径，两处各写一遍必然漂移
+    （快照里已经算过一遍，注释写着「张数=size_usd/(last*quanto)」）。
+    """
+    try:
+        last = float(client.get_last_price(sym) or 0)
+        mult = float(getattr(cm, "quanto_multiplier", 0) or 0)
+        if last > 0 and mult > 0:
+            return round(last * mult, 8)
+    except Exception:  # noqa: BLE001 — 取不到价不影响其余元数据
+        pass
+    return None
+
+
 def run_tool(
 
 
@@ -1448,7 +1480,17 @@ def run_tool(
             # 把**可用工具**直接列出来，减少模型的盲目重试（实测它会连着猜好几次）
             "available": [n for n in TOOL_NAMES if _tool_allowed(n, allow, deny)],
             "hint": "该工具被 strategist.tools 的 allow/deny 关掉了；请只用 available 里的工具",
+
         }
+
+    # symbol 的统一前置（T6）：解析结果**回填 args**，下游工具直接用。
+    # 缺省策略见 `strategist/symbols.py` —— 关键是「不猜」：多币漏写会带宇宙拒绝，
+    # 而不是静默拿另一个币的数据（`ticker` 空符号取 `raw[0]` 就是那种静默错币）。
+    if name in _SYMBOL_TOOLS:
+        _resolved, _note = resolve_symbol_arg(args, symbols, tool=name)
+        if not _resolved:
+            return symbol_error_payload(_note, symbols, tool=name)
+        args["symbol"] = _resolved
 
 
     # journal_lookup: 记忆检索（不需要 gate client，只要 bot_root / bot_id）
@@ -1545,7 +1587,7 @@ def run_tool(
 
 
         if name in ORDERFLOW_TOOL_NAMES:
-            return run_orderflow_tool(bot_root, name, args)
+            return run_orderflow_tool(bot_root, name, args, symbols=symbols)
 
 
         if name == "klines":
@@ -1734,8 +1776,9 @@ def run_tool(
 
 
                 "leverage_max": cm.leverage_max,
-
-
+                # 描述与 AGENTS.md 规则 #1 都承诺给「最小名义」，实现此前没给 ——
+                # 模型只能去快照里找（快照只覆盖本 bot 的 symbols，快照外的币就查不到）。
+                "min_notional_usd": _min_notional_usd(client, sym, cm),
             }
 
 
@@ -1826,6 +1869,17 @@ def run_tool(
 
         if name == "account":
 
+
+            # 与宇宙求交（T6）：越界/任意字符串不再被接受（此前 `symbols: ["FAKE_USDT"]`
+            # 也会照样去查）。放在任何 REST 调用**之前** —— 无效参数不该先烧一次网络往返。
+            _universe = [str(x) for x in (symbols or [])]
+            _asked = args.get("symbols") or ([args.get("symbol")] if args.get("symbol") else [])
+            if _universe and _asked:
+                _outside = [str(x) for x in _asked if str(x) not in _universe]
+                if _outside:
+                    return {"error": "symbol_not_in_universe",
+                            "message": "account.symbols 有宇宙外的币",
+                            "outside": _outside, "universe": sorted(_universe)}
 
             # Always REST (authoritative); local account.db may lag (no keys / stalled push)
 
@@ -2358,9 +2412,11 @@ def run_tool(
 
 
             else:
-
-
-                rows = _aux_query(bot_root, q + " ORDER BY fetched_ts DESC LIMIT ?", (lim,))
+                # 缺 symbol 不再退化成「全表最新 N 行」—— 那会返回**任意币**的数据，
+                # 而调用方无从察觉（这是本层唯一「缺 symbol 时静默取到别的币」的路径）。
+                return {"error": "symbol_required",
+                        "message": "sentiment 需要 symbol（不再回退全表最新）",
+                        "universe": sorted(str(x) for x in (symbols or []))}
 
 
             return {"sentiment": rows}
