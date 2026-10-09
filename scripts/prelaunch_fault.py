@@ -35,7 +35,13 @@ def run_fault(REP, gate_client) -> None:
             except LLMError:
                 raised = True
             elapsed = time.time() - t0
-            REP.rec("M15", "llm_timeout", raised and elapsed < 5, f"raised={raised} t={elapsed:.1f}s")
+            # **判据是「有上界地失败」，不是「1 秒内失败」**：客户端对上层的稳定性承诺是
+            # 指数退避重试 3 次（AGENTS.md「稳定性（不掉票）」），所以 `timeout_sec=1`
+            # 时总耗时必然 ≈ 3 次超时 + 退避（实测稳定 7.6s）。原先卡 `elapsed < 5`
+            # 与那个设计冲突 —— 长期 FAIL 而没人管（同 M10 tiny_usd 的形态）。
+            # 这里验：确实抛了错（不是静默吞掉）+ 总耗时在合理上界内（不无限等）。
+            REP.rec("M15", "llm_timeout", raised and elapsed < 30,
+                    f"raised={raised} t={elapsed:.1f}s（含 3 次退避重试）")
     except Exception as e:  # noqa: BLE001
         REP.rec("M15", "llm_timeout", False, str(e)[:80])
 
