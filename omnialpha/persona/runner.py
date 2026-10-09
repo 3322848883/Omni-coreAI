@@ -87,14 +87,23 @@ class PersonaRunner:
 
         # 记录共同记忆：本轮投票（新单先建，再记票）
         # 带上本轮标的：多币组必须按币取单，否则可能复用/关闭**另一个币**的订单记录
-        order_id = self._resolve_order_id(decision, fusion, symbol=self._symbol_of(flat))
+        sym = self._symbol_of(flat)
+        # `create` 前校验宇宙：订单库是**审计面**，写一个本组根本不做的标的进去，
+        # 会让「按币取单」与事后核对都失准（T14）。组宇宙 = 各成员 symbols 的并集；
+        # 取不到（全组都没配）时不拦（不猜）。
+        universe = sorted({s for b in self.group.members for s in self._symbols_of(b)})
+        if universe and sym and sym.upper() not in {u.upper() for u in universe}:
+            log.warning("persona %s: 本轮标的 %s 不在宇宙 %s 内 → 不归档该标的",
+                        self.group.name, sym, universe)
+            sym = ""
+        order_id = self._resolve_order_id(decision, fusion, symbol=sym)
         if order_id:
             if self.orders.get(order_id) is None:
                 # 新建共享订单（开仓/首轮）
                 try:
                     self.orders.create({
                         "order_id": order_id,
-                        "symbol": self._symbol_of(flat),
+                        "symbol": sym,
                         "group": self.group.name,
                         "topology": self.group.topology,
                         "target_account": self.group.target_account or self.group.members[0],
