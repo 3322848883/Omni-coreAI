@@ -118,6 +118,9 @@ class Intent:
     tp3_share: Optional[float] = None
     tp_extra: list[float] = field(default_factory=list)
     tp_extra_shares: list[Optional[float]] = field(default_factory=list)
+    # 钝动作（close_all / cancel_all / cancel_price_all / cancel_trail_all）的**作用面**：
+    # ""=未声明（symbol 为空时执行侧拒绝，不再静默放大到全账户）| symbol | bot | account
+    scope: str = ""
 
     @property
     def needs_open(self) -> bool:
@@ -357,6 +360,23 @@ def _norm_replace(value) -> str:
     raise SchemaError(f"replace must be none|symbol|all, got {value!r}")
 
 
+_SCOPES = ("symbol", "bot", "account")
+
+
+def _norm_scope(value) -> str:
+    """钝动作作用面：`symbol`（默认语义，需要给 symbol）| `bot` | `account`。
+
+    空串 = **调用方未声明**（≠ symbol）—— 执行侧据此拒绝「symbol 为空就默默放大到
+    全账户」这条路径（spec: symbol-as-parameter §S2.4⑧）。非法值直接报错，不静默归一。
+    """
+    if value is None or value == "":
+        return ""
+    s = str(value).strip().lower()
+    if s not in _SCOPES:
+        raise SchemaError(f"scope must be symbol|bot|account, got {value!r}")
+    return s
+
+
 def _safe_label(label: str) -> str:
     """Order text tag: only [A-Za-z0-9_-], max 32 — blocks path/injection in text."""
     import re
@@ -385,7 +405,10 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
         tp = _f(data.get("tp"), "tp")
         sl = _f(data.get("sl"), "sl")
         if tp is None and sl is None:
-            return Intent(action="hold", meta=data.get("meta") or {}, label=default_label)
+            # `symbol` 要跟着走：多币下「hold 哪个币」是有信息量的（replace=symbol 靠它
+            # 决定本轮触及哪些币；丢了就等于本轮没声明作用面 → 旧单收不掉）。
+            return Intent(action="hold", symbol=str(data.get("symbol") or "").strip(),
+                          meta=data.get("meta") or {}, label=default_label)
         intent = _parse_modify_tp_sl(data, default_label, requested_action="modify_tp_sl")
         intent.meta["from_action"] = "hold"
         return intent
@@ -407,6 +430,7 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
             symbol=_check_symbol_token(symbol) if symbol else "",
             side=data.get("side"),
             label=_safe_label(data.get("label") or default_label),
+            scope=_norm_scope(data.get("scope")),
             meta=data.get("meta") or {},
         )
 

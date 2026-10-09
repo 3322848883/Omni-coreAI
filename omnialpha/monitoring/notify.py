@@ -298,12 +298,30 @@ def build_notifier(root: Path = None) -> AlertNotifier:
     if tg_token and tg_chat:
         n.register(TelegramChannel(bot_token=tg_token, chat_id=tg_chat))
     return n
+def _rolled_back_symbols(steps: list) -> set:
+    """本轮**被回滚**（撤掉）的腿所在的币。
+
+    为什么必须在渲染层扣一次：回滚发生在「新单挂完之后」（place-before-cancel），
+    所以那条腿在 report 里仍然 `ok=True` —— 它确实挂出去过。照原样推送就成了
+    「已开仓 / 已挂单」的假消息，而账户上什么都没有：**通知与最终状态不一致**。
+    """
+    out: set = set()
+    for s in steps or []:
+        if not isinstance(s, dict):
+            continue
+        for leg in ((s.get("detail") or {}).get("rolled_back_legs") or []):
+            if isinstance(leg, dict) and leg.get("symbol"):
+                out.add(str(leg["symbol"]))
+    return out
+
+
 def format_trade_steps(bot_id: str, steps: list) -> list[str]:
     """把 ExecReport.steps 里值得推送的成交/保护事件格式化成文本行。
 
     只推：开仓、平仓、减仓、modify_tp_sl；hold/cancel 静默。
     """
     lines: list[str] = []
+    rolled = _rolled_back_symbols(steps)
     for s in steps or []:
         if not isinstance(s, dict):
             continue
@@ -320,6 +338,10 @@ def format_trade_steps(bot_id: str, steps: list) -> list[str]:
         mark = "✓" if ok else "✗"
         tstamp = _step_time(detail, s)
         if action in _OPEN_ACTIONS:
+            if sym and sym in rolled:
+                # 整轮回滚把它撤了：如实说「已回滚」，别再说挂单/开仓
+                lines.append(f"{mark} 已回滚 {sym}（整轮失败回滚，账户上未留下这笔）  [{tstamp}]")
+                continue
             side = "多" if "long" in action else "空"
             px = _entry_price(detail, s)
             sz, unit = _resolve_size(detail, s)
@@ -639,6 +661,7 @@ def _resolve_size(detail: dict, s: dict):
 def format_trade_card(bot_id: str, steps: list) -> list[dict]:
     """把成交事件格式化成飞书卡片元素（彩色标题+字段布局）。"""
     cards = []
+    rolled = _rolled_back_symbols(steps)
     for s in steps or []:
         if not isinstance(s, dict):
             continue
@@ -667,6 +690,10 @@ def format_trade_card(bot_id: str, steps: list) -> list[dict]:
                 title = "📋 挂单告警"
             else:
                 title = "📈 开仓告警"
+            if sym and sym in rolled:
+                # 整轮回滚把它撤了：标题必须如实（字段名仍是稳定契约，不动）
+                color = "grey"
+                title = "↩️ 已回滚告警"
             fields = [
                 ("Bot", bot_id), ("币种", sym),
                 ("方向", f"开{side}"), ("入场价", px),

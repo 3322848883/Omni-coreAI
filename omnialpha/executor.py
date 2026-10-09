@@ -205,8 +205,10 @@ class Executor:
         # Snapshot owned resting orders before new placements (place-before-cancel).
         # Do NOT cancel here — new protection first, then withdraw old owned ones.
         replace_mode = self._replace_mode(signal, intents)
-        # 无条件快照「本轮开始前」的本 bot 挂单 —— 回滚要用它当基线（见 _rollback_newly_placed）
-        pre_owned = self._snapshot_owned(intents)
+        # 无条件快照「本轮开始前」的本 bot 挂单 —— 回滚要用它当基线（见 _rollback_newly_placed）。
+        # `replace=all` 时快照面扩到「本 bot 有单的**全部**合约」（见 _all_owned_symbols）——
+        # 这就是它与 `replace=symbol`（只看本轮 payload 触及的币）的区别。
+        pre_owned = self._snapshot_owned(intents, replace_mode)
 
         # 排序：**先平仓、后开仓**（参照 nofx 的 `sortDecisionsByPriority`）。
         # 先释放保证金再开新仓 —— 否则同轮换仓会因保证金不足被拒，或两笔叠加
@@ -276,6 +278,92 @@ class Executor:
         if self.default_replace and self.default_replace != "none":
             modes.add(self.default_replace)
         return "all" if "all" in modes else ("symbol" if "symbol" in modes else "none")
+
+    def _own_namespace(self, label: str = "") -> tuple[str, str]:
+        """本 bot 的归属命名空间 → `(text_prefix, tag)`；判不出来时是 `("", "")`。
+
+        `_own_scope_tag`/`_own_prefix` 的**唯一入口**：`label_prefix` 优先（bot 级命名空间，
+        signal 的 label 逃不出去），否则用 label 本身。两者都空 = **归属判不了** ——
+        调用方必须 fail-closed（跳过 / 拒绝），**不得退化为整表**。
+        """
+        tag = self._own_scope_tag(label)
+        return self._text_prefix(tag), tag
+
+    def _wide_scope(self, scope: str, action: str) -> str:
+        """`symbol` 为空时解析作用面；**未显式声明就拒绝**。
+
+        为什么必须拒绝：动作的作用域不该由「参数是否为空」隐式决定 —— 原先
+        `close_all`/`cancel_*` 在 `symbol=""` 时静默放大到**全账户**（且 `close_all`
+        连归属过滤都没有，会平掉别的 bot 的仓）。能力不丢：显式写 `scope: account`
+        仍是全账户语义。单币路径不受影响 —— 它们调这些动作都带 symbol。
+        """
+        s = str(scope or "").strip().lower()
+        if s in ("bot", "account"):
+            return s
+        if s == "symbol":
+            raise GateApiError(
+                f"{action}: scope=symbol 需要 symbol（只动一个币就写 symbol）")
+        if s:
+            raise GateApiError(
+                f"{action}: scope 只能是 symbol|bot|account，收到 {scope!r}")
+        raise GateApiError(
+            f"{action}: 未给 symbol 时必须显式声明作用面 —— "
+            f"全账户请写 scope: account，全 bot（本 bot 的 symbols）请写 scope: bot；"
+            f"只动一个币请写 symbol")
+
+    def _wide_symbols(self, scope: str, candidates: list) -> list[str]:
+        """宽作用面（`symbol` 为空）下本次动作触及的 symbol 列表。
+
+        `scope=bot` → 限定在本 bot 声明的宇宙（`symbols_whitelist`）；
+        `scope=account` → 候选集合原样（调用方给的是「账户上一切有仓/有单的合约」）。
+        候选集合本身由调用方按动作给（平仓看有仓的合约，撤单看有单的合约）。
+        """
+        cand = sorted({str(s) for s in (candidates or []) if s})
+        if scope == "bot" and self.symbols_whitelist:
+            return [s for s in cand if s in self.symbols_whitelist]
+        return cand
+
+    def _symbol_owned(self, symbol: str) -> bool:
+        """本 bot 在该合约上**有归属证据**（本 bot 命名空间的挂单 / 条件单 text）。
+
+        持仓记录本身不带 text，所以归属只能从订单判：该合约上存在一条 text 落在本 bot
+        命名空间（`t-<label_prefix>*`）的单，就认为这个仓是本 bot 的。
+        **查不到（无本 bot 单 / 接口失败）一律 False = 判不了归属** —— 调用方 fail-closed。
+        """
+        prefix = self._own_prefix("")
+        if not prefix:
+            return False
+        return bool(self._owned_open_orders(symbol, prefix)
+                    or self._owned_price_orders(symbol, prefix))
+
+    def _all_owned_symbols(self) -> list[str]:
+        """本 bot 在**哪些合约上有挂单/条件单**（`replace=all` 的候选面）。
+
+        只用于把 `replace=all` 与 `replace=symbol` 真正区分开：symbol 只看本轮 payload
+        触及的币，all 还要收掉本 bot 在**其他币**上的旧单（`_cancel_stale_owned` 的
+        own 分支逐 slot 处理，所以候选面扩在这里）。归属仍靠订单 text，无 bot 命名空间
+        时返回空集（fail-closed，不放大到整表）。
+        """
+        prefix, label = self._own_namespace("")
+        if not prefix or not label:
+            return []
+        out: set[str] = set()
+        try:
+            for o in self.client.list_orders() or []:
+                sym = o.get("contract")
+                if sym and self._text_owned(str(o.get("text") or ""), label):
+                    out.add(str(sym))
+        except GateApiError:
+            pass
+        try:
+            for p in self.client.list_price_orders(None) or []:
+                sym = p.get("contract") or (p.get("initial") or {}).get("contract")
+                text = str((p.get("initial") or {}).get("text") or p.get("text") or "")
+                if sym and self._text_owned(text, label):
+                    out.add(str(sym))
+        except GateApiError:
+            pass
+        return sorted(out)
 
     def _text_prefix(self, label: str) -> str:
         return f"t-{label}" if label else ""
@@ -354,6 +442,7 @@ class Executor:
         """
         # 先撤未成交的入场单（它们还在 list_orders(status=open) 里；已成交的不会出现）
         cancelled = 0
+        rolled_legs: list[dict] = []
         for intent in intents:
             if not intent.symbol:
                 continue
@@ -369,6 +458,7 @@ class Executor:
                 try:
                     self.client.cancel_order(oid)
                     cancelled += 1
+                    rolled_legs.append({"symbol": intent.symbol, "kind": "order", "id": oid})
                 except GateApiError as e:
                     report.results.append(StepResult(
                         "rollback", intent.symbol, False,
@@ -399,30 +489,51 @@ class Executor:
                     try:
                         self.client.cancel_price_order(pid)
                         cancelled += 1
+                        rolled_legs.append({"symbol": intent.symbol, "kind": "price", "id": pid})
                     except GateApiError as e:
                         report.results.append(StepResult(
                             "rollback", intent.symbol, False,
                             detail={"cancel_price_order": pid}, error=str(e)[:120]))
 
+        # 落**明细**：谁被回滚了 —— 通知要靠它把「挂单成功」卡改成「已回滚」卡
+        # （否则通知与最终状态自相矛盾：单已经被撤了，卡片还在说挂单成功）。
         report.results.append(StepResult(
             "rollback", "", True,
-            detail={"rolled_back": cancelled, "reason": "本轮有腿失败，已撤掉本轮新挂的单"}))
+            detail={
+                "rolled_back": cancelled,
+                "rolled_back_symbols": sorted({leg["symbol"] for leg in rolled_legs}),
+                "rolled_back_legs": rolled_legs,
+                "reason": "本轮有腿失败，已撤掉本轮新挂的单",
+            }))
 
-    def _snapshot_owned(self, intents: list) -> dict:
-        """{symbol: {"prefix": set(price_ids), "orders": set(order_ids)}}"""
-        snap: dict[str, dict] = {}
+    def _snapshot_owned(self, intents: list, mode: str = "none") -> dict:
+        """{symbol: {"prefix": str, "price_ids": set, "order_ids": set}}
+
+        `mode="all"`（`replace=all`）时把快照面扩到本 bot 有单的**全部**合约 ——
+        否则 all 与 symbol 行为完全相同（审计 C-5）。`symbol` 模式只看本轮 payload
+        触及的币（行为不变）。
+        """
+        pairs: list[tuple[str, str]] = []
         for intent in intents:
             if not intent.symbol:
                 continue
             prefix = self._own_prefix(intent.label)
-            if not prefix:
-                continue
-            slot = snap.setdefault(intent.symbol, {"prefix": prefix, "price_ids": set(), "order_ids": set()})
-            for p in self._owned_price_orders(intent.symbol, prefix):
+            if prefix:
+                pairs.append((intent.symbol, prefix))
+        if mode == "all":
+            # payload 之外的合约：归属只能按 bot 命名空间判（`_all_owned_symbols` 无
+            # 命名空间时返回空集 → 不放大）
+            bot_prefix = self._own_prefix("")
+            if bot_prefix:
+                pairs += [(sym, bot_prefix) for sym in self._all_owned_symbols()]
+        snap: dict[str, dict] = {}
+        for symbol, prefix in pairs:
+            slot = snap.setdefault(symbol, {"prefix": prefix, "price_ids": set(), "order_ids": set()})
+            for p in self._owned_price_orders(symbol, prefix):
                 pid = self._order_id(p)
                 if pid:
                     slot["price_ids"].add(pid)
-            for o in self._owned_open_orders(intent.symbol, prefix):
+            for o in self._owned_open_orders(symbol, prefix):
                 oid = str(o.get("id") or "")
                 if oid:
                     slot["order_ids"].add(oid)
@@ -639,52 +750,23 @@ class Executor:
             return []
         return _parse_symbol_positions(positions, symbol)
 
-    def _apply_replace(self, signal: SignalFile, intents: list, report: ExecReport) -> None:
-        """Cancel old open/price orders before executing a new plan.
-
-        replace=all    → every whitelist symbol (or all open contracts)
-        replace=symbol → each symbol in this payload (once)
-        """
-        modes = {getattr(i, "replace", "none") for i in intents}
-        if signal.replace and signal.replace != "none":
-            modes.add(signal.replace)
-        mode = "all" if "all" in modes else ("symbol" if "symbol" in modes else "none")
-        if mode == "none":
-            return
-        if mode == "all":
-            symbols = sorted(self.symbols_whitelist) if self.symbols_whitelist else self._open_symbols()
-        else:
-            symbols = sorted({i.symbol for i in intents if i.symbol})
-        for sym in symbols:
-            try:
-                self.client.cancel_all_orders(sym)
-                self.client.cancel_all_price_orders(sym)
-                report.results.append(
-                    StepResult(
-                        "replace_cancel",
-                        sym,
-                        True,
-                        detail={"replace": mode, "cancelled": ["orders", "price_orders"]},
-                    )
-                )
-            except GateApiError as e:
-                report.results.append(
-                    StepResult("replace_cancel", sym, False, error=str(e))
-                )
-
     def _execute_intent(self, intent: Intent) -> StepResult:
         print(self.client.banner())
         action = intent.action
+        # `scope` 必须一路传到钝动作：`symbol=""` 时它决定作用面（bot/account）。
+        # 不传 = 永远命中「未显式声明 → 拒绝」分支（能力实现了，但生产路径接不上线 ——
+        # 本仓踩过：闸门测试全绿而生产路径根本没接线）。
+        scope = getattr(intent, "scope", "") or ""
         if action == "hold":
             return StepResult("hold", "", True, detail={"skipped": True})
         if action == "modify_tp_sl":
             return self._modify_tp_sl(intent)
         if action == "close_all":
-            return self._close_all(intent.symbol)
+            return self._close_all(intent.symbol, scope)
         if action == "cancel_all":
-            return self._cancel_all(intent.symbol, intent.label or "")
+            return self._cancel_all(intent.symbol, intent.label or "", scope)
         if action == "cancel_price_all":
-            return self._cancel_price_all(intent.symbol, intent.label or "")
+            return self._cancel_price_all(intent.symbol, intent.label or "", scope)
         if action in ("stop_entry_long", "stop_entry_short"):
             return self._stop_entry(intent)
         if action == "close":
@@ -692,7 +774,7 @@ class Executor:
         if action == "trail":
             return self._trail(intent)
         if action == "cancel_trail_all":
-            return self._cancel_trail_all(intent.symbol)
+            return self._cancel_trail_all(intent.symbol, scope)
         if action in ("open_long", "open_short"):
             return self._open(intent)
         return StepResult(action, intent.symbol, False, error=f"unhandled action {action}")
@@ -960,11 +1042,13 @@ class Executor:
             return current_total
         return current_total
 
-    def _check_notional(self, size_usd: Optional[float]) -> None:
+    def _check_notional(self, size_usd: Optional[float], symbol: str = "") -> None:
         if size_usd is None:
             return
         # 权益比例硬顶：默认单笔名义 ≤ 5×权益（可配 account_risk.max_notional_pct）
         # 注意：紧止损 + 2% 风险会推高名义；0.5× 会误杀正常仓（永续带杠杆）
+        # 文案带 symbol：多币下归档顶层的 error 不带币就**无法归因**（I6）
+        where = f"{symbol} " if symbol else ""
         pct = self.account_risk.get("max_notional_pct")
         if pct is None:
             pct = 5.0
@@ -977,7 +1061,8 @@ class Executor:
                     cap_pct = equity * pct
                     if size_usd > cap_pct:
                         raise GateApiError(
-                            f"MAX_NOTIONAL_PCT: size_usd={size_usd:.0f} > equity×{pct:.0%}={cap_pct:.0f}"
+                            f"MAX_NOTIONAL_PCT: {where}size_usd={size_usd:.0f} "
+                            f"> equity×{pct:.0%}={cap_pct:.0f}"
                         )
         except GateApiError:
             raise
@@ -985,7 +1070,7 @@ class Executor:
             pass
         if self.max_notional_usd is not None and size_usd > self.max_notional_usd:
             raise GateApiError(
-                f"size_usd={size_usd} exceeds max_notional_usd={self.max_notional_usd}"
+                f"{where}size_usd={size_usd} exceeds max_notional_usd={self.max_notional_usd}"
             )
 
     def _align_size_to_risk(self, intent: Intent, entry: float) -> tuple[float, str]:
@@ -1196,8 +1281,11 @@ class Executor:
             cur = "long" if psz > 0 else "short"
             if cur != want:
                 raise GateApiError(
-                    f"NO_FLIP: 持有 {cur} 时不能直接开 {want}"
+                    f"NO_FLIP: {getattr(intent, 'symbol', '') or ''} 持有 {cur} 时不能直接开 {want}"
                     f"（先 close，下一轮再开；或配 account_risk.no_flip: false 关闭此闸门）"
+                    if getattr(intent, "symbol", "")
+                    else f"NO_FLIP: 持有 {cur} 时不能直接开 {want}"
+                         f"（先 close，下一轮再开；或配 account_risk.no_flip: false 关闭此闸门）"
                 )
 
     def _check_safe_mode(self, action: str) -> None:
@@ -1242,7 +1330,7 @@ class Executor:
             intent.size_usd = vol_size
             if vol_note:
                 size_note = f"{size_note}; {vol_note}" if size_note else vol_note
-        self._check_notional(intent.size_usd)
+        self._check_notional(intent.size_usd, getattr(intent, "symbol", ""))
         # 挂入场单前先验触发价合法性：保护单挂不上时入场单已挂出 = 无保护挂单
         side_err = self._precheck_exit_triggers(intent)
         if side_err:
@@ -1810,11 +1898,26 @@ class Executor:
         order = self.client.place_trailing_order(body)
         return StepResult("trail", intent.symbol, True, detail={"order": order, "body": body})
 
-    def _cancel_trail_all(self, symbol: str) -> StepResult:
+    def _cancel_trail_all(self, symbol: str, scope: str = "") -> StepResult:
         if symbol:
+            # 带 symbol 的老路径：逐字不变（单币 bot 走这条）
             self._check_symbol(symbol)
-        result = self.client.stop_trailing_orders(symbol or None)
-        return StepResult("cancel_trail_all", symbol, True, detail={"result": result})
+            result = self.client.stop_trailing_orders(symbol)
+            return StepResult("cancel_trail_all", symbol, True, detail={"result": result})
+        # 空 symbol：必须显式 scope（原先静默 `stop_trailing_orders(None)` = 全账户）
+        scope = self._wide_scope(scope, "cancel_trail_all")
+        if scope == "account":
+            result = self.client.stop_trailing_orders(None)
+            return StepResult("cancel_trail_all", "", True,
+                              detail={"result": result, "scope": "account"})
+        symbols = self._wide_symbols(scope, list(self.symbols_whitelist or []) + self._open_symbols())
+        if not symbols:
+            raise GateApiError(
+                "cancel_trail_all: scope=bot 下没有可撤的 symbol"
+                "（本 bot 未声明 symbols 且当前无持仓）")
+        result = {sym: self.client.stop_trailing_orders(sym) for sym in symbols}
+        return StepResult("cancel_trail_all", "", True,
+                          detail={"result": result, "scope": "bot", "symbols": symbols})
 
     def _stop_entry(self, intent: Intent) -> StepResult:
         """Breakout ENTRY: trigger then OPEN. Not stop-loss."""
@@ -1843,7 +1946,7 @@ class Executor:
                 intent.size_usd, vol_note = self._vol_adjust(intent, intent.size_usd)
                 if vol_note:
                     size_note = f"{size_note}; {vol_note}" if size_note else vol_note
-        self._check_notional(intent.size_usd)
+        self._check_notional(intent.size_usd, getattr(intent, "symbol", ""))
         # 挂入场单前先验 TP/SL 触发价合法性：保护单挂不上时入场单已挂出 = 无保护挂单
         # （与 `_open` 同源。**注意它校验的是保护单的触发价，不含 entry 的
         #  `trigger_price`** —— 后者只有交易所会校验，见 UPGRADE-PLAN 待办）
@@ -2056,12 +2159,23 @@ class Executor:
                 return False  # 有对应持仓 → 不是孤儿
         return True
 
-    def _cleanup_orphan_protectors(self, symbol: str, keep_ids: Optional[set] = None) -> list:
+    def _cleanup_orphan_protectors(self, symbol: str, keep_ids: Optional[set] = None,
+                                   label: str = "") -> list:
         """回收孤儿保护单（有对应持仓的保留）。
 
         安全闸：reduce_only + tp/sl 后缀 + 本 bot 命名空间 + 非 keep + **无对应持仓** + **无待成交入场单**。
+
+        归属用 `label_prefix` 优先、否则用本次信号的 `label`；**两者都空就一张都不撤**
+        （fail-closed）—— 原先的形态是「有 prefix 才过滤」，一旦漏配 `label_prefix`
+        就静默退化成整表撤单（会撤掉别的 bot 的保护单）。
         """
         if not symbol:
+            return []
+        tag = self._own_scope_tag(label)
+        if not tag:
+            log.warning("_cleanup_orphan_protectors(%s): skipped_unattributed —— "
+                        "label_prefix 与 label 均为空，判不出本 bot 命名空间，"
+                        "拒绝处理任何保护单（原先会退化成整表）", symbol)
             return []
         keep = {str(x) for x in (keep_ids or set())}
         # 有待成交入场单 → 预挂的 TP/SL 不是孤儿，撤了会裸仓（symbol 级判定）
@@ -2087,10 +2201,7 @@ class Executor:
             pid = self._order_id(p)
             if not pid or pid in keep:
                 continue
-            if self.label_prefix:
-                if not self._text_owned(text, self.label_prefix):
-                    continue
-            else:
+            if not self._text_owned(text, tag):
                 continue
             if not self._is_orphan_protector(p, positions):
                 continue  # 当前计划保护单，保留
@@ -2107,16 +2218,26 @@ class Executor:
                 pass
         return cancelled
 
-    def _resync_protectors(self, symbol: str) -> list:
+    def _resync_protectors(self, symbol: str, label: str = "") -> list:
         """减仓/调仓后把保护单张数同步到剩余持仓。
 
         - flat：交给 _cleanup_orphan_protectors
         - 有仓：|保护单size| != 持仓size → 撤旧、按现价重挂同 trigger 的等量保护单
         返回动作摘要列表。
+
+        **归属判不出来就什么都不做**（fail-closed）：原先的条件是
+        `if self.label_prefix and not owned` —— 漏配 `label_prefix` 时整个条件为假，
+        于是**任何**保护单都被当成自己的，会把别的 bot 的保护单撤掉重挂。
         """
         notes: list = []
         if not symbol:
             return notes
+        tag = self._own_scope_tag(label)
+        if not tag:
+            log.warning("_resync_protectors(%s): skipped_unattributed —— "
+                        "label_prefix 与 label 均为空，判不出本 bot 命名空间，"
+                        "拒绝同步保护单张数（原先会退化成整表）", symbol)
+            return [{"skipped_unattributed": 1, "reason": "no_namespace"}]
         positions = self._symbol_positions(symbol)
         if not positions:
             return notes
@@ -2138,7 +2259,7 @@ class Executor:
             status = str(p.get("status") or "").lower()
             if status in ("cancelled", "finished", "filled", "triggered", "failed", "closed"):
                 continue
-            if self.label_prefix and not self._text_owned(text, self.label_prefix):
+            if not self._text_owned(text, tag):
                 continue
             try:
                 psz = float(init.get("size") or p.get("size") or 0)
@@ -2168,7 +2289,7 @@ class Executor:
                         "price": "0",
                         "tif": "ioc",
                         "reduce_only": True,
-                        "text": text or (f"t-{self.label_prefix}-sl" if tail == "sl" else f"t-{self.label_prefix}-tp"),
+                        "text": text or (f"t-{tag}-sl" if tail == "sl" else f"t-{tag}-tp"),
                     },
                     "trigger": {
                         "rule": int(trig.get("rule") or (2 if psz < 0 else 1)),
@@ -2828,8 +2949,9 @@ class Executor:
             size=size or 0,
         )
         # 平/减仓后：先撤孤儿，再把剩余保护单张数对齐持仓
-        cleaned = self._cleanup_orphan_protectors(intent.symbol)
-        resized = self._resync_protectors(intent.symbol)
+        _lbl = getattr(intent, "label", "") or ""
+        cleaned = self._cleanup_orphan_protectors(intent.symbol, label=_lbl)
+        resized = self._resync_protectors(intent.symbol, label=_lbl)
         # 统一字段名：与 open_* 的 detail 对齐，供卡片/日志等消费者直读
         _o = order or {}
         _px = _o.get("fill_price") or _o.get("avg_price") or _o.get("price")
@@ -2856,14 +2978,32 @@ class Executor:
             detail=detail,
         )
 
-    def _close_all(self, symbol: str) -> StepResult:
-        symbols = [symbol] if symbol else self._open_symbols()
+    def _close_all(self, symbol: str, scope: str = "") -> StepResult:
+        """市价全平。
+
+        `symbol` 为空时必须显式 `scope`（`bot` / `account`）—— 原先「空 symbol = 全账户」
+        是**静默**的。而且宽路径下**只平本 bot 有归属的仓**：归属判不了（该合约上没有
+        本 bot 命名空间的挂单/条件单）就不平它，落进 `skipped_unattributed` ——
+        这是「平掉别的 bot 的仓」的唯一入口（审计 C-3/C-16）。
+        带 symbol 的路径**逐字不变**（单币 bot 全走这条）。
+        """
+        wide = not symbol
+        if wide:
+            scope = self._wide_scope(scope, "close_all")
+        symbols = [symbol] if symbol else self._wide_symbols(scope, self._open_symbols())
         if symbol:
             self._check_symbol(symbol)
         orders = []
+        skipped_unattributed: list[str] = []
         dual = self.client.is_dual_position_mode()
         for sym in symbols:
             if self.symbols_whitelist is not None and sym not in self.symbols_whitelist:
+                continue
+            if wide and not self._symbol_owned(sym):
+                # 判不了归属 → 不平（fail-closed）。不算整轮失败：跳过若算失败会触发
+                # 回滚，把同轮其他币已经挂好的腿也一起撤掉。
+                skipped_unattributed.append(sym)
+                log.warning("close_all: %s 无本 bot 归属证据 → 跳过不平（fail-closed）", sym)
                 continue
             if dual:
                 for side in ("long", "short"):
@@ -2884,19 +3024,36 @@ class Executor:
                     if _is_flat_error(e):
                         continue
                     raise
-        return StepResult("close_all", symbol, True, detail={"closed_order_ids": orders})
+        detail: dict[str, Any] = {"closed_order_ids": orders}
+        if wide:
+            detail["scope"] = scope
+            detail["skipped_unattributed"] = skipped_unattributed
+        return StepResult("close_all", symbol, True, detail=detail)
 
-    def _cancel_all(self, symbol: str, label: str = "") -> StepResult:
+    def _cancel_all(self, symbol: str, label: str = "", scope: str = "") -> StepResult:
         """撤销本 bot 的普通挂单（**带持仓感知**）。
 
         与 `cancel_price_all` 同理：`cancel_all` 同样是钝动作，持仓判断错一次就会
         连带撤掉保护。持仓数据取不到 → 拒绝；正在保护真实持仓的 reduce-only 挂单 → 跳过。
+        `symbol` 为空时必须显式 `scope`（原先静默放大到全账户）。
         """
+        wide = not symbol
+        if wide:
+            scope = self._wide_scope(scope, "cancel_all")
         prefix = self._own_prefix(label)
-        # own-scope isolation for bot namespace / explicit label; default "signal"
-        # keeps legacy wipe so cleanup/manage paths still work.
-        own_tag = self._own_scope_tag(label)
-        use_own = self.order_scope == "own" and prefix and own_tag not in ("", "signal")
+        # own-scope isolation for bot namespace / explicit label.
+        # **判不出命名空间就拒绝**：原先 `own_tag in ("", "signal")` 会**静默退回整表撤单**
+        # （`cancel_all_orders(symbol)`）—— 那会撤掉别的 bot 在同一合约上的单（审计 C-9）。
+        # `own_tag == "signal"` 现在是**可确定**的本 bot 命名空间（默认 label = t-signal*），
+        # 所以走 own 分支而不是放宽到整表。
+        if self.order_scope == "own" and not prefix:
+            return StepResult(
+                "cancel_all", symbol, False,
+                detail={"refused": "no_own_namespace"},
+                error=("cancel_all: 判不出本 bot 命名空间（label_prefix 与 label 均为空）"
+                       "→ 拒绝整表撤单；请给 label 或配置 label_prefix"
+                       "（确实要整表请显式 order_scope: all）"))
+        use_own = self.order_scope == "own" and bool(prefix)
         if use_own:
             positions, perr = self._positions_or_error()
             if positions is None:
@@ -2911,7 +3068,7 @@ class Executor:
                 symbols = [symbol]
             else:
                 rows = self.client.list_orders() or []
-                symbols = sorted({o.get("contract") for o in rows if o.get("contract")})
+                symbols = self._wide_symbols(scope, [o.get("contract") for o in rows])
             cancelled = []
             skipped = []
             errors = []
@@ -2944,7 +3101,7 @@ class Executor:
                 error=f"持仓查询失败，拒绝撤销挂单（无法区分保护单与孤儿）: {perr}",
             )
         guarded = []
-        for sym in ([symbol] if symbol else self._open_symbols()):
+        for sym in ([symbol] if symbol else self._wide_symbols(scope, self._open_symbols())):
             if not sym:
                 continue
             try:
@@ -2965,11 +3122,7 @@ class Executor:
         else:
             # cancel open orders on every contract with open orders (not only open positions)
             orders = self.client.list_orders() or []
-            symbols = []
-            for o in orders:
-                sym = o.get("contract")
-                if sym and sym not in symbols:
-                    symbols.append(sym)
+            symbols = self._wide_symbols(scope, [o.get("contract") for o in orders])
             result = {sym: self.client.cancel_all_orders(sym) for sym in symbols}
         return StepResult("cancel_all", symbol, True, detail={"result": result})
 
@@ -3030,7 +3183,7 @@ class Executor:
             for p in (self.client.list_price_orders(symbol) or [])
         } - {""})
 
-    def _cancel_price_all(self, symbol: str, label: str = "") -> StepResult:
+    def _cancel_price_all(self, symbol: str, label: str = "", scope: str = "") -> StepResult:
         """撤销本 bot 的条件单（**带持仓感知**）。
 
         **为什么要带持仓感知**：AI 的意图通常是「撤孤儿保护单」（提示词规则 14），
@@ -3042,7 +3195,11 @@ class Executor:
         判据复用 `_cleanup_orphan_protectors` 那一套，避免两条路径漂移。
 
         持仓数据取不到时**整个拒绝** —— 无法区分保护单与孤儿，宁可不动。
+        `symbol` 为空时必须显式 `scope`（原先静默放大到全账户）。
         """
+        wide = not symbol
+        if wide:
+            scope = self._wide_scope(scope, "cancel_price_all")
         if symbol:
             self._check_symbol(symbol)
         positions, perr = self._positions_or_error()
@@ -3053,13 +3210,22 @@ class Executor:
                 error=f"持仓查询失败，拒绝撤销条件单（无法区分保护单与孤儿）: {perr}",
             )
         prefix = self._own_prefix(label)
-        own_tag = self._own_scope_tag(label)
-        use_own = self.order_scope == "own" and prefix and own_tag not in ("", "signal")
+        # 判不出命名空间 → 拒绝（原先会静默退回整表撤单，见 `_cancel_all` 同处说明）
+        if self.order_scope == "own" and not prefix:
+            return StepResult(
+                "cancel_price_all", symbol, False,
+                detail={"refused": "no_own_namespace"},
+                error=("cancel_price_all: 判不出本 bot 命名空间（label_prefix 与 label 均为空）"
+                       "→ 拒绝整表撤单；请给 label 或配置 label_prefix"
+                       "（确实要整表请显式 order_scope: all）"))
+        use_own = self.order_scope == "own" and bool(prefix)
         if use_own:
             cancelled = []
             skipped = []
             errors = []
-            for sym in self._price_order_symbols(symbol):
+            syms = (self._price_order_symbols(symbol) if symbol
+                    else self._wide_symbols(scope, self._price_order_symbols("")))
+            for sym in syms:
                 owned = self._owned_price_orders(sym, prefix)
                 pending_entry = self._has_pending_entry(sym)
                 for p in owned:

@@ -1233,18 +1233,23 @@ class TestStopEntrySharesOpenGates(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertEqual((report.results[0].detail or {}).get("cancelled"), ["102"])
 
-    def test_cancel_all_default_label_still_wipes(self):
-        """Default label 'signal' keeps legacy wipe so cleanup paths work."""
+    def test_cancel_all_default_label_is_namespace_scoped(self):
+        """默认 label 'signal' 只撤**本命名空间**（`t-signal*`）—— 不再整表撤。
+
+        T9 收紧了这里：`own_tag == "signal"` 原先会**静默退回整表**（撤掉账户上所有
+        bot 的挂单）。现在按命名空间过滤：自己的单撤、别家的不动 ——「清理路径能工作」
+        这个初衷保留，它只需要能撤自己的单。
+        """
         client = FakeClient()
         client.orders = [
+            {"contract": "BTC_USDT", "size": 1, "text": "t-signal"},
             {"contract": "BTC_USDT", "size": 1, "text": "t-bota-1"},
-            {"contract": "BTC_USDT", "size": 1, "text": "t-other"},
         ]
         client.cancelled = []
         ex = Executor(client, symbols_whitelist=["BTC_USDT"], order_scope="own")
         report = ex.execute_signal(parse_signal({"action": "cancel_all", "symbol": "BTC_USDT"}))
         self.assertTrue(report.ok)
-        self.assertIn("BTC_USDT", client.cancelled)
+        self.assertEqual(len(client.cancelled), 1, "只撤本命名空间（t-signal）那条")
 
     def test_cancel_label_prefix_is_segment_safe(self):
         """label 'bot' must not match t-bota* / t-botb* (prelaunch review)."""
@@ -1330,9 +1335,10 @@ class TestStopEntrySharesOpenGates(unittest.TestCase):
             {"contract": "ETH_USDT"},
             {"contract": "BTC_USDT"},
         ]
-        # order_scope=all keeps legacy wipe when cancelling without a unique bot label
+        # order_scope=all 的整表撤仍需**显式声明**作用面（T9：空 symbol 不再静默放大）
         ex = Executor(client, order_scope="all")
-        self.assertTrue(ex.execute_signal(parse_signal({"action": "cancel_all"})).ok)
+        self.assertTrue(ex.execute_signal(
+            parse_signal({"action": "cancel_all", "scope": "account"})).ok)
         self.assertEqual(client.cancelled, ["BTC_USDT", "ETH_USDT"])
 
 
