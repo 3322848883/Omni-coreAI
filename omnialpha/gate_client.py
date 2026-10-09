@@ -466,15 +466,34 @@ def _infer_side(pos: dict) -> str:
     return "long" if _pos_is_side(pos, "long") else "short"
 
 
+# 计价币后缀（紧凑写法用）：本仓所有所在 /futures/usdt 路径下只有 USDT 计价，
+# USDC 一并识别是为了「加了新计价币时不会静默拼成 X_USDC_USDT」。BTC/ETH 计价
+# 走另外的 API 路径，不在本函数的语义范围里。
+_QUOTE_SUFFIXES = ("USDT", "USDC")
+
+
 def resolve_symbol(name: str) -> str:
+    """标的写法归一 → 该所合约名（**全仓唯一判据**：AI 工具 / 信号 / 配置 / 采集共用）。
+
+    为什么必须一处实现：同一条判据此前有两份（本文件与 `pa-data-source/kline_watcher.py`），
+    语义不同且都处理不了紧凑写法 —— `BTCUSDT` 被拼成 `BTCUSDT_USDT`（合约不存在），
+    查询命中 0 行后**静默返回空**，看起来像「这个币没数据」。同一条规则两处实现必然漂移。
+    """
     upper = (name or "").upper().strip()
     if not upper:
         raise GateApiError("symbol is required")
     if upper in SYMBOL_MAP:
         return SYMBOL_MAP[upper]
     if "_" in upper:
+        # 带分隔符：只认 base 别名（`AU_USDT` → `XAU_USDT`），其余原样返回
+        # —— 这样 `PEPE_USDT` 这类不在别名表里的合约不会被二次拼接。
         base = upper.split("_")[0]
         return SYMBOL_MAP.get(base, upper)
+    for quote in _QUOTE_SUFFIXES:
+        # 紧凑写法：`BTCUSDT` → `BTC_USDT`；base 也要过别名表（`AUUSDT` → `XAU_USDT`）
+        if upper.endswith(quote) and len(upper) > len(quote):
+            base = upper[: -len(quote)]
+            return SYMBOL_MAP.get(base, f"{base}_{quote}")
     return SYMBOL_MAP.get(upper, f"{upper}_USDT")
 
 

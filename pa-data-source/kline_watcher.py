@@ -18,6 +18,14 @@ import websocket
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
+# 仓库根也进 sys.path：本采集器与 bot 侧必须**共用同一份** symbol 归一判据
+# （此前各写一份，`BTCUSDT` 在两边都拼错且结果不同）。systemd 单元的工作目录是
+# <repo>/pa-data-source，所以仓库根 = SCRIPT_DIR 的父目录；单独部署本目录时才会 import 失败。
+_REPO_ROOT = os.path.dirname(SCRIPT_DIR)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from omnialpha.gate_client import resolve_symbol  # noqa: E402
 
 from logger import setup_logger, logger
 from data_monitor import update_data_time, check_and_alert, get_monitor_status
@@ -97,16 +105,6 @@ DATA_DIR = os.path.join(SCRIPT_DIR, "data")
 DB_PATH = os.path.join(DATA_DIR, "kline.db")
 ACCOUNT_DB_PATH = os.path.join(DATA_DIR, "account.db")
 
-SYMBOL_MAP = {
-    "BTC": "BTC_USDT",
-    "ETH": "ETH_USDT",
-    "SOL": "SOL_USDT",
-    "XAU": "XAU_USDT",
-    "XAG": "XAG_USDT",
-    "AU": "XAU_USDT",
-    "AG": "XAG_USDT",
-}
-
 running = True
 db_conn = None
 db_lock = threading.Lock()
@@ -166,20 +164,6 @@ SPOT_TICKER = "spot.tickers"
 FUTURES_TICKER = "futures.tickers"
 
 market_type = "spot"
-
-
-def resolve_symbol(name):
-    upper = name.upper()
-    if upper in SYMBOL_MAP:
-        return SYMBOL_MAP[upper]
-    if "_USDT" in upper:
-        base = upper.split("_")[0]
-        if base in SYMBOL_MAP:
-            return SYMBOL_MAP[base]
-        return upper
-    if not upper.endswith("_USDT"):
-        return upper + "_USDT"
-    return upper
 
 
 def format_decimal(value, min_decimals=2):

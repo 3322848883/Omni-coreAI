@@ -10,7 +10,7 @@ from typing import Optional
 
 import yaml
 
-from .gate_client import GateApiError, GateClient, load_credentials
+from .gate_client import GateApiError, GateClient, load_credentials, resolve_symbol
 
 log = logging.getLogger("omnialpha.config")
 
@@ -23,6 +23,9 @@ class BotConfig:
     api_key_env: str = ""
     api_secret_env: str = ""
     symbols: list[str] = field(default_factory=list)
+    # 显式声明「本 bot 不限制品种」。`symbols: []` 必须配它，否则启动报错 ——
+    # 空白名单会被执行器当成 None（任意币可开仓 + 零守护），是静默放开而非「没配」（C-1）。
+    symbols_unrestricted: bool = False
     max_notional_usd: Optional[float] = None
     max_orders_per_file: int = 20
     max_files_per_run: int = 50
@@ -44,6 +47,9 @@ class BotConfig:
     account_risk: dict = field(default_factory=dict)
     # 所属账户名（config/accounts.yaml 的 key）；空 = 不参与账户级合并
     account: str = ""
+    # 熔断粒度：auto（有 account: 就按账户，否则按 bot）| bot | <账户名>。
+    # 只解析不消费 —— 消费方是熔断（T19）：逐 bot 熔断时同账户其他 bot 会继续开仓。
+    account_scope: str = "auto"
     # LLM strategist (per-bot strategy + risk)
     strategist: dict = field(default_factory=dict)
     # exchange adapter: gate | binance | okx | bybit | bitget | hyperliquid
@@ -180,6 +186,84 @@ def merge_account_risk(bot_risk: dict, acct_risk: dict) -> dict:
     return out
 
 
+# ── symbol 归一 + 配置 fail-fast（T4）───────────────────────────────
+# 为什么全部落在配置加载**一处**：配置是币种的唯一权威来源（设计文档 S2.1 第③层）。
+# 放到执行器/快照里去校验，就又是「配置看起来生效、实际不生效」——本仓反复踩的形态。
+
+def normalize_symbols(seq) -> list[str]:
+    """逐项归一（`btcusdt`→`BTC_USDT`）→ 去重 → **保序**。
+
+    保序不是洁癖：`symbols[0]` 在若干处被当「首币」（降级兜底、K 线收盘唤醒），
+    顺序一变行为就变，而单币 bot 的输出必须逐字不变（I11）。
+    """
+    out: list[str] = []
+    for raw in (seq or []):
+        text = str(raw or "").strip()
+        if not text:
+            raise GateApiError(f"symbols 里有空项: {seq!r}")
+        sym = resolve_symbol(text)
+        if sym not in out:
+            out.append(sym)
+    return out
+
+
+def _fail_or_warn(path: Path, msg: str, *, enabled: bool) -> None:
+    """启用中的 bot 直接报错；未启用的只告警。
+
+    为什么区分：基线 `config/bots/*.yaml` 里有大量别人的实验配置（本仓 60 份），
+    新校验若对它们一律报错，等于**拦住所有人**——那会逼人绕过校验，比不校验更糟。
+    """
+    if enabled:
+        raise GateApiError(f"{path.name}: {msg}")
+    log.warning("%s: %s（未启用，仅告警）", path.name, msg)
+
+
+def _contract_check_enabled(data: dict) -> bool:
+    """合约存在性校验是**可选/懒**校验：yaml `validate_contracts: true` 或
+    `OMNIALPHA_VALIDATE_CONTRACTS=1` 才做，默认关。
+
+    为什么默认关：配置加载会发生在离线测试、只读巡检、容器构建里。把「网络可达」
+    变成启动前提，会把这些场景一起拦下（测试还会真的发请求）——代价远大于收益。
+    """
+    if data.get("validate_contracts") is True:
+        return True
+    return os.environ.get("OMNIALPHA_VALIDATE_CONTRACTS", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+_CONTRACTS_CACHE: dict[tuple[str, str], Optional[set]] = {}
+
+
+def fetch_exchange_contracts(exchange: str, env: str = "live") -> Optional[set]:
+    """该所当前可用合约名集合；**取不到就返回 None**（调用方跳过校验，绝不拦启动）。
+
+    只实现 Gate（公开端点 `/futures/usdt/contracts`，无需密钥）：其余五所的适配器
+    要先有密钥才能建 client，把「配置校验」变成「凭据校验」是更坏的取舍（宁可少校验
+    一所，也不能让无密钥/离线环境起不来）。T16 补各所真实元数据时再铺开。
+    """
+    key = ((exchange or "gate").strip().lower(), env)
+    if key in _CONTRACTS_CACHE:
+        return _CONTRACTS_CACHE[key]
+    result: Optional[set] = None
+    if key[0] == "gate":
+        try:
+            client = GateClient(api_key="", api_secret="",
+                                env=env if env in ("live", "testnet") else "live", timeout=10)
+            result = set(client.get_contracts().keys())
+        except Exception as e:  # noqa: BLE001 — 校验是尽力而为，网络失败不算配置错误
+            log.warning("合约存在性校验: 拉取 %s 合约列表失败，本次跳过（%s）", key[0], e)
+            result = None
+    else:
+        log.info("合约存在性校验: exchange=%s 暂未实现（跳过）", key[0])
+    _CONTRACTS_CACHE[key] = result
+    return result
+
+
+# 测试可替换（离线环境不得真的发请求）
+_CONTRACT_FETCHER = fetch_exchange_contracts
+
+
 def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
                     accounts: Optional[dict] = None) -> BotConfig:
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -216,28 +300,129 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
     if acct_name and accounts:
         acct_risk = dict((accounts.get(acct_name) or {}).get("account_risk") or {})
     merged_risk = merge_account_risk(bot_risk, acct_risk) if acct_risk else bot_risk
+
+    # ── symbol 归一 + 单 bot fail-fast（T4）─────────────────────────
+    # 币种是配置层的唯一权威（设计 S2.1 第③层）。这里不归一，下游每一处都要自己猜，
+    # 而"猜错"在本仓的历史形态**全是静默的**：`symbols: [btc]` 会让快照 ticker 报错、
+    # 让工具宇宙比对失配（`given not in uni`），看起来像"这个币没数据"。
+    raw_symbols = data.get("symbols") or []
+    if not isinstance(raw_symbols, list):
+        raise GateApiError(f"{path.name}: symbols 必须是列表")
+    symbols = normalize_symbols(raw_symbols)
+    unrestricted = bool(data.get("symbols_unrestricted", False))
+    if unrestricted and symbols:
+        raise GateApiError(
+            f"{path.name}: symbols_unrestricted: true 与 symbols: [...] 语义矛盾 —— "
+            f"放开品种限制就别再列白名单，只能给一个")
+    strategist = dict(data.get("strategist") or {})
+    if strategist.get("symbols") is not None:
+        strategist["symbols"] = normalize_symbols(strategist["symbols"])
+    scope = data.get("account_scope", "auto")
+    if not isinstance(scope, str) or not scope.strip():
+        raise GateApiError(f"{path.name}: account_scope 必须是 auto|bot|<账户名>")
+    scope = scope.strip()
+    exchange = str(data.get("exchange") or "gate").strip().lower()
+    # 合约存在性：**可选/懒**校验，默认关（理由见 _contract_check_enabled）。
+    # 取不到合约列表（离线/无凭据）就跳过 —— 配置校验不得变成"网络可达"的前置。
+    if _contract_check_enabled(data) and symbols:
+        available = _CONTRACT_FETCHER(exchange, env)
+        if available is not None:
+            missing = [s for s in symbols if s not in available]
+            if missing:
+                raise GateApiError(
+                    f"{path.name}: {exchange} 上没有这些合约: {missing}"
+                    f"（改 symbols 或换 exchange）")
+
     return BotConfig(
         bot_id=str(bot_id),
         enabled=enabled,
         env=env,
         api_key_env=str(data.get("api_key_env") or ""),
         api_secret_env=str(data.get("api_secret_env") or ""),
-        symbols=[str(s) for s in (data.get("symbols") or [])],
+        symbols=symbols,
+        symbols_unrestricted=unrestricted,
+        account_scope=scope,
         max_notional_usd=float(data["max_notional_usd"]) if data.get("max_notional_usd") is not None else None,
         max_orders_per_file=int(data.get("max_orders_per_file") or 20),
         max_files_per_run=int(data.get("max_files_per_run") or 50),
         poll_interval_sec=float(data.get("poll_interval_sec") or 2.0),
         label_prefix=str(data.get("label_prefix") or ""),
-        exchange=str(data.get("exchange") or "gate").strip().lower(),
+        exchange=exchange,
         position_policy=str(data.get("position_policy") or "strict").strip().lower(),
         default_replace=str(data.get("default_replace") or "none").strip().lower(),
         order_scope=str(data.get("order_scope") or "own").strip().lower(),
         require_sl=bool(data.get("require_sl", True)),
         account=acct_name,
         account_risk=merged_risk,
-        strategist=dict(data.get("strategist") or {}),
+        strategist=strategist,
         paper=dict(data.get("paper") or {}),
     )
+
+
+def _validate_cross_bot(bots: dict[str, BotConfig], config_dir: Path) -> None:
+    """跨 bot 校验：这些是「单独看每个 bot 都没问题、放在一起就出事」的形态。
+
+    为什么必须放在**一起**看：空白名单、宇宙超出白名单、`label_prefix` 重名，
+    三者都只有在多 bot 共存时才显形，而它们的后果全是实盘安全级
+    （任意币可开仓 + 零守护 / 白名单外动作被拒 / 两个 bot 互相撤单）。
+    """
+    enabled = {bid: b for bid, b in bots.items() if b.enabled}
+
+    # ① 空 symbols：执行器把 `[]` 当成 None = **不限制**（任意币可开仓），
+    #    而 5 个守护扫描又都遍历 `bot.symbols`（零次迭代 = 零守护）——必须显式声明才放行。
+    for bid, b in enabled.items():
+        if not b.symbols and not b.symbols_unrestricted:
+            raise GateApiError(
+                f"{bid}: symbols 为空但未声明 symbols_unrestricted: true —— "
+                f"空白名单等于「任意币可开仓 + 零守护」；确实要放开请显式写 "
+                f"symbols_unrestricted: true")
+
+    # ② 分析宇宙必须 ⊆ 执行白名单：超出部分会在执行层被拒单（白烧一轮），
+    #    而不是"模型想分析就分析"。
+    for bid, b in bots.items():
+        universe = (b.strategist or {}).get("symbols")
+        if not universe or not b.symbols:
+            continue
+        outside = [s for s in universe if s not in b.symbols]
+        if outside:
+            _fail_or_warn(
+                config_dir / f"{bid}.yaml",
+                f"strategist.symbols {outside} 不在 bot.symbols {b.symbols} 内"
+                f"（分析宇宙超出执行白名单，超出的币一律会被执行层拒单）",
+                enabled=b.enabled)
+
+    # ③ label_prefix 唯一：它是归属判据（订单 text `t-<label>`），重名 =
+    #    两个 bot 的 `_text_owned` 互相命中 → 互相撤单/改单/对账。
+    by_prefix: dict[str, list[str]] = {}
+    for bid, b in bots.items():
+        if b.label_prefix:
+            by_prefix.setdefault(b.label_prefix, []).append(bid)
+    for prefix, bids in sorted(by_prefix.items()):
+        if len(bids) < 2:
+            continue
+        running = sorted(x for x in bids if x in enabled)
+        msg = (f"label_prefix {prefix!r} 重复: {sorted(bids)}"
+               f"（重名会让两个 bot 互相撤单/改单）")
+        if len(running) >= 2:
+            raise GateApiError(msg)
+        # 仓库实况：三对重名里各只有一个在跑 —— 不误报，只留痕
+        log.warning("%s（只有 %s 在运行，仅告警）", msg, running)
+
+
+def assert_account_risk_consistent(bot: BotConfig, config_dir: Path) -> None:
+    """断言该 bot 看到的 `account_risk` 与「经 accounts 合并后」完全一致。
+
+    为什么要断言：`run` 路径经 `load_all_bots`（合并 `config/accounts.yaml`），
+    而 `plan`/`plan-loop` 曾经直接 `load_bot_config`（**不合并**）—— 于是 strategist
+    会把比执行闸门**更宽松**的预算告诉模型，模型按大预算报量然后被拒单
+    （实盘曾占失败的 1/7）。两处口径必须同源，不能靠"记得传 accounts"。
+    """
+    accounts = load_accounts(Path(config_dir))
+    fresh = load_bot_config(Path(config_dir) / f"{bot.bot_id}.yaml", accounts=accounts)
+    if dict(fresh.account_risk or {}) != dict(bot.account_risk or {}):
+        raise GateApiError(
+            f"{bot.bot_id}: account_risk 与 accounts 合并后的结果不一致 —— "
+            f"strategist 预算会与执行闸门漂移：{bot.account_risk} != {fresh.account_risk}")
 
 
 def load_all_bots(config_dir: Path, overlay_dir: Optional[Path] = None) -> dict[str, BotConfig]:
@@ -252,4 +437,5 @@ def load_all_bots(config_dir: Path, overlay_dir: Optional[Path] = None) -> dict[
             continue
         cfg = load_bot_config(path, overlay_dir=ov_dir, accounts=accounts)
         bots[cfg.bot_id] = cfg
+    _validate_cross_bot(bots, config_dir)
     return bots
