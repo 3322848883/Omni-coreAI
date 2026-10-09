@@ -1,9 +1,9 @@
 ---
 feature: symbol-as-parameter
-status: in-progress
+status: delivered
 updated: 2026-10-09
 branch: feat/symbol-as-parameter
-commits: 
+commits: 07ae1b0..ee9a1f3（22 commits / 82 文件 / +8913 −575）
 ---
 
 # 币种作为可配置参数（可切换 / 可添加）
@@ -15,6 +15,47 @@ commits:
 > 是本地生成行情数据导致的假阳性，worktree 里不出现）。
 
 ## Report
+
+### What was built
+
+币种从「设计常量」变成「可配置参数」：**可切换**（改配置即换标的）、**可添加**（新币
+自动获得全套工具/触发器/记忆/守护，不需要改代码）。三层权责落地 —— 币种由**配置层**
+声明、**程序层**一路传递并校验、**人格/契约层**只消费（不再写死币名）。
+
+| 层 | 交付 |
+|---|---|
+| 解析与缺省 | `strategist/symbols.py` 唯一解析来源；单币自动补、多币/越界/未配置一律拒绝；别名（`coin`/`token`/`contract`）归一 |
+| 工具 | 22 个需 symbol 的工具统一前置（`SYMBOL_TOOLS`）；aux 工具币名三形态归一；`sentiment` 缺 coin 即拒（原先返回**任意币**的情绪） |
+| 触发器 | 按币设唤醒条件（`max_active_per_symbol`）；yaml 叶条件缺 symbol：单币自动补、多币启动报错 |
+| 计划闸门 | plan 层宇宙校验、按币名额（`max_chips_per_symbol`）、快照按币分区 |
+| 执行器 | 四个钝动作加显式 `scope`（空 symbol 不再静默放大到全账户）；`close_all` 归属判据 + `skipped_unattributed`；保护单同步/清理 fail-closed；回滚留痕 + 「已回滚」通知 |
+| 守护 | 扫描集合 = `bot.symbols` ∪「有归属的合约」→ **删币后存量仓位仍受守护**；共享 client + 币数上限 + 覆盖留痕 |
+| 记忆 | journal / Tier-1 / 近况、画像 / 盈亏 / 衰减、订单上下文**全部按币**；画像移出稳定前缀（缓存） |
+| 审计 | `trades.symbol` 不再恒 NULL + `symbols_json` + 按币查询；`plans.symbols_json` |
+| 数据源 | `fetch_aux.CONTRACTS` 从 watchlist 读；按币覆盖告警；Bitget/HL 真实合约元数据；per-venue 覆盖矩阵（三态） |
+| 安全 | HL 撤单带正确 `coin`（原先硬编码 `BTC`）；paper 平一侧不裸另一侧 + 逐合约杠杆；`sizing` quanto 缺失硬拒（与 paper 同源）；`account_scope` 决定熔断归属 |
+| 人格/契约 | 契约示例不再写死币名；修 3 处**错尺度**示例；人格/宇宙一致性告警 |
+
+### Verification
+
+- 全量 **2325 项 OK / 0 失败 / 1 skip**（worktree 内；每条提交后都跑过全量）
+- 新增多币测试 **106 项**（8 个文件）
+- **「不是假绿」实测**：临时删掉 `tier1_journal_fields` 的币维度后 4 项测试立刻失败
+- **生产路径接线**：`test_dull_action_scope` 全部从 `execute_signal` 触发，不只单测 helper
+
+### Journey log
+
+1. **并行实施踩坑**：subagent 并发上限实测约 2，一次派 4 个全部被取消，留下 4 处半成品
+   （其中一个停在编辑中间、`executor.py` 语法错误）。此后改为自己逐批实施。
+2. **反断言测试扫到自己写的注释**：`TestNoHardcodedSymbolInDegradePaths` 因注释里出现
+   `BTC_USDT`（在说明历史）而误报 → 改成只扫**字符串字面量**（用 `ast` 剥离 docstring）。
+3. **两个真 bug 是收尾时发现的**：`parse_intent` 的 hold 分支**丢掉 symbol**（多币下
+   `replace=symbol` 于是收不掉旧单）；`_resync_protectors` 是 fail-**open**（漏配
+   `label_prefix` 时会撤掉别的 bot 的保护单）。
+4. **「越界 symbol 唯一解时纠正」被否决**：spec 要求**拒绝**该 chip（保留 `corrected_from`
+   留痕）—— 纠正会把「模型当时写的是哪个币」这个事实丢掉。
+5. **I11 的两处有意例外**（均已在提交信息里标注）：契约示例占位符化（T18）、画像移出
+   稳定前缀（T13）。其余单币路径都有逐字 golden 断言钉住。
 
 ## [S1] Problem
 
@@ -341,18 +382,18 @@ N=5 时旧人格 214k 买 1 个币、新人格 229k 买 5 个（差 4.6×）。
 - [x] T6: 工具统一前置（7 行情 + 10 aux + orderflow 接入 `resolve_symbol_arg`；`sentiment` 缺 coin 拒绝；`contract` 补 `min_notional_usd`；`account.symbols` 进 schema 并与宇宙求交） — acceptance: 多币漏写 symbol → 拒绝且带宇宙；单币自动补；`ticker` 空符号不再返回任意币数据 (covers: S2.4②; depends: T4)
 - [x] T7: 触发器按币（`max_active_per_symbol`；yaml 叶条件缺 symbol 单币自动补、多币启动报错） — acceptance: 5 币宇宙下每币都能设上唤醒条件；缺 symbol 的条件不再"永不触发" (covers: S2.4④; depends: T4)
 - [x] T8: 名额与预算按币（`max_chips_per_symbol` 缺省 1；`_prompt_risk` 支持 per_symbol；persona 与 live 风控合并同一份） — acceptance: 一币多 chip 不再挤掉其他币；两处风控对同一 plan 结论一致 (covers: S2.4⑥)
-- [ ] T9: 钝动作 `scope` + 归属 + `replace=all` + 通知/文案 + 回滚留痕（含 `close_all` 归属判据、`_resync_protectors` fail-closed、删 `_apply_replace` 死代码、风控文案带 symbol、已回滚腿改发"已回滚"卡） — acceptance: `symbol=""` 未给 scope 被拒；`close_all` 不再平他 bot 的仓；回滚后通知与最终状态一致 (covers: S2.4⑧)
-- [ ] T10: 守护驱动源 + 观测与成本（覆盖面含"有归属的合约"、`covered/skipped` 落盘、`run_once` 清 `tool_usage`、`tool_usage_summary` 带 by_symbol、`kline` 带 symbol、`charts` 元数据落盘、扫描共享 client 与上限） — acceptance: 删币后其存量仓位仍被扫描覆盖；`thinking.json` 可按币统计工具与图 (covers: S2.4⑦⑨; depends: T9)
-- [ ] T11: journal / Tier-1 / 近况按币（`symbols[]`、`decisions[]`、`tier1{symbol:{…}}`、近况与索引按币渲染） — acceptance: 两币 → journal 两条独立可还原记录；**单币输出逐字不变**（golden） (covers: S2.4⑩)
+- [x] T9: 钝动作 `scope` + 归属 + `replace=all` + 通知/文案 + 回滚留痕（含 `close_all` 归属判据、`_resync_protectors` fail-closed、删 `_apply_replace` 死代码、风控文案带 symbol、已回滚腿改发"已回滚"卡） — acceptance: `symbol=""` 未给 scope 被拒；`close_all` 不再平他 bot 的仓；回滚后通知与最终状态一致 (covers: S2.4⑧)
+- [x] T10: 守护驱动源 + 观测与成本（覆盖面含"有归属的合约"、`covered/skipped` 落盘、`run_once` 清 `tool_usage`、`tool_usage_summary` 带 by_symbol、`kline` 带 symbol、`charts` 元数据落盘、扫描共享 client 与上限） — acceptance: 删币后其存量仓位仍被扫描覆盖；`thinking.json` 可按币统计工具与图 (covers: S2.4⑦⑨; depends: T9)
+- [x] T11: journal / Tier-1 / 近况按币（`symbols[]`、`decisions[]`、`tier1{symbol:{…}}`、近况与索引按币渲染） — acceptance: 两币 → journal 两条独立可还原记录；**单币输出逐字不变**（golden） (covers: S2.4⑩)
 - [x] T12: 解析加固（`repair_json`：去围栏/去尾逗号/按栈补括号；`scenarios` 非对象 → 丢弃 + notes） — acceptance: 少一个 `}`、尾逗号、`scenarios:"x"` 三种坏输入都能解析成功；降级率降为 0 (covers: S2.4⑨)
-- [ ] T13: 画像/盈亏/decay 按币 + 缓存前缀分层（`ledger_stats` per-symbol、paper `group by contract`、`exchange_pnl.by_contract`、decay 带 symbol、画像移出稳定前缀、`check_prefix` 分 hash） — acceptance: 两币各自独立胜率/盈亏；单币画像逐字不变 (covers: S2.4⑩; depends: T11)
-- [ ] T14: 订单上下文与共享订单库按币（按 symbol 各一张 ≤3、`list_open(group, symbol)`、`create` 校验宇宙、单 bot 也写订单记录） — acceptance: 多币多单时两张单的 `premise_invalidation` 都在 prompt 里；不再关错币的单 (covers: S2.4⑩; depends: T11)
-- [ ] T15: ledger 写 symbol（`insert_trade` 补 symbol / `symbols_json`、`plans.symbols_json`、查询加 symbol 参数） — acceptance: 新写入的 `trades.symbol` 非 NULL 且可按币查询 (covers: S2.4⑩)
-- [ ] T16: 数据源闭环（`fetch_aux.CONTRACTS` 从 watchlist 读、aux/data monitor per-symbol 覆盖告警、per-venue 覆盖矩阵 + 启动校验、Bitget/HL 真实元数据） — acceptance: 新增币后 aux 工具**不再静默空**（要么有数据、要么显式告警）；"某币零数据"能被监控报出 (covers: S2.4⑪)
-- [ ] T17: 测试补多币断言（`fills` 测试表补 `contract`、画像/盈亏/近况各加"两币→两条独立记录"、prompt 多币预算守卫） — acceptance: 故意把 symbol 维度删掉时新测试必须失败（不是假绿） (covers: S2.4⑪; depends: T11, T13)
-- [ ] T18: 人格与契约最小清理（示例占位符、默认人格、价格示例符号化、修两处错尺度反例、加载时一致性告警、文档口径） — acceptance: 契约示例不含具体币名；`brooks_eth_pa.md`/`ladder_t_pa_sol.md` 的错尺度示例已修；人格币名 ∉ 宇宙时告警 (covers: S2.4⑫)
-- [ ] T19: 安全批（HL `cancel_order` 带 contract；paper 补 `(contract, side)` 与逐合约杠杆；熔断 `account_scope` + 先 dry；空 `symbols` 报错） — acceptance: HL 对非 BTC 撤单带正确 coin；paper 平一侧不再撤另一侧的保护单；熔断 dry 一版只告警 (covers: S2.3 #1/#6/#7)
-- [ ] T20: `sizing` quanto 收紧（缺失即 raise，与 paper 语义一致） — acceptance: quanto 缺失时拒绝下单并告警；**依赖 T16 先补齐各所真实元数据**，否则不得开启 (covers: S2.3 #5; depends: T16)
+- [x] T13: 画像/盈亏/decay 按币 + 缓存前缀分层（`ledger_stats` per-symbol、paper `group by contract`、`exchange_pnl.by_contract`、decay 带 symbol、画像移出稳定前缀、`check_prefix` 分 hash） — acceptance: 两币各自独立胜率/盈亏；单币画像逐字不变 (covers: S2.4⑩; depends: T11)
+- [x] T14: 订单上下文与共享订单库按币（按 symbol 各一张 ≤3、`list_open(group, symbol)`、`create` 校验宇宙、单 bot 也写订单记录） — acceptance: 多币多单时两张单的 `premise_invalidation` 都在 prompt 里；不再关错币的单 (covers: S2.4⑩; depends: T11)
+- [x] T15: ledger 写 symbol（`insert_trade` 补 symbol / `symbols_json`、`plans.symbols_json`、查询加 symbol 参数） — acceptance: 新写入的 `trades.symbol` 非 NULL 且可按币查询 (covers: S2.4⑩)
+- [x] T16: 数据源闭环（`fetch_aux.CONTRACTS` 从 watchlist 读、aux/data monitor per-symbol 覆盖告警、per-venue 覆盖矩阵 + 启动校验、Bitget/HL 真实元数据） — acceptance: 新增币后 aux 工具**不再静默空**（要么有数据、要么显式告警）；"某币零数据"能被监控报出 (covers: S2.4⑪)
+- [x] T17: 测试补多币断言（`fills` 测试表补 `contract`、画像/盈亏/近况各加"两币→两条独立记录"、prompt 多币预算守卫） — acceptance: 故意把 symbol 维度删掉时新测试必须失败（不是假绿） (covers: S2.4⑪; depends: T11, T13)
+- [x] T18: 人格与契约最小清理（示例占位符、默认人格、价格示例符号化、修两处错尺度反例、加载时一致性告警、文档口径） — acceptance: 契约示例不含具体币名；`brooks_eth_pa.md`/`ladder_t_pa_sol.md` 的错尺度示例已修；人格币名 ∉ 宇宙时告警 (covers: S2.4⑫)
+- [x] T19: 安全批（HL `cancel_order` 带 contract；paper 补 `(contract, side)` 与逐合约杠杆；熔断 `account_scope` + 先 dry；空 `symbols` 报错） — acceptance: HL 对非 BTC 撤单带正确 coin；paper 平一侧不再撤另一侧的保护单；熔断 dry 一版只告警 (covers: S2.3 #1/#6/#7)
+- [x] T20: `sizing` quanto 收紧（缺失即 raise，与 paper 语义一致） — acceptance: quanto 缺失时拒绝下单并告警；**依赖 T16 先补齐各所真实元数据**，否则不得开启 (covers: S2.3 #5; depends: T16)
 
 ## 证据附录（四路全量审计，一行一条）
 
