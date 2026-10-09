@@ -124,6 +124,17 @@ def _est_tokens(text: str) -> int:
 def _format_order_context(ctx: Optional[dict]) -> str:
     if not ctx:
         return "（当前无持仓）"
+    # 多币：按币各一张（`_order_context_for` 的容器形态）。合并成一张会让模型以为
+    # 只有一笔持仓，其余币的前提失效价/理由全看不到（D-19）—— 而「上一轮我给 ETH
+    # 定的失效价是多少」正是这一轮该照着判断的东西。
+    many = ctx.get("orders") if isinstance(ctx, dict) else None
+    if isinstance(many, list):
+        parts = [_format_one_order(c) for c in many if isinstance(c, dict)]
+        return "\n\n".join(parts) if parts else "（当前无持仓）"
+    return _format_one_order(ctx)
+
+
+def _format_one_order(ctx: dict) -> str:
     lines = [
         f"订单: {ctx.get('order_id', '')}",
         f"标的: {ctx.get('symbol', '')}  方向: {ctx.get('side', '')}",

@@ -265,7 +265,9 @@ class PlanRunner:
           （实测：`smc-paper` 是 `disc-trio` 的分析成员，独立跑 plan 时被注入了
           `pa-a` 账户上的空单，而它自己账户是平的）。
 
-        有多个 open 单时取 `updated_at` 最新的（设计是单币单计划，正常只有一个）。
+        有多个 open 单时**按币各取一张**（≤3）：单币正常只有一张；多币下每枚币各有
+        自己的理由与前提失效价，只取 `updated_at` 最新那张会让其余币的上下文凭空
+        消失（D-19）。单币（或订单记录里没有 symbol）时返回**单张**，形态同改动前。
         """
         try:
             from ..persona.orders import SharedOrderStore
@@ -280,7 +282,24 @@ class PlanRunner:
             if not mine:
                 return None
             mine.sort(key=lambda r: int(r.get("updated_at") or 0), reverse=True)
-            return store.get_order_context(mine[0]["order_id"])
+            # 按**币**各取一张（≤3）。原先只取 `updated_at` 最新的一张 —— 多币下一轮
+            # 可能同时有 2–3 张单，其余币的理由/前提失效价/最近事件在 prompt 里**凭空
+            # 消失**（D-19：模型看不到自己上一轮给另一个币定的失效价）。
+            # 单币时返回**单张**（形态与改动前逐字一致），多币才包一层容器。
+            by_sym: dict[str, dict] = {}
+            for r in mine:
+                s = str(r.get("symbol") or "").strip()
+                if s and s not in by_sym:
+                    by_sym[s] = r
+                if len(by_sym) >= 3:
+                    break
+            if len(by_sym) <= 1:
+                # 单币，或记录里没有 symbol（老订单库）→ 退回「最新一张」
+                pick = next(iter(by_sym.values())) if by_sym else mine[0]
+                return store.get_order_context(pick["order_id"])
+            many = [store.get_order_context(r["order_id"]) for r in by_sym.values()]
+            many = [c for c in many if c]
+            return {"orders": many} if many else store.get_order_context(mine[0]["order_id"])
         except Exception as e:  # noqa: BLE001
             log.warning("order context lookup failed: %s", e)
             return None

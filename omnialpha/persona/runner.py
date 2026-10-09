@@ -598,9 +598,10 @@ class PersonaRunner:
         **关掉 BTC 那张单**，hold/close 复用的也可能是另一个币的单（静默错配）。
         `symbol` 为空（全组未配 symbols）时退化为旧行为，不做过滤。
         """
-        opens = self.orders.list_open(group=self.group.name)
-        if symbol:
-            opens = [o for o in opens if str(o.get("symbol") or "") == symbol]
+        # `symbol` 交给 store 过滤（它做大小写归一）。原先在这里精确比较 —— 形态不一致
+        # （`btc_usdt` vs `BTC_USDT`）就会**静默退化成「不过滤」**，于是又回到
+        # `opens[0]` 关错币的老问题（T14）。
+        opens = self.orders.list_open(group=self.group.name, symbol=symbol or None)
         # 方向反转 → **另起一张单**，而不是在旧记录上再记一次 open。
         # 否则注入 prompt 的订单上下文会自相矛盾：实测账户已是 +177 多仓，
         # 而订单上下文还写着「方向: short / 理由: …限价空」（side 与 reason 都是旧的）

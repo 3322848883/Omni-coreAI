@@ -160,8 +160,14 @@ class SharedOrderStore:
             self._write(self._path(order_id), rec)
             return rec
 
-    def list_open(self, group: Optional[str] = None) -> list[dict]:
-        """列出 open 订单；可选按 group 过滤（多组隔离）。"""
+    def list_open(self, group: Optional[str] = None,
+                  symbol: Optional[str] = None) -> list[dict]:
+        """列出 open 订单；可选按 group / **symbol** 过滤（多组、多币隔离）。
+
+        `symbol` 用于「只找这个币的单」—— 多币下按 order_id 定位时若拿错一张，
+        关掉的就是**另一个币**的仓（T14）。
+        """
+        want = str(symbol).strip().upper() if symbol else ""
         out = []
         for p in sorted(self.dir.glob("*.json")):
             rec = self._read_json(p)
@@ -170,6 +176,8 @@ class SharedOrderStore:
             if rec.get("status") != "open":
                 continue
             if group is not None and rec.get("group") != group:
+                continue
+            if want and str(rec.get("symbol") or "").strip().upper() != want:
                 continue
             out.append(rec)
         return out
