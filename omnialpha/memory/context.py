@@ -39,13 +39,13 @@ def build_context(
     profile = MemoryProfile(root, bot_id)
 
     # ── 固定前缀（缓存命中区）─────────────────────────
-    profile_summary = profile.prompt_summary()
-    system_parts = [system_prompt]
-    if profile_summary:
-        system_parts.append(f"\n[画像] {profile_summary}")
-    system = "\n".join(system_parts)
+    # 画像**不放在这里**：它每平一笔就变（`record_trade` / 账本投影），放进 system
+    # 会让整段缓存前缀失效 —— 而 system 是最长的一段（人设+契约+工具）。
+    # 实测缓存命中率 0.04–0.75、单轮 70–331k token，前缀稳定性是成本的第一杠杆。
+    system = system_prompt
 
     # ── 动态后缀（缓存未命中区）───────────────────────
+    profile_summary = profile.prompt_summary()
     order_block = _format_order_context(order_context)
     # 只读一次 journal：原先 `read_recent_summaries` 与 `read_recent(1)` 各做一次
     # `read_text()`，每轮多读一遍整个文件（独立评审指出）。
@@ -71,8 +71,10 @@ def build_context(
     last_state = _format_last_plan_state(recent_rows[-1:])
     last_state_block = f"\n[上轮方案状态]\n{last_state}\n" if last_state else ""
     snapshot_block = snapshot_text or _format_snapshot(snapshot or {})
+    # 画像段：无成交时不写（别让模型看到「历史表现: 0笔」这种噪音）
+    profile_block = f"[画像] {profile_summary}\n\n" if profile_summary else ""
 
-    user = f"""[订单上下文]
+    user = f"""{profile_block}[订单上下文]
 {order_block}
 
 [近况]

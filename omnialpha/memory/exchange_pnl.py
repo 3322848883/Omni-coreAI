@@ -60,6 +60,7 @@ def load(root: Path, bot_id: str) -> dict:
         rec = {}
     totals = rec.get("totals") or {}
     worst = totals.get("worst")
+    by = totals.get("by_contract") or {}
     return {
         "cursor": str(rec.get("cursor") or ""),
         "active_cursor": str(rec.get("active_cursor") or ""),
@@ -70,6 +71,16 @@ def load(root: Path, bot_id: str) -> dict:
             # `None` = 还没记过任何一笔（**不能拿 0 顶替**：那会让「最差单笔」
             # 在一串盈利里显示成 0，读起来像「有一笔不赚不亏」）
             "worst": None if worst is None else float(worst),
+            # 按币（老记录没有这一层 → 空 dict，调用方退回合并值）
+            "by_contract": {
+                str(c): {
+                    "trades": int(v.get("trades") or 0),
+                    "wins": int(v.get("wins") or 0),
+                    "pnl": float(v.get("pnl") or 0.0),
+                    "worst": None if v.get("worst") is None else float(v.get("worst")),
+                }
+                for c, v in (by or {}).items() if isinstance(v, dict)
+            },
         },
         "fills": list(rec.get("fills") or []),
         # 未归属而被排除的记录（留痕，便于核对漏了什么）
@@ -219,12 +230,22 @@ def stats(root: Path, bot_id: str) -> Optional[dict]:
     t = load(root, bot_id)["totals"]
     if t["trades"] <= 0:
         return None
-    return {
+    out = {
         "trades": t["trades"],
         "wins": t["wins"],
         "pnl": round(t["pnl"], 2),
         "worst": round(t["worst"] if t["worst"] is not None else 0.0, 2),
     }
+    # 按币（与 `realized_pnl_stats(by_contract=True)` 同形：`by_contract: {币: {trades,
+    # wins, pnl, worst}}`）。只在真的有这一层时才给 —— 老记录退回合并值。
+    by = t.get("by_contract") or {}
+    if by:
+        out["by_contract"] = {
+            c: {"trades": v["trades"], "wins": v["wins"], "pnl": round(v["pnl"], 2),
+                "worst": round(v["worst"] if v["worst"] is not None else 0.0, 2)}
+            for c, v in by.items()
+        }
+    return out
 
 
 def _int_or_zero(v: Any) -> int:
@@ -485,6 +506,9 @@ def sync(root: Path, bot_id: str, client, *, contract: Optional[str] = None,
 
     fresh.sort(key=lambda x: _int_or_zero(x["key"]))
     t = rec["totals"]
+    # 按币累计（多币下合并值回答不了「这个币赚没赚」）。老记录里没有这一层，
+    # 读时按需建 —— 首次 sync 之后就会带上。
+    by = t.setdefault("by_contract", {})
     for f in fresh:
         t["trades"] += 1
         if f["pnl"] > 0:
@@ -492,6 +516,16 @@ def sync(root: Path, bot_id: str, client, *, contract: Optional[str] = None,
         t["pnl"] += f["pnl"]
         if t["worst"] is None or f["pnl"] < t["worst"]:
             t["worst"] = f["pnl"]
+        c = str(f.get("contract") or "").strip().upper()
+        if not c:
+            continue
+        slot = by.setdefault(c, {"trades": 0, "wins": 0, "pnl": 0.0, "worst": None})
+        slot["trades"] += 1
+        if f["pnl"] > 0:
+            slot["wins"] += 1
+        slot["pnl"] = round(slot["pnl"] + f["pnl"], 2)
+        if slot["worst"] is None or f["pnl"] < slot["worst"]:
+            slot["worst"] = f["pnl"]
     rec["totals"] = t
     rec["cursor"] = str(max_key)
     if active:

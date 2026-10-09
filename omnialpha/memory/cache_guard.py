@@ -52,19 +52,27 @@ class CacheGuard:
 
         缓存命中的前提是前缀**逐字稳定**（设计 S2.6）。上一轮的前缀摘要存
         `state/cache_prefix.sha256`；只有变化时才重写（首次运行视为稳定）。
+
+        **分段 hash**：一个总 hash 只能告诉你「变了」，分段之后才看得出是**哪一段**
+        （人设 / 契约 / 工具清单 / 技能目录）动了 —— 排查缓存失效时这是唯一线索。
+        文件**第一行仍是总 hash**，所以旧格式（单行）能直接读、不会比出假变化。
         """
         import hashlib
-        cur = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
+        text = str(system_prompt or "")
+        cur = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        seg_lines = [hashlib.sha256(s.encode("utf-8")).hexdigest()[:12]
+                     for s in text.split("\n\n")]
         p = self.path.with_name("cache_prefix.sha256")
         prev = ""
         try:
             if p.exists():
-                prev = p.read_text(encoding="utf-8").strip()
+                # 只取第一行（总 hash）—— 兼容旧格式的单行文件
+                prev = p.read_text(encoding="utf-8").strip().splitlines()[0].strip()
         except Exception:  # noqa: BLE001
             prev = ""
         if prev != cur:
             try:
-                p.write_text(cur, encoding="utf-8")
+                p.write_text("\n".join([cur] + seg_lines) + "\n", encoding="utf-8")
             except Exception:  # noqa: BLE001
                 pass
         return not prev or prev == cur

@@ -159,12 +159,27 @@ def new_order_id() -> str:
     return uuid.uuid4().hex[:16]
 
 
-def realized_pnl_stats(db_path: Any) -> Optional[dict]:
+def _pnl_agg(vals: list) -> dict:
+    """一组已实现盈亏 → 计数/盈利笔数/合计/最差单笔。"""
+    return {
+        "trades": len(vals),
+        "wins": sum(1 for v in vals if v > 0),
+        "pnl": round(sum(vals), 2),
+        "worst": round(min(vals), 2) if vals else 0.0,
+    }
+
+
+def realized_pnl_stats(db_path: Any, *, contract: Optional[str] = None,
+                       by_contract: bool = False) -> Optional[dict]:
     """汇总 paper 账本的**已实现盈亏**（权威口径）：笔数 / 盈利笔数 / 合计 / 最差单笔。
 
     `fills.realised_pnl != 0` 即一笔平仓成交 —— **它包含交易所侧触发的平仓**
     （SL/TP），而那类没有信号、不进 `logs/trades.jsonl`。所以「这个 bot 到底平了
     几笔、赚亏多少」只能从这里取，不能从成交日志推。
+
+    - `contract=`     只统计该合约（单币读法）
+    - `by_contract=`  额外返回 `by_contract: {合约: 同一组计数}` —— 多币下**合并值
+      回答不了「这个币赚没赚」**（一币亏一币赚会互相抵消）
 
     只读打开；库不存在 / 读不出 / 没有任何平仓 → 返回 None（调用方退回非账本口径）。
     """
@@ -174,20 +189,34 @@ def realized_pnl_stats(db_path: Any) -> Optional[dict]:
     try:
         con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
         try:
-            vals = [float(r[0]) for r in
-                    con.execute("select realised_pnl from fills where realised_pnl != 0")]
+            # 兼容没有 `contract` 列的库（老库 / 测试手工建的最小表）：缺列时按
+            # 「无币」读 —— 核心计数照常给，只是没有按币那一层。**不能因此整段读
+            # 失败**（那会让画像静默退回文件累加值，正是这条投影要修掉的毛病）。
+            have = {r[1] for r in con.execute("PRAGMA table_info(fills)")}
+            col = "contract" if "contract" in have else "null"
+            sql = f"select {col}, realised_pnl from fills where realised_pnl != 0"
+            params: tuple = ()
+            if contract and "contract" in have:
+                sql += " and contract=?"
+                params = (str(contract).strip().upper(),)
+            pairs = [(r[0], float(r[1])) for r in con.execute(sql, params)]
         finally:
             con.close()
     except Exception:  # noqa: BLE001
         return None
-    if not vals:
+    if not pairs:
         return None
-    return {
-        "trades": len(vals),
-        "wins": sum(1 for v in vals if v > 0),
-        "pnl": round(sum(vals), 2),
-        "worst": round(min(vals), 2),
-    }
+    rec = _pnl_agg([v for _, v in pairs])
+    if contract:
+        rec["contract"] = str(contract).strip().upper()
+    if by_contract:
+        groups: dict[str, list] = {}
+        for c, v in pairs:
+            key = str(c or "").strip().upper()
+            if key:
+                groups.setdefault(key, []).append(v)
+        rec["by_contract"] = {c: _pnl_agg(vs) for c, vs in sorted(groups.items())}
+    return rec
 
 
 class _FileLock:

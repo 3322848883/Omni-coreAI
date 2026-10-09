@@ -52,18 +52,31 @@ class MemoryProfile:
         """
         from ..paper.store import realized_pnl_stats
         st = realized_pnl_stats(
-            self.root / "data" / "bots" / self.bot_id / "paper" / "account.db")
+            self.root / "data" / "bots" / self.bot_id / "paper" / "account.db",
+            by_contract=True)
         if not st:
             from .exchange_pnl import stats as _exchange_stats
             st = _exchange_stats(self.root, self.bot_id)
         if not st:
             return None
-        return {
+        out = {
             "total_trades": st["trades"],
             "win_count": st["wins"],
             "total_pnl_usd": st["pnl"],
             "max_drawdown_usd": st["worst"],
         }
+        # 按币：多币下**合并值回答不了「这个币赚没赚」**（一币亏一币赚会互相抵消）。
+        # 只有一个币有成交时 `prompt_summary` 会忽略这一层、输出与改动前逐字相同。
+        by = st.get("by_contract") or {}
+        if by:
+            out["by_symbol"] = {
+                sym: self._derive({
+                    "total_trades": v["trades"], "win_count": v["wins"],
+                    "total_pnl_usd": v["pnl"], "max_drawdown_usd": v["worst"],
+                })
+                for sym, v in by.items()
+            }
+        return out
 
     def load(self) -> dict:
         if not self.path.exists():
@@ -139,21 +152,34 @@ class MemoryProfile:
             self._write(self._derive(rec))
             return self._derive(rec)
 
-    def prompt_summary(self) -> str:
-        """精简后进 system prompt（~50t）。"""
-        rec = self.load()
-        if rec.get("total_trades", 0) == 0:
-            return ""
-        n = rec["total_trades"]
-        wr = round(rec.get("win_rate", 0.0) * 100)
-        avg_pnl = rec.get("avg_pnl_usd", 0.0)
+    @staticmethod
+    def _one_line(rec: dict) -> str:
+        """单条画像的紧凑渲染（单币与按币共用同一段文字）。"""
+        n = int(rec.get("total_trades") or 0)
+        wr = round(float(rec.get("win_rate") or 0.0) * 100)
         parts = [f"{n}笔交易", f"胜率{wr}%"]
         # 账本投影给不出持仓轮数（文件里也没有时是 0）→ 宁可不报，
         # 别写「均持仓0轮」——那读起来像「开仓即平」，是假信息。
         if rec.get("avg_hold_rounds"):
             parts.append(f"均持仓{rec['avg_hold_rounds']}轮")
-        parts.append(f"均盈亏{avg_pnl}u")
-        return "历史表现: " + ", ".join(parts)
+        parts.append(f"均盈亏{rec.get('avg_pnl_usd', 0.0)}u")
+        return ", ".join(parts)
+
+    def prompt_summary(self) -> str:
+        """精简后进 prompt（~50t）。
+
+        **多币时按币各列一条** —— 合并值会让模型以为「整体胜率 50%」，而实际是
+        BTC 赚、ETH 亏。只有**一个**币有成交（或老画像没有按币层）时输出与改动前
+        **逐字相同**（I11）。
+        """
+        rec = self.load()
+        if rec.get("total_trades", 0) == 0:
+            return ""
+        by = rec.get("by_symbol") or {}
+        if len(by) > 1:
+            chunks = [f"{sym}: {self._one_line(v)}" for sym, v in sorted(by.items())]
+            return "历史表现(按币): " + " | ".join(chunks)
+        return "历史表现: " + self._one_line(rec)
 
     def _write(self, rec: dict) -> None:
         self.path.write_text(

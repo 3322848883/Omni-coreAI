@@ -312,11 +312,17 @@ class TestStats(unittest.TestCase):
             self.assertIsNone(stats(root, BOT))
 
     def test_shape_matches_paper_ledger(self):
-        """形状必须与 `realized_pnl_stats` 一致 —— ledger_stats 把两者当同一数据源。"""
+        """形状必须与 `realized_pnl_stats` 一致 —— ledger_stats 把两者当同一数据源。
+
+        `by_contract` 是 T13 新增的**按币**层，两边**同步新增**（paper 侧
+        `realized_pnl_stats(by_contract=True)` 同形：`{币: {trades,wins,pnl,worst}}`）；
+        有成交时必然出现，所以形状仍一致。
+        """
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _sync(root, _CloseClient([_close(1001, "-1.0")]))
-            self.assertEqual(set(stats(root, BOT)), {"trades", "wins", "pnl", "worst"})
+            self.assertEqual(set(stats(root, BOT)),
+                             {"trades", "wins", "pnl", "worst", "by_contract"})
 
 
 class TestListPositionCloseQuery(unittest.TestCase):

@@ -26,6 +26,9 @@ class DecayDetector:
         self.path = self.root / "data" / "bots" / bot_id / "state" / "perf_metrics.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._history: list[float] = []  # pnl 序列
+        # 与 `_history` **平行**：多币下同一个 bot 里不同币可能各自失效，账户级合并
+        # 指标会说「在失血」却指不出是谁（T13）。长度必须与 `_history` 一致。
+        self._symbols: list[str] = []
         self._last_equity: Optional[float] = None
         key = str(self.path)
         with self._locks_guard:
@@ -57,6 +60,7 @@ class DecayDetector:
                 if "pnl_usd" in rec:
                     try:
                         self._history.append(float(rec.get("pnl_usd") or 0.0))
+                        self._symbols.append(str(rec.get("symbol") or "").strip().upper())
                     except (TypeError, ValueError):
                         pass
                 if rec.get("equity") is not None:
@@ -69,7 +73,7 @@ class DecayDetector:
 
     def record_cycle(self, cycle_id: str, decision: str,
                      executed: bool, pnl_usd: Optional[float] = None,
-                     equity: Optional[float] = None) -> dict:
+                     equity: Optional[float] = None, symbol: str = "") -> dict:
         """每轮追加指标，返回当前滚动指标。
 
         `pnl_usd` 缺省时用**权益差**推算（`equity − 上次 equity`）：plan-loop 不执行
@@ -86,6 +90,7 @@ class DecayDetector:
                 self._last_equity = float(equity)
             pnl_usd = float(pnl_usd)
             self._history.append(pnl_usd)
+            self._symbols.append(str(symbol or "").strip().upper())
             metrics = self._compute()
             rec = {
                 "ts": int(time.time()),
@@ -95,6 +100,8 @@ class DecayDetector:
                 "pnl_usd": pnl_usd,
                 **metrics,
             }
+            if symbol:
+                rec["symbol"] = str(symbol).strip().upper()
             if equity is not None:
                 rec["equity"] = float(equity)
             with self.path.open("a", encoding="utf-8") as f:
@@ -125,6 +132,11 @@ class DecayDetector:
         # 胜率过低
         if metrics.get("n_trades", 0) >= 5 and metrics.get("win_rate", 1) < 0.3:
             alerts.append(f"decay: win_rate {metrics['win_rate']:.2f} < 0.3")
+        # 按币：多币下账户级告警指不出是哪个币在失血 → 单独报（单币时这一层不存在，
+        # 文案与改动前逐字相同）
+        for s, m in (metrics.get("by_symbol") or {}).items():
+            if m["n_trades"] >= 5 and m["win_rate"] < 0.3:
+                alerts.append(f"decay [{s}]: win_rate {m['win_rate']:.2f} < 0.3")
         if alerts:
             return {"ts": int(time.time()), "alerts": alerts, "metrics": metrics}
         return None
@@ -138,12 +150,30 @@ class DecayDetector:
         var = sum((p - mean) ** 2 for p in recent) / max(n - 1, 1)
         std = math.sqrt(var) if var > 0 else 0
         sharpe = (mean / std * math.sqrt(self.window)) if std > 0 else 0
-        return {
+        out = {
             "rolling_sharpe": round(sharpe, 3),
             "win_rate": round(wins / trades, 3) if trades else 0,
             "n_trades": trades,
             "rolling_pnl": round(sum(recent), 2),
         }
+        # 按币（账户级合并指标指不出是谁在失血）。`_symbols` 与 `_history` 平行；
+        # 老记录没有 symbol → 空串，跳过。**只有一个币时不加这一层** ——
+        # 单币的状态文件与告警文案保持逐字不变（I11）。
+        syms = self._symbols[-self.window:]
+        if len(syms) == len(recent):
+            groups: dict[str, list] = {}
+            for p, s in zip(recent, syms):
+                if s:
+                    groups.setdefault(s, []).append(p)
+            if len(groups) > 1:
+                out["by_symbol"] = {
+                    s: {"rolling_pnl": round(sum(ps), 2),
+                        "win_rate": round(sum(1 for p in ps if p > 0)
+                                          / max(sum(1 for p in ps if p != 0), 1), 3),
+                        "n_trades": sum(1 for p in ps if p != 0)}
+                    for s, ps in sorted(groups.items())
+                }
+        return out
 
     def _historical(self) -> dict:
         n = len(self._history)

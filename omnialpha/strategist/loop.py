@@ -760,10 +760,16 @@ class PlanRunner:
             bid = self.cfg.bot_id or self.inbox.name
             det = DecayDetector(root, bid)
             acts = [c.action for c in (plan.chips or [])]
+            # 本轮只涉及**一个**币时记下它（多币时留空）：权益差是账户级口径，
+            # 归不到某个币头上 —— 硬塞一个币名会让衰减告警指错人。
+            # 单币时带上它，多币场景下的按币衰减才有数据可用（T13）。
+            _syms = {str(getattr(c, "symbol", "") or "") for c in (plan.chips or [])}
+            _syms.discard("")
             det.record_cycle(
                 cycle_id=plan.cycle_id or '',
                 decision=','.join(acts) or 'hold',
                 executed=executed, equity=equity,
+                symbol=next(iter(_syms)) if len(_syms) == 1 else "",
             )
             alert = det.check()
             if alert:
