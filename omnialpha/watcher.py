@@ -29,6 +29,200 @@ def _alert_store(paths: "ProjectPaths", bot_id: str):
         return None
 
 
+# ── 守护扫描集合：`bot.symbols` ∪ 「交易所上本 bot 有归属痕迹的合约」─────
+#
+# 为什么必须扩展（设计 S2.4⑦ / D6）：5 个 sweep 原先一律 `for sym in bot.symbols`
+# —— 于是**从 yaml 里删掉一个币，它上面的存量仓位立刻脱离全部守护**（裸仓）。
+# 而「删旧币、加新币」正是换标的的核心场景，覆盖面不该由「配置里还写不写它」决定。
+#
+# 为什么不能按「账户里有仓」扩展：账户是**多 bot 共用**的，按仓扩展会把别的 bot 的
+# 仓位拉进本 bot 的扫描集合 —— 后果是替他 bot 补 SL / 上移 SL，属于错币操作。
+# 所以归属判据取**痕迹**：订单 text 前缀 `t-<label_prefix>`（与 `executor._text_owned`
+# 同一条规则，segment-safe：`t-x` 或 `t-x-*`，`t-xXX` 不算）。
+# 有仓、但一个本 bot 的挂单/条件单都没有 → 判不了归属，**不扫**（宁可少扫不越界）。
+#
+# 币数上限是成本闸门（设计 S2.7「成本有界」）：币越多每轮 REST 调用越多，
+# 无上限时扫描周期会随 N 线性拉长。超限只扫前 N 个并告警 + 落 `over_cap`。
+_SCAN_SYMBOL_CAP = 12
+
+
+def _text_owned(text: str, label: str) -> bool:
+    """归属判据（与 `executor._text_owned` 同规则，segment-safe）。
+
+    空 label 一律 False —— 归属判据必须 fail-closed，否则「没配 label_prefix」
+    会退化成「整个账户都是我的」。
+    """
+    label = str(label or "").strip()
+    if not label:
+        return False
+    text = str(text or "")
+    tag = f"t-{label}"
+    return text == tag or text.startswith(tag + "-")
+
+
+def _order_text(row: dict) -> str:
+    """订单文本：条件单在 `initial.text`，普通挂单在 `text`。"""
+    init = row.get("initial") if isinstance(row.get("initial"), dict) else {}
+    return str(init.get("text") or row.get("text") or "")
+
+
+def _order_contract(row: dict) -> str:
+    """订单合约：条件单在 `initial.contract`，普通挂单在 `contract`。"""
+    init = row.get("initial") if isinstance(row.get("initial"), dict) else {}
+    return str(init.get("contract") or row.get("contract") or "")
+
+
+def _own_label(bot: BotConfig) -> str:
+    return str(getattr(bot, "label_prefix", "") or bot.bot_id or "").strip()
+
+
+def _position_size(p: dict) -> int:
+    try:
+        return int(p.get("size") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def guard_scan_set(bot: BotConfig, client=None) -> dict:
+    """本轮守护扫描集合 + 跳过明细（设计 S2.4⑦ / D6）。
+
+    返回 `{"symbols", "universe", "extra", "skipped", "errors", "positions"}`：
+
+    - `symbols`   本轮真正要扫的币（`universe` 在前、归属合约殿后、受上限截断）
+    - `extra`     不在 yaml 里、但本 bot 有归属痕迹的合约（**删币后仍被守护的就是它们**）
+    - `skipped`   `[{"symbol", "reason"}]`，reason ∈ `over_cap`（超上限没扫）/
+                  `not_owned`（账户上有仓、但本 bot 无归属痕迹且不在 yaml → 不是我的）
+    - `errors`    取归属痕迹/持仓时的失败（取不到时**不扩展**，只记原因）
+    - `positions` 账户里有仓的合约（供事后回答「这个仓到底有没有被守护」）
+
+    单币且账户上没有额外归属合约时 `symbols == list(bot.symbols)`，逐字不变。
+    """
+    universe: list[str] = []
+    for s in (getattr(bot, "symbols", None) or []):
+        s = str(s or "").strip()
+        if s and s not in universe:
+            universe.append(s)
+    extra: list[str] = []
+    skipped: list[dict] = []
+    errors: list[str] = []
+    label = _own_label(bot)
+    if client is not None and label:
+        # 账户级拉一次挂单 + 条件单（各 1 个 REST 调用），按 text 前缀判归属。
+        for kind, meth in (("orders", "list_orders"), ("price_orders", "list_price_orders")):
+            fn = getattr(client, meth, None)
+            if fn is None:
+                continue
+            try:
+                rows = fn() or []
+            except Exception as e:  # noqa: BLE001 — 取不到就不扩展，原因留痕
+                errors.append(f"{kind}: {e}")
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                if not _text_owned(_order_text(row), label):
+                    continue
+                sym = _order_contract(row)
+                if sym and sym not in universe and sym not in extra:
+                    extra.append(sym)
+
+    scanned = universe + extra
+    if len(scanned) > _SCAN_SYMBOL_CAP:
+        for sym in scanned[_SCAN_SYMBOL_CAP:]:
+            skipped.append({"symbol": sym, "reason": "over_cap"})
+        scanned = scanned[:_SCAN_SYMBOL_CAP]
+        log.warning("guard scan %s: 币数 %d 超过上限 %d，本轮只扫前 %d 个（其余标记 over_cap）",
+                    bot.bot_id, len(universe) + len(extra), _SCAN_SYMBOL_CAP, _SCAN_SYMBOL_CAP)
+
+    positions: list[str] = []
+    if client is not None:
+        try:
+            rows = client.get_positions() or []
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"positions: {e}")
+            rows = []
+        for p in rows:
+            if not isinstance(p, dict) or _position_size(p) == 0:
+                continue
+            sym = str(p.get("contract") or "")
+            if not sym:
+                continue
+            if sym not in positions:
+                positions.append(sym)
+            if sym not in scanned:
+                # 有仓却不扫：必须能回答「为什么没守护它」
+                skipped.append({"symbol": sym, "reason": "not_owned"})
+
+    return {
+        "symbols": scanned,
+        "universe": universe,
+        "extra": [s for s in extra if s in scanned],
+        "skipped": skipped,
+        "errors": errors,
+        "positions": positions,
+    }
+
+
+def guard_coverage_path(paths: "ProjectPaths", bot_id: str) -> Path:
+    """每轮扫描的覆盖记录：`data/bots/<id>/state/guard_coverage.json`。"""
+    return paths.bot_paths(bot_id).state / "guard_coverage.json"
+
+
+def record_guard_coverage(paths: "ProjectPaths", bot_id: str, sweep: str,
+                          scan: dict) -> None:
+    """把本轮扫描的 `covered`/`skipped` 落盘（原子写，失败不阻塞执行）。
+
+    回答的是**事后**才问得出的那个问题：「这个仓到底有没有被守护」——
+    只看日志回答不了（sweep 正常跑完是不打日志的），所以必须落一份可读状态。
+    文件按 sweep 名分节（`round` = 300s 那五步、`give_back` = 60s 那一步），
+    每节覆盖上一轮同名节，节内带 `ts` 便于判断新鲜度。
+    """
+    try:
+        p = guard_coverage_path(paths, bot_id)
+        payload: dict = {}
+        if p.exists():
+            try:
+                payload = json.loads(p.read_text(encoding="utf-8")) or {}
+            except Exception:  # noqa: BLE001 — 坏文件不该拦住写
+                payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        rounds = payload.get("rounds")
+        if not isinstance(rounds, dict):
+            rounds = {}
+        rounds[str(sweep)] = {
+            "ts": int(time.time()),
+            "universe": list(scan.get("universe") or []),
+            "covered": list(scan.get("symbols") or []),
+            "covered_extra": list(scan.get("extra") or []),
+            "skipped": list(scan.get("skipped") or []),
+            "counts": {
+                "covered": len(scan.get("symbols") or []),
+                "skipped": len(scan.get("skipped") or []),
+                "extra": len(scan.get("extra") or []),
+            },
+            "positions": list(scan.get("positions") or []),
+            "errors": list(scan.get("errors") or []),
+        }
+        payload["bot_id"] = bot_id
+        payload["updated"] = int(time.time())
+        payload["cap"] = _SCAN_SYMBOL_CAP
+        payload["rounds"] = rounds
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(f".{p.name}.writing")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, p)
+    except Exception as e:  # noqa: BLE001
+        log.warning("record guard coverage failed (%s): %s", bot_id, e)
+
+
+def _sweep_symbols(bot: BotConfig, client, symbols) -> list[str]:
+    """sweep 的扫描集合：显式给了就用它，否则就地算一份（含归属合约）。"""
+    if symbols is not None:
+        return list(symbols)
+    return list(guard_scan_set(bot, client)["symbols"])
+
+
 @dataclass
 class ProjectPaths:
     root: Path
@@ -436,7 +630,8 @@ def _record_exec_latency(bot: BotConfig, paths: ProjectPaths, seconds: float,
         pass
 
 
-def _reconcile_sweep(bot: BotConfig, paths: ProjectPaths) -> int:
+def _reconcile_sweep(bot: BotConfig, paths: ProjectPaths, *,
+                     client=None, symbols=None) -> int:
     """保护单张数对账：同方向 tp/sl 合计 > 持仓张数时保留最新一组、撤其余。
 
     与 `_orphan_sweep` 的分工：那个管「**无持仓**时的孤儿」，这个管
@@ -448,10 +643,11 @@ def _reconcile_sweep(bot: BotConfig, paths: ProjectPaths) -> int:
     """
     from .reconcile import reconcile_protectors
 
-    try:
-        client = bot.create_client()
-    except Exception:  # noqa: BLE001
-        return 0
+    if client is None:
+        try:
+            client = bot.create_client()
+        except Exception:  # noqa: BLE001
+            return 0
     executor = Executor(
         client,
         label_prefix=getattr(bot, "label_prefix", "") or bot.bot_id,
@@ -461,7 +657,7 @@ def _reconcile_sweep(bot: BotConfig, paths: ProjectPaths) -> int:
         alert_store=_alert_store(paths, bot.bot_id),
     )
     total = 0
-    for sym in (bot.symbols or []):
+    for sym in _sweep_symbols(bot, client, symbols):
         try:
             res = reconcile_protectors(executor, sym)
         except Exception as e:  # noqa: BLE001
@@ -475,16 +671,18 @@ def _reconcile_sweep(bot: BotConfig, paths: ProjectPaths) -> int:
     return total
 
 
-def _orphan_sweep(bot: BotConfig, paths: ProjectPaths) -> int:
+def _orphan_sweep(bot: BotConfig, paths: ProjectPaths, *,
+                  client=None, symbols=None) -> int:
     """定期扫孤儿保护单（TP/SL 无对应持仓）。返回撤单数。
 
     为什么需要：close/reduce 动作后才清理远远不够 ——
     TP/SL 由交易所触发平仓时，对应保护单会变成孤儿一直挂着。
     """
-    try:
-        client = bot.create_client()
-    except Exception:  # noqa: BLE001
-        return 0
+    if client is None:
+        try:
+            client = bot.create_client()
+        except Exception:  # noqa: BLE001
+            return 0
     executor = Executor(
         client,
         label_prefix=getattr(bot, "label_prefix", "") or bot.bot_id,
@@ -493,7 +691,7 @@ def _orphan_sweep(bot: BotConfig, paths: ProjectPaths) -> int:
         account=getattr(bot, "account", "") or "",
     )
     total = 0
-    for sym in (bot.symbols or []):
+    for sym in _sweep_symbols(bot, client, symbols):
         try:
             cleaned = executor._cleanup_orphan_protectors(sym)
             if cleaned:
@@ -507,7 +705,8 @@ def _orphan_sweep(bot: BotConfig, paths: ProjectPaths) -> int:
 _AUTO_PROTECT_ALERT_SEC = 3600.0
 
 
-def _auto_protect_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict) -> int:
+def _auto_protect_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict, *,
+                        client=None, symbols=None) -> int:
     """定期给裸仓补 SL（`account_risk.auto_protect` 逐 bot 开启，默认关）。
 
     与 `_orphan_sweep` 是一对：一个撤孤儿、一个补缺失。但**判据故意不共用** ——
@@ -525,10 +724,11 @@ def _auto_protect_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict) -> i
     `alerted` 是跨轮共享的限流表：同一 (bot, symbol) 的失败告警按
     `_AUTO_PROTECT_ALERT_SEC` 节流，否则每轮扫描都刷一条。
     """
-    try:
-        client = bot.create_client()
-    except Exception:  # noqa: BLE001
-        return 0
+    if client is None:
+        try:
+            client = bot.create_client()
+        except Exception:  # noqa: BLE001
+            return 0
     executor = Executor(
         client,
         label_prefix=getattr(bot, "label_prefix", "") or bot.bot_id,
@@ -539,7 +739,7 @@ def _auto_protect_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict) -> i
         alert_store=_alert_store(paths, bot.bot_id),
     )
     done = 0
-    for sym in (bot.symbols or []):
+    for sym in _sweep_symbols(bot, client, symbols):
         try:
             out = executor.ensure_protection(sym)
         except Exception as e:  # noqa: BLE001 — 单个 symbol 失败不拖垮整轮扫描
@@ -586,7 +786,8 @@ def _auto_protect_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict) -> i
     return done
 
 
-def _peak_trail_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict) -> int:
+def _peak_trail_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict, *,
+                      client=None, symbols=None) -> int:
     """单持仓峰值回撤 → 上移 SL（`account_risk.peak_trail` 逐 bot 开，默认关）。
 
     与 `_auto_protect_sweep` 是一对：那个补**缺失**的保护，这个**上移**已有的保护。
@@ -600,10 +801,11 @@ def _peak_trail_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict) -> int
                           那是「市价平仓」，是另一个动作，不该由这条路径做掉）
       - 正常上移          记 warning 日志
     """
-    try:
-        client = bot.create_client()
-    except Exception:  # noqa: BLE001
-        return 0
+    if client is None:
+        try:
+            client = bot.create_client()
+        except Exception:  # noqa: BLE001
+            return 0
     executor = Executor(
         client,
         label_prefix=getattr(bot, "label_prefix", "") or bot.bot_id,
@@ -614,7 +816,7 @@ def _peak_trail_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict) -> int
         alert_store=_alert_store(paths, bot.bot_id),
     )
     done = 0
-    for sym in (bot.symbols or []):
+    for sym in _sweep_symbols(bot, client, symbols):
         try:
             out = executor.check_peak_trail(sym)
         except Exception as e:  # noqa: BLE001 — 单个 symbol 失败不拖垮整轮扫描
@@ -671,7 +873,8 @@ def _peak_trail_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict) -> int
     return done
 
 
-def _give_back_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict) -> int:
+def _give_back_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict, *,
+                     client=None, symbols=None) -> int:
     """浮盈从峰值回撤 `give_back_pct`% → 平掉仓位（`account_risk.give_back` 逐 bot 开）。
 
     与 `_peak_trail_sweep` 的区别：那个**上移 SL**（防坐电梯），这个**直接平仓**
@@ -690,10 +893,11 @@ def _give_back_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict) -> int:
     if not mode:
         return 0
     dry = str(mode).lower() == "dry"
-    try:
-        client = bot.create_client()
-    except Exception:  # noqa: BLE001
-        return 0
+    if client is None:
+        try:
+            client = bot.create_client()
+        except Exception:  # noqa: BLE001
+            return 0
     executor = Executor(
         client,
         label_prefix=getattr(bot, "label_prefix", "") or bot.bot_id,
@@ -704,7 +908,7 @@ def _give_back_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict) -> int:
         alert_store=_alert_store(paths, bot.bot_id),
     )
     done = 0
-    for sym in (bot.symbols or []):
+    for sym in _sweep_symbols(bot, client, symbols):
         try:
             out = executor.check_give_back(sym, dry=dry)
         except Exception as e:  # noqa: BLE001 — 单个 symbol 失败不拖垮整轮扫描
@@ -845,6 +1049,24 @@ def _exchange_pnl_sweep(bot: BotConfig, paths: ProjectPaths) -> int:
     return added
 
 
+def _guard_round(bot: BotConfig, paths: ProjectPaths):
+    """本轮扫描的**共享 client** + 扫描集合（算一次，5 个 sweep 复用）。
+
+    原先每个 sweep 各建一个 client、各自按币查持仓/挂单 —— REST 调用数按
+    「sweep 数 × 币数」涨，币一多扫描周期就被拉长（C-14）。现在每轮 1 个 client、
+    1 次扫描集合计算（含 1 次账户级挂单/条件单快照 + 1 次持仓快照）。
+
+    建不出 client 时仍返回 `(None, scan)` —— sweep 自己会再试一次，coverage 也照样
+    落盘（「这轮没扫成」本身就是要留痕的事实）。
+    """
+    client = None
+    try:
+        client = bot.create_client()
+    except Exception as e:  # noqa: BLE001
+        log.warning("guard scan %s: no client (%s)", bot.bot_id, e)
+    return client, guard_scan_set(bot, client)
+
+
 def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[str] = None,
                 orphan_sweep_sec: float = 300.0,
                 pnl_sweep_sec: float = 60.0,
@@ -881,32 +1103,44 @@ def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[
                     _exchange_pnl_sweep(bot, paths)
                 except Exception as e:  # noqa: BLE001
                     log.warning("exchange pnl sweep %s failed: %s", bot.bot_id, e)
-                # 浮盈回撤平仓放**快扫描**：回撤保护对时间敏感，300s 一次太慢
-                try:
-                    _give_back_sweep(bot, paths, give_back_alerted)
-                except Exception as e:  # noqa: BLE001
-                    log.warning("give back sweep %s failed: %s", bot.bot_id, e)
+                # 浮盈回撤平仓放**快扫描**：回撤保护对时间敏感，300s 一次太慢。
+                # 只在开关打开时才去算扫描集合 —— 否则白付一次账户快照的 REST。
+                if (getattr(bot, "account_risk", None) or {}).get("give_back", False):
+                    client, scan = _guard_round(bot, paths)
+                    try:
+                        _give_back_sweep(bot, paths, give_back_alerted,
+                                         client=client, symbols=scan["symbols"])
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("give back sweep %s failed: %s", bot.bot_id, e)
+                    record_guard_coverage(paths, bot.bot_id, "give_back", scan)
             if do_sweep:
                 # 顺序固定：**先对齐张数（有持仓）→ 再撤孤儿（无持仓）→ 补缺失（裸仓）
                 # → 最后上移已有保护（防坐电梯）**。
                 # 上移放最后：它读的是「现有 SL 在哪」，前面三步刚把 SL 集合收拾干净，
                 # 这时候的目标价才是稳的。
+                client, scan = _guard_round(bot, paths)
+                syms = scan["symbols"]
                 try:
-                    _reconcile_sweep(bot, paths)
+                    _reconcile_sweep(bot, paths, client=client, symbols=syms)
                 except Exception as e:  # noqa: BLE001
                     log.warning("reconcile sweep %s failed: %s", bot.bot_id, e)
                 try:
-                    _orphan_sweep(bot, paths)
+                    _orphan_sweep(bot, paths, client=client, symbols=syms)
                 except Exception as e:  # noqa: BLE001
                     log.warning("orphan sweep %s failed: %s", bot.bot_id, e)
                 try:
-                    _auto_protect_sweep(bot, paths, auto_protect_alerted)
+                    _auto_protect_sweep(bot, paths, auto_protect_alerted,
+                                        client=client, symbols=syms)
                 except Exception as e:  # noqa: BLE001
                     log.warning("auto protect sweep %s failed: %s", bot.bot_id, e)
                 try:
-                    _peak_trail_sweep(bot, paths, peak_trail_alerted)
+                    _peak_trail_sweep(bot, paths, peak_trail_alerted,
+                                      client=client, symbols=syms)
                 except Exception as e:  # noqa: BLE001
                     log.warning("peak trail sweep %s failed: %s", bot.bot_id, e)
+                # 覆盖记录落在一轮**结束**时：这样它描述的是「这一轮实际扫了什么」，
+                # 而不是「每个 sweep 各自以为要扫什么」。
+                record_guard_coverage(paths, bot.bot_id, "round", scan)
         if do_sweep:
             last_sweep = now
         if do_pnl:

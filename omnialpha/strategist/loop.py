@@ -24,6 +24,14 @@ from .prompt import build_system_prompt, build_user_prompt, load_strategy_prompt
 from .risk import RiskConfig, apply_risk
 from .schema import PlanError, extract_kline_reads, normalize_chip_type, parse_plan_text
 from .snapshot import collect_snapshot
+from .symbols import (
+    AMBIGUOUS_MULTI,
+    AUTO_SINGLE,
+    NO_UNIVERSE,
+    OUT_OF_UNIVERSE,
+    UNIVERSE_EMPTY,
+    resolve_symbol_arg,
+)
 from .tools import NATIVE_TOOLS, TOOL_GUIDE, available_native_tools, extract_tool_calls, filter_tool_schemas, run_tool
 from .triggers import check_conditions, parse_conditions
 from .trigger_store import AITriggerPolicy, AITriggerStore, TriggerPolicyError, validate_trigger_payload
@@ -111,26 +119,60 @@ class PlanRunner:
         self._ai_store = AITriggerStore(self.history_dir / "ai_triggers.json", self._ai_policy)
         # 工具使用统计（每轮累计，随 thinking 落盘）——防 AI 偷懒不查数据
         self.tool_usage: list[dict] = []
+        # 本轮发出的 K 线图**元数据**（symbol/周期/成功与否/字节数）——
+        # 图片本体（base64）只发给模型，不落 thinking.json。
+        self._last_chart_meta: list[dict] = []
         # 本轮快照摘要（设计 S2.4 的 journal `snapshot_digest`）；
         # persona 侧写 journal 时从这里取。
         self.last_snapshot_digest: str = ""
 
-    def _record_tool_use(self, name: str, args: dict, result: Any) -> None:
+    def _audit_symbol(self, name: str, args: Optional[dict]) -> tuple[str, Optional[str]]:
+        """工具调用审计里的 symbol 归因 → `(symbol, note)`；`note=None` = 该工具与币无关。
+
+        **为什么要在审计体里落 symbol**：多币下事后核对「模型是不是拿错币了」，
+        只能靠逐条调用记录 —— 工具名 + 参数摘要回答不了「这条 `klines` 查的是哪个币」，
+        而 `args` 里的 symbol 在单币宇宙下是**自动补全**的（模型自己没写）。
+        所以这里用 `resolve_symbol_arg` 的 note 区分三种情形：显式给了、自动补全、
+        越界/漏写。判据与工具层同源（`strategist/symbols.py`）。
+        """
+        try:
+            from .tools import SYMBOL_TOOLS
+
+            if name not in SYMBOL_TOOLS:
+                return "", None
+            universe = list(getattr(getattr(self, "cfg", None), "symbols", None) or [])
+            sym, note = resolve_symbol_arg(args, universe, tool=name)
+            return sym, note
+        except Exception:  # noqa: BLE001 — 纯观测，异常只意味着「这条没归因」
+            return "", None
+
+    def _record_tool_use(self, name: str, args: dict, result: Any,
+                         *, raw_args: Optional[dict] = None) -> None:
         """记录一次工具调用：工具名、参数摘要、结果规模，以及完整返回。
 
         `result_full` 是排查「模型到底拿到了什么」的唯一依据。只存 preview 时，
         核对工具数值（如 SMC 的 structure_scale.atr）只能靠复现，无法判断模型
         是**引用了真实值**还是**自己估算**。
+
+        `raw_args` = **模型原样给出的参数**。`run_tool` 会就地把补全后的 symbol
+        写回 `args`（`tools.py:1528`），所以只有原始副本能回答「模型自己写了
+        symbol 没有」—— 缺 symbol 率就是靠它算的。
         """
         try:
             text = str(result) if result is not None else ""
-            self.tool_usage.append({
+            entry = {
                 "tool": str(name or ""),
                 "args": {k: str(v)[:40] for k, v in (args or {}).items()},
                 "result_preview": text[:200],
                 "result_full": text[:20000],
                 "result_len": len(text),
-            })
+            }
+            sym, note = self._audit_symbol(
+                name, raw_args if raw_args is not None else args)
+            if note is not None:
+                entry["symbol"] = sym
+                entry["symbol_note"] = note
+            self.tool_usage.append(entry)
         except Exception:  # noqa: BLE001
             pass
 
@@ -309,6 +351,12 @@ class PlanRunner:
         return hit, model
 
     def run_once(self, trigger: str = "manual") -> dict[str, Any]:
+        # 每轮开始清零。原先只有 `analyze_once` 清 —— plan-loop 走的是 run_once，
+        # 于是 `tool_usage` **跨轮累加**，`tool_usage_summary` 的 counts 越跑越大，
+        # 「这轮调了几次工具」根本读不出来（D-26）。
+        self.tool_usage = []
+        # 图元数据同理：vision 关掉时必须清空，否则 thinking.json 会挂着上一轮的图。
+        self._last_chart_meta = []
         cycle_id = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         snapshot = collect_snapshot(
             self.client,
@@ -593,6 +641,7 @@ class PlanRunner:
     def analyze_once(self, trigger: str = "manual") -> dict[str, Any]:
         """各人格独立分析：LLM → Plan，不写 inbox、不执行（供多人格融合）。"""
         self.tool_usage = []  # 每轮开始时清零
+        self._last_chart_meta = []  # 图元数据同理（否则挂上一轮的图）
         cycle_id = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         snapshot = collect_snapshot(
             self.client,
@@ -970,17 +1019,49 @@ class PlanRunner:
         return chip
 
     def _tool_usage_summary(self) -> dict:
-        """工具使用摘要：{工具名: 次数} + 是否查过数据。"""
+        """工具使用摘要：按工具名 + **按币**（设计 S2.4⑨ / D-25）。
+
+        旧字段（`counts`/`total_calls`/`data_checked`）语义与取值逐字不变；
+        新增三个只在多币下才有意义的观测：
+
+        - `by_symbol`        按**解析后**的 symbol 归因：每个币调了多少次、用了哪些工具
+                             （含单币自动补全 —— 它描述的是「数据取自哪个币」）
+        - `missing_symbol`   模型**没显式写 symbol** 的次数（`auto_single` 也算：
+                             单币下无歧义，但币一多这些调用就会变成拒绝 —— 最早的预警）
+        - `out_of_universe`  写了 symbol 但**不在宇宙内**（错币/幻觉币）的次数
+
+        没有这三个数，多币下「模型拿错币」只能靠翻 `result_full` 逐条看。
+        """
         counts: dict[str, int] = {}
+        by_symbol: dict[str, dict] = {}
+        missing = 0
+        out_of_universe = 0
         for u in self.tool_usage:
             t = u.get("tool") or "?"
             counts[t] = counts.get(t, 0) + 1
+            note = u.get("symbol_note")
+            if note is None:  # 与币无关的工具（skill / journal_lookup / …）
+                continue
+            sym = str(u.get("symbol") or "")
+            if note == OUT_OF_UNIVERSE:
+                out_of_universe += 1
+            elif note in (AUTO_SINGLE, AMBIGUOUS_MULTI, UNIVERSE_EMPTY, NO_UNIVERSE):
+                missing += 1
+            if not sym:
+                continue
+            rec = by_symbol.setdefault(sym, {"calls": 0, "tools": []})
+            rec["calls"] += 1
+            if t not in rec["tools"]:
+                rec["tools"].append(t)
         data_tools = {"klines", "indicators", "ticker", "orderbook", "contract",
                       "stats", "account", "smc_map", "smc_events", "sqzmom"}
         return {
             "counts": counts,
             "total_calls": len(self.tool_usage),
             "data_checked": bool(data_tools.intersection(counts.keys())),
+            "by_symbol": by_symbol,
+            "missing_symbol": missing,
+            "out_of_universe": out_of_universe,
         }
 
     def _save_thinking(self, **kw: Any) -> None:
@@ -1003,6 +1084,11 @@ class PlanRunner:
             "content_head": (kw.get("content") or "")[:65536],
             "tool_usage": list(self.tool_usage),  # 本轮工具使用明细（防偷懒）
             "tool_usage_summary": self._tool_usage_summary(),
+            # 本轮发给模型的 K 线图**元数据**（symbol/周期/是否生成成功/字节数）。
+            # 只写元数据：图片本体是 base64（每张几十到几百 KB），写进来会把
+            # thinking.json 撑爆。此前 payload 里完全没有 charts 字段 →
+            # 「这轮到底给模型发了哪几个币哪些周期的图」事后无从核对（D-24）。
+            "charts": [dict(c) for c in (getattr(self, "_last_chart_meta", None) or [])],
         }
         # 逐K形态读（人格可选产出，见 prompts/brooks_btc_pa.md）：**非空才落**。
         # 没被要求这个字段的 bot 不会填，于是它们的 thinking.json 与改动前逐字节一致
@@ -1062,6 +1148,9 @@ class PlanRunner:
         一张图都没有 —— 模型只能靠数值快照判断它们，等于「多币配置、单币视野」。
         图内自带 symbol 与周期标注（`vision.generate_and_encode(symbol=…, timeframe=…)`），
         所以顺序只决定发送次序、不决定归属。
+
+        每张图（含**没生成成功**的）都会记一条元数据到 `self._last_chart_meta`，
+        由 `_save_thinking` 落进 thinking.json —— 只写元数据，不写 base64 本体。
         """
         try:
             from .vision import generate_and_encode
@@ -1077,6 +1166,7 @@ class PlanRunner:
         seen = set()
         tfs = [t for t in tfs if t and not (t in seen or seen.add(t))]
         out: list = []
+        meta: list[dict] = []
         for sym in symbols:
             m = market.get(sym) or {}
             if not isinstance(m, dict):
@@ -1094,6 +1184,8 @@ class PlanRunner:
                     if isinstance(klines, dict):
                         klines = klines.get("candles") or klines.get("klines") or []
                     if not klines or len(klines) < 10:
+                        meta.append({"symbol": sym, "timeframe": tf, "ok": False,
+                                     "reason": "no_candles"})
                         continue
                     merged = []
                     for i, k in enumerate(klines):
@@ -1106,12 +1198,21 @@ class PlanRunner:
                     if b64:
                         out.append(b64)
                         made += 1
+                        # 只记长度，不记 base64 本体
+                        meta.append({"symbol": sym, "timeframe": tf, "ok": True,
+                                     "bytes": len(str(b64))})
+                    else:
+                        meta.append({"symbol": sym, "timeframe": tf, "ok": False,
+                                     "reason": "empty"})
                 except Exception as e:  # noqa: BLE001
+                    meta.append({"symbol": sym, "timeframe": tf, "ok": False,
+                                 "reason": str(e)[:200]})
                     log.warning("生成 %s/%s 周期 K 线图失败，该图本轮缺失: %s", sym, tf, e)
                     continue
             if not made:
                 # 某个币一张图都没有 —— 多币时尤其要能看见「哪个币没图」
                 log.warning("vision: %s 一张图都没生成（请求周期 %s）", sym, tfs)
+        self._last_chart_meta = meta
         if not out and tfs:
             # vision 开着却一张图都没生成 —— 此前是彻底静默的，等于「不发图但没人知道」
             log.warning("vision 已开启但一张图都没生成（请求周期 %s），本轮将无图发给模型", tfs)
@@ -1213,6 +1314,7 @@ class PlanRunner:
             for c in calls[:8]:
                 name = c.get("tool") or c.get("name") or ""
                 args = c.get("args") or c.get("arguments") or {}
+                raw_args = dict(args)  # run_tool 会就地补 symbol，审计要的是模型原样
                 res = run_tool(
                     self.client, name, args,
                     env=self.cfg.env, bot_root=self.cfg.bot_root, market_cfg=self.cfg.market,
@@ -1220,7 +1322,7 @@ class PlanRunner:
                     allow=self.cfg.tools.get("allow"), deny=self.cfg.tools.get("deny"),
                     symbols=self.cfg.symbols,
                 )
-                self._record_tool_use(name, args, res)
+                self._record_tool_use(name, args, res, raw_args=raw_args)
                 results.append({"tool": name, "result": res})
             messages.append({"role": "assistant", "content": text})
             messages.append({
@@ -1283,6 +1385,7 @@ class PlanRunner:
                     args = json.loads(fn.get("arguments") or "{}")
                 except Exception:  # noqa: BLE001
                     args = {}
+                raw_args = dict(args)  # run_tool 会就地补 symbol，审计要的是模型原样
                 result = run_tool(
                     self.client, name, args,
                     env=self.cfg.env, bot_root=self.cfg.bot_root, market_cfg=self.cfg.market,
@@ -1290,7 +1393,7 @@ class PlanRunner:
                     allow=self.cfg.tools.get("allow"), deny=self.cfg.tools.get("deny"),
                     symbols=self.cfg.symbols,
                 )
-                self._record_tool_use(name, args, result)
+                self._record_tool_use(name, args, result, raw_args=raw_args)
                 # 收窄：skill 成功加载且声明 allowed-tools → 限定后续工具面
                 if name == "skill" and isinstance(result, dict) and result.get("content"):
                     allowed = self._skill_allowed_tools(str(args.get("name") or ""))
