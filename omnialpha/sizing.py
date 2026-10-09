@@ -51,9 +51,17 @@ def usd_to_contracts(
         raise GateApiError("size_usd must be positive")
     if entry_price is None or entry_price <= 0:
         raise GateApiError("entry_price must be positive")
-    multiplier = meta.quanto_multiplier or 1.0
-    if multiplier <= 0:
-        multiplier = 1.0
+    # `quanto_multiplier` 缺失 → **拒绝**，不再静默兜底 1.0。
+    # 拿 1.0 顶替会让「张数 ↔ 名义金额」差几个数量级（spec S2.3 #5），而 paper 路径
+    # 对这种输入是**硬拒**的 —— 同一份元数据两条路径语义必须同源，否则 live 会悄悄
+    # 下一笔大 10000× 的单，而 paper 上同样的输入直接报错（回测结论因此不可信）。
+    multiplier = meta.quanto_multiplier
+    if multiplier is None or float(multiplier) <= 0:
+        raise GateApiError(
+            f"合约 {getattr(meta, 'name', '')!r} 的 quanto_multiplier 缺失或非正"
+            f"（{multiplier!r}）→ 拒绝换算张数；请确认该所的合约元数据接口可用"
+        )
+    multiplier = float(multiplier)
     raw = size_usd / (entry_price * multiplier)
     lot = meta.order_size_round or 1.0
     if lot <= 0:

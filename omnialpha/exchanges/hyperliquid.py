@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from typing import Any, Optional
 
 from ..gate_client import ContractMeta
 from .base import ExchangeClient, ExchangeError, SymbolMapper
 from .http_util import http_json
+
+log = logging.getLogger("omnialpha.exchanges.hyperliquid")
 
 
 def _f(v: Any) -> Optional[float]:
@@ -111,6 +114,35 @@ class HyperliquidExchange(ExchangeClient):
         }
 
     def get_contract(self, symbol: str) -> ContractMeta:
+        """从 Hyperliquid 取**真实**合约元数据（原先对所有币硬编码一套值）。
+
+        HL 的数量单位就是**币本身**（`sz` 的语义是币数量、不是「张」），所以
+        `quanto_multiplier = 1.0` 是对的；要取的是**精度**与杠杆上限：
+        `meta.universe[coin].szDecimals` / `maxLeverage`。
+        原先硬编码 `order_size_round=0.001 / order_price_round=0.01 / maxLeverage=50`
+        —— 对 BTC（szDecimals=5）与 DOGE（szDecimals=0）都是错的，而张数/价格精度
+        直接决定下单会不会被拒。
+
+        取不到就**退回原默认**（不影响行情与下单），并留痕：宁可元数据缺失，
+        也不要因为一次 API 抖动把整个链路打断。
+        """
+        coin = self.mapper.native(symbol)
+        try:
+            d = self._info("meta") or {}
+            for u in (d.get("universe") or []):
+                if str(u.get("name") or "").upper() != str(coin).upper():
+                    continue
+                szd = int(u.get("szDecimals") or 0)
+                max_lev = _f(u.get("maxLeverage"))
+                # HL 价格精度：小数位 ≤ (6 - szDecimals)，且最多 5 位有效数字。
+                px_dp = max(0, min(6 - szd, 6))
+                return ContractMeta(
+                    name=symbol, quanto_multiplier=1.0,
+                    order_size_round=10.0 ** -szd if szd >= 0 else 1.0,
+                    order_price_round=10.0 ** -px_dp,
+                    leverage_max=float(max_lev) if max_lev else 50.0)
+        except Exception as e:  # noqa: BLE001 — 取不到就用默认，不断链路
+            log.warning("hyperliquid get_contract(%s): meta 取不到（%s），退回默认", symbol, e)
         return ContractMeta(name=symbol, quanto_multiplier=1.0, order_size_round=0.001,
                             order_price_round=0.01, leverage_max=50)
 

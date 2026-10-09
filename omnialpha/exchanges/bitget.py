@@ -5,12 +5,15 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import time
 from typing import Any, Optional
 
 from ..gate_client import ContractMeta
 from .base import ExchangeClient, SymbolMapper
 from .http_util import http_json
+
+log = logging.getLogger("omnialpha.exchanges.bitget")
 
 
 def _f(v: Any) -> Optional[float]:
@@ -115,6 +118,37 @@ class BitgetExchange(ExchangeClient):
         }
 
     def get_contract(self, symbol: str) -> ContractMeta:
+        """从 Bitget 取**真实**合约元数据（原先对所有币硬编码 `quanto=1.0/精度1/杠杆100`）。
+
+        最要紧的是 `sizeMultiplier`（**合约面值** = 1 张代表多少币）：它直接决定
+        「张数 ↔ 名义金额」的换算，写错就是数量级级别的错。另有 `volumePlace` /
+        `pricePlace`（数量/价格小数位）与 `maxLever`。
+
+        字段名取自 Bitget v2 mix `/api/v2/mix/market/contracts`。**取不到任何一项就
+        整体退回原默认**（不影响行情与下单），并留痕 —— 宁可元数据缺失，也不要拿
+        一个猜出来的面值去算张数。
+        """
+        native = self.mapper.native(symbol)
+        try:
+            d = self._req("GET", "/api/v2/mix/market/contracts",
+                          {"productType": "USDT-FUTURES", "symbol": native}) or {}
+            rows = d.get("data") or []
+            row = rows[0] if isinstance(rows, list) and rows else (
+                rows if isinstance(rows, dict) else {})
+            quanto = _f(row.get("sizeMultiplier"))
+            vol_place = row.get("volumePlace")
+            px_place = row.get("pricePlace")
+            max_lev = _f(row.get("maxLever"))
+            if not quanto:
+                raise ValueError("sizeMultiplier 缺失")
+            return ContractMeta(
+                name=symbol,
+                quanto_multiplier=float(quanto),
+                order_size_round=(10.0 ** -int(vol_place)) if vol_place is not None else 1.0,
+                order_price_round=(10.0 ** -int(px_place)) if px_place is not None else 0.1,
+                leverage_max=float(max_lev) if max_lev else 100.0)
+        except Exception as e:  # noqa: BLE001 — 取不到就用默认，不断链路
+            log.warning("bitget get_contract(%s): 合约元数据取不到（%s），退回默认", symbol, e)
         return ContractMeta(name=symbol, quanto_multiplier=1.0, order_size_round=1.0,
                             order_price_round=0.1, leverage_max=100)
 
