@@ -113,7 +113,11 @@ class PaperEngine:
         meta = self.feed.get_contract(symbol)
         last = self._last(symbol)
         acct = self.store.get_account()
-        lev = float(body.get("leverage") or acct.get("leverage") or 20)
+        # 杠杆优先级：订单显式 → **该合约的设置**（`leverage:<symbol>`）→ 账户级默认 → 20。
+        # 逐合约那一层是必须的：真实交易所按合约设杠杆，账户级一份会让多币互相覆盖。
+        lev = float(body.get("leverage")
+                    or self.store.cfg_f(f"leverage:{symbol}", 0)
+                    or acct.get("leverage") or 20)
         normalized = validate_and_round_order(
             body, meta, last,
             price_band_pct=self.store.cfg_f("price_band_pct", 5.0),
@@ -408,8 +412,9 @@ class PaperEngine:
                     margin=0.0, margin_mode=margin_mode,
                     realised_pnl=float(cur.get("realised_pnl") or 0) + realised,
                 )
-                # 仓位归零：回收孤儿保护单（reduce-only TP/SL）
-                self.store.cancel_reduce_only_price_orders(symbol)
+                # 仓位归零：回收**这一侧**的孤儿保护单。
+                # 双向模式下同一 contract 的另一侧有自己的 SL/TP，一起撤掉就是裸仓（C-16）。
+                self.store.cancel_reduce_only_price_orders(symbol, mode=mode)
             else:
                 self.store.upsert_position(
                     symbol, mode,
@@ -525,7 +530,26 @@ class PaperEngine:
             "realised": self.store.total_realised(),
             "drawdown": 0.0,
         }
-        self.store.insert_pnl(snap)
+        self.store.insert_pnl(snap)                 # 账户级（contract=None）
+        # 每个有仓的币各落一条：只存合并值时「这个币到底赚没赚」永远答不出来
+        # （一币亏一币赚会互相抵消）。与账户级**同频**、共用同一个 snap_time，
+        # 所以事后能按时间把它们对齐（没有持仓时不写）。
+        for p in self.store.get_positions():
+            symbol = str(p["contract"])
+            size = float(p["size"] or 0)
+            entry = float(p["entry_price"] or 0)
+            last = self._last(symbol)
+            quanto = self._quanto(symbol, strict=False)
+            upnl = (last - entry) * size * quanto if (size and last and quanto) else 0.0
+            rpnl = float(p.get("realised_pnl") or 0)
+            self.store.insert_pnl({
+                "snap_time": snap["snap_time"],
+                "equity": rpnl + upnl,
+                "unrealised": upnl,
+                "realised": rpnl,
+                "drawdown": 0.0,
+                "contract": symbol,
+            })
         return snap
 
     def get_account_view(self) -> dict:

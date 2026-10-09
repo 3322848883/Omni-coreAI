@@ -124,7 +124,8 @@ CREATE TABLE IF NOT EXISTS pnl_snapshot (
     equity REAL NOT NULL,
     unrealised REAL NOT NULL,
     realised REAL NOT NULL,
-    drawdown REAL NOT NULL DEFAULT 0
+    drawdown REAL NOT NULL DEFAULT 0,
+    contract TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_orders_contract ON orders (contract, status);
 CREATE INDEX IF NOT EXISTS idx_price_orders_contract ON price_orders (contract, status);
@@ -132,6 +133,12 @@ CREATE INDEX IF NOT EXISTS idx_fills_time ON fills (fill_time);
 CREATE INDEX IF NOT EXISTS idx_fills_order ON fills (order_id);
 CREATE INDEX IF NOT EXISTS idx_funding_time ON funding_log (settle_time);
 """
+
+# 加列清单（旧库补列用，见 `_add_missing_columns`）。
+_ADDED_COLUMNS = (
+    ("pnl_snapshot", "contract", "TEXT"),
+)
+
 
 DEFAULT_CONFIG = {
     "initial_capital": "10000",
@@ -262,9 +269,21 @@ class PaperStore:
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute("PRAGMA synchronous=NORMAL")
                 conn.executescript(DDL)
+                self._add_missing_columns(conn)
                 conn.commit()
                 self._conn = conn
             return self._conn
+
+    @staticmethod
+    def _add_missing_columns(conn: sqlite3.Connection) -> None:
+        """给**已存在**的旧表补列 —— `CREATE TABLE IF NOT EXISTS` 对已存在的表是空操作，
+        线上 paper 库（加 `contract` 之前建的）光靠 DDL 永远补不上，写入会 no such column。
+        幂等：PRAGMA 查一遍再 ALTER，重复打开不报错。
+        """
+        for table, col, typ in _ADDED_COLUMNS:
+            have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            if col not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
 
     def close(self) -> None:
         with self._lock:
@@ -303,6 +322,18 @@ class PaperStore:
         with self._lock:
             rows = conn.execute("SELECT key, value FROM config").fetchall()
         return {r["key"]: r["value"] for r in rows}
+
+    def set_config(self, key: str, value: Any) -> None:
+        """写一条配置（UPSERT）。用于**逐合约**的持久化设置（如 `leverage:BTC_USDT`）。"""
+        conn = self._db()
+        with self._lock:
+            with self._flock:
+                conn.execute(
+                    "INSERT INTO config (key, value) VALUES (?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (str(key), str(value)),
+                )
+                conn.commit()
 
     def cfg_f(self, key: str, default: float = 0.0) -> float:
         try:
@@ -453,18 +484,29 @@ class PaperStore:
                 conn.commit()
                 return cur.rowcount == 1
 
-    def cancel_reduce_only_price_orders(self, contract: str, keep_ids: Optional[set] = None) -> list[str]:
-        """仓位归零后回收孤儿保护单（仅 reduce_only 且未触发）。"""
+    def cancel_reduce_only_price_orders(self, contract: str, keep_ids: Optional[set] = None,
+                                        mode: Optional[str] = None) -> list[str]:
+        """仓位归零后回收孤儿保护单（仅 reduce_only 且未触发）。
+
+        `mode` 用于**双向模式**：同一个 contract 上 long 与 short 各有自己的保护单，
+        平掉一侧时**只能撤那一侧的** —— 否则平多单会把空单的 SL/TP 一并撤掉，
+        剩下一侧裸奔（审计 C-16）。保护单归哪一侧由 `side` 定：`sell` 平多、`buy` 平空。
+        `mode=None`（单仓模式）保持原行为：撤该合约上全部未触发的 reduce_only 单。
+        """
         keep = {str(x) for x in (keep_ids or set())}
+        sql = ("SELECT order_id FROM price_orders WHERE contract=? AND reduce_only=1 "
+               "AND status IN ('untriggered','open','triggered')")
+        params: list = [contract]
+        if mode and ("long" in str(mode) or "short" in str(mode)):
+            # 只有**真双向**仓（mode 是 long/short/dual_long/dual_short）才需要分侧；
+            # `single` 是单仓模式的默认值，必须保持「撤该合约全部」的原行为。
+            sql += " AND side=?"
+            params.append("sell" if "long" in str(mode) else "buy")
         conn = self._db()
         cancelled: list[str] = []
         with self._lock:
             with self._flock:
-                rows = conn.execute(
-                    "SELECT order_id FROM price_orders WHERE contract=? AND reduce_only=1 "
-                    "AND status IN ('untriggered','open','triggered')",
-                    (contract,),
-                ).fetchall()
+                rows = conn.execute(sql, tuple(params)).fetchall()
                 for r in rows:
                     oid = str(r["order_id"])
                     if oid in keep:
@@ -569,24 +611,56 @@ class PaperStore:
 
     # ── pnl snapshot ────────────────────────────────────
     def insert_pnl(self, snap: dict) -> None:
+        """落一条盈亏快照。`contract=None` = 账户级；给了就是**该币**的快照。
+
+        为什么要有按币快照：只存账户级合并值时，「这个币到底赚没赚」在多币下
+        永远答不出来（合并值一个币亏另一个币赚会互相抵消）。
+        """
         conn = self._db()
         with self._lock:
             conn.execute(
-                "INSERT INTO pnl_snapshot (snap_time, equity, unrealised, realised, drawdown)"
-                " VALUES (?,?,?,?,?)",
+                "INSERT INTO pnl_snapshot (snap_time, equity, unrealised, realised, drawdown,"
+                " contract) VALUES (?,?,?,?,?,?)",
                 (
                     int(snap.get("snap_time") or time.time()),
                     float(snap.get("equity") or 0), float(snap.get("unrealised") or 0),
                     float(snap.get("realised") or 0), float(snap.get("drawdown") or 0),
+                    (str(snap.get("contract") or "").strip().upper() or None),
                 ),
             )
             conn.commit()
 
-    def last_pnl(self) -> Optional[dict]:
+    def last_pnl(self, contract: Optional[str] = None) -> Optional[dict]:
+        """最近一条快照。`contract=None` 取**账户级**（`contract IS NULL`）那条 ——
+        不是「最新的一条」，否则按币快照会顶掉账户级读数。
+        """
+        conn = self._db()
+        sql = "SELECT * FROM pnl_snapshot"
+        params: tuple = ()
+        if contract:
+            sql += " WHERE contract=?"
+            params = (str(contract).strip().upper(),)
+        else:
+            sql += " WHERE contract IS NULL"
+        sql += " ORDER BY snap_time DESC LIMIT 1"
+        with self._lock:
+            row = conn.execute(sql, params).fetchone()
+        return dict(row) if row else None
+
+    def pnl_by_contract(self) -> dict[str, dict]:
+        """每个币最近一条快照 → `{contract: row}`（按币盈亏的读取面）。"""
         conn = self._db()
         with self._lock:
-            row = conn.execute("SELECT * FROM pnl_snapshot ORDER BY snap_time DESC LIMIT 1").fetchone()
-        return dict(row) if row else None
+            rows = conn.execute(
+                "SELECT * FROM pnl_snapshot WHERE contract IS NOT NULL"
+                " ORDER BY snap_time DESC"
+            ).fetchall()
+        out: dict[str, dict] = {}
+        for r in rows:
+            c = str(r["contract"])
+            if c not in out:
+                out[c] = dict(r)
+        return out
 
     def total_realised(self) -> float:
         conn = self._db()

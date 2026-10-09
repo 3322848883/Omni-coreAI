@@ -185,8 +185,31 @@ class HyperliquidExchange(ExchangeClient):
     def list_price_orders(self, contract: Optional[str] = None):
         return self.list_orders(contract)
 
-    def cancel_order(self, order_id: str):
-        return self._post("cancel", {"cancels": [{"coin": "BTC", "oid": order_id}]},
+    def cancel_order(self, order_id: str, contract: Optional[str] = None):
+        """撤单。HL 的 cancel 必须带正确的 `coin` —— **不能猜**。
+
+        原先硬编码 `coin: "BTC"`：对任何非 BTC 的撤单要么打到 BTC 的单上，要么因为
+        oid 不属于该 coin 而失败（且报错与真实原因无关）。coin 只能由「这个 oid 属于
+        哪个合约」推出：调用方给了 `contract` 就用它；否则在**当前挂单**里按 oid 反查；
+        两者都拿不到就**拒绝**（宁可报错，也不要撤错币）。
+        """
+        coin = ""
+        if contract:
+            coin = self.mapper.native(str(contract))
+        else:
+            try:
+                for o in (self.list_orders() or []):
+                    if str(o.get("id")) == str(order_id):
+                        coin = self.mapper.native(str(o.get("contract") or ""))
+                        break
+            except Exception:  # noqa: BLE001 — 反查失败 = 拿不到 coin，交给下面拒绝
+                coin = ""
+        if not coin:
+            raise ExchangeError(
+                f"hyperliquid cancel_order 拿不到 oid={order_id} 的 coin"
+                f"（请传 contract=，或先让该单出现在 list_orders 里）",
+                status=400, exchange="hyperliquid")
+        return self._post("cancel", {"cancels": [{"coin": coin, "oid": order_id}]},
                           signed=True)
 
     def cancel_all_orders(self, contract: str):

@@ -114,7 +114,11 @@ class PaperExchange(ExchangeClient):
         cap = float(getattr(meta, "leverage_max", 100) or 100)
         if cap and lev > cap:
             raise ExchangeError(f"leverage too high: {lev} > {cap}", status=400, exchange="paper")
-        self.store.update_account(leverage=lev)
+        # **逐合约**：真实交易所的杠杆是按合约设的。原先写账户级（`account.leverage`），
+        # 多币下后设的会覆盖先设的 —— 两个币要不同杠杆就无法表达。
+        # 单币行为不变：`place_order` 会按「订单显式 → 该合约设置 → 账户级默认」顺序读，
+        # 设过的那个币读到的值与原先写在账户级时相同。
+        self.store.set_config(f"leverage:{symbol}", lev)
         return {"symbol": symbol, "leverage": lev}
 
     def set_margin_mode(self, symbol: str, mode: str) -> Any:
