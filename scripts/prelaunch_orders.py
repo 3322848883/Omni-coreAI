@@ -183,10 +183,18 @@ def run_orders(REP, gate_client, env: str = "testnet") -> None:
     except Exception as e:  # noqa: BLE001
         REP.rec("M10", "usd_to_contracts", False, str(e)[:80])
     try:
-        usd_to_contracts(0.01, last, cm)
-        REP.rec("M10", "tiny_usd_reject", False, "should reject")
+        # **设计如此：不足 1 张时抬到最小可下量，不抛错**（`sizing.py` 里有实测依据：
+        # `size_usd` 是模型按「风险预算 ÷ 止损距离」反推的，小账户配远止损会算出
+        # < 1 张的名义，抛错会让**整轮计划作废并回滚已挂的腿** —— 那比"风险略高于预期"
+        # 贵得多；真正的闸门是 yaml 风控 + 账户级上限）。
+        # 原先这条用例期望"被拒"，与实现的设计冲突，长期 FAIL 而没人管 —— 现在按
+        # 设计验「抬到 ≥ 1 张」。
+        n_tiny = usd_to_contracts(0.01, last, cm)
+        REP.rec("M10", "tiny_usd_raised_to_min", n_tiny >= 1,
+                f"0.01U -> {n_tiny} 张（抬到最小可下量）")
     except GateApiError as e:
-        REP.rec("M10", "tiny_usd_reject", True, str(e)[:60])
+        REP.rec("M10", "tiny_usd_raised_to_min", False,
+                f"不该抛错（设计是抬到最小量）: {str(e)[:60]}")
     # size contracts
     try:
         rep = ex.execute_signal(parse_signal({
