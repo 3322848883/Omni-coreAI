@@ -369,6 +369,25 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
     if not isinstance(scope, str) or not scope.strip():
         raise GateApiError(f"{path.name}: account_scope 必须是 auto|bot|<账户名>")
     scope = scope.strip()
+
+    # ── 账户归属：`account_scope` 是权威（T19）────────────────────────
+    # 熔断标记（`halt.json`）与日初权益都按这个归属**共享**：同一个账户上的多个 bot
+    # 必须一起停 —— 否则一个 bot 亏到熔断、另一个还在拿同一笔钱开仓（实盘安全级）。
+    #   `bot`      = 显式声明「本 bot 独立」，即使配了 `account` 也不拿它做共享归属
+    #   `<账户名>` = 直接指定（此时熔断走 `data/accounts/<name>/state/halt.json`）
+    #   `auto`     = 沿用旧的 `account` 字段（默认，行为不变）
+    if scope == "bot":
+        eff_account = ""
+    elif scope != "auto":
+        eff_account = scope
+    else:
+        eff_account = acct_name
+    if scope not in ("auto", "bot") and accounts and scope not in accounts:
+        _fail_or_warn(
+            path,
+            f"account_scope={scope!r} 在 config/accounts.yaml 里不存在"
+            f"（现有账户：{sorted(accounts)}）—— 熔断标记会落到一个没人读的路径",
+            enabled=enabled)
     exchange = str(data.get("exchange") or "gate").strip().lower()
     # 合约存在性：**可选/懒**校验，默认关（理由见 _contract_check_enabled）。
     # 取不到合约列表（离线/无凭据）就跳过 —— 配置校验不得变成"网络可达"的前置。
@@ -406,7 +425,7 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
         default_replace=str(data.get("default_replace") or "none").strip().lower(),
         order_scope=str(data.get("order_scope") or "own").strip().lower(),
         require_sl=bool(data.get("require_sl", True)),
-        account=acct_name,
+        account=eff_account,
         account_risk=merged_risk,
         strategist=strategist,
         paper=dict(data.get("paper") or {}),
