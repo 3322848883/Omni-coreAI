@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -218,6 +219,34 @@ def _fail_or_warn(path: Path, msg: str, *, enabled: bool) -> None:
     log.warning("%s: %s（未启用，仅告警）", path.name, msg)
 
 
+def _warn_persona_symbols(bot_path: Path, prompt_file, symbols: list,
+                          unrestricted: bool) -> None:
+    """人格文件里写了**具体合约代码**、而它不在本 bot 白名单里 → 告警。
+
+    为什么只告警不报错：人格里出现 `BTC_USDT` 也可能是**叙事引用**
+    （"禁止把 BTC 的结构讲成 ETH 的结构"），那是要保留的写法 —— 静态文本分不清
+    「引用」与「要求的标的」，所以留痕让人判断。真矛盾时模型会拿不到那个币的数据。
+    """
+    if not prompt_file or unrestricted or not symbols:
+        return
+    p = Path(str(prompt_file))
+    if not p.is_absolute():
+        # config/bots/<bot>.yaml → 仓库根
+        p = bot_path.parent.parent.parent / p
+    if not p.is_file():
+        return
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    mentioned = sorted({m.upper() for m in re.findall(r"\b[A-Z]{2,6}_USDT\b", text)})
+    outside = [m for m in mentioned if m not in symbols]
+    if outside:
+        log.warning("%s: 人格 %s 提到 %s，不在 symbols %s 内"
+                    "（叙事引用可忽略；若是要求的标的，那些币的数据与下单都会被拒）",
+                    bot_path.name, p.name, outside, symbols)
+
+
 def _contract_check_enabled(data: dict) -> bool:
     """合约存在性校验是**可选/懒**校验：yaml `validate_contracts: true` 或
     `OMNIALPHA_VALIDATE_CONTRACTS=1` 才做，默认关。
@@ -354,6 +383,9 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
                     path,
                     f"exchange={exchange} 上没有这些合约: {missing}（拼错？或换 exchange）",
                     enabled=enabled)
+
+    # 人格文件写的标的 ⊄ 白名单 → 告警（不报错，理由见该函数 docstring）
+    _warn_persona_symbols(path, strategist.get("prompt_file"), symbols, unrestricted)
 
     return BotConfig(
         bot_id=str(bot_id),

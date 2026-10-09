@@ -79,6 +79,7 @@ LLM 策略另需 `OPENAI_BASE_URL` / `OPENAI_API_KEY`，然后：
 6. **`type=limit` 必须给 `price`**；市价遇偏离自动回退「公允价 IOC」。
 7. **trail 追踪单搁置**（需资金密码）。
 8. **Plan JSON 仓位字段只有 `size_usd` / `size`**；`size_pct`/`margin_pct` 是外部信号用的。
+9. **币种由 `symbols` 声明**（可多个、可随时改）：它同时是**执行白名单**与工具的【品种宇宙】。多币下工具/触发器漏写 `symbol` 会被**拒绝**（不猜币），单币自动补；`strategist.symbols` 必须 ⊆ `symbols`。`symbols: []` 必须配 `symbols_unrestricted: true` —— 空白名单等于「任意币可开仓 + 零守护」。
 
 ---
 

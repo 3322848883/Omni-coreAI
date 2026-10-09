@@ -8,9 +8,12 @@ from typing import Any, Optional
 from .schema import CHIP_ACTIONS, CHIP_ORDER_TYPES
 
 # Fixed contract only: output format + hard rules. Role/style live in the strategy persona.
+# `symbol` 写**占位符**而不是某个具体币：契约是所有 bot 共用的，写死一个币会持续把
+# 模型往那个币引（只做 ETH 的 bot 也被示范写 BTC），而"该写哪个币"由配置层的
+# 【品种宇宙】决定 —— 契约只需要说清"这个字段必须写"。
 _SYSTEM_HEAD = (
     "只输出一个 JSON 对象，不要 Markdown 前后缀。\n"
-    '格式: {"cycle_id":"...","reasoning":"...","chips":[{"symbol":"BTC_USDT",'
+    '格式: {"cycle_id":"...","reasoning":"...","chips":[{"symbol":"<币种>",'
     '"action":"open_long|open_short|add_long|add_short|reduce_long|reduce_short|close|close_all|hold|'
     'stop_entry_long|stop_entry_short|flatten|cancel_all|cancel_price_all|modify_tp_sl",'
     '"confidence":0.0,"size_usd":50,"tp":null,"tp2":null,"tp1_share":null,"sl":null,"type":"market|limit|post_only|ioc|fok",'
