@@ -18,7 +18,16 @@ def load_equity_series(db_path: Path) -> list[tuple[int, float]]:
         return []
     con = _connect_ro(Path(db_path))
     try:
-        cur = con.execute("SELECT snap_time, equity, unrealised FROM pnl_snapshot ORDER BY snap_time")
+        # 只取**账户级**行（`contract IS NULL`）：加了按币快照之后，同一个 `snap_time`
+        # 会有多行（账户级 + 每个有仓的币各一条），不过滤就会把「某个币的权益」混进
+        # 账户权益曲线 —— scoreboard 与最大回撤都会失真。
+        # 老库（`contract` 列是 T19 才加的）没这一列 → 退回原查询，兼容。
+        have = {r[1] for r in con.execute("PRAGMA table_info(pnl_snapshot)")}
+        sql = "SELECT snap_time, equity, unrealised FROM pnl_snapshot"
+        if "contract" in have:
+            sql += " WHERE contract IS NULL"
+        sql += " ORDER BY snap_time"
+        cur = con.execute(sql)
         out = []
         for r in cur.fetchall():
             eq = float(r["equity"] or 0)

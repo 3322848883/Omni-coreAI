@@ -83,6 +83,10 @@ def migrate_bot(root: Path, bot_id: str, dry_run: bool = False, copy: bool = Fal
                         orders=len(row.get("chips") or row.get("orders") or []),
                         reasoning=(row.get("reasoning") or "")[:200],
                         raw=row,
+                        # 历史记录里 chips 带 symbol 就采用（没有就留空，不猜）
+                        symbols=[str((c or {}).get("symbol") or "")
+                                 for c in (row.get("chips") or [])
+                                 if isinstance(c, dict)],
                     )
                 else:
                     led.insert_trade(

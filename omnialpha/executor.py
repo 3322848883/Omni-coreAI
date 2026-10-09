@@ -328,7 +328,13 @@ class Executor:
 
         持仓记录本身不带 text，所以归属只能从订单判：该合约上存在一条 text 落在本 bot
         命名空间（`t-<label_prefix>*`）的单，就认为这个仓是本 bot 的。
-        **查不到（无本 bot 单 / 接口失败）一律 False = 判不了归属** —— 调用方 fail-closed。
+
+        **白名单不算归属**：`symbols_whitelist` 说的是「本 bot 允许交易哪些币」，
+        不等于「账户上这个仓是我的」—— 同一个账户上别的 bot 完全可能持有一个也在本
+        bot 白名单里的币。拿它当归属证据会把别人的仓平掉（那是这条判据要防的事）。
+
+        **查不到（无本 bot 单 / 接口失败）一律 False = 判不了归属** —— 调用方
+        fail-closed（不平它），并**显式报告**（不能静默 no-op，见 `_close_all`）。
         """
         prefix = self._own_prefix("")
         if not prefix:
@@ -2997,11 +3003,13 @@ class Executor:
         skipped_unattributed: list[str] = []
         dual = self.client.is_dual_position_mode()
         for sym in symbols:
-            if self.symbols_whitelist is not None and sym not in self.symbols_whitelist:
-                continue
-            if wide and not self._symbol_owned(sym):
-                # 判不了归属 → 不平（fail-closed）。不算整轮失败：跳过若算失败会触发
-                # 回滚，把同轮其他币已经挂好的腿也一起撤掉。
+            # **不要在这里再过滤白名单**：`scope=bot` 的收窄已经由 `_wide_symbols`
+            # 做过，而 `scope=account` 的语义就是「账户上本 bot 的仓」—— 再套一层白名单
+            # 会让 account **退化成 bot**（S2.3#2/D5 承诺的「能力不丢」逃生口失效）。
+            # 归属判据只在 `scope=account` 需要：那个作用面跨 bot，光有白名单不足以说明
+            # 「这个合约上的仓是我的」。单币路径由 `_check_symbol` 把关。
+            if wide and scope == "account" and not self._symbol_owned(sym):
+                # 判不了归属 → 不平（fail-closed）。跳过的仓要留痕（见下面 detail）。
                 skipped_unattributed.append(sym)
                 log.warning("close_all: %s 无本 bot 归属证据 → 跳过不平（fail-closed）", sym)
                 continue
@@ -3028,6 +3036,15 @@ class Executor:
         if wide:
             detail["scope"] = scope
             detail["skipped_unattributed"] = skipped_unattributed
+            if not orders and skipped_unattributed:
+                # **一个都没平** = 这次 close_all 没生效，不能报成功。原先恒 `ok=True`：
+                # 归档里看起来是成功、而账户上的仓一个没动 —— 静默 no-op 比报错危险，
+                # 因为没人会去查一个「成功」的动作。
+                return StepResult(
+                    "close_all", symbol, False, detail=detail,
+                    error=(f"close_all({scope}): 候选 {len(skipped_unattributed)} 个合约"
+                           f"全部无本 bot 归属证据 → 未平任何仓 {skipped_unattributed}；"
+                           f"若这些仓确实是本 bot 的，请检查 label_prefix 与本 bot 的挂单"))
         return StepResult("close_all", symbol, True, detail=detail)
 
     def _cancel_all(self, symbol: str, label: str = "", scope: str = "") -> StepResult:

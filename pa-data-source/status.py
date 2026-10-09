@@ -80,8 +80,19 @@ def check_processes():
 
 
 def check_aux_status():
-    """读 aux_status.json，返回辅助信息流新鲜度、滚动缓存表状态与一致性"""
-    return read_aux_status(AUX_STATUS)
+    """读 aux_status.json，返回辅助信息流新鲜度、滚动缓存表状态与一致性
+
+    **带上按币覆盖**（`db_path` + `contracts`）：只报「整体 ok/fail」时，某个币在
+    aux 各表全空会被掩盖 —— 5 个币里 1 个永远没数据也照样显示 ok（T16）。
+    """
+    try:
+        import fetch_aux
+        contracts = list(fetch_aux.CONTRACTS)
+    except Exception:  # noqa: BLE001 — 拿不到就退回「只报整体」
+        contracts = None
+    return read_aux_status(AUX_STATUS,
+                           db_path=os.path.join(AUX_DIR, "aux_cache.db"),
+                           contracts=contracts)
 
 
 def check_health_endpoint():

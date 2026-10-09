@@ -244,7 +244,22 @@ class TestCloseAllOwnership(unittest.TestCase):
         self.assertEqual(c.closed, [], "判不了归属 → 不平（fail-closed）")
         self.assertEqual(rep.results[0].detail.get("skipped_unattributed"), ["BTC_USDT"],
                          "被跳过的仓要留痕")
-        self.assertTrue(rep.ok, "跳过不算整轮失败（否则会连带回滚其他腿）")
+        # **一个都没平 ≠ 成功**：恒 `ok=True` 会让归档里看起来成功了，而账户上的仓
+        # 一个没动 —— 静默 no-op 比报错危险（没人会去查一个「成功」的动作）。
+        self.assertFalse(rep.ok, "全部被跳过 = 这次 close_all 没生效")
+        self.assertIn("close_all", rep.results[0].error or "")
+
+    def test_partial_skip_still_reports_success(self):
+        """有平成的腿时仍算成功：部分跳过是正常的（其他币的仓不是我的）。"""
+        c = _FakeClient(
+            positions=[{"contract": "BTC_USDT", "size": 1, "mode": "single"},
+                       {"contract": "ETH_USDT", "size": 2, "mode": "single"}],
+            orders=[{"id": "o1", "text": "t-brk", "contract": "BTC_USDT", "size": 1, "left": 1}],
+        )
+        rep = _ex(c).execute_signal(parse_signal({"action": "close_all", "scope": "account"}))
+        self.assertTrue(rep.ok, "有平成的腿 → 成功")
+        self.assertEqual([x["contract"] for x in c.closed], ["BTC_USDT"])
+        self.assertEqual(rep.results[0].detail.get("skipped_unattributed"), ["ETH_USDT"])
 
     def test_bot_scope_restricted_to_declared_universe(self):
         c = _FakeClient(

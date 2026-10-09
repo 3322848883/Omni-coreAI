@@ -122,7 +122,13 @@ class TestCriticalFixes(unittest.TestCase):
                 self.assertEqual(payload["action"], "hold")
                 self.assertIn("risk_reject", payload.get("meta", {}))
 
-    def test_risk_caps_size(self):
+    def test_risk_rejects_oversized_notional(self):
+        """超 `max_notional_usd` → **拒绝**（与 live 同源），不再静默截断。
+
+        截断会把模型报的仓位悄悄改小、下单照样发生 —— 与 live 的 `_check_notional`
+        （直接拒单）**结论不一致**，于是模拟盘会成交一笔实盘根本不成交的单，
+        回测结论因此不可信（T8 要修的正是这个）。
+        """
         from omnialpha.persona.runner import PersonaRunner
 
         with tempfile.TemporaryDirectory() as td:
@@ -142,14 +148,15 @@ class TestCriticalFixes(unittest.TestCase):
             g = _group(target_account="a", topology="single_account")
             bots = {"a": BotCfg(), "b": BotCfg()}
             r = PersonaRunner(root, g, bots, {"a": R(), "b": R()})
-            res = r.run_once()
-            self.assertTrue(res["executed"])
+            r.run_once()
             import json
             inbox = list((root / "data" / "bots" / "a" / "inbox").glob("*.json"))
-            self.assertTrue(inbox)
+            self.assertTrue(inbox, "仍会写 inbox —— 但内容必须是 hold")
             payload = json.loads(inbox[0].read_text(encoding="utf-8"))
-            self.assertEqual(float(payload["size_usd"]), 100.0)
-            self.assertTrue(payload.get("meta", {}).get("risk_capped"))
+            self.assertEqual(payload.get("action"), "hold",
+                             "超限 → 降级 hold；原先会被截断成 100 后照样发出去")
+            self.assertIn("risk_reject", payload.get("meta") or {},
+                          "要留痕说明为什么没下（静默改小最危险）")
 
     def test_risk_not_gate_manage_actions(self):
         """风控不得拦 close/reduce/modify（减险出场）。"""

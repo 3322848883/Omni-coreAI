@@ -191,9 +191,14 @@ class GateClient:
             name = str(item.get("name") or "")
             if not name:
                 continue
+            # `quanto_multiplier` **不兜底 1**：缺失就传 None，让
+            # `sizing.usd_to_contracts` 按「拒绝下单」处理（T20）。在这里顶一个 1.0 会把
+            # 「张数 ↔ 名义金额」差几个数量级，而且让下游的守卫**永不可达** ——
+            # 静默错比报错贵得多。其余两项的默认值（1 张步长 / 100 倍杠杆）是无害的。
+            qm = item.get("quanto_multiplier")
             cache[name] = ContractMeta(
                 name=name,
-                quanto_multiplier=float(item.get("quanto_multiplier") or 1),
+                quanto_multiplier=float(qm) if qm is not None else None,
                 order_size_round=float(item.get("order_size_round") or 1),
                 order_price_round=float(item.get("order_price_round") or 0.1),
                 leverage_max=int(item.get("leverage_max") or 100),

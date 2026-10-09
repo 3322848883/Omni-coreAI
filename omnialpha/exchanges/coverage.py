@@ -92,3 +92,48 @@ def unverified(matrix: dict) -> dict:
         if unk:
             out[sym] = unk
     return out
+
+
+def _main(argv) -> int:
+    """`python -m omnialpha.exchanges.coverage BTC_USDT [gate=BTC_USDT,SOL_USDT ...]`。
+
+    位置参数是要查的币；`venue=sym1,sym2` 形式的参数是**你手上的实测集合**
+    （该所的合约清单）——提供了就出 `有/没有`，没提供就是 `?`（未校验）。
+    加上这个入口是因为：只把矩阵留在库里、验收却只靠单测，等于它在生产里
+    从没被用过（`?` 与 `有/没有` 的区别也就没人真的看见）。
+    """
+    argv = list(argv or [])
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        print("\n用法: python -m omnialpha.exchanges.coverage BTC_USDT [gate=BTC_USDT,SOL_USDT ...]")
+        return 0 if argv else 2
+    symbols: list = []
+    venue_symbols: dict = {}
+    for a in argv:
+        if "=" in a:
+            v, _, rest = a.partition("=")
+            venue_symbols[v.strip().lower()] = [s.strip() for s in rest.split(",") if s.strip()]
+        else:
+            symbols.append(a)
+    m = coverage_matrix(symbols, venue_symbols=venue_symbols)
+    mark = {True: "有", False: "没有", None: "?"}
+    for sym, row in m.items():
+        cells = "  ".join(f"{v}={mark.get(ok, '?')}" for v, ok in sorted(row.items()))
+        print(f"{sym}: {cells}")
+    g = gaps(m)
+    if g:
+        print("\n确认没有（上币差异，换所或换币就行）：")
+        for sym, vs in g.items():
+            print(f"  {sym}: {', '.join(vs)}")
+    u = unverified(m)
+    if u:
+        print("\n未校验（该所没接列合约能力；别把 ? 当有或没有）：")
+        for sym, vs in u.items():
+            print(f"  {sym}: {', '.join(vs)}")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    import sys
+
+    raise SystemExit(_main(sys.argv[1:]))

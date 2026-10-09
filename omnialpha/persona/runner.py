@@ -781,9 +781,15 @@ class PersonaRunner:
         if max_notional is not None and payload.get("size_usd") is not None:
             try:
                 if float(payload["size_usd"]) > float(max_notional):
+                    # **拒绝，不截断**：截断会把模型报的仓位悄悄改小、而下单照样发生 ——
+                    # 与 live 路径结论不一致（`executor._check_notional` 是直接拒单），
+                    # 于是模拟盘会成交一笔实盘根本不成交的单，回测结论因此不可信
+                    # （T8 要修的正是「两处风控对同一 plan 结论不一致」）。
                     payload = dict(payload)
-                    payload["size_usd"] = float(max_notional)
-                    payload.setdefault("meta", {})["risk_capped"] = True
+                    payload["action"] = "hold"
+                    payload.setdefault("meta", {})["risk_reject"] = (
+                        f"size_usd {payload['size_usd']} > max_notional_usd {max_notional}")
+                    return payload
             except (TypeError, ValueError):
                 pass
         return payload

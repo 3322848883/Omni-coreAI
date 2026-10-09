@@ -60,6 +60,16 @@ def resolve_symbol_arg(
     ).strip().upper()
     uni = _norm(universe)
     if given:
+        # **形态归一必须与全仓同一判据**（`gate_client.resolve_symbol`）：schema 与
+        # trigger 两侧都过它，这里不过就会出现「同一句话三层不同解」——
+        # 实测 `{"symbol":"BTCUSDT"}` 会被当成宇宙外的币而拒掉，而它在别处与
+        # `BTC_USDT` 是同一个标的。
+        try:
+            from ..gate_client import resolve_symbol
+
+            given = resolve_symbol(given)
+        except Exception:  # noqa: BLE001 — 归一不可用时退回大写原样，不阻断
+            pass
         if uni and given not in uni:
             return "", OUT_OF_UNIVERSE
         return given, EXPLICIT

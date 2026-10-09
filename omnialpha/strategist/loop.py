@@ -103,7 +103,7 @@ class PlanRunner:
         self._kline_close_symbols: list[str] = []
         self._last_cycle_id: Optional[str] = None
         self._busy = threading.Lock()
-        self._conditions = parse_conditions(cfg.conditions)
+        self._conditions = parse_conditions(cfg.conditions, cfg.symbols)
         self._cond_states: dict[str, Any] = {}
         self._last_trigger: str = ""
         self._cycle_file = history_dir / "last_cycle.json"
@@ -452,7 +452,7 @@ class PlanRunner:
             plan = self._hold_plan(cycle_id, degraded)
         else:
             try:
-                plan = parse_plan_text(text)
+                plan = parse_plan_text(text, symbols=self.cfg.symbols)
             except PlanError as e:
                 log.error("plan parse failed: %s", e)
                 degraded = f"parse_failed: {e}"
@@ -708,7 +708,7 @@ class PlanRunner:
             log.error("analyze llm failed: %s", e)
             return self._hold_fallback(cycle_id, trigger, f"llm_failed: {e}")
         try:
-            plan = parse_plan_text(text)
+            plan = parse_plan_text(text, symbols=self.cfg.symbols)
         except PlanError as e:
             log.error("analyze plan parse failed: %s", e)
             return self._hold_fallback(cycle_id, trigger, f"parse_failed: {e}")
@@ -1122,6 +1122,8 @@ class PlanRunner:
                 raw={"thinking_file": path.name,
                      "reasoning_chain": kw.get("reasoning") or [],
                      "content_head": (kw.get("content") or "")[:200]},
+                # 按币维度必须真的写进去（否则这一列恒 NULL，按币查询形同虚设）
+                symbols=self._plan_symbols(),
             )
             led.close()
         except Exception:  # noqa: BLE001
@@ -1133,10 +1135,21 @@ class PlanRunner:
 
             root = self.cfg.bot_root or Path.cwd()
             led = Ledger(default_ledger_path(root))
+            kw.setdefault("symbols", self._plan_symbols())
             led.insert_plan(self.inbox.name, **kw)
             led.close()
         except Exception:  # noqa: BLE001
             pass
+
+    def _plan_symbols(self) -> list:
+        """本 bot 的币集 —— 写进 ledger 的 `plans.symbols_json`。
+
+        用**宇宙**而不是「本轮 chips 的币」：`_record_plan` 拿不到 plan 对象，
+        而 `plans` 表的用途是「按币查这个 bot 的计划记录」—— 宇宙足够且稳定。
+        不接线的话这一列在生产里**恒为 NULL**，`recent_plans(symbol=...)` 永远筛不到
+        （T15 就在修这个形态，别把它复刻一遍）。
+        """
+        return [str(s) for s in (getattr(self.cfg, "symbols", None) or []) if s]
 
     def _llm_send(self, messages: list) -> str:
         if hasattr(self.llm, "chat_messages"):
