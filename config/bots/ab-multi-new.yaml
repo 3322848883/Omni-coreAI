@@ -1,0 +1,63 @@
+# 多币种 A/B · 试验臂（**新版**人格：prompts/brooks_multi_pa.md，多币种纪律）
+#
+# 与 ab-multi-cur.yaml 的**唯一差别就是 prompt_file 一行** —— 变量只能有一个。
+# 其余（币种集合、周期、图数、工具、max_chips、provider）全部逐字相同。
+#
+# 安全：env=paper + 基线 enabled: false（同控制臂）。
+bot_id: ab-multi-new
+enabled: false
+env: paper
+exchange: gate
+api_key_env: ""
+api_secret_env: ""
+
+symbols:
+  - BTC_USDT
+  - ETH_USDT
+  - SOL_USDT
+  - XAU_USDT
+  - XAG_USDT
+
+max_notional_usd: 10000
+label_prefix: abmnew
+position_policy: strict
+default_replace: symbol
+order_scope: own
+require_sl: true
+
+paper:
+  feed_exchange: gate
+  initial_capital: 10000
+  leverage: 50
+
+account_risk:
+  halt: false
+  max_leverage: 50
+  max_notional_pct: 5.0
+  auto_protect: "dry"
+
+strategist:
+  enabled: true
+  prompt_file: prompts/brooks_multi_pa.md
+  interval_sec: 900
+  timeframe: 5m
+  vision: true
+  vision_timeframes: ["5m", "15m", "1h", "4h"]
+  candles: 120
+  write_hold: true
+  tools:
+    enabled: true
+    native: true
+    max_rounds: 3
+  market:
+    mode: rest_only
+    indicators: [ema20, atr14]
+    timeframes: ["15m", "1h", "4h"]
+    extra_candles: 80
+  risk:
+    min_confidence: 0.0
+    max_chips: 5
+    max_notional_usd: 10000
+  llm:
+    provider: gw-flash
+    reasoning_effort: high

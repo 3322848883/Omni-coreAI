@@ -1,0 +1,65 @@
+# 换标的 A/B：ETH_USDT ｜ prompts/brooks_btc_pa.md
+#
+# 用途：本地「单币种换标的」对照实验（不是多币种）。harness：scripts/_ab_swap.py。
+# 三格里它只与另外两个换标的配置相差 symbols / prompt_file —— 变量保持单一。
+#
+# 安全：env=paper（下单走本地模拟账户）+ 基线 enabled: false，
+# 只要不写进 config/bots.local/ 就永远不会被 supervisor/watchdog 拉起来。
+bot_id: ab-swap-eth-cur
+enabled: false
+env: paper
+exchange: gate
+api_key_env: ""
+api_secret_env: ""
+
+# bot 级 symbols = 执行器白名单（executor._check_symbol）：本格只做这一个标的
+symbols:
+  - ETH_USDT
+
+max_notional_usd: 10000
+label_prefix: swpethc
+position_policy: strict
+default_replace: symbol
+order_scope: own
+require_sl: true
+
+paper:
+  feed_exchange: gate
+  initial_capital: 10000
+  leverage: 50
+
+account_risk:
+  halt: false
+  max_leverage: 50
+  max_notional_pct: 5.0
+  auto_protect: "dry"
+
+strategist:
+  enabled: true
+  prompt_file: prompts/brooks_btc_pa.md
+  interval_sec: 900
+  timeframe: 5m
+  vision: true
+  vision_timeframes: ["5m", "15m", "1h", "4h"]
+  candles: 120
+  write_hold: true
+  tools:
+    enabled: true
+    native: true
+    max_rounds: 3
+  market:
+    # 本地 kline.db 停在 3 天前；hybrid 会让「K 线」与「ticker」时间错位，
+    # 所以 A/B 统一走 REST 取实时数据（两臂同源，交错跑抵消行情漂移）。
+    mode: rest_only
+    indicators: [ema20, atr14]
+    timeframes: ["15m", "1h", "4h"]
+    extra_candles: 80
+  risk:
+    # 0.0 = 不过滤低置信度：本轮测的是「分析质量」，不是风控策略层的取舍。
+    # 两臂一致；真实 brooks-btc 用 0.6。
+    min_confidence: 0.0
+    max_chips: 1
+    max_notional_usd: 10000
+  llm:
+    provider: gw-flash
+    reasoning_effort: high

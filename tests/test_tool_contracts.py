@@ -73,5 +73,73 @@ class TestVisionWarnsWhenNoChart(unittest.TestCase):
         self.assertTrue(out, "有 K 线时应能生成图")
 
 
+class TestMultiSymbolCharts(unittest.TestCase):
+    """多币种出图：**每个币都要有图**。
+
+    回归背景：`_generate_charts` 原先写死 `sym = symbols[0]` —— 多币配置下
+    第 2..N 个币一张图都没有，模型只能靠数值快照判断它们（「多币配置、单币视野」）。
+    这里 monkeypatch 掉渲染（`generate_and_encode`）只看调用，避免测试里真画图。
+    """
+
+    def _runner(self, symbols, tfs, timeframe="15m"):
+        runner = object.__new__(PlanRunner)
+        runner.cfg = SimpleNamespace(
+            symbols=list(symbols), timeframe=timeframe, vision_timeframes=list(tfs)
+        )
+        return runner
+
+    @staticmethod
+    def _rows(base):
+        return [{"t": 1790900000 + i * 900, "o": base + i, "h": base + 100 + i,
+                 "l": base - 100 + i, "c": base + 50 + i, "v": 10 + i} for i in range(20)]
+
+    def _snapshot(self, syms):
+        market = {}
+        for sym, base in syms.items():
+            market[sym] = {"candles": self._rows(base),
+                           "tf": {"1h": {"candles": self._rows(base)}}}
+        return {"market": market}
+
+    def _capture(self, runner, snapshot):
+        from omnialpha.strategist import vision
+
+        seen: list = []
+        orig = vision.generate_and_encode
+        vision.generate_and_encode = lambda k, symbol="", timeframe="": (
+            seen.append((symbol, timeframe)) or "B64")
+        try:
+            out = runner._generate_charts(snapshot)
+        finally:
+            vision.generate_and_encode = orig
+        return out, seen
+
+    def test_every_symbol_gets_charts(self):
+        runner = self._runner(["BTC_USDT", "ETH_USDT", "SOL_USDT"], ["15m", "1h"])
+        out, seen = self._capture(runner, self._snapshot(
+            {"BTC_USDT": 84000, "ETH_USDT": 2700, "SOL_USDT": 150}))
+        self.assertEqual(len(out), 6, "3 币 × 2 周期 = 6 张图")
+        for sym in ("BTC_USDT", "ETH_USDT", "SOL_USDT"):
+            self.assertIn((sym, "15m"), seen)
+            self.assertIn((sym, "1h"), seen)
+        # 反断言：不是只有首币有图（旧实现下 ETH/SOL 一张都没有）
+        self.assertEqual(len([s for s, _ in seen if s == "ETH_USDT"]), 2)
+
+    def test_other_symbols_survive_missing_data(self):
+        """某个币取不到 K 线时，**其余币照常出图**（只是它自己缺图 + 有 warning）。"""
+        runner = self._runner(["BTC_USDT", "ETH_USDT"], ["15m"])
+        snap = {"market": {"BTC_USDT": {"candles": self._rows(84000)}, "ETH_USDT": {}}}
+        with self.assertLogs("omnialpha.strategist", level="WARNING") as cm:
+            out, seen = self._capture(runner, snap)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(seen, [("BTC_USDT", "15m")])
+        self.assertTrue(any("ETH_USDT 一张图都没生成" in m for m in cm.output), cm.output)
+
+    def test_single_symbol_unchanged(self):
+        """单币配置行为不变（这是回归的另一半：别把单币也搞坏）。"""
+        runner = self._runner(["BTC_USDT"], ["15m", "1h"])
+        out, seen = self._capture(runner, self._snapshot({"BTC_USDT": 84000}))
+        self.assertEqual(sorted(seen), [("BTC_USDT", "15m"), ("BTC_USDT", "1h")])
+
+
 if __name__ == "__main__":
     unittest.main()

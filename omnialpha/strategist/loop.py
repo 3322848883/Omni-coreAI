@@ -991,9 +991,14 @@ class PlanRunner:
         return self.llm.chat(system, user)
 
     def _generate_charts(self, snapshot: dict) -> list:
-        """按 vision_timeframes 生成多周期 K 线图 base64 列表。
+        """按 vision_timeframes 生成多周期 K 线图 base64 列表（**逐 symbol**）。
 
         省略 vision_timeframes → 只发主周期。
+
+        **必须逐 symbol**：原先只给 `symbols[0]` 出图，多币种 bot 的第 2..N 个币
+        一张图都没有 —— 模型只能靠数值快照判断它们，等于「多币配置、单币视野」。
+        图内自带 symbol 与周期标注（`vision.generate_and_encode(symbol=…, timeframe=…)`），
+        所以顺序只决定发送次序、不决定归属。
         """
         try:
             from .vision import generate_and_encode
@@ -1003,42 +1008,47 @@ class PlanRunner:
         symbols = self.cfg.symbols or []
         if not symbols:
             return []
-        sym = symbols[0]
         market = snapshot.get("market") or {}
-        m = market.get(sym) or {}
-        if not isinstance(m, dict):
-            m = {}
         tfs = list(self.cfg.vision_timeframes or []) or [self.cfg.timeframe]
         # 去重保序
         seen = set()
         tfs = [t for t in tfs if t and not (t in seen or seen.add(t))]
         out: list = []
-        for tf in tfs:
-            try:
-                if tf == self.cfg.timeframe:
-                    klines = m.get("candles") or m.get("klines") or []
-                    ind = m.get("indicators") or {}
-                else:
-                    block = (m.get("tf") or {}).get(tf) or {}
-                    klines = block.get("candles") or block.get("klines") or []
-                    ind = block.get("indicators") or {}
-                if isinstance(klines, dict):
-                    klines = klines.get("candles") or klines.get("klines") or []
-                if not klines or len(klines) < 10:
+        for sym in symbols:
+            m = market.get(sym) or {}
+            if not isinstance(m, dict):
+                m = {}
+            made = 0
+            for tf in tfs:
+                try:
+                    if tf == self.cfg.timeframe:
+                        klines = m.get("candles") or m.get("klines") or []
+                        ind = m.get("indicators") or {}
+                    else:
+                        block = (m.get("tf") or {}).get(tf) or {}
+                        klines = block.get("candles") or block.get("klines") or []
+                        ind = block.get("indicators") or {}
+                    if isinstance(klines, dict):
+                        klines = klines.get("candles") or klines.get("klines") or []
+                    if not klines or len(klines) < 10:
+                        continue
+                    merged = []
+                    for i, k in enumerate(klines):
+                        row = dict(k) if isinstance(k, dict) else {"c": k}
+                        for name, series in (ind or {}).items():
+                            if isinstance(series, (list, tuple)) and i < len(series):
+                                row.setdefault(name, series[i])
+                        merged.append(row)
+                    b64 = generate_and_encode(merged, symbol=sym, timeframe=tf)
+                    if b64:
+                        out.append(b64)
+                        made += 1
+                except Exception as e:  # noqa: BLE001
+                    log.warning("生成 %s/%s 周期 K 线图失败，该图本轮缺失: %s", sym, tf, e)
                     continue
-                merged = []
-                for i, k in enumerate(klines):
-                    row = dict(k) if isinstance(k, dict) else {"c": k}
-                    for name, series in (ind or {}).items():
-                        if isinstance(series, (list, tuple)) and i < len(series):
-                            row.setdefault(name, series[i])
-                    merged.append(row)
-                b64 = generate_and_encode(merged, symbol=sym, timeframe=tf)
-                if b64:
-                    out.append(b64)
-            except Exception as e:  # noqa: BLE001
-                log.warning("生成 %s 周期 K 线图失败，该周期本轮无图: %s", tf, e)
-                continue
+            if not made:
+                # 某个币一张图都没有 —— 多币时尤其要能看见「哪个币没图」
+                log.warning("vision: %s 一张图都没生成（请求周期 %s）", sym, tfs)
         if not out and tfs:
             # vision 开着却一张图都没生成 —— 此前是彻底静默的，等于「不发图但没人知道」
             log.warning("vision 已开启但一张图都没生成（请求周期 %s），本轮将无图发给模型", tfs)
@@ -1145,6 +1155,7 @@ class PlanRunner:
                     env=self.cfg.env, bot_root=self.cfg.bot_root, market_cfg=self.cfg.market,
                     bot_id=self.cfg.bot_id, skill_ids=self.cfg.skills,
                     allow=self.cfg.tools.get("allow"), deny=self.cfg.tools.get("deny"),
+                    symbols=self.cfg.symbols,
                 )
                 self._record_tool_use(name, args, res)
                 results.append({"tool": name, "result": res})
@@ -1214,6 +1225,7 @@ class PlanRunner:
                     env=self.cfg.env, bot_root=self.cfg.bot_root, market_cfg=self.cfg.market,
                     bot_id=self.cfg.bot_id, skill_ids=self.cfg.skills,
                     allow=self.cfg.tools.get("allow"), deny=self.cfg.tools.get("deny"),
+                    symbols=self.cfg.symbols,
                 )
                 self._record_tool_use(name, args, result)
                 # 收窄：skill 成功加载且声明 allowed-tools → 限定后续工具面

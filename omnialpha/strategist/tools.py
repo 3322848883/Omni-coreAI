@@ -47,6 +47,7 @@ from .market import MarketConfig, resolve_candles
 
 
 from .snapshot import collect_snapshot
+from .symbols import resolve_symbol_arg, symbol_error_payload
 
 
 
@@ -336,7 +337,7 @@ NATIVE_TOOLS = [
                 "properties": {
 
 
-                    "symbol": {"type": "string", "description": "e.g. BTC_USDT"},
+                    "symbol": {"type": "string", "description": "币种（取【品种宇宙】里的值）"},
 
 
                     "tf": {"type": "string", "enum": ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]},
@@ -1036,7 +1037,7 @@ NATIVE_TOOLS = [
                 "properties": {
 
 
-                    "symbol": {"type": "string", "description": "e.g. BTC_USDT"},
+                    "symbol": {"type": "string", "description": "币种（取【品种宇宙】里的值）"},
 
 
                     "tf": {"type": "string", "enum": ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]},
@@ -1084,7 +1085,7 @@ NATIVE_TOOLS = [
                 "properties": {
 
 
-                    "symbol": {"type": "string", "description": "e.g. BTC_USDT"},
+                    "symbol": {"type": "string", "description": "币种（取【品种宇宙】里的值）"},
 
 
                     "tf": {"type": "string", "enum": ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]},
@@ -1132,7 +1133,7 @@ NATIVE_TOOLS = [
                 "properties": {
 
 
-                    "symbol": {"type": "string", "description": "e.g. BTC_USDT"},
+                    "symbol": {"type": "string", "description": "币种（取【品种宇宙】里的值）"},
 
 
                     "tf": {"type": "string", "enum": ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]},
@@ -1234,7 +1235,7 @@ _TAKER_DELTA_TOOL_DEF = {
         "parameters": {
             "type": "object",
             "properties": {
-                "symbol": {"type": "string", "description": "e.g. BTC_USDT"},
+                "symbol": {"type": "string", "description": "币种（取【品种宇宙】里的值）"},
                 "tf": {"type": "string",
                        "enum": ["1m", "5m", "15m", "30m", "1h", "4h", "1d"],
                        "description": "aggregation interval (default 5m)"},
@@ -1414,6 +1415,8 @@ def run_tool(
 
 
     deny: Optional[list] = None,
+    # 【品种宇宙】：工具的 symbol 缺省策略要用它（见 strategist/symbols.py）
+    symbols: Optional[list] = None,
 
 
 ) -> Any:
@@ -1538,7 +1541,7 @@ def run_tool(
         if name.startswith("tv_"):
             from .tv_tools import run_tv_tool
             return run_tv_tool(client, name, args, env=env, bot_root=bot_root,
-                               market_cfg=market_cfg)
+                               market_cfg=market_cfg, symbols=symbols)
 
 
         if name in ORDERFLOW_TOOL_NAMES:
@@ -2423,7 +2426,10 @@ def run_tool(
 
 
 
-            sym = str(args.get("symbol") or args.get("sym") or "BTC_USDT")
+            sym, _sym_note = resolve_symbol_arg(args, symbols, tool="smc_map")
+            if not sym:
+                return symbol_error_payload(_sym_note, symbols, tool="smc_map")
+
 
 
             tf = str(args.get("tf") or args.get("interval") or "15m").lower()
@@ -2480,7 +2486,10 @@ def run_tool(
 
 
 
-            sym = str(args.get("symbol") or args.get("sym") or "BTC_USDT")
+            sym, _sym_note = resolve_symbol_arg(args, symbols, tool="smc_events")
+            if not sym:
+                return symbol_error_payload(_sym_note, symbols, tool="smc_events")
+
 
 
             tf = str(args.get("tf") or args.get("interval") or "15m").lower()
@@ -2534,7 +2543,10 @@ def run_tool(
 
 
 
-            sym = str(args.get("symbol") or args.get("sym") or "BTC_USDT")
+            sym, _sym_note = resolve_symbol_arg(args, symbols, tool="sqzmom")
+            if not sym:
+                return symbol_error_payload(_sym_note, symbols, tool="sqzmom")
+
 
 
             tf = str(args.get("tf") or args.get("interval") or "15m").lower()

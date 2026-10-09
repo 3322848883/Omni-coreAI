@@ -18,6 +18,7 @@ from typing import Any, Optional
 
 from ..gate_client import GateClient
 from .market import MarketConfig, resolve_candles
+from .symbols import resolve_symbol_arg, symbol_error_payload
 from .tv_indicators import (
     MODE_OI,
     MODE_VOLUME,
@@ -54,7 +55,7 @@ TV_TOOL_NAMES = (
     "tv_cdv", "tv_wyckoff",
 )
 
-_SYM = {"type": "string", "description": "e.g. BTC_USDT"}
+_SYM = {"type": "string", "description": "币种（取【品种宇宙】里的值）"}
 _TF = {"type": "string", "enum": ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]}
 _LIMIT = {"type": "integer", "minimum": 30, "maximum": 300,
           "description": "candles to fetch (default 200)"}
@@ -317,7 +318,7 @@ TV_TOOL_DEFS: list[dict[str, Any]] = [
 
 
 def _rows(client, args: dict, env: str, bot_root, market_cfg: Optional[MarketConfig]):
-    sym = str(args.get("symbol") or args.get("sym") or "BTC_USDT")
+    sym = str(args.get("symbol") or args.get("sym") or "")
     tf = str(args.get("tf") or args.get("interval") or "15m").lower()
     lim = max(30, min(int(args.get("limit") or 200), 300))
     res = resolve_candles(client, sym, tf, lim, market_cfg=market_cfg, env=env, bot_root=bot_root)
@@ -346,7 +347,7 @@ def _ohlcv(client, args: dict, env: str, bot_root,
 
     剖面类指标要用到 `v` 和 `t`，而 `_rows` 只解包 o/h/l/c —— 故另开一个入口。
     """
-    sym = str(args.get("symbol") or args.get("sym") or "BTC_USDT")
+    sym = str(args.get("symbol") or args.get("sym") or "")
     tf = str(args.get("tf") or args.get("interval") or "15m").lower()
     lim = max(30, min(int(args.get("limit") or default_limit), max_limit))
     res = resolve_candles(client, sym, tf, lim, market_cfg=market_cfg,
@@ -415,9 +416,17 @@ def _mintick(client, sym: str) -> float:
 
 def run_tv_tool(client: GateClient, name: str, args: dict,
                 *, env: str = "live", bot_root=None,
-                market_cfg: Optional[MarketConfig] = None) -> Any:
+                market_cfg: Optional[MarketConfig] = None,
+                symbols: Optional[list] = None) -> Any:
     """执行 TV 指标工具。"""
     args = dict(args or {})
+    # symbol 的唯一解析来源（strategist/symbols.py）：TV 工具全部按币取数，
+    # 所以**在入口解析一次并回填 args**，下游 _rows/_ohlcv 直接用。
+    # 原先三处各自把 BTC_USDT 当兜底 —— 换币/多币时漏写 symbol 会静默分析错标的。
+    _sym, _note = resolve_symbol_arg(args, symbols, tool=name)
+    if not _sym:
+        return symbol_error_payload(_note, symbols, tool=name)
+    args["symbol"] = _sym
 
     if name == "tv_linreg_trendlines":
         sym, tf, n, o, h, l, c, src = _rows(client, args, env, bot_root, market_cfg)
@@ -655,7 +664,7 @@ def run_tv_tool(client: GateClient, name: str, args: dict,
         return out
 
     if name == "tv_wyckoff":
-        sym = str(args.get("symbol") or args.get("sym") or "BTC_USDT")
+        sym = str(args.get("symbol") or args.get("sym") or "")
         tf = str(args.get("tf") or args.get("interval") or "15m").lower()
         # 状态机要走完 A→E，内部至少喂 500 根（对齐 SMC 那次的预热教训）
         lim = max(500, min(int(args.get("limit") or 600), 1500))
