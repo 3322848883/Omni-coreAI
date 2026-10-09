@@ -55,6 +55,9 @@ def build_context(
     recent_rows = rows[-n_recent:] if (rows and n_recent > 0) else []
     recent_summaries = [
         {"cycle_id": r.get("cycle_id", ""), "decision": r.get("decision", ""),
+         # 按币（多币下 `decision` 只是不带币名的动作串，渲染层要看这两个：
+         # `_decision_text` 靠它们才能说出「哪个币做了什么」）
+         "symbols": r.get("symbols"), "decisions": r.get("decisions"),
          # **不再 [:30] 截断**：模型每轮写 6K–76K 字符的推理，而 `[近况]` 原先只
          # 回看到 30 字（实测整段 171 字符）。journal 写入侧已截到 `[:200]`，
          # 是这里又砍了一刀。
@@ -166,11 +169,43 @@ def _exec_tag(row: dict) -> str:
     return f" [orders={n}]" if n else ""
 
 
+def _decision_text(r: dict) -> str:
+    """决策的渲染文本。
+
+    单币（或老 journal 没有 `symbols` 那些键时）**原样返回 `decision`** —— 单币 prompt
+    必须逐字不变（I11）。多币下 `decision` 只是不带币名的动作串
+    （`"hold,open_long"` 看不出哪个币做了什么），所以按 `symbols`/`decisions` 渲染成
+    `BTC_USDT:hold ETH_USDT:open_long`。
+    """
+    symbols = r.get("symbols")
+    decisions = r.get("decisions")
+    if (isinstance(symbols, list) and isinstance(decisions, list)
+            and len(symbols) > 1 and len(symbols) == len(decisions)):
+        pairs = [f"{s}:{d}" for s, d in zip(symbols, decisions) if s]
+        if pairs:
+            return " ".join(pairs)
+    return str(r.get("decision") or "")
+
+
+def _tier1_bits(d: dict) -> list:
+    """Tier 1 片段（单币读顶层字段、多币读 `tier1[symbol]` —— 同一套字段名）。"""
+    bits = []
+    if d.get("region"):
+        bits.append(f"区域={d['region']}")
+    if d.get("invalidation_price") is not None:
+        bits.append(f"前提失效={d['invalidation_price']}（触及即视为结构破坏，须撤单或离场）")
+    if d.get("time_stop_bars") is not None:
+        bits.append(f"最大持仓={d['time_stop_bars']} 轮")
+    if d.get("give_back_pct") is not None:
+        bits.append(f"浮盈回撤阈值={d['give_back_pct']}%")
+    return bits
+
+
 def _format_recent(summaries: list[dict]) -> str:
     if not summaries:
         return "（无近期决策）"
     return "\n".join(
-        f"{s.get('cycle_id', '')}: {s.get('decision', '')}{_exec_tag(s)}"
+        f"{s.get('cycle_id', '')}: {_decision_text(s)}{_exec_tag(s)}"
         f" — {s.get('reasoning', '')}"
         for s in summaries
     )
@@ -188,7 +223,7 @@ def _format_index(rows: list[dict]) -> str:
     if not rows:
         return ""
     lines = "\n".join(
-        f"  {r.get('cycle_id', '')} {r.get('decision', '')}{_exec_tag(r)}" for r in rows
+        f"  {r.get('cycle_id', '')} {_decision_text(r)}{_exec_tag(r)}" for r in rows
     )
     return (f"\n[近期决策索引·最近 {len(rows)} 轮"
             f"（要看某轮细节用 journal_lookup(cycle_id)）]\n{lines}")
@@ -207,16 +242,17 @@ def _format_last_plan_state(rows: list[dict]) -> str:
     if not rows:
         return ""
     r = rows[-1]
-    bits = []
-    if r.get("region"):
-        bits.append(f"区域={r['region']}")
-    if r.get("invalidation_price") is not None:
-        bits.append(f"前提失效={r['invalidation_price']}（触及即视为结构破坏，须撤单或离场）")
-    if r.get("time_stop_bars") is not None:
-        bits.append(f"最大持仓={r['time_stop_bars']} 轮")
-    if r.get("give_back_pct") is not None:
-        bits.append(f"浮盈回撤阈值={r['give_back_pct']}%")
-    return "；".join(bits)
+    # 多币：每枚币各有自己的前提失效价/最大持仓 —— 合并成一句会让模型以为那些值是
+    # 全局的（审计 D-22）。单币（tier1 只有一条或没有）走下面同一套顶层字段，逐字不变。
+    tier1 = r.get("tier1")
+    if isinstance(tier1, dict) and len(tier1) > 1:
+        chunks = []
+        for sym, one in tier1.items():
+            bits = _tier1_bits(one if isinstance(one, dict) else {})
+            if bits:
+                chunks.append(f"{sym}: " + "；".join(bits))
+        return "；".join(chunks)
+    return "；".join(_tier1_bits(r))
 
 
 def _format_snapshot(snapshot: dict) -> str:

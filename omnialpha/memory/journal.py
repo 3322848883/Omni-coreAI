@@ -13,6 +13,63 @@ from pathlib import Path
 from typing import Any, Optional
 
 
+def _fld(obj: Any, key: str, default: Any = None) -> Any:
+    """chip 在两条策略路径上形态不同（strategist 是 dataclass，persona 是 dict）。"""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def tier1_journal_fields(chips: Any) -> dict:
+    """契约 Tier 1 字段 → journal 的**按币**形态（两条策略路径共用，一处定义）。
+
+    多币宇宙下每枚币有自己的 `region`/`invalidation`/`risk_pct`，只取 `chips[0]` 会让
+    其余币的这些判定凭空消失 —— 而它们正是下一轮回放「当时为什么这么判」要用的（D-21）。
+    原先 `loop.py` 与 `persona/runner.py` 各有一份近乎重复的 helper，两边已经漂移过一次，
+    所以这里只留一份。
+
+    返回：
+
+    - `symbols`    本轮涉及哪些币（与 chips 同序、**不去重**，保证与 decisions 对齐）
+    - `decisions`  与 symbols 同序的动作名
+    - `tier1`      `{symbol: {region / rule_ids / risk_pct / invalidation_price / …}}`
+                   （每币只收**非空**项；同币出现多次取第一条）
+    - **单 chip 时把该币的 Tier-1 平铺到顶层** —— 单币 journal 的形态与改动前逐字一致
+      （I11），`tier1` 只是增量。
+    """
+    symbols: list[str] = []
+    decisions: list[str] = []
+    tier1: dict[str, dict] = {}
+    for c in (chips or []):
+        sym = str(_fld(c, "symbol", "") or "").strip().upper()
+        symbols.append(sym)
+        decisions.append(str(_fld(c, "action", "") or ""))
+        if not sym or sym in tier1:
+            continue
+        one: dict[str, Any] = {}
+        if _fld(c, "region", ""):
+            one["region"] = _fld(c, "region")
+        if _fld(c, "rule_ids", None):
+            one["rule_ids"] = list(_fld(c, "rule_ids"))
+        for src, dst in (("risk_pct", "risk_pct"),
+                         ("invalidation", "invalidation_price"),
+                         ("time_stop_bars", "time_stop_bars"),
+                         ("give_back_pct", "give_back_pct")):
+            v = _fld(c, src, None)
+            if v is not None:
+                one[dst] = v
+        if one:
+            tier1[sym] = one
+    if not symbols:
+        return {}
+    out: dict[str, Any] = {"symbols": symbols, "decisions": decisions}
+    if len(symbols) == 1:
+        out.update(tier1.get(symbols[0]) or {})
+    if tier1:
+        out["tier1"] = tier1
+    return out
+
+
 class MemoryJournal:
     """append-only 决策日志。不提供 update/delete（不可变）。"""
 

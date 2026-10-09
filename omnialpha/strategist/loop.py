@@ -529,31 +529,15 @@ class PlanRunner:
 
     @staticmethod
     def _tier1_journal_fields(plan: Any) -> dict:
-        """契约 Tier 1 字段进 journal（docs/compose/spec/pa-skills-upgrade.md [S2]）。
+        """契约 Tier 1 字段进 journal —— **按币**形态（见 `memory/journal.py`）。
 
-        取首个 chip 的判定值 —— 单 bot 路径 `max_chips=1`，取到的就是本轮的方案。
-        全部可选：没填就不写键，**老 journal 的形态不变**（下游按 `.get()` 读，
-        不会因为多了键而改变行为）。
+        多币下每枚币各有自己的 region/invalidation/risk_pct，只取 `chips[0]` 会让
+        其余币的判定凭空消失（审计 D-21）。实现只有一处（`tier1_journal_fields`），
+        与 persona 路径共用 —— 此前两边各写一份、已经漂移过一次。
         """
-        chips = getattr(plan, "chips", None) or []
-        if not chips:
-            return {}
-        c = chips[0]
-        out: dict[str, Any] = {}
-        if getattr(c, "region", ""):
-            out["region"] = c.region
-        if getattr(c, "rule_ids", None):
-            out["rule_ids"] = list(c.rule_ids)
-        if getattr(c, "risk_pct", None) is not None:
-            out["risk_pct"] = c.risk_pct
-        if getattr(c, "invalidation", None) is not None:
-            out["invalidation_price"] = c.invalidation
-        if getattr(c, "time_stop_bars", None) is not None:
-            out["time_stop_bars"] = c.time_stop_bars
-        if getattr(c, "give_back_pct", None) is not None:
-            out["give_back_pct"] = c.give_back_pct
-        return out
+        from ..memory.journal import tier1_journal_fields
 
+        return tier1_journal_fields(getattr(plan, "chips", None) or [])
     def _skill_catalog(self) -> str:
         """SkillKit L1 catalog：仅 name+description，空则不渲染。"""
         try:

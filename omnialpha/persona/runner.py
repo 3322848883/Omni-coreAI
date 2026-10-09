@@ -162,30 +162,17 @@ class PersonaRunner:
         return result
 
     @staticmethod
-    def _tier1_from_chip(chip: Any) -> dict:
-        """契约 Tier 1 字段（docs/compose/spec/pa-skills-upgrade.md [S2]）。
+    def _tier1_from_chips(chips: Any) -> dict:
+        """契约 Tier 1 字段 —— **按币**形态（实现见 `memory/journal.py`）。
 
-        人格路径的 plan 是**普通 dict**（`analyze_once` 的 chips_out），不是 Chip 对象，
-        所以这里按 dict 读。全部可选：没填就不写键。
+        人格路径的 plan 是普通 dict（`analyze_once` 的 chips_out），strategist 路径是
+        Chip 对象；两条路径共用同一个 helper，避免「近重复实现漂移」（独立评审点过一次）。
+        多币下每个 chip 的判定都要留下 —— 只取 `chips[0]` 会让其余币的 region /
+        invalidation 凭空消失（审计 D-21）。
         """
-        out: dict[str, Any] = {}
-        if not isinstance(chip, dict):
-            return out
-        if chip.get("region"):
-            out["region"] = chip["region"]
-        if chip.get("rule_ids"):
-            out["rule_ids"] = list(chip["rule_ids"])
-        if chip.get("risk_pct") is not None:
-            out["risk_pct"] = chip["risk_pct"]
-        if chip.get("invalidation") is not None:
-            out["invalidation_price"] = chip["invalidation"]
-        # 与 `loop.py::_tier1_journal_fields` 保持同一字段集 —— 两边不一致时
-        # 人格路径的 journal 会永远缺这两格（独立评审指出的近重复 helper 漂移）。
-        if chip.get("time_stop_bars") is not None:
-            out["time_stop_bars"] = chip["time_stop_bars"]
-        if chip.get("give_back_pct") is not None:
-            out["give_back_pct"] = chip["give_back_pct"]
-        return out
+        from ..memory.journal import tier1_journal_fields
+
+        return tier1_journal_fields(chips or [])
 
     def _post_exec_hooks(self, order_id: Optional[str], fusion: dict,
                          plans: dict, result: dict, cycle_id: str) -> None:
@@ -258,7 +245,7 @@ class PersonaRunner:
                 prompt_cache_hit_tokens=hit,
                 executed=executed,
                 exec_result={"action": action, "order_id": order_id},
-                **self._tier1_from_chip((plan.get("chips") or [{}])[0]),
+                **self._tier1_from_chips(plan.get("chips") or []),
             )
         except Exception:  # noqa: BLE001
             pass
