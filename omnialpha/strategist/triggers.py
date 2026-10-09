@@ -29,6 +29,9 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from .indicators import atr, boll, ema, macd, rsi, sma
+# symbol 归一与触发器白名单**同一份实现**（`trigger_store`）：同一条判据两处各写
+# 一遍必然漂移，而这里的后果是「条件写在 `BTC` 上、执行器按 `BTC_USDT` 取数」。
+from .trigger_store import normalize_symbol, normalize_symbols
 
 log = logging.getLogger("omnialpha.triggers")
 
@@ -61,10 +64,29 @@ class ConditionState:
     last_true: bool = False
 
 
-def parse_conditions(raw: Optional[list], _depth: int = 0) -> list[dict]:
-    """Parse and validate conditions. Unknown types raise ConditionError."""
+def parse_conditions(
+    raw: Optional[list],
+    symbols: Optional[list] = None,
+    _depth: int = 0,
+    _path: str = "conditions",
+) -> list[dict]:
+    """Parse and validate conditions. Unknown types raise ConditionError.
+
+    `symbols` 是**本 bot 的品种宇宙**（`cfg.symbols`）。叶条件缺 `symbol` 时的行为：
+
+    | 宇宙 | 行为 |
+    |---|---|
+    | 1 个币 | **自动补**该币（唯一解，无歧义；单币 bot 行为不变） |
+    | ≥2 个币 | **报错**（`ConditionError`，指明是哪个条件缺） |
+    | 未提供（旧调用方） | 保持原样（symbol=""）—— 不凭空收紧已有调用 |
+
+    为什么多币必须报错而不是留空：留空的条件在运行期只得到 `"no symbol"` →
+    **永不触发**，启动不报错、运行不告警（B-11）。那正是「配置看起来生效、
+    实际不生效」——唯一能把它变可见的手段是启动 fail-fast。
+    """
     out = []
-    for item in raw or []:
+    for i, item in enumerate(raw or []):
+        path = f"{_path}[{i}]"
         if not isinstance(item, dict):
             raise ConditionError("condition must be an object")
         ctype = str(item.get("type") or "").strip().lower()
@@ -84,9 +106,22 @@ def parse_conditions(raw: Optional[list], _depth: int = 0) -> list[dict]:
             children = item.get("children")
             if not isinstance(children, list) or not children:
                 raise ConditionError(f"{ctype} requires non-empty children[]")
-            item["children"] = parse_conditions(children, _depth=_depth + 1)
+            item["children"] = parse_conditions(
+                children, symbols, _depth=_depth + 1, _path=f"{path}.children"
+            )
         else:
-            item.setdefault("symbol", item.get("symbol") or "")
+            symbol = normalize_symbol(item.get("symbol"))
+            if not symbol:
+                universe = normalize_symbols(symbols)
+                if len(universe) == 1:
+                    symbol = universe[0]
+                elif len(universe) > 1:
+                    raise ConditionError(
+                        f"{path} ({ctype}) 缺少 symbol，而本 bot 有 {len(universe)} 个币"
+                        f"（{','.join(universe)}）—— 缺 symbol 的条件永不触发，"
+                        f"请在该条件里显式写明 symbol"
+                    )
+            item["symbol"] = symbol
         out.append(item)
     return out
 
@@ -141,6 +176,10 @@ def evaluate_condition(client, cond: dict, timeframe: str, now: Optional[float] 
 
     symbol = cond.get("symbol") or ""
     if not symbol:
+        # 缺 symbol 的条件**永不触发**（每次求值都到这里）—— 不能静默：
+        # 配置错误必须留痕，否则「设了条件却从没被唤醒」在日志里查不出原因。
+        log.warning("condition %s has no symbol → never fires (key=%s)",
+                    ctype, cond.get("key") or "")
         return False, "no symbol"
     # ensure enough history for the longest indicator period
     period_hint = max(

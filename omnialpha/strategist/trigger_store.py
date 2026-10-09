@@ -12,6 +12,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+# 归一必须与**执行器**同源：下单走 `gate_client.resolve_symbol`，触发器白名单若按
+# 字面比较，`BTC` 就会被判越界 —— 明明就是同一个币（B-10/B-11 之外的第 3 处静默）。
+# 归一实现在此一处，`triggers.py` 复用（同一条判据两处各写一遍必然漂移）。
+from ..gate_client import resolve_symbol
+
 DEFAULT_ALLOW = (
     "price_break",
     # —— EMA 家族 ——
@@ -67,11 +72,36 @@ class TriggerPolicyError(ValueError):
     pass
 
 
+def normalize_symbol(raw: Any) -> str:
+    """归一成执行器认的写法（`btc` / `BTC` → `BTC_USDT`）；空值返回 ""。"""
+    s = str(raw or "").strip().upper()
+    if not s:
+        return ""
+    try:
+        return resolve_symbol(s)
+    except Exception:  # noqa: BLE001 —— 归一失败不该把配置校验炸掉，退回原写法
+        return s
+
+
+def normalize_symbols(seq: Optional[list]) -> tuple:
+    """归一 + 去重（保序）。去重是必须的：同一币的两种写法会让「唯一宇宙」判据失真。"""
+    out: list[str] = []
+    for x in (seq or ()):
+        s = normalize_symbol(x)
+        if s and s not in out:
+            out.append(s)
+    return tuple(out)
+
+
 @dataclass
 class AITriggerPolicy:
     enabled: bool = False
     allow_types: tuple = DEFAULT_ALLOW
     max_active: int = 5
+    # 每个币的槽位数（缺省 1）；`max_active` 保留为**总上限**。
+    # 为什么需要它：`max_active` 全局共享时，首币能把槽位占满 → 其余币**永远设不上
+    # 唤醒条件**（弱币系统性出局，且 AI 只看到 `trigger_limit`，无法归因）。
+    max_active_per_symbol: int = 1
     default_cooldown_sec: float = 60.0
     default_ttl_sec: float = 86400.0
     allow_modify: bool = True
@@ -117,16 +147,20 @@ def validate_trigger_payload(
     ctype = str(raw.get("type") or "").strip().lower()
     if ctype not in tuple(policy.allow_types):
         raise TriggerPolicyError(f"type not allowed: {ctype!r}")
-    symbol = str(raw.get("symbol") or "").strip().upper()
-    allowed = tuple(policy.allow_symbols) or tuple(bot_symbols or [])
+    symbol = normalize_symbol(raw.get("symbol"))
+    # 白名单与输入**两侧都归一**：`BTC` 与 `BTC_USDT` 是同一个币，不该被判越界。
+    allowed = normalize_symbols(policy.allow_symbols) or normalize_symbols(bot_symbols)
     if not symbol and len(allowed) == 1:
         # 单币种 bot 漏写 symbol 时意图**没有歧义** —— 直接补上，而不是把整条触发器拒掉。
         # 线上实测：`trigger_rejected: symbol not allowed: ''` 在提示词补全参数范围之后
         # 仍是唯一还在发生的触发器拒绝（2026-10-02 修复后 5 次），纯属白烧一轮。
         # 多币种时仍然拒 —— 那种情况下「用哪个币」是真的猜不出来。
-        symbol = str(allowed[0]).strip().upper()
+        symbol = allowed[0]
     if allowed and symbol not in allowed:
-        raise TriggerPolicyError(f"symbol not allowed: {symbol!r}")
+        # 带上 universe：错误必须能自我纠正，否则模型只能猜（多币下会反复被拒）。
+        raise TriggerPolicyError(
+            f"symbol not allowed: {symbol!r}; universe={list(allowed)}"
+        )
 
     params: dict[str, Any] = {}
     for key in ("period", "fast", "slow", "signal", "lookback", "mult", "level",
@@ -213,13 +247,35 @@ class AITriggerStore:
         self._purge_expired(now)
         return list(self._items)
 
+    def _per_symbol_cap(self, bot_symbols: Optional[list]) -> Optional[int]:
+        """每个币的槽位上限；单币宇宙返回 None（= 不额外收紧）。
+
+        为什么单币不收紧：单币 bot 的 per-symbol 配额与总上限**同义**，再压一层等于
+        把 `max_active: 5` 变成 1 —— 那是能力下降（设计 I11 要求单币行为逐字不变），
+        而「首币饿死其余币」只存在于多币宇宙。
+        """
+        universe = normalize_symbols(self.policy.allow_symbols) or normalize_symbols(bot_symbols)
+        if len(universe) <= 1:
+            return None
+        cap = int(getattr(self.policy, "max_active_per_symbol", 1) or 0)
+        return cap if cap > 0 else None
+
+    def _counts_by_symbol(self, now: Optional[float] = None) -> dict:
+        """按币计数。**与总上限同源**：先做过期清理 —— 过期条件不该继续占槽位。"""
+        self._purge_expired(now)
+        counts: dict[str, int] = {}
+        for t in self._items:
+            key = normalize_symbol(t.symbol)
+            counts[key] = counts.get(key, 0) + 1
+        return counts
+
     def _find_same(self, norm: dict) -> Optional["AITrigger"]:
-        """按 (type, symbol, params) 找已存在的同质条件。"""
+        """按 (type, symbol, params) 找已存在的同质条件（symbol 归一后比较）。"""
         want_type = str(norm.get("type") or "")
-        want_sym = str(norm.get("symbol") or "")
+        want_sym = normalize_symbol(norm.get("symbol"))
         want = dict(norm.get("params") or {})
         for t in self._items:
-            if t.type == want_type and t.symbol == want_sym and dict(t.params or {}) == want:
+            if t.type == want_type and normalize_symbol(t.symbol) == want_sym and dict(t.params or {}) == want:
                 return t
         return None
 
@@ -236,13 +292,23 @@ class AITriggerStore:
         dup = self._find_same(norm)
         if dup is not None:
             return dup
+        symbol = normalize_symbol(norm.get("symbol"))
+        per_symbol = self._per_symbol_cap(bot_symbols)
+        if per_symbol is not None:
+            used = self._counts_by_symbol().get(symbol, 0)
+            if used >= per_symbol:
+                raise TriggerPolicyError(
+                    f"trigger_limit: {symbol} 已有 {used} 个条件，"
+                    f"max_active_per_symbol={per_symbol} —— "
+                    f"换条件请先 trigger_ops remove 该币的旧条件"
+                )
         if len(self._items) >= int(self.policy.max_active):
             raise TriggerPolicyError(f"trigger_limit: max_active={self.policy.max_active}")
         now = time.time()
         t = AITrigger(
             id="t-" + uuid.uuid4().hex[:8],
             type=norm["type"],
-            symbol=norm["symbol"],
+            symbol=symbol,
             params=norm.get("params") or {},
             cooldown_sec=float(norm.get("cooldown_sec") or self.policy.default_cooldown_sec),
             ttl_sec=float(norm.get("ttl_sec") or self.policy.default_ttl_sec),
