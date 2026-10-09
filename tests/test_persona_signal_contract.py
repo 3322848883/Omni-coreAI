@@ -110,9 +110,12 @@ class TestDiscussionChipTypeIsNormalized(unittest.TestCase):
         parse_signal({**chip, "action": "stop_entry_long", "size_usd": 100})   # 必须被接受
 
     def test_unknown_type_falls_back_to_market(self):
+        # T3 起 `_discussion_chip` 要求 chip 带合法 symbol（缺了/越界会拒绝），
+        # 所以这里给一个宇宙内的标的 —— 本用例只测 type 归一。
         chip = PlanRunner._discussion_chip(
             {"type": "weird_thing", "sl": 1, "trigger_price": 2},
-            "stop_entry_long", {"chips": []},
+            "stop_entry_long", {"chips": [{"symbol": "ETH_USDT"}]},
+            allowed=["ETH_USDT"],
         )
         self.assertEqual(chip["type"], "market")
 

@@ -398,7 +398,12 @@ class TestRunnerLifecycle(unittest.TestCase):
             self.assertTrue(res["ok"])
             self.assertFalse(res["plans"]["b"]["ok"])
 
-    def test_no_chips_symbol_defaults_btc(self):
+    def test_no_chips_symbol_is_not_invented(self):
+        """全组都没配 symbols 时**不猜**标的（原实现写死 `BTC_USDT`）。
+
+        T3 起：唯一解（该 bot 只配一个币）仍纠正；**无法确定时留空**——
+        凭空写一个币会让信号带着错标的下单（实测 eth-disc 只做 ETH 却产出 BTC_USDT）。
+        """
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             g = _group(target_account="a", topology="single_account")
@@ -410,7 +415,8 @@ class TestRunnerLifecycle(unittest.TestCase):
             inbox = list((root / "data" / "bots" / "a" / "inbox").glob("*.json"))
             self.assertTrue(inbox)
             payload = json.loads(inbox[0].read_text(encoding="utf-8"))
-            self.assertEqual(payload["symbol"], "BTC_USDT")
+            self.assertEqual(payload["symbol"], "",
+                             "无法确定标的时应留空，而不是凭空写 BTC_USDT")
 
     def test_mirror_partial_failure_reports(self):
         """镜像拓扑：一个成员写失败 → executed=False 但已成功的仍落盘。"""

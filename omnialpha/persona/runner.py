@@ -86,7 +86,8 @@ class PersonaRunner:
         cycle_id = next(iter(flat.values())).get("cycle_id") or ""
 
         # 记录共同记忆：本轮投票（新单先建，再记票）
-        order_id = self._resolve_order_id(decision, fusion)
+        # 带上本轮标的：多币组必须按币取单，否则可能复用/关闭**另一个币**的订单记录
+        order_id = self._resolve_order_id(decision, fusion, symbol=self._symbol_of(flat))
         if order_id:
             if self.orders.get(order_id) is None:
                 # 新建共享订单（开仓/首轮）
@@ -592,18 +593,27 @@ class PersonaRunner:
                 return str(chips[0]["symbol"])
         # 兜底用第一个成员自己的标的 —— 原先是硬编码 "BTC_USDT"，
         # 对只做 ETH 的组会把共享订单的 symbol 写错。
+        # 全组都没配 symbols 时返回 ""（**不猜**）：写一个错的标的比留空更危险。
         for b in self.group.members:
             syms = self._symbols_of(b)
             if syms:
                 return syms[0]
-        return "BTC_USDT"
+        return ""
 
-    def _resolve_order_id(self, decision: str, fusion: dict) -> Optional[str]:
+    def _resolve_order_id(self, decision: str, fusion: dict,
+                          symbol: str = "") -> Optional[str]:
         """订单生命周期：开仓建新单；持仓期（hold/管理动作）复用现有 open 单。
 
         按 group 过滤，多组隔离互不干扰。
+
+        **再按 symbol 过滤**（T3）：`list_open` 返回的是"文件名字典序"，
+        多币组共管多张单时 `opens[0]` 与币无关 —— 于是想把 ETH 方向反转可能
+        **关掉 BTC 那张单**，hold/close 复用的也可能是另一个币的单（静默错配）。
+        `symbol` 为空（全组未配 symbols）时退化为旧行为，不做过滤。
         """
         opens = self.orders.list_open(group=self.group.name)
+        if symbol:
+            opens = [o for o in opens if str(o.get("symbol") or "") == symbol]
         # 方向反转 → **另起一张单**，而不是在旧记录上再记一次 open。
         # 否则注入 prompt 的订单上下文会自相矛盾：实测账户已是 +177 多仓，
         # 而订单上下文还写着「方向: short / 理由: …限价空」（side 与 reason 都是旧的）
@@ -652,17 +662,22 @@ class PersonaRunner:
         # 归一化为 schema 合法 action（close_long/close_short 不在 ACTIONS，需拆成 close+side）
         action, side_override = self._normalize_action(action)
 
-        # chip 的标的必须落在该 bot 自己的白名单里。讨论丢字段后重建的 chip 会带
-        # 硬编码兜底（见 `_discuss`）；executor 的白名单闸门本来也会把这种信号整笔
-        # 拒掉，但那样只留下一条 failed —— 不如在这里纠正成该 bot 自己的标的并留痕。
+        # chip 的标的必须落在该 bot 自己的白名单里。分两种情形：
+        #  ① 该 bot 只配了一个币 → **纠正**它（唯一解；模型写错标的但价位是那个币的，
+        #     白名单就是它的意图）—— 这是旧行为，保留并留痕 `meta.symbol_corrected`；
+        #  ② 多币宇宙 → **拒绝**（把动作降成 hold）。此时"首币"不是唯一解，
+        #     原实现静默改成 `allowed[0]`，会让模型本意 SOL 的结论被**执行成 ETH**。
         sym = str(chip.get("symbol") or "").strip()
         allowed = self._symbols_of(source_bot)
+        symbol_rejected = ""
         corrected_from = ""
-        if allowed and sym not in allowed:
-            corrected_from = sym
-            sym = allowed[0]
-        if not sym:
-            sym = allowed[0] if allowed else "BTC_USDT"
+        if not sym or (allowed and sym not in allowed):
+            if len(allowed) == 1:
+                corrected_from = sym
+                sym = allowed[0]
+            else:
+                symbol_rejected = sym or "(missing)"
+                sym = ""
 
         payload = {
             "action": action,
@@ -680,6 +695,12 @@ class PersonaRunner:
                 "confidence": fusion.get("confidence") or 0.0,
             },
         }
+        if symbol_rejected:
+            # 拒绝而不是纠正：动作降成 hold（不下单），把原因与宇宙留在 meta 里可查
+            payload["action"] = "hold"
+            payload["meta"]["symbol_rejected"] = symbol_rejected
+            payload["meta"]["rejected_action"] = action
+            payload["meta"]["universe"] = allowed
         if corrected_from:
             payload["meta"]["symbol_corrected"] = f"{corrected_from}→{sym}"
         if side_override:

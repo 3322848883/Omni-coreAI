@@ -89,6 +89,10 @@ class PlanRunner:
             bot_root=cfg.bot_root,
         )
         self._last_kline_t: Optional[int] = None
+        # 逐币基线（多币才用；单币仍走 `_last_kline_t` 以保持历史行为逐字不变）
+        self._last_kline_t_by_symbol: dict[str, int] = {}
+        # 上一次 _kline_closed() 判定为"收盘"的币（供触发标签取用）
+        self._kline_close_symbols: list[str] = []
         self._last_cycle_id: Optional[str] = None
         self._busy = threading.Lock()
         self._conditions = parse_conditions(cfg.conditions)
@@ -176,6 +180,10 @@ class PlanRunner:
             "min_confidence": self.cfg.risk.min_confidence,
             "max_notional_usd": round(limit, 2) if limit is not None else None,
             "max_chips": self.cfg.risk.max_chips,
+            # 品种宇宙与每币名额也进风控段：名额是按币给的（T8/D8），不告诉模型配额，
+            # 它会以为"几条 chip 都能落在同一个币上"，于是把别的币饿死。
+            "symbols": list(self.cfg.symbols or []),
+            "max_chips_per_symbol": getattr(self.cfg.risk, "max_chips_per_symbol", 1),
             "allow_actions": sorted(self.cfg.risk.allow_actions)
             if self.cfg.risk.allow_actions
             else None,
@@ -513,19 +521,24 @@ class PlanRunner:
             return ""
 
     def _hold_plan(self, cycle_id: str, reason: str) -> Plan:
-        """降级用的 hold Plan：让本轮照常走完风控/记录链路，不留下空周期。"""
+        """降级用的 hold Plan：让本轮照常走完风控/记录链路，不留下空周期。
+
+        **逐币**而不是只给首币：多币宇宙里"只给首币一条 hold"会让其余币在
+        journal/近况里**完全缺席**，模型下一轮看不到它们（等于那几枚币被静默丢出决策）。
+        宇宙为空时不再兜底 `BTC_USDT` —— 那是在猜一个本 bot 根本没配的标的。
+        """
         from .schema import Chip, Plan
 
-        sym = (self.cfg.symbols or ["BTC_USDT"])[0]
+        syms = list(self.cfg.symbols or [])
+        chips = [Chip(symbol=s, action="hold", confidence=0.0,
+                      reasoning="数据/模型异常，降级观望") for s in syms]
+        if not chips:
+            chips = [Chip(symbol="", action="hold", confidence=0.0,
+                          reasoning="数据/模型异常，降级观望；本 bot 未配置 symbols")]
         return Plan(
             cycle_id=cycle_id,
             reasoning=f"[降级] {reason[:60]}",
-            chips=[Chip(
-                symbol=sym,
-                action="hold",
-                confidence=0.0,
-                reasoning="数据/模型异常，降级观望",
-            )],
+            chips=chips,
         )
 
     def _record_cycle_failure(self, root: Path, bid: str, detail: str) -> None:
@@ -560,6 +573,13 @@ class PlanRunner:
         稳定优先：一个成员失败不应让它整轮缺席（否则融合只剩少数人）。
         """
         log.warning("degrade to hold: %s", reason)
+        # 与 `_hold_plan` 同源：多币逐币一条 hold，宇宙为空时不猜 `BTC_USDT`
+        syms = list(self.cfg.symbols or [])
+        chips = [{"symbol": s, "action": "hold", "confidence": 0.0,
+                  "reasoning": "数据/模型异常，降级观望"} for s in syms]
+        if not chips:
+            chips = [{"symbol": "", "action": "hold", "confidence": 0.0,
+                      "reasoning": "数据/模型异常，降级观望；本 bot 未配置 symbols"}]
         return {
             "ok": True,
             "degraded": reason,
@@ -568,12 +588,7 @@ class PlanRunner:
             "plan": {
                 "cycle_id": cycle_id,
                 "reasoning": f"[降级] {reason[:40]}",
-                "chips": [{
-                    "symbol": (self.cfg.symbols or ["BTC_USDT"])[0],
-                    "action": "hold",
-                    "confidence": 0.0,
-                    "reasoning": "数据/模型异常，降级观望",
-                }],
+                "chips": chips,
             },
         }
 
@@ -777,7 +792,8 @@ class PlanRunner:
         my_reasoning = str(plan.get("reasoning") or "")[:200]
         sys_prompt = (
             "你是交易策略人格，参与多空讨论。只输出一个 JSON 对象，不要 Markdown 前后缀。\n"
-            '{"decision":"open_long|open_short|close|reduce_long|reduce_short|hold|'
+            '{"symbol":"<品种宇宙里的值>",'
+            '"decision":"open_long|open_short|close|reduce_long|reduce_short|hold|'
             'stop_entry_long|stop_entry_short",'
             '"confidence":0.0,"reasoning":"≤30字",'
             '"type":"limit|market|post_only|ioc|fok","price":0.0,"trigger_price":0.0,'
@@ -786,7 +802,9 @@ class PlanRunner:
             "规则：1) decision 用英文枚举；2) confidence 0~1；3) reasoning ≤30 字；"
             "4) **入场类（open_*/stop_entry_*）必须给出 sl 与可执行价位**"
             "（限价给 price，突破进场给 trigger_price）；"
-            "5) 给不出可执行价位就选 hold —— 讨论的结论要能直接执行，不是只表个态。"
+            "5) 给不出可执行价位就选 hold —— 讨论的结论要能直接执行，不是只表个态；"
+            "6) **symbol 必须写、且必须是【品种宇宙】里的那个** —— 讨论结论是针对哪个币的，"
+            "缺了或写错整条就作废（系统不会替你补，补错标的比少一条更危险）。"
         )
         user_prompt = (
             f"我的当前决策：{my_decision}\n我的理由：{my_reasoning}\n\n"
@@ -827,7 +845,8 @@ class PlanRunner:
             # 讨论结果根本进不了融合（线上实测：三人讨论后都改成 stop_entry_long，
             # 融合票却仍是讨论前的 hold/long/hold，讨论成了纯日志表演）。
             chip = self._discussion_chip(data, decision, plan,
-                                         default_symbol=self._default_symbol())
+                                         default_symbol=self._default_symbol(),
+                                         allowed=self.cfg.symbols)
             if decision in ("open_long", "open_short", "stop_entry_long", "stop_entry_short") \
                     and chip is None:
                 decision = "hold"   # 入场却给不出可执行价位 → 退回 hold，不假装能执行
@@ -842,9 +861,12 @@ class PlanRunner:
         原先这条兜底是 `_discussion_chip` 里的硬编码 `"BTC_USDT"`，对只做 ETH 的组
         会把标的写错（实测 eth-disc 三人格只做 ETH，产出的信号却带 `BTC_USDT`，
         而价位是 ETH 的 2694/2706）。
+
+        **多币宇宙返回空串**：那时"首币"不是唯一解，补上去就是张冠李戴
+        （结论可能针对别的币），让调用方拒绝该 chip 比猜一个更安全。
         """
         syms = getattr(self.cfg, "symbols", None) or []
-        return str(syms[0]) if syms else ""
+        return str(syms[0]) if len(syms) == 1 else ""
 
     def _log_discussion_call(self, round_num: int, sys_prompt: str,
                              user_prompt: str, raw: str) -> None:
@@ -870,10 +892,16 @@ class PlanRunner:
 
     @staticmethod
     def _discussion_chip(data: dict, decision: str, plan: dict,
-                         default_symbol: str = "") -> Optional[dict]:
+                         default_symbol: str = "",
+                         allowed: Optional[list] = None) -> Optional[dict]:
         """把讨论结论拼成可执行 chip；入场类缺 sl / 价位则返回 None（调用方退回 hold）。
 
-        `default_symbol` 由调用方传 bot 自己的 `symbols[0]`（见 `_default_symbol`）。
+        `default_symbol` 由调用方传 bot 自己的 `symbols[0]`（见 `_default_symbol`）；
+        `allowed` = 品种宇宙，**越界一律拒绝**该 chip。
+
+        为什么越界要拒而不是改成首币：讨论结论可能是针对**另一个币**的，补成首币
+        等于把结论张冠李戴地执行（原实现就是 `or "BTC_USDT"`，实测 eth-disc 只做 ETH
+        却产出带 `BTC_USDT` 的信号）。宁可少一条 chip，也不要下错标的的单。
         """
         chips = plan.get("chips") or []
         base = dict(chips[0]) if chips and isinstance(chips[0], dict) else {}
@@ -889,7 +917,13 @@ class PlanRunner:
 
         chip = dict(base)
         chip["action"] = decision
-        chip["symbol"] = chip.get("symbol") or default_symbol or "BTC_USDT"
+        chip["symbol"] = chip.get("symbol") or default_symbol
+        sym = str(chip.get("symbol") or "").strip()
+        universe = [str(x) for x in (allowed or [])]
+        if not sym:
+            return None                      # 缺 symbol 且宇宙不唯一 → 不猜
+        if universe and sym not in universe:
+            return None                      # 越界 → 拒绝，不做纠正
         if decision not in ("open_long", "open_short", "stop_entry_long", "stop_entry_short"):
             return chip          # close/reduce/modify 沿用原 chip 的执行字段
         sl = num("sl")
@@ -1251,28 +1285,82 @@ class PlanRunner:
         return msg.get("content") or ""
 
     def _kline_closed(self) -> bool:
-        """True when latest candle timestamp for first symbol advances.
+        """宇宙内**任一币**的最新 K 线前进即唤醒；单币路径与旧实现逐字一致。
 
         取数走 fetch_rest_candles（新旧客户端都兼容）。此前直接调
         client.public_get，而客户端重构成 ExchangeClient 后没有该方法 →
         异常被吞、永远返回 False → kline_close 事件从未触发过。
+
+        **为什么必须遍历整个宇宙**：旧实现只取宇宙里的**第一个**币，多币 bot 的第 2..N 个币
+        的收盘事件**永远唤不醒**（而 `docs/compose/spec/llm-strategist.md:119` 还把这个
+        行为写成了"规格"，于是既没被测试拦住、也没被标成缺陷）。
+        某个币取数失败只跳过它自己：不唤醒、也**不把它当成"已观测"** —— 基线记 `0`
+        （= 未知），它恢复后的第一根 K 线因此仍能唤醒。若失败那轮干脆不写，恢复时会与
+        "全新未观测"混淆，那笔收盘事件就永久丢了。
         """
         if not self.cfg.symbols:
             return False
-        sym = self.cfg.symbols[0]
         interval = self.cfg.event_timeframe or self.cfg.timeframe
         try:
             from .market import fetch_rest_candles
-
-            rows = fetch_rest_candles(self.client, sym, interval, 2)
-            if not rows:
-                return False
-            ts = int((rows[-1] or {}).get("t") or 0)
-            closed = self._last_kline_t is not None and ts > self._last_kline_t
-            self._last_kline_t = ts
-            return closed
         except Exception:  # noqa: BLE001
             return False
+        # 单币沿用历史属性 `_last_kline_t`（既有调用方与测试按 int 读写它）；
+        # 多币才需要逐币基线。
+        single = len(self.cfg.symbols) == 1
+        by_sym = getattr(self, "_last_kline_t_by_symbol", None)
+        if by_sym is None:
+            by_sym = self._last_kline_t_by_symbol = {}
+        closed: list[str] = []
+
+        def _mark_unknown(sym: str) -> None:
+            """该币本轮没读到 → 基线记「未知」（0）。
+
+            为什么要写而不是不写：不写的话，它下次成功读取会与"全新未观测"（键不存在）
+            混为一谈，于是**这笔收盘事件永久丢失**。记 0 则保证它恢复后仍会唤醒一次。
+            单币路径**不动** `_last_kline_t` —— 那是历史行为（I11 逐字不变）。
+            """
+            if not single:
+                by_sym[sym] = 0
+
+        for sym in self.cfg.symbols:
+            try:
+                rows = fetch_rest_candles(self.client, sym, interval, 2)
+            except Exception:  # noqa: BLE001 — 一个币取不到不该拖住其他币
+                log.warning("kline_close: %s 取数失败，本轮跳过该币（不影响其他币）", sym)
+                _mark_unknown(sym)
+                continue
+            if not rows:
+                _mark_unknown(sym)
+                continue
+            ts = int((rows[-1] or {}).get("t") or 0)
+            if not ts:
+                _mark_unknown(sym)
+                continue
+            if single:
+                prev = self._last_kline_t
+                self._last_kline_t = ts
+            else:
+                prev = by_sym.get(sym)
+                by_sym[sym] = ts
+            if prev is not None and ts > prev:
+                closed.append(sym)
+        if closed:
+            # 保留"上一次唤醒是谁收盘"——`_kline_close_trigger()` 在唤醒后立即被调用，
+            # 中途的空判定不该把它抹掉（同一分钟多币收盘只唤醒一次）。
+            self._kline_close_symbols = closed
+        return bool(closed)
+
+    def _kline_close_trigger(self) -> str:
+        """kline_close 的触发标签：单币保持 `kline_close`（逐字不变），多币带出收盘的币。
+
+        带上币名是为了让日志与 cycle 元数据能回答"这轮是谁收盘唤醒的"——
+        多币下 `plan[kline_close]` 无法区分，排查时看不出是哪条腿在驱动节奏。
+        """
+        syms = list(getattr(self, "_kline_close_symbols", None) or [])
+        if len(self.cfg.symbols or []) <= 1 or not syms:
+            return "kline_close"
+        return "kline_close:" + ",".join(syms)
 
     def _apply_ai_triggers(self, plan) -> list:
         """Apply Plan.triggers / trigger_ops under ai_triggers policy."""
@@ -1334,7 +1422,7 @@ class PlanRunner:
                 fire, trigger = True, "interval"
                 last_interval = now
             elif self.cfg.event_on_kline_close and self._kline_closed():
-                fire, trigger = True, "kline_close"
+                fire, trigger = True, self._kline_close_trigger()
             else:
                 cond = self._check_condition_events()
                 if cond:
