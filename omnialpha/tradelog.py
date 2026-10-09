@@ -61,7 +61,7 @@ class TradeLogger:
         )
         # SQLite ledger (best-effort)
         try:
-            from .ledger import Ledger, default_ledger_path
+            from .ledger import Ledger, default_ledger_path, symbols_from_steps
 
             root = self._ledger_root()
             if root is not None:
@@ -73,6 +73,9 @@ class TradeLogger:
                     ok=bool(report.get("ok")),
                     steps=report.get("steps"),
                     source=source,
+                    # ledger 里按币可查（审计 D-15：这一列原先**恒 NULL**）。
+                    # jsonl 本身不动 —— 单币的 trades.jsonl 逐字不变。
+                    symbols=symbols_from_steps(report.get("steps")),
                 )
                 led.close()
         except Exception:  # noqa: BLE001

@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .ledger import Ledger, default_ledger_path
+from .ledger import Ledger, default_ledger_path, symbols_from_steps
 from .paths import BotPaths, LAYOUT_VERSION, detect_legacy_layout
 
 
@@ -93,6 +93,8 @@ def migrate_bot(root: Path, bot_id: str, dry_run: bool = False, copy: bool = Fal
                         steps=row.get("steps"),
                         source=row.get("source") or "import",
                         ts=_ts(row.get("ts")),
+                        # 历史 jsonl 的 steps 带 symbol 就用；没有就留空（不猜）
+                        symbols=symbols_from_steps(row.get("steps")),
                     )
                     report["imported_trades"] += 1
         finally:
