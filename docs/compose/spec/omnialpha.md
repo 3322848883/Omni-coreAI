@@ -139,7 +139,7 @@ AI 定时写 JSON ──► inbox/<bot_id>/*.json
 
 | 字段 | 类型 | 默认 | 说明 |
 |------|------|------|------|
-| `symbol` | string | — | `BTC_USDT` 或 `BTC`（经 SYMBOL_MAP 归一） |
+| `symbol` | string | — | `BTC_USDT` / `BTC` / `BTCUSDT`，统一经 `resolve_symbol` 归一 |
 | `size_usd` | number | — | 名义 USDT；`size` 存在时忽略 |
 | `size` | int | — | 直接张数（高级） |
 | `type` | string | `market` | `market\|limit\|post_only\|ioc\|fok` → TIF `ioc/gtc/poc/ioc/fok` |
@@ -247,6 +247,8 @@ python -m omnialpha status           # bot 配置/inbox 余量/最近执行摘�
 
 - `rest_signed_request` / `gate_sign`（quick_order.py:202–261）
 - `resolve_symbol` / `SYMBOL_MAP` / `ORDER_TIF` / `apply_order_type` 语义
+  （**符号归一的唯一实现在 ``omnialpha/gate_client.py``**；采集侧后来改为直接 import 它，
+  见 `tests/test_symbol_identity.py`，本目录不再保留副本）
 - `api_get_position_mode` 与 dual 判定（quick_order.py:339–344, 166–167）
 - 开/平/触发/撤 REST 路径与 body 形状（quick_order cmd_open / cmd_close / cmd_price_trigger / cancel_*）
 - 环境选择 live/testnet 的 REST 基址与密钥变量约定

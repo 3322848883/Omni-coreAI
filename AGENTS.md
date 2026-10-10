@@ -308,6 +308,10 @@ unding_enabled、position_mode、margin_mode、price_band_pct
 - **讨论模式**（3 阶段，可选）：`discussion.enabled: true` + `rounds: 3` → ①相互讨论与反驳 ②深化讨论 ③最终决策；`early_exit_on_agreement` 控制一致即退；改口落盘 `data/shared/discussion_log.jsonl`
 - **稳定性（不掉票）**：LLM 5xx/网络错误**指数退避重试 3 次**；重试仍失败或解析失败 → **降级 hold**（保留投票权）；`analyze_once` 异常也降级；**账户缺失继续行情分析**；无工具调用**强制重试**
 - **工具审计**：每轮 `tool_usage` + `tool_usage_summary` 随 `thinking.json` 落盘（防偷懒）
+- **事件留痕**：`data/shared/persona_log.jsonl`（`_log`，每行带 `ts`/`group`）—— 含 `decision`、
+  `hold`、`symbol_rejected`（**越界 chip 被拒**：`meta.reason` 是 `symbol_not_in_universe` /
+  `symbol_missing`，另有 `corrected_from` 与 `universe`）、`analyze_failed`。
+  它**不是** `alerts.json` 的告警类型（被拒不等于要告警），查"这轮为什么没下单"看这里。
 - 共同记忆 `data/shared/orders/<order_id>.json`。`python -m omnialpha persona-run --group <name>`
 
 **记忆系统**（agent-memory）：四层记忆（Order/Journal/Profile/Working）。订单上下文含 reason/lifecycle/recent_events(top-5)/memory_refs/invalidation，**匹配按路径区分**：单 bot（`plan-loop`）只看 `target_account == 自己`，人格（`persona-run`）看全组 `members`（组内共管同一张单）；**方向反转时另起一张单**（旧单关闭），否则注入的持仓方向会与账户相反。决策日志 append-only 事件溯源（`state/memory_journal.jsonl`，含 `snapshot_digest`/`llm_model`/`prompt_cache_hit_tokens`，**hold 轮也记**）。策略画像（`state/memory_profile.json`）的**核心统计由 paper 账本投影**（`fills.realised_pnl`）—— 覆盖**全部**平仓（含 SL/TP 触发：交易所侧成交、没有信号）与**全部** bot；`by_action`/`best_act` 由平仓事件尽力而为，无账本（live）时退回文件累加值。上下文由 `build_context` 按缓存顺序组装（稳定前缀 → 变化值殿后）。遗忘按 24h 间隔跑（TTL 归档 + 超龄已平仓清理，状态落 `data/shared/memory_gc.json`）。

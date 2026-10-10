@@ -734,21 +734,22 @@ DOGE_USDT 15m (本地库) 最新 20 根:
 
 ### 别名映射
 
-如果嫌 `DOGE_USDT` 太长，可在本技能目录下的 `kline_watcher.py` 或 `quick_order.py` 中修改 `SYMBOL_MAP`：
+符号归一（`BTC` → `BTC_USDT`、`BTCUSDT` → `BTC_USDT`、`AU` → `XAU_USDT`）集中在**库里**
+（`omnialpha/gate_client.py` 的 `resolve_symbol` 与它那张别名表），本目录的
+`kline_watcher.py` / `quick_order.py` 都**直接 import 同一份实现**：
 
 ```python
-SYMBOL_MAP = {
-    "BTC": "BTC_USDT",
-    "ETH": "ETH_USDT",
-    "SOL": "SOL_USDT",
-    "DOGE": "DOGE_USDT",    # 新增映射
-    "XRP": "XRP_USDT",      # 新增映射
-    "XAU": "XAU_USDT",      # 黄金
-    "XAG": "XAG_USDT",      # 白银
-    "AU":  "XAU_USDT",      # 黄金（短别名）
-    "AG":  "XAG_USDT",      # 白银（短别名）
-}
+# pa-data-source/kline_watcher.py（quick_order.py 同理）
+from omnialpha.gate_client import resolve_symbol
 ```
+
+> ⚠️ **不要在本目录再写一份自己的别名表或解析函数。** 这里历史上出现过三份副本，
+> 结果同一个写法在不同入口指向不同合约（`BTCUSDT` 在一处被拼成 `BTCUSDT_USDT`），
+> 而查询命中 0 行时**只会静默返回空**、不报错。守卫测试
+> `tests/test_symbol_identity.py::TestSingleImplementation` 会扫整个目录拦下副本。
+
+要加别名（例如 `DOGE`）就改 `omnialpha/gate_client.py` 里那张表 —— 采集侧与 bot 侧
+**同时生效**，不需要两边各改一次。
 
 然后在 `watchlist.yaml` 中可以使用短名称：
 

@@ -11,7 +11,9 @@ api_secret_env: GATE_API_SECRET
 # api_key_env: GATE_TESTNET_API_KEY
 # api_secret_env: GATE_TESTNET_API_SECRET
 
-symbols:                  # 白名单；空列表 = 不限制
+symbols:                  # 执行白名单，同时是工具的【品种宇宙】。**不能留空** ——
+                          # 留空必须显式配 `symbols_unrestricted: true`，否则启动报错
+                          # （空白名单 = 任意币可开仓 + 零守护）
   - BTC_USDT
   - ETH_USDT
 
