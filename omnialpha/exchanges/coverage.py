@@ -31,8 +31,8 @@ _VENUE_LISTING_SUPPORT = {
     "binance": False,
     "okx": False,
     "bybit": False,
-    "bitget": False,
-    "hyperliquid": False,
+    "bitget": True,        # `BitgetExchange.available_symbols()`（公开端点）
+    "hyperliquid": True,   # `HyperliquidExchange.available_symbols()`（POST /info meta）
 }
 
 

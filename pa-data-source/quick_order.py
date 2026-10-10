@@ -85,18 +85,18 @@ except ImportError:
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 WATCHLIST_PATH = os.path.join(SCRIPT_DIR, "watchlist.yaml")
 
+# 仓库根进 sys.path：symbol 归一判据必须**全仓共用同一份**。这里原先有自己的
+# `SYMBOL_MAP` + `resolve_symbol`（第三份副本，注释还写着"复用自 kline_watcher"），
+# 而它**没跟着 T4 一起修**：`BTCUSDT` 会被它拼成 `BTCUSDT_USDT`，与 bot 侧
+# 归一结果不同 → 同一个写法在两处指不同的合约。
+_REPO_ROOT = os.path.dirname(SCRIPT_DIR)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from omnialpha.gate_client import resolve_symbol  # noqa: E402
+
 GATE_REST = os.environ.get("GATE_API_BASE", "https://api.gateio.ws")
 FUTURES_API = "/api/v4/futures/usdt"
-
-SYMBOL_MAP = {
-    "BTC": "BTC_USDT",
-    "ETH": "ETH_USDT",
-    "SOL": "SOL_USDT",
-    "XAU": "XAU_USDT",
-    "XAG": "XAG_USDT",
-    "AU": "XAU_USDT",
-    "AG": "XAG_USDT",
-}
 
 ORDER_TYPE_DESC = {
     "market": "市价",
@@ -114,18 +114,9 @@ ORDER_TIF = {
 }
 
 
-# ── 符号解析 (复用自 kline_watcher.py) ────────────────────
-def resolve_symbol(name):
-    """解析交易对名称: BTC -> BTC_USDT"""
-    upper = name.upper()
-    if upper in SYMBOL_MAP:
-        return SYMBOL_MAP[upper]
-    if "_USDT" in upper:
-        base = upper.split("_")[0]
-        if base in SYMBOL_MAP:
-            return SYMBOL_MAP[base]
-        return upper
-    return upper + "_USDT"
+# ── 符号解析 ──────────────────────────────────────────────
+# 由 `omnialpha.gate_client.resolve_symbol` 提供（见文件头的 sys.path 注入）。
+# **不要**在本文件再写一份：三份副本已经漂移过一次（`BTCUSDT` 三种结果）。
 
 
 def normalize_contract_size(value, label="size"):

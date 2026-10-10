@@ -92,7 +92,13 @@ class TestResolveSymbol(unittest.TestCase):
 
 
 class TestSingleImplementation(unittest.TestCase):
-    """采集侧必须**引用**同一份实现，而不是自己再写一遍。"""
+    """采集侧必须**引用**同一份实现，而不是自己再写一遍。
+
+    ⚠️ 判据必须是**整个 `pa-data-source/` 目录**，不能按文件点名：
+    这条守卫原先只扫 `kline_watcher.py`，于是 `quick_order.py` 里的第三份副本
+    （注释还写着"复用自 kline_watcher"、且仍把 `BTCUSDT` 拼成 `BTCUSDT_USDT`）
+    安然活过了 T4 —— **按文件点名的守卫挡不住下一个新文件**。
+    """
 
     def test_kline_watcher_reuses_gate_client_impl(self):
         import kline_watcher as kw
@@ -102,16 +108,37 @@ class TestSingleImplementation(unittest.TestCase):
             "pa-data-source/kline_watcher.py 必须 import 同一份 resolve_symbol（D2）",
         )
 
+    def test_quick_order_reuses_gate_client_impl(self):
+        import quick_order as qo
+
+        self.assertIs(
+            qo.resolve_symbol, resolve_symbol,
+            "pa-data-source/quick_order.py 必须 import 同一份 resolve_symbol",
+        )
+
     def test_collector_side_same_results(self):
         import kline_watcher as kw
 
         for raw, want in LEGACY_CASES + COMPACT_CASES:
             self.assertEqual(kw.resolve_symbol(raw), want, raw)
 
-    def test_no_second_copy_in_source(self):
-        """源码级反断言：采集侧不得再出现第二份 `def resolve_symbol`。"""
-        src = (PA / "kline_watcher.py").read_text(encoding="utf-8")
-        self.assertNotIn("def resolve_symbol", src)
+    def test_quick_order_same_results(self):
+        """同一个写法在两处必须指同一个合约（原先 `BTCUSDT` 一处对一处错）。"""
+        import quick_order as qo
+
+        for raw, want in LEGACY_CASES + COMPACT_CASES:
+            self.assertEqual(qo.resolve_symbol(raw), want, raw)
+
+    def test_no_second_copy_anywhere_in_collector_dir(self):
+        """源码级反断言：`pa-data-source/` 下**任何**文件都不得再有第二份实现。"""
+        files = sorted(PA.glob("*.py"))
+        self.assertTrue(files, "没扫到采集侧源码，判据失效")
+        for p in files:
+            src = p.read_text(encoding="utf-8")
+            self.assertNotIn("def resolve_symbol", src,
+                             f"{p.name} 又写了一份 resolve_symbol")
+            self.assertNotIn("SYMBOL_MAP = ", src,
+                             f"{p.name} 又写了一份 SYMBOL_MAP")
 
 
 if __name__ == "__main__":
