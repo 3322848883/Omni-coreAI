@@ -31,10 +31,15 @@ from omnialpha.schema import parse_signal  # noqa: E402
 
 
 class _Meta:
-    quanto_multiplier = 1.0
+    quanto_multiplier = 0.0001      # 与 BTC_USDT 同量级：名义 → 张数换算需要它
+    order_size_round = 1
+    order_size_min = 1
+    order_price_round = 0.1
+    price_tick = 0.1
     tick_size = 0.1
     lot_size = 1
     min_notional_usd = 1.0
+    name = "BTC_USDT"
 
 
 class _FakeClient:
@@ -58,6 +63,11 @@ class _FakeClient:
 
     def get_ticker(self, symbol):
         return {"mark_price": 50000.0}
+
+    def get_klines(self, symbol, interval, limit=100):
+        """高波动 K 线（ATR% ≈ 4.5%），用来触发 `_vol_adjust` 的缩放 note。"""
+        return [{"o": 50000, "h": 50000 + i * 100, "l": 49000, "c": 50000, "v": 1}
+                for i in range(20)]
 
     def get_contract(self, symbol):
         return _Meta()
@@ -316,6 +326,48 @@ class TestCancelOwnership(unittest.TestCase):
         self.assertEqual(c.wiped, [], "own 命名空间下不得整表撤单")
 
 
+class TestWideScopeIsExecuted(unittest.TestCase):
+    """宽路径（`order_scope: all`）的**闸门与执行必须同源**。
+
+    `scope` 只收窄了「查保护单」那一步、真正撤单仍打全账户，等于收紧没做 ——
+    这正是本仓记录过的「闸门测试全绿但生产路径没接线」形态。
+    """
+
+    def _ex_all(self, c):
+        return Executor(c, symbols_whitelist=["BTC_USDT"], order_scope="all")
+
+    def _two_symbols(self):
+        return _FakeClient(price_orders=[
+            {"id": "p1", "initial": {"text": "t-brk-tp", "contract": "BTC_USDT",
+                                     "reduce_only": 1, "size": -1}},
+            {"id": "p2", "initial": {"text": "t-brk-tp", "contract": "SOL_USDT",
+                                     "reduce_only": 1, "size": -1}},
+        ])
+
+    def test_bot_scope_price_wipe_is_limited_to_universe(self):
+        c = self._two_symbols()
+        rep = self._ex_all(c).execute_signal(
+            parse_signal({"action": "cancel_price_all", "scope": "bot"}))
+        self.assertTrue(rep.ok, rep.to_dict())
+        self.assertEqual(c.wiped, [("price_orders", "BTC_USDT")],
+                         "scope=bot 只能撤本 bot 宇宙内的条件单")
+
+    def test_account_scope_price_wipe_covers_every_symbol(self):
+        c = self._two_symbols()
+        rep = self._ex_all(c).execute_signal(
+            parse_signal({"action": "cancel_price_all", "scope": "account"}))
+        self.assertTrue(rep.ok, rep.to_dict())
+        self.assertEqual(c.wiped, [("price_orders", "BTC_USDT"), ("price_orders", "SOL_USDT")])
+
+    def test_symbol_scope_price_wipe_unchanged(self):
+        """带 symbol 的老路径逐字不变（单币 bot 走这条）。"""
+        c = self._two_symbols()
+        rep = self._ex_all(c).execute_signal(
+            parse_signal({"action": "cancel_price_all", "symbol": "BTC_USDT"}))
+        self.assertTrue(rep.ok, rep.to_dict())
+        self.assertEqual(c.wiped, [("price_orders", "BTC_USDT")])
+
+
 class TestReplaceAll(unittest.TestCase):
     """④ replace=all 真正实现（且按归属过滤）。"""
 
@@ -427,6 +479,58 @@ class TestRiskMessagesCarrySymbol(unittest.TestCase):
         self.assertFalse(rep.ok)
         self.assertIn("NO_FLIP", rep.results[0].error or "")
         self.assertIn("BTC_USDT", rep.results[0].error or "")
+
+    def test_trigger_price_side_carries_symbol(self):
+        """预检（`_precheck_exit_triggers`）拒单文案也要带币。"""
+        c = _FakeClient()
+        ex = _ex(c, require_sl=True)
+        # mark=50000；open_long 的 SL 要 rule=2（跌破触发）→ 51000 落在非法一侧
+        rep = ex.execute_signal(parse_signal({
+            "action": "open_long", "symbol": "BTC_USDT", "size": 1, "sl": 51000,
+        }))
+        self.assertFalse(rep.ok, rep.to_dict())
+        err = rep.results[0].error or ""
+        self.assertIn("TRIGGER_PRICE_SIDE", err)
+        self.assertIn("BTC_USDT", err)
+
+    def test_size_notes_carry_symbol(self):
+        """仓位验算/波动率缩放的 note 逐段都要带币（多币下才能归因）。"""
+        c = _FakeClient()
+        ex = _ex(c, max_notional_usd=1e12,
+                 account_risk={"max_notional_pct": 10, "risk_pct": 0.01,
+                               "vol_target_pct": 2.0},
+                 require_sl=True)
+        rep = ex.execute_signal(parse_signal({
+            "action": "open_long", "symbol": "BTC_USDT",
+            "size_usd": 100, "price": 50000, "sl": 25000,
+        }))
+        self.assertTrue(rep.ok, rep.to_dict())
+        note = rep.results[0].detail.get("size_align_note") or ""
+        self.assertIn("size_clamped", note)
+        self.assertIn("vol_adjust", note)
+        parts = [p.strip() for p in note.split(";") if p.strip()]
+        for p in parts:
+            self.assertIn("BTC_USDT", p, f"这段 note 不带 symbol：{p!r}")
+
+    def test_safe_mode_carries_symbol(self):
+        """安全模式（`_check_safe_mode`）文案带币。"""
+        import json
+        with tempfile.TemporaryDirectory() as td:
+            state = Path(td) / "data" / "bots" / "b1" / "state"
+            state.mkdir(parents=True, exist_ok=True)
+            (state / "health.json").write_text(
+                json.dumps({"error_streak": 3}), encoding="utf-8")
+            c = _FakeClient()
+            ex = Executor(c, symbols_whitelist=["BTC_USDT"], label_prefix="brk",
+                          root=Path(td), bot_id="b1", require_sl=True,
+                          account_risk={"safe_mode_after_failures": 3})
+            rep = ex.execute_signal(parse_signal({
+                "action": "open_long", "symbol": "BTC_USDT", "size": 1, "sl": 49000,
+            }))
+            self.assertFalse(rep.ok, rep.to_dict())
+            err = rep.results[0].error or ""
+            self.assertIn("SAFE_MODE", err)
+            self.assertIn("BTC_USDT", err)
 
 
 class TestRollbackNotification(unittest.TestCase):

@@ -913,6 +913,11 @@ class Executor:
         """Account-level halt / exposure / daily-loss limits (pre-trade, all configurable)."""
         ar = self.account_risk or {}
         action = (intent.meta or {}).get("requested_action") or intent.action
+        # 文案带 symbol：账户级闸门被触发时归档顶层的 error 不带币就**无法归因**
+        # （多币下一个账户里同时挂着几个币的单）。约定与 `_check_notional` 同源：
+        # 错误码后紧跟 `<symbol> `，symbol 为空时不加任何字符（单币自动补路径恒非空）。
+        sym = str(getattr(intent, "symbol", "") or "").strip()
+        where = f"{sym} " if sym else ""
         manage = {"hold", "modify_tp_sl", "close", "close_all", "flatten", "cancel_all", "cancel_price_all",
                   "cancel_trail_all", "reduce", "reduce_long", "reduce_short"}
         # 人工 halt（yaml）与**自动熔断**（日亏触发、跨日自动复位）取逻辑或。
@@ -920,7 +925,7 @@ class Executor:
         auto_halt = self._read_auto_halt()
         if (ar.get("halt") or auto_halt) and action not in manage:
             raise GateApiError(
-                "HALTED: "
+                "HALTED: " + where
                 + ("account_risk.halt=true" if ar.get("halt") else f"auto halt ({auto_halt})")
                 + "; only close/cancel allowed")
         if action not in manage and action.startswith(("open", "add", "stop_entry")):
@@ -938,7 +943,7 @@ class Executor:
                         self._write_auto_halt(
                             f"daily_loss_limit {start - total:.2f} > {dlimit}")
                         raise GateApiError(
-                            f"DAILY_LOSS_LIMIT: loss={start - total:.2f} > {dlimit} "
+                            f"DAILY_LOSS_LIMIT: {where}loss={start - total:.2f} > {dlimit} "
                             f"(day_start={start:.2f} now={total:.2f})"
                         )
                 except GateApiError:
@@ -962,7 +967,7 @@ class Executor:
             max_lev = ar.get("max_leverage")
             if max_lev is not None and intent.leverage and int(intent.leverage) > int(max_lev):
                 raise GateApiError(
-                    f"MAX_LEVERAGE: {intent.leverage} > account max_leverage={max_lev}"
+                    f"MAX_LEVERAGE: {where}{intent.leverage} > account max_leverage={max_lev}"
                 )
             # total notional: sum open positions + this order
             # 两个闸门取更小者：绝对值 max_total_notional_usd 与**按比例**的
@@ -1000,22 +1005,22 @@ class Executor:
                         eq = float((self.client.get_account() or {}).get("total") or 0)
                         if eq <= 0:
                             raise GateApiError(
-                                "MAX_TOTAL_NOTIONAL: cannot read equity for max_total_notional_pct"
+                                f"MAX_TOTAL_NOTIONAL: {where}cannot read equity for max_total_notional_pct"
                             )
                         pc = eq * float(max_total_pct)
                         cap = pc if cap is None else min(cap, pc)
                         pct_note = f" (权益×{float(max_total_pct):g})"
                     if cap is None:
-                        raise GateApiError("MAX_TOTAL_NOTIONAL: no cap configured")
+                        raise GateApiError(f"MAX_TOTAL_NOTIONAL: {where}no cap configured")
                     if this_usd is not None and pos_notional + float(this_usd) > cap:
                         raise GateApiError(
-                            f"MAX_TOTAL_NOTIONAL: open={pos_notional:.2f} + this={this_usd:.2f} "
+                            f"MAX_TOTAL_NOTIONAL: {where}open={pos_notional:.2f} + this={this_usd:.2f} "
                             f"> {cap:.0f}{pct_note}"
                         )
                 except GateApiError:
                     raise
                 except Exception:  # noqa: BLE001 — if cannot measure, do not silently allow huge size
-                    raise GateApiError("MAX_TOTAL_NOTIONAL: cannot measure account exposure")
+                    raise GateApiError(f"MAX_TOTAL_NOTIONAL: {where}cannot measure account exposure")
 
     def _day_start_equity(self, current_total: float) -> float:
         """Persist UTC-day start equity for daily_loss_limit.
@@ -1118,13 +1123,15 @@ class Executor:
         # 会拒单；钳制后同一张单缩到 500 照常开。
         cap = self.max_notional_usd
         target = expected if cap is None else min(expected, float(cap))
+        # 钳制留痕带 symbol：多币下「这轮为什么缩了仓」要能直接归因到币
+        where = f"{intent.symbol} " if getattr(intent, "symbol", "") else ""
         # 偏差超过 30% 过大 → 钳到应有值；过小（<50%）保留（可主动降风险）
         if float(size_usd) > target * 1.3:
-            note = f"size_clamped {float(size_usd):.0f}->{target:.0f} (risk {risk_pct:.1%} expected)"
+            note = f"size_clamped {where}{float(size_usd):.0f}->{target:.0f} (risk {risk_pct:.1%} expected)"
             return target, note
         if cap is not None and float(size_usd) > float(cap):
             # 没超过 target×1.3，但仍越过了名义硬顶 → 必须钳，否则 _check_notional 会拒
-            return float(cap), f"size_capped {float(size_usd):.0f}->{float(cap):.0f} (max_notional_usd)"
+            return float(cap), f"size_capped {where}{float(size_usd):.0f}->{float(cap):.0f} (max_notional_usd)"
         # 权益比例上限此前**没有钳制路径**，只有 `_check_notional` 的拒单闸门 —— 见
         # `_NOTIONAL_DRIFT_TOL` 的说明。这里只钳微越界。
         pct_cap = self._notional_pct_cap(equity)
@@ -1132,7 +1139,7 @@ class Executor:
             s = float(size_usd)
             if pct_cap < s <= pct_cap * (1 + _NOTIONAL_DRIFT_TOL):
                 return pct_cap, (
-                    f"size_capped {s:.2f}->{pct_cap:.2f} (max_notional_pct drift)"
+                    f"size_capped {where}{s:.2f}->{pct_cap:.2f} (max_notional_pct drift)"
                 )
         return float(size_usd), ""
 
@@ -1188,7 +1195,8 @@ class Executor:
         adjusted = vol_adjust_size(float(size_usd), atr_pct, target_pct=target)
         if adjusted == float(size_usd):
             return size_usd, ""
-        note = f"vol_adjust {float(size_usd):.0f}->{adjusted:.0f} (atr {atr_pct:.2f}% target {target:.2f}%)"
+        where = f"{intent.symbol} " if getattr(intent, "symbol", "") else ""
+        note = f"vol_adjust {where}{float(size_usd):.0f}->{adjusted:.0f} (atr {atr_pct:.2f}% target {target:.2f}%)"
         return adjusted, note
 
     # ── actions ──────────────────────────────────────────
@@ -1236,7 +1244,9 @@ class Executor:
                 bad.append(f"{kind}={px:g} 需 > mark {ref:g}（rule=1 涨破触发）")
             elif rule == 2 and px >= ref:
                 bad.append(f"{kind}={px:g} 需 < mark {ref:g}（rule=2 跌破触发）")
-        return ("TRIGGER_PRICE_SIDE: " + "; ".join(bad)) if bad else None
+        # 文案带 symbol：多币下「哪条腿的触发价非法」必须能直接归因到币
+        where = f"{intent.symbol} " if getattr(intent, "symbol", "") else ""
+        return ("TRIGGER_PRICE_SIDE: " + where + "; ".join(bad)) if bad else None
 
     def _stop_requested(self) -> bool:
         """优雅停机：`state/stop` 文件存在时中止执行。
@@ -1294,7 +1304,7 @@ class Executor:
                          f"（先 close，下一轮再开；或配 account_risk.no_flip: false 关闭此闸门）"
                 )
 
-    def _check_safe_mode(self, action: str) -> None:
+    def _check_safe_mode(self, action: str, symbol: str = "") -> None:
         """安全模式：连续失败达阈值时**禁止开仓**（只允许平/减/改/观望）。
 
         参照 nofx 的 `consecutiveAIFailures>=3` → 过滤掉所有 `open_*`、
@@ -1317,13 +1327,14 @@ class Executor:
         except Exception:  # noqa: BLE001 — 读不到健康数据就不拦，保持原行为
             return
         if streak >= n:
+            where = f"{symbol} " if symbol else ""
             raise GateApiError(
-                f"SAFE_MODE: 连续失败 {streak} 次 ≥ {n}，暂停开仓（只允许平/减/改/观望）"
+                f"SAFE_MODE: {where}连续失败 {streak} 次 ≥ {n}，暂停开仓（只允许平/减/改/观望）"
             )
 
     def _open(self, intent: Intent) -> StepResult:
         self._check_symbol(intent.symbol)
-        self._check_safe_mode(intent.action)
+        self._check_safe_mode(intent.action, getattr(intent, "symbol", ""))
         self._check_no_flip(intent)
         self._check_open_sl(intent)
         self._check_account_risk(intent)
@@ -1928,7 +1939,7 @@ class Executor:
     def _stop_entry(self, intent: Intent) -> StepResult:
         """Breakout ENTRY: trigger then OPEN. Not stop-loss."""
         self._check_symbol(intent.symbol)
-        self._check_safe_mode(intent.action)
+        self._check_safe_mode(intent.action, getattr(intent, "symbol", ""))
         self._check_no_flip(intent)
         # 与 `_open` 完全同源的两道账户/计划闸门（原先只有 _check_symbol + _check_notional）。
         # 缺 `_check_open_sl` / `_check_account_risk` 时，突破单可以绕过
@@ -3236,12 +3247,13 @@ class Executor:
                        "→ 拒绝整表撤单；请给 label 或配置 label_prefix"
                        "（确实要整表请显式 order_scope: all）"))
         use_own = self.order_scope == "own" and bool(prefix)
+        # 宽作用面（symbol 为空）：候选面 = 账户上「有条件单的合约」，再按 scope 收窄
+        syms = (self._price_order_symbols(symbol) if symbol
+                else self._wide_symbols(scope, self._price_order_symbols("")))
         if use_own:
             cancelled = []
             skipped = []
             errors = []
-            syms = (self._price_order_symbols(symbol) if symbol
-                    else self._wide_symbols(scope, self._price_order_symbols("")))
             for sym in syms:
                 owned = self._owned_price_orders(sym, prefix)
                 pending_entry = self._has_pending_entry(sym)
@@ -3264,7 +3276,7 @@ class Executor:
             }, error="; ".join(errors) if errors else None)
         # 非 own-scope：走交易所整表撤单，**无法逐单过滤** → 存在真实保护单时直接拒绝
         guarded = []
-        for sym in self._price_order_symbols(symbol):
+        for sym in syms:
             try:
                 rows = self.client.list_price_orders(sym) or []
             except GateApiError:
@@ -3277,7 +3289,13 @@ class Executor:
                 detail={"refused": "live_protection_present", "symbols": guarded},
                 error=f"{guarded} 上有正在保护持仓的 tp/sl，整表撤单会撤掉它们，已拒绝",
             )
-        result = self.client.cancel_all_price_orders(symbol or None)
+        # **闸门与执行必须同源**：上面按 `syms`（已按 scope 收窄）查过保护单，这里也必须
+        # 按 `syms` 逐合约撤。原先宽路径直接 `cancel_all_price_orders(None)` = 整账户，
+        # 于是 `scope: bot` 只在闸门上生效、真正撤的仍是全账户 —— 收紧等于没做。
+        if symbol:
+            result = self.client.cancel_all_price_orders(symbol)
+        else:
+            result = {sym: self.client.cancel_all_price_orders(sym) for sym in syms}
         return StepResult("cancel_price_all", symbol, True, detail={"result": result})
 
     def _open_symbols(self) -> list[str]:
