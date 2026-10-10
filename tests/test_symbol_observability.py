@@ -14,6 +14,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from omnialpha.strategist.loop import PlanRunner, StrategistConfig
 
@@ -245,6 +246,121 @@ class TestChartsMetadataInThinking(unittest.TestCase):
             for key in ("ts", "cycle_id", "trigger", "reasoning_chain", "content_head",
                         "tool_usage", "tool_usage_summary"):
                 self.assertIn(key, rec)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 以下来自 `test_guard_scan_and_obs.py`（2026-10-10 合并）—— 该文件的
+# 「观测落盘」两类测试原本与本文件重复（同名行为、不同用例名）。用例一个没删。
+# ─────────────────────────────────────────────────────────────────────
+class TestToolUsageObservation(unittest.TestCase):
+    def _runner(self, symbols) -> PlanRunner:
+        r = PlanRunner.__new__(PlanRunner)
+        r.cfg = StrategistConfig(symbols=list(symbols), bot_id="b1")
+        r.tool_usage = []
+        return r
+
+    def test_by_symbol_missing_and_out_of_universe(self):
+        r = self._runner(["BTC_USDT", "ETH_USDT"])
+        r._record_tool_use("klines", {"symbol": "BTC_USDT"}, "x",
+                           raw_args={"symbol": "BTC_USDT"})
+        r._record_tool_use("indicators", {}, "y", raw_args={})            # 漏写 → 记缺失
+        r._record_tool_use("ticker", {"symbol": "SOL_USDT"}, "z",
+                           raw_args={"symbol": "SOL_USDT"})               # 越界 → 记越界
+        s = r._tool_usage_summary()
+        self.assertEqual(s["counts"], {"klines": 1, "indicators": 1, "ticker": 1})
+        self.assertEqual(s["total_calls"], 3)
+        self.assertTrue(s["data_checked"])
+        self.assertEqual(s["by_symbol"]["BTC_USDT"]["calls"], 1)
+        self.assertEqual(s["by_symbol"]["BTC_USDT"]["tools"], ["klines"])
+        self.assertEqual(s["missing_symbol"], 1)
+        self.assertEqual(s["out_of_universe"], 1)
+        self.assertNotIn("SOL_USDT", s["by_symbol"], "越界的币不该出现在按币归因里")
+
+    def test_auto_filled_counts_as_missing(self):
+        """单币宇宙下自动补全**也算** missing —— 币一多这些调用就会变成拒绝。"""
+        r = self._runner(["BTC_USDT"])
+        r._record_tool_use("klines", {}, "x", raw_args={})
+        s = r._tool_usage_summary()
+        self.assertEqual(s["missing_symbol"], 1)
+        self.assertEqual(s["by_symbol"]["BTC_USDT"]["calls"], 1,
+                         "自动补全后数据确实取自 BTC —— 按币归因要算它")
+
+    def test_symbol_free_tools_not_counted(self):
+        """与币无关的工具（skill / journal_lookup）不进 by_symbol、也不进 missing。"""
+        r = self._runner(["BTC_USDT", "ETH_USDT"])
+        r._record_tool_use("skill", {"name": "pa"}, "x", raw_args={})
+        r._record_tool_use("journal_lookup", {"cycle_id": "c1"}, "y", raw_args={})
+        s = r._tool_usage_summary()
+        self.assertEqual(s["by_symbol"], {})
+        self.assertEqual(s["missing_symbol"], 0)
+        self.assertEqual(s["total_calls"], 2)
+
+    def test_raw_args_are_the_source_of_truth(self):
+        """`run_tool` 会就地回填 symbol —— 判「模型写没写」只能看原始参数。"""
+        r = self._runner(["BTC_USDT", "ETH_USDT"])
+        filled = {"symbol": "BTC_USDT"}          # run_tool 回填后的样子
+        r._record_tool_use("klines", filled, "x", raw_args={})   # 模型其实没写
+        self.assertEqual(r._tool_usage_summary()["missing_symbol"], 1)
+
+    def test_old_fields_shape_unchanged(self):
+        r = self._runner(["BTC_USDT"])
+        r._record_tool_use("klines", {"symbol": "BTC_USDT"}, "x",
+                           raw_args={"symbol": "BTC_USDT"})
+        s = r._tool_usage_summary()
+        self.assertEqual(set(s), {"counts", "total_calls", "data_checked",
+                                 "by_symbol", "missing_symbol", "out_of_universe"})
+        self.assertIsInstance(s["counts"], dict)
+        self.assertIsInstance(s["data_checked"], bool)
+
+    def test_run_once_resets_tool_usage(self):
+        """每轮开始清零 —— 否则统计跨轮累加（旧实现只在 analyze_once 清）。"""
+        r = self._runner(["BTC_USDT"])
+        r.tool_usage = [{"tool": "stale-from-last-round"}]
+        with mock.patch.object(PlanRunner, "_assemble_prompt",
+                               side_effect=RuntimeError("boom")):
+            try:
+                r.run_once()
+            except Exception:  # noqa: BLE001 — 只要走到清零那行就算
+                pass
+        self.assertEqual(r.tool_usage, [], "每轮开始必须清零")
+
+
+class TestThinkingCharts(unittest.TestCase):
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.addCleanup(self._td.cleanup)
+
+    def _runner(self) -> PlanRunner:
+        r = PlanRunner.__new__(PlanRunner)
+        r.cfg = StrategistConfig(symbols=["BTC_USDT"], bot_id="b1",
+                                 bot_root=Path(self._td.name))
+        r.history_dir = Path(self._td.name) / "state"
+        r.inbox = Path(self._td.name) / "b1"
+        r.tool_usage = []
+        return r
+
+    def test_charts_meta_persisted_without_base64(self):
+        r = self._runner()
+        r._last_chart_meta = [{"symbol": "BTC_USDT", "tf": "15m",
+                               "file": "c1.png", "ok": True, "bytes": 12345}]
+        r._save_thinking(cycle_id="c1", reasoning=["因为…"], content="{}")
+        files = sorted(Path(r.history_dir).glob("*.thinking.json"))
+        self.assertTrue(files, "thinking.json 没落盘")
+        payload = json.loads(files[-1].read_text(encoding="utf-8"))
+        self.assertEqual(payload["charts"][0]["symbol"], "BTC_USDT")
+        self.assertEqual(payload["charts"][0]["tf"], "15m")
+        blob = json.dumps(payload)
+        self.assertNotIn("base64", blob, "只写元数据，不写图片本体")
+        self.assertLess(len(blob), 65536, "charts 不该把文件撑大")
+
+    def test_charts_empty_when_not_generated(self):
+        """没生成图时是空数组（不是缺字段）—— 消费方不必做存在性判断。"""
+        r = self._runner()
+        r._save_thinking(cycle_id="c2")
+        files = sorted(Path(r.history_dir).glob("*.thinking.json"))
+        payload = json.loads(files[-1].read_text(encoding="utf-8"))
+        self.assertEqual(payload["charts"], [])
+        self.assertIn("tool_usage_summary", payload)
 
 
 if __name__ == "__main__":

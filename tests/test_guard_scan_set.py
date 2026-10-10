@@ -16,6 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from omnialpha.config import BotConfig
 from omnialpha.watcher import (
     ProjectPaths,
     _SCAN_SYMBOL_CAP,
@@ -260,6 +261,106 @@ class TestGuardCoverageRecorded(unittest.TestCase):
                                   guard_scan_set(bot, FakeClient()))
             rec = json.loads(p.read_text(encoding="utf-8"))
             self.assertEqual(rec["rounds"]["round"]["covered"], ["BTC_USDT"])
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 以下来自 `test_guard_scan_and_obs.py`（2026-10-10 合并）。
+# 该文件把「守护扫描集合」与「观测落盘」两类测试混在一起，与
+# `test_symbol_observability.py` 在 5 个行为点上重复 —— 现按**一个关注点一个文件**
+# 拆开：扫描集合归本文件，tool_usage/charts 观测归 `test_symbol_observability.py`。
+# 用例**一个没删**（重复的那几对也保留，宁多勿少），只是换了家。
+# ─────────────────────────────────────────────────────────────────────
+class _StubClient:
+    """只回答三件事：挂单、条件单、持仓（归属判据就靠这三种）。"""
+
+    def __init__(self, orders=None, price_orders=None, positions=None):
+        self._orders = list(orders or [])
+        self._price_orders = list(price_orders or [])
+        self._positions = list(positions or [])
+
+    def list_orders(self, contract=None):
+        return [dict(o) for o in self._orders]
+
+    def list_price_orders(self, contract=None):
+        return [dict(p) for p in self._price_orders]
+
+    def get_positions(self):
+        return [dict(p) for p in self._positions]
+
+
+def _obs_bot(symbols, label_prefix="brk") -> BotConfig:
+    """（原 `_bot`，改名避免与本文件已有的 `_bot` 撞名。）"""
+    return BotConfig(bot_id="b1", symbols=list(symbols), label_prefix=label_prefix)
+
+
+class TestGuardScanSet(unittest.TestCase):
+    def test_owned_symbol_outside_yaml_is_still_scanned(self):
+        """T10 的核心：yaml 里删了 ETH，但账户上还有本 bot 的 ETH 仓 → 仍要守护它。"""
+        scan = guard_scan_set(
+            _obs_bot(["BTC_USDT"]),
+            _StubClient(orders=[{"contract": "ETH_USDT", "text": "t-brk"}],
+                        positions=[{"contract": "ETH_USDT", "size": 2}]),
+        )
+        self.assertIn("ETH_USDT", scan["symbols"],
+                      "有归属痕迹的合约必须继续被扫（否则删币即裸仓）")
+        self.assertEqual(scan["extra"], ["ETH_USDT"])
+        self.assertEqual(scan["symbols"][0], "BTC_USDT", "yaml 里的币排在前面")
+
+    def test_owned_symbol_via_price_order_only(self):
+        """归属痕迹也可能只在**条件单**上（挂着的 SL）。"""
+        scan = guard_scan_set(
+            _obs_bot(["BTC_USDT"]),
+            _StubClient(price_orders=[{"contract": "SOL_USDT",
+                                       "initial": {"text": "t-brk-sl"}}]),
+        )
+        self.assertIn("SOL_USDT", scan["symbols"])
+
+    def test_other_bots_symbol_is_not_scanned(self):
+        """他 bot 归属的合约不能被拉进来 —— 那会去动别人的仓。"""
+        scan = guard_scan_set(
+            _obs_bot(["BTC_USDT"]),
+            _StubClient(orders=[{"contract": "ETH_USDT", "text": "t-other"}],
+                        positions=[{"contract": "ETH_USDT", "size": 2}]),
+        )
+        self.assertNotIn("ETH_USDT", scan["symbols"])
+        self.assertEqual([s["symbol"] for s in scan["skipped"] if s["reason"] == "not_owned"],
+                         ["ETH_USDT"], "有仓但没我的痕迹 → 留痕、不扫")
+        self.assertEqual([s for s in scan["skipped"] if s["symbol"] == "ETH_USDT"],
+                         [{"symbol": "ETH_USDT", "reason": "not_owned"}])
+
+    def test_single_coin_unchanged(self):
+        """单币 + 无额外归属合约 → 逐字等于 `bot.symbols`（I11）。"""
+        scan = guard_scan_set(_obs_bot(["BTC_USDT"]), _StubClient())
+        self.assertEqual(scan["symbols"], ["BTC_USDT"])
+        self.assertEqual(scan["extra"], [])
+        self.assertEqual(scan["skipped"], [])
+
+    def test_over_cap_is_recorded(self):
+        """币数超上限 → 截断 + `over_cap` 留痕（不能静默少扫）。"""
+        syms = [f"C{i}_USDT" for i in range(_SCAN_SYMBOL_CAP + 2)]
+        scan = guard_scan_set(_obs_bot(syms), _StubClient())
+        self.assertEqual(len(scan["symbols"]), _SCAN_SYMBOL_CAP)
+        over = [s for s in scan["skipped"] if s["reason"] == "over_cap"]
+        self.assertEqual(len(over), 2)
+
+    def test_client_failure_is_recorded_not_raised(self):
+        """取归属痕迹失败 → 不扩展、只记原因（不能让守护整轮崩）。"""
+        class _Boom(_StubClient):
+            def list_orders(self, contract=None):
+                raise RuntimeError("network down")
+
+        scan = guard_scan_set(_obs_bot(["BTC_USDT"]), _Boom())
+        self.assertEqual(scan["symbols"], ["BTC_USDT"])
+        self.assertTrue(any("orders" in e for e in scan["errors"]), scan["errors"])
+
+    def test_no_label_prefix_does_not_expand(self):
+        """判不出本 bot 命名空间 → **不扩展**（fail-closed，不然会扫全账户）。"""
+        scan = guard_scan_set(
+            _obs_bot(["BTC_USDT"], label_prefix=""),
+            _StubClient(orders=[{"contract": "ETH_USDT", "text": "t-brk"}]),
+        )
+        self.assertEqual(scan["symbols"], ["BTC_USDT"])
+        self.assertEqual(scan["extra"], [])
 
 
 if __name__ == "__main__":
