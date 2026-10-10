@@ -1,9 +1,9 @@
 ---
 feature: symbol-as-parameter
 status: delivered
-updated: 2026-10-09
-branch: feat/symbol-as-parameter
-commits: 07ae1b0..e15089a（24 commits / 92 文件）
+updated: 2026-10-10（收尾见「2026-10-10 收尾」一节）
+branch: feat/symbol-as-parameter（已快进合入 master）
+commits: 07ae1b0..e0948ec（38 commits / 101 文件；`e0948ec` 已推 origin/master 并部署到服务器）
 ---
 
 # 币种作为可配置参数（可切换 / 可添加）
@@ -11,8 +11,9 @@ commits: 07ae1b0..e15089a（24 commits / 92 文件）
 > 工作区：`.worktrees/symbol-as-parameter`（linked worktree，基于 `origin/master` @ `07ae1b0`）。
 > 环境：需 `python -m omnialpha skill install skills-src/{pa-analysis,price-action-trading} --yes`
 > （`skills/` 是 gitignore 的运行时目录，全新 worktree 里为空会让 14 项 skillkit 测试失败）。
-> 基线：**2056 项 OK / 0 失败 / 1 skip**（worktree 内实测；主树那 1 项 `test_skill_sizes`
-> 是本地生成行情数据导致的假阳性，worktree 里不出现）。
+> 基线：**2056 项 OK / 0 失败 / 1 skip**（改动前的起点；worktree 内实测，
+> 主树那 1 项 `test_skill_sizes` 是本地生成行情数据导致的假阳性，worktree 里不出现）。
+> 当前：**2440 项 OK / 0 失败 / 1 skip**（worktree 内，2026-10-10 实测；服务器同版本同结果）。
 
 ## Report
 
@@ -69,6 +70,64 @@ commits: 07ae1b0..e15089a（24 commits / 92 文件）
 5. 钝动作缺 `scope` 时单币会**整轮失败并回滚** —— 这是收紧的代价（原先静默放大到全账户），
    实盘两个 bot 都带 symbol，正常路径不变。
 6. 风控文案带 symbol（`NO_FLIP` / `MAX_NOTIONAL_PCT`）—— spec T9 明确要求。
+7. **工具 schema 多出 `account.symbols` 的 enum**（2026-10-10，T6 接线）：单币宇宙也会注入
+   `enum: ["BTC_USDT"]`。这不是新增约束 —— `account.symbols` 在单币 bot 上本来也只能填那一个
+   值，写进 enum 是把隐含约束显式化；但它**确实改变了发给 LLM 的 schema**（不是 prompt 文本）。
+8. **越界标的从「纠正」改为「拒绝」**（2026-10-10，T3/D1）：`PersonaRunner._execute` 原先对
+   白名单外的 symbol「唯一解时纠正成 `allowed[0]` 并照常下单」，现在**拒绝该 chip、不落盘信号**。
+   单币 persona 组因此可能"少做一轮"（旧行为是用模型没说的币下单）。**实盘两个 bot 走的是
+   单 bot strategist 路径，不受影响**（那条路径的越界由 plan 层 `PlanError` → 降级 hold 拦住，
+   而旧版也会被 executor 白名单拒，两版都不同单）。
+
+### 2026-10-10 收尾（部署后核实 + 补齐 + 勾选更正）
+
+**背景**：本批的 10 个提交（`3a2c647..e0948ec`）在推送/部署前后做了一轮"逐条核实"，
+发现几处**只写在报告里、没人回头验过**的缺口，也发现本 Report 自身有不实之处。全部核实口径
+与证据都写在对应提交信息里，这里只记结论与**仍未闭合**的部分。
+
+**本轮新修**（4 个提交之外的两个改动点）：
+
+- `available_native_tools(symbols=)` 的**注入本身有效**（不传 → `None`，传 →
+  `['BTC_USDT','ETH_USDT']`），但**两个生产调用点都没传** → enum 形同虚设。
+  现在 `loop._chat_native_tools` 与 `deploy-check` 都按各自 bot 的宇宙注入，
+  并补了**功能级接线断言**（直接跑生产方法、抓交给 LLM 的 tools，而不是扫源码）。
+- **`plan.notes` 没有出口**：解析期宽容告警（如 `chip.scenarios` 非对象被丢弃）只落
+  `log.warning`，run 结果与 ledger 都读不到。现已并入 `run_notes`。
+- **`symbol_rejected` 事件**（越界 chip 被拒时）：落 `data/shared/persona_log.jsonl`
+  （`{"event":"symbol_rejected","decision":…,"order_id":…,"meta":{reason/universe/…}}`，
+  `_log` 会补 `ts` 与 `group`）。这是新增的**审计面**，不在 `alerts.json` 里（它不触发告警）。
+- `scripts/_symbol_audit.py`：S2.6-2 承诺的运行期守卫，此前**从未存在**。
+  现按 §S2.8 的口径读既有产物（不重跑 LLM）：覆盖率（tool/decision/chart 三口径分开报）/
+  缺 symbol 率 / 越界率 / 自动补全率 / 每币取数次数 / 图清单，`--strict` 在多币下把
+  缺 symbol 率与越界率当退出码。
+- kline 审计体带 `symbol`（多币落 `kline_reads` 数组）；挂单/条件单**翻页取全**；
+  `quick_order.py` 第三份 `SYMBOL_MAP` 收口；`coverage._VENUE_LISTING_SUPPORT` 的
+  bitget/hyperliquid 改 `True`；`coverage_matrix` 接进 `deploy-check`（只显示不阻断）。
+
+**部署与生效证据**（`e0948ec`，服务器 `/opt/omnialpha`）：
+
+- `origin/master` = `origin/feat/symbol-as-parameter` = 服务器 HEAD = `e0948ec`；依赖未变。
+- 部署前闸门：`status` / `deploy-check` exit 0、服务器全量 **2440 项 OK**、采集器 `import` 自检通过。
+- 重启后逐项核对：`brooks-btc` 持仓 `BTC_USDT -56 @82790` + SL 82910 / TP 82540、
+  `ladder-eth` 的待成交入场单 `t-lad` 与两张保护单 —— **触发价、张数与 id 均与部署前快照一致**。
+- **新代码生效的硬证据**：`thinking.json` 的 `kline` 块出现 `symbol`（改动前只有
+  `kline_read`/`kline_tf`）。
+- **实盘口径实测**（`_symbol_audit.py` 首次对实盘运行）：`brooks-btc` 近 20 轮
+  **缺 symbol 率 0.00%（0/81）、越界率 0.00%（0/85）、覆盖率 20/20、图 80 张全 ok** ——
+  也就是说 I11 例外 7/8 那两条在实盘上**不会触发**，本批修复对实盘收益面是中性的。
+
+**仍未闭合**（如实记录，见 §Tasks 的勾选口径）：
+
+1. **单 bot 不写订单记录**（原 D-7/T14 的"单 bot 也写订单记录"）——全仓 `SharedOrderStore`
+   只有 `persona/runner.py` 一个写入方，`loop.py:296` 只读。**但影响比最初判断的小**：
+   `memory/context.py:245` 已用**决策日志**回看上一轮 Tier-1（含 `invalidation` /
+   `time_stop_bars` / `give_back_pct`，多币按币）补上，注明来源是独立评审 Critical 3。
+   真正仍缺的是**订单级**记忆：`lifecycle` / `recent_events`(top-5) / `votes` / `reason_text`。
+2. `SharedOrderStore.create` 此前不校验宇宙（现在加了可选 `universe=`，见提交），
+   但**启动路径**仍没有"每所是否有这些币"的阻断式校验 —— `config.validate_contracts`
+   是**默认关**的选项（理由：离线测试/只读巡检/容器构建不该依赖网络），
+   三态矩阵现在只是在 `deploy-check` 里**显示**。
+3. 历史 `trades.symbol` 全 NULL 且 `migrate` 有导入标记不会重导 → 旧数据仍无法按币审计。
 
 ### Journey log
 
@@ -414,7 +473,7 @@ N=5 时旧人格 214k 买 1 个币、新人格 229k 买 5 个（差 4.6×）。
 - [x] T11: journal / Tier-1 / 近况按币（`symbols[]`、`decisions[]`、`tier1{symbol:{…}}`、近况与索引按币渲染） — acceptance: 两币 → journal 两条独立可还原记录；**单币输出逐字不变**（golden） (covers: S2.4⑩)
 - [x] T12: 解析加固（`repair_json`：去围栏/去尾逗号/按栈补括号；`scenarios` 非对象 → 丢弃 + notes） — acceptance: 少一个 `}`、尾逗号、`scenarios:"x"` 三种坏输入都能解析成功；降级率降为 0 (covers: S2.4⑨)
 - [x] T13: 画像/盈亏/decay 按币 + 缓存前缀分层（`ledger_stats` per-symbol、paper `group by contract`、`exchange_pnl.by_contract`、decay 带 symbol、画像移出稳定前缀、`check_prefix` 分 hash） — acceptance: 两币各自独立胜率/盈亏；单币画像逐字不变 (covers: S2.4⑩; depends: T11)
-- [x] T14: 订单上下文与共享订单库按币（按 symbol 各一张 ≤3、`list_open(group, symbol)`、`create` 校验宇宙、单 bot 也写订单记录） — acceptance: 多币多单时两张单的 `premise_invalidation` 都在 prompt 里；不再关错币的单 (covers: S2.4⑩; depends: T11)
+- [~] T14: 订单上下文与共享订单库按币（按 symbol 各一张 ≤3、`list_open(group, symbol)`、`create` 校验宇宙、单 bot 也写订单记录） — **部分完成**：前三项已交付；`create` 的宇宙校验于 2026-10-10 补上（可选 `universe=`，越界不落盘）；**「单 bot 也写订单记录」未做**（关键字段已由决策日志的 `[上轮方案状态]` 补上，影响评估见「2026-10-10 收尾」§仍未闭合 1） — acceptance: 多币多单时两张单的 `premise_invalidation` 都在 prompt 里；不再关错币的单 (covers: S2.4⑩; depends: T11)
 - [x] T15: ledger 写 symbol（`insert_trade` 补 symbol / `symbols_json`、`plans.symbols_json`、查询加 symbol 参数） — acceptance: 新写入的 `trades.symbol` 非 NULL 且可按币查询 (covers: S2.4⑩)
 - [x] T16: 数据源闭环（`fetch_aux.CONTRACTS` 从 watchlist 读、aux/data monitor per-symbol 覆盖告警、per-venue 覆盖矩阵 + 启动校验、Bitget/HL 真实元数据） — acceptance: 新增币后 aux 工具**不再静默空**（要么有数据、要么显式告警）；"某币零数据"能被监控报出 (covers: S2.4⑪)
 - [x] T17: 测试补多币断言（`fills` 测试表补 `contract`、画像/盈亏/近况各加"两币→两条独立记录"、prompt 多币预算守卫） — acceptance: 故意把 symbol 维度删掉时新测试必须失败（不是假绿） (covers: S2.4⑪; depends: T11, T13)
