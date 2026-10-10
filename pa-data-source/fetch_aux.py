@@ -129,15 +129,29 @@ XPOST_QUERIES = {
     "XAG_USDT": "XAG silver",
 }
 
-# 币种基本面查询符号：仅加密合约（BTC/ETH/SOL）。
-# XAU/XAG 为贵金属，get-coin-info 实测返回无关 meme 代币（如 Solana 上名为 Gold 的代币），
-# 无有效币种信息，故不采集，见 PLAN-intel-feed.md §5.2 实施修正
-COIN_INFO_SYMBOLS = ["BTC", "ETH", "SOL"]
+# 币种基本面查询符号：**从 CONTRACTS 推导**（去掉非加密品种），不再是独立硬编码清单。
+# 为什么排除贵金属：XAU/XAG 没有「币种基本面」这种概念，get-coin-info 实测返回无关
+# meme 代币（如 Solana 上名为 Gold 的代币），采集会误导，见 PLAN-intel-feed.md §5.2。
+# 为什么必须推导：写死 `["BTC","ETH","SOL"]` 时，新加的加密币（如 DOGE）永远没有
+# 币种基本面数据 —— 与 CONTRACTS 同一病因的静默空，只是换了个接口。
+NON_CRYPTO_BASES = {"XAU", "XAG"}
 
-# 链上数据查询符号：仅 ETH。
-# BTC/SOL 实测返回与 ETH 完全相同的链上总览（chain=eth、同一组 activity），
-# token 参数对原生币不生效（统一回 chain_overview），采集会误导，故不采集，
-# 见 PLAN-intel-feed.md §6.1 实施修正
+
+def coin_info_symbols(contracts):
+    """`COIN_INFO_SYMBOLS` 的来源：`CONTRACTS` 里非贵金属品种的基础资产（保序去重）。"""
+    out = []
+    for c in (contracts or []):
+        base = str(c or "").strip().upper().split("_")[0]
+        if base and base not in NON_CRYPTO_BASES and base not in out:
+            out.append(base)
+    return out
+
+
+COIN_INFO_SYMBOLS = coin_info_symbols(CONTRACTS)
+
+# 链上数据查询符号：**人工声明，不可推导** —— 保留常量。
+# token 参数只对 EVM 链生效：BTC/SOL 实测返回与 ETH 完全相同的链上总览（chain=eth、
+# 同一组 activity），采集会误导，故只采 ETH；见 PLAN-intel-feed.md §6.1 实施修正。
 ONCHAIN_TOKENS = ["ETH"]
 
 # 事件信号每轮取前 N 个加密预测事件（按 attention_score 降序），避免命令数膨胀

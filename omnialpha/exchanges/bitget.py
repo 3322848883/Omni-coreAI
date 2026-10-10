@@ -15,6 +15,11 @@ from .http_util import http_json
 
 log = logging.getLogger("omnialpha.exchanges.bitget")
 
+# 列合约缓存 TTL：上币/下架是低频事件，启动校验一次 + 5 分钟内复用足够
+_LISTING_TTL_SEC = 300
+# 列合约超时：这是**启动前**的尽力校验，不能让一个慢所把启动拖住（取不到即「未校验」）
+_LISTING_TIMEOUT_SEC = 8
+
 
 def _f(v: Any) -> Optional[float]:
     try:
@@ -34,8 +39,13 @@ class BitgetExchange(ExchangeClient):
         self.passphrase = passphrase or kwargs.get("passphrase") or ""
         self.base = str(kwargs.get("base_url") or "https://api.bitget.com").rstrip("/")
         self.mapper = BitgetMapper()
+        # 列合约缓存（per-instance：跨实例共享会让"这次取不到"被上次的结果盖住）
+        self._listing: Optional[set] = None
+        self._listing_ts = 0.0
+        self.listing_note = ""
 
-    def _req(self, method: str, path: str, params: Optional[dict] = None, signed: bool = False) -> Any:
+    def _req(self, method: str, path: str, params: Optional[dict] = None, signed: bool = False,
+             timeout: int = 20) -> Any:
         params = dict(params or {})
         ts = str(int(time.time() * 1000))
         body_s = json.dumps(params) if method != "GET" and params else ""
@@ -59,8 +69,10 @@ class BitgetExchange(ExchangeClient):
             if self.env == "testnet":
                 headers["paptrading"] = "1"
         if method == "GET":
-            return http_json("GET", f"{self.base}{path}", params, headers=headers, exchange="bitget")
-        return http_json(method, f"{self.base}{path}", params, headers=headers, json_body=True, exchange="bitget")
+            return http_json("GET", f"{self.base}{path}", params, headers=headers,
+                             timeout=timeout, exchange="bitget")
+        return http_json(method, f"{self.base}{path}", params, headers=headers, json_body=True,
+                         timeout=timeout, exchange="bitget")
 
     def get_last_price(self, symbol: str) -> float:
         d = self._req("GET", "/api/v2/mix/market/ticker", {"productType": "USDT-FUTURES", "symbol": self.mapper.native(symbol)}) or {}
@@ -151,6 +163,33 @@ class BitgetExchange(ExchangeClient):
             log.warning("bitget get_contract(%s): 合约元数据取不到（%s），退回默认", symbol, e)
         return ContractMeta(name=symbol, quanto_multiplier=1.0, order_size_round=1.0,
                             order_price_round=0.1, leverage_max=100)
+
+    def available_symbols(self) -> Optional[set]:
+        """该所当前可交易的 USDT-M 合约（内部写法 `BTC_USDT`）；**取不到返回 `None`**。
+
+        这是 per-venue 覆盖矩阵的**实测来源**（`omnialpha/exchanges/coverage.py` 只做机械
+        比对、不发请求）。公开端点，无需密钥，所以「配置校验」不会变成「凭据校验」。
+
+        `None` 是**未校验**，不是「没有」：把它当空集，就会把一个真实存在的币判成
+        上币差异而放过（那正是「新增币后工具静默空」的成因之一）。
+        """
+        now = time.time()
+        if self._listing is not None and now - self._listing_ts < _LISTING_TTL_SEC:
+            return self._listing
+        try:
+            d = self._req("GET", "/api/v2/mix/market/contracts",
+                          {"productType": "USDT-FUTURES"}, timeout=_LISTING_TIMEOUT_SEC) or {}
+            rows = d.get("data") or []
+            out = {self.mapper.internal(r.get("symbol"))
+                   for r in rows if isinstance(r, dict) and r.get("symbol")}
+            if not out:
+                raise ValueError("合约清单为空")
+        except Exception as e:  # noqa: BLE001 — 取不到就如实说未校验
+            self.listing_note = "取不到合约清单: %s" % e
+            log.warning("bitget available_symbols: 取不到合约清单（%s）—— 视为未校验", e)
+            return None
+        self._listing, self._listing_ts, self.listing_note = out, now, ""
+        return out
 
     def get_account(self) -> dict:
         d = self._req("GET", "/api/v2/mix/account/accounts", {"productType": "USDT-FUTURES"}, signed=True) or {}

@@ -13,6 +13,11 @@ from .http_util import http_json
 
 log = logging.getLogger("omnialpha.exchanges.hyperliquid")
 
+# 列合约缓存 TTL：上币/下架是低频事件，启动校验一次 + 5 分钟内复用足够
+_LISTING_TTL_SEC = 300
+# 列合约超时：这是**启动前**的尽力校验，不能让一个慢所把启动拖住（取不到即「未校验」）
+_LISTING_TIMEOUT_SEC = 8
+
 
 def _f(v: Any) -> Optional[float]:
     try:
@@ -42,6 +47,10 @@ class HyperliquidExchange(ExchangeClient):
         self.mapper = HyperliquidMapper()
         self.agent = kwargs.get("agent") or ""
         self.account = kwargs.get("account_address") or api_key
+        # 列合约缓存（per-instance：跨实例共享会让"这次取不到"被上次的结果盖住）
+        self._listing: Optional[set] = None
+        self._listing_ts = 0.0
+        self.listing_note = ""
 
     def _post(self, type_: str, payload: dict, signed: bool = False) -> Any:
         body = {"type": type_, **payload}
@@ -56,9 +65,10 @@ class HyperliquidExchange(ExchangeClient):
                 body["signature"] = sig(body)
         return http_json("POST", f"{self.base}/exchange", body, json_body=True, exchange="hyperliquid")
 
-    def _info(self, type_: str, payload: Optional[dict] = None) -> Any:
+    def _info(self, type_: str, payload: Optional[dict] = None, timeout: int = 20) -> Any:
         body = {"type": type_, **(payload or {})}
-        return http_json("POST", f"{self.base}/info", body, json_body=True, exchange="hyperliquid")
+        return http_json("POST", f"{self.base}/info", body, json_body=True,
+                         timeout=timeout, exchange="hyperliquid")
 
     def get_last_price(self, symbol: str) -> float:
         rows = self._info("allMids") or {}
@@ -145,6 +155,36 @@ class HyperliquidExchange(ExchangeClient):
             log.warning("hyperliquid get_contract(%s): meta 取不到（%s），退回默认", symbol, e)
         return ContractMeta(name=symbol, quanto_multiplier=1.0, order_size_round=0.001,
                             order_price_round=0.01, leverage_max=50)
+
+    def available_symbols(self) -> Optional[set]:
+        """该所当前可交易的永续合约（内部写法 `BTC_USDT`）；**取不到返回 `None`**。
+
+        `meta.universe` 是 HL 的权威合约清单（与 `get_contract` 同一份数据）。公开
+        端点，无需密钥 —— 所以「配置校验」不会变成「凭据校验」。
+
+        `isDelisted` 的条目要排除：它们还在 universe 里但已不可交易，留着会让
+        「该所有这个合约」判错。`None` 是**未校验**，不是「没有」（见 coverage.py）。
+        """
+        now = time.time()
+        if self._listing is not None and now - self._listing_ts < _LISTING_TTL_SEC:
+            return self._listing
+        try:
+            d = self._info("meta", timeout=_LISTING_TIMEOUT_SEC) or {}
+            out = set()
+            for u in (d.get("universe") or []):
+                if not isinstance(u, dict) or not u.get("name"):
+                    continue
+                if u.get("isDelisted"):
+                    continue
+                out.add(self.mapper.internal(u.get("name")))
+            if not out:
+                raise ValueError("universe 为空")
+        except Exception as e:  # noqa: BLE001 — 取不到就如实说未校验
+            self.listing_note = "取不到合约清单: %s" % e
+            log.warning("hyperliquid available_symbols: 取不到 meta.universe（%s）—— 视为未校验", e)
+            return None
+        self._listing, self._listing_ts, self.listing_note = out, now, ""
+        return out
 
     def get_account(self) -> dict:
         try:

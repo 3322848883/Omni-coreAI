@@ -18,6 +18,22 @@ retention_days: 300
 max_candles: 2000
 log_level: INFO
 
+# === 多所 K 线采集（kline_watcher_multi，非 Gate 五所）===
+# 为什么单独声明：Gate 独有的贵金属 XAU/XAG 在非 Gate 所**并非都存在**（实测
+# hyperliquid 无、bitget 有），所以另列一份清单，用六所都有的 DOGE/XRP 补位。
+# 这份清单以前写死在 watchdog.py 的 --symbols 参数里 —— 加币要改代码，漏改那处
+# 不报错、只是永远没数据。现在它在这里（声明），watchdog 启动时逐所校验：
+# 该所没上这个合约就**告警并跳过**（不静默）。
+# 周期与 Gate 的差异：其余五所无 30m（见 AGENTS.md「品种 / 周期」）。
+multi_venue:
+  symbols:
+    - BTC_USDT
+    - ETH_USDT
+    - SOL_USDT
+    - DOGE_USDT
+    - XRP_USDT
+  intervals: [1m, 5m, 15m, 1h, 4h, 1d]
+
 # === 账户推送配置 ===
 # 密钥不落盘（可移植技能）：优先读取环境变量 GATE_API_KEY / GATE_API_SECRET；
 # 如确需写入本文件，请填入你自己的密钥（需要 Futures 权限）。
