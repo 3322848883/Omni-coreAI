@@ -14,15 +14,19 @@
 
 ## 为什么是三态而不是布尔
 
-本仓只有 Gate 接了「列合约」的校验（`config.fetch_exchange_contracts`）。其余所要
-用真实接口逐个探合约是否存在，而**本机网络到不了其中几家**（bitget TLS 重置等）。
-与其把 AGENTS.md 里的上币差异抄成硬编码静态表（上币随时会变，抄下来就是**会腐坏的
-知识**），不如如实回答 `None` = 未校验：`True`/`False` 是**测出来的**，`None` 是
-**不知道**。调用方据此决定要不要去探。
+`gate` 走 `config.fetch_exchange_contracts`；**bitget / hyperliquid 的适配器已接
+`available_symbols()`**（公开端点，无需密钥），由 `venue_listings()` 统一取；其余所
+（binance / okx / bybit）还没有列合约能力。**取不到的一律 `None` = 未校验**：
+`True`/`False` 是**测出来的**，`None` 是**不知道**。把 `None` 当空集会让
+「上币差异」这个结论被凭空造出来（真实存在的币被判成没有）。调用方据此决定要不要去探。
 """
 from __future__ import annotations
 
+import importlib
+import logging
 from typing import Optional
+
+log = logging.getLogger(__name__)
 
 # 各所「列合约」能力的接入状态。True = 有实时校验路径；False = 尚未接入。
 # 新增一家所时在这里改一行，而不是在业务代码里加分支。
@@ -94,6 +98,58 @@ def unverified(matrix: dict) -> dict:
     return out
 
 
+MARKS = {True: "有", False: "没有", None: "?"}
+
+
+def format_rows(matrix: dict) -> list:
+    """把矩阵渲染成紧凑行：`BTC_USDT: binance=? bitget=有 ...`（CLI 与 deploy-check 共用）。
+
+    共用同一份渲染是为了避免两处各写一套 ——「矩阵留在库里、只在单测里被用过」正是
+    本模块此前的问题（见 `_main` 的说明）。
+    """
+    lines = []
+    for sym, row in (matrix or {}).items():
+        cells = " ".join(f"{v}={MARKS.get(ok, '?')}" for v, ok in sorted((row or {}).items()))
+        lines.append(f"{sym}: {cells}")
+    return lines
+
+
+def venue_listings(exchanges=None, *, env: str = "live") -> dict:
+    """尽力而为地取各所的**实测合约清单**，给 `coverage_matrix` 当 `venue_symbols`。
+
+    - 该所适配器有 `available_symbols()`（bitget / hyperliquid：公开端点、**无需密钥**）→ 调它
+    - `gate` → `config.fetch_exchange_contracts`（公开端点）
+    - 其余所、以及任何取不到的 → **不进入返回** → 矩阵把它标 `?`（未校验）。绝不写成空集：
+      空集会被判成「确认没有」，于是上币差异这个**结论**就被凭空造出来了。
+
+    只读、异常吞掉 —— 调用方（deploy-check / status）不该因为某个所不可达而失败。
+    """
+    out: dict = {}
+    for ex in (exchanges if exchanges is not None else venues()):
+        ex = str(ex or "").strip().lower()
+        if not ex:
+            continue
+        got = None
+        try:
+            if ex == "gate":
+                from ..config import fetch_exchange_contracts
+
+                got = fetch_exchange_contracts(ex, env)
+            else:
+                mod = importlib.import_module(f"omnialpha.exchanges.{ex}")
+                for obj in vars(mod).values():
+                    if (isinstance(obj, type) and getattr(obj, "name", "") == ex
+                            and hasattr(obj, "available_symbols")):
+                        got = obj(env=env).available_symbols()
+                        break
+        except Exception as e:  # noqa: BLE001 — 尽力而为，取不到只是「未校验」
+            log.info("venue_listings(%s) 取不到合约清单：%s", ex, e)
+            got = None
+        if got:
+            out[ex] = set(got)
+    return out
+
+
 def _main(argv) -> int:
     """`python -m omnialpha.exchanges.coverage BTC_USDT [gate=BTC_USDT,SOL_USDT ...]`。
 
@@ -116,10 +172,8 @@ def _main(argv) -> int:
         else:
             symbols.append(a)
     m = coverage_matrix(symbols, venue_symbols=venue_symbols)
-    mark = {True: "有", False: "没有", None: "?"}
-    for sym, row in m.items():
-        cells = "  ".join(f"{v}={mark.get(ok, '?')}" for v, ok in sorted(row.items()))
-        print(f"{sym}: {cells}")
+    for line in format_rows(m):
+        print(line)
     g = gaps(m)
     if g:
         print("\n确认没有（上币差异，换所或换币就行）：")

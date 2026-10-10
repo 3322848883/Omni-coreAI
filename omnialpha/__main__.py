@@ -731,6 +731,45 @@ def cmd_deploy_check(args) -> int:
     else:
         print("基线检查:   OK（无基线 enabled: true）")
 
+    # 3c) 品种覆盖（per-venue 三态矩阵；**只显示、不阻断**）
+    # 为什么放这里：这个矩阵此前只在单测与一个诊断 CLI 里被调用过 —— 生产路径从没
+    # 用过它，于是"`?` 与 `有/没有` 的区别"没人真的看见过（T348 的缺口）。
+    # 失败一律吞掉：部署检查不该因为某个所不可达而失败。
+    try:
+        from .exchanges.coverage import (
+            coverage_matrix,
+            format_rows,
+            gaps,
+            unverified,
+            venue_listings,
+        )
+
+        try:
+            _bots = bots
+        except NameError:          # 上面 load_all_bots 失败时
+            _bots = {}
+        _enabled = sorted(k for k, v in (_bots or {}).items() if v.enabled)
+        listings = venue_listings()
+        print(f"品种覆盖:   已实测 {sorted(listings) if listings else '（无）'}"
+              f"；其余所标 ?（未校验＝不知道，≠没有）"
+              f"  [联网几秒，取不到就标 ?，不影响结论]")
+        for bid in _enabled:
+            syms = [str(s) for s in (getattr(_bots[bid], "symbols", None) or [])]
+            if not syms:
+                continue
+            m = coverage_matrix(syms, venue_symbols=listings)
+            for line in format_rows(m):
+                print(f"  {bid:<12} {line}")
+            for sym, vs in gaps(m).items():
+                print(f"  ⚠️  {bid}: {sym} 在 {'/'.join(vs)} 上**确认没有**"
+                      f"（上币差异？或拼错？—— 只提示，不改部署结论）")
+            unk = unverified(m)
+            if unk:
+                venues_unk = sorted({v for vs in unk.values() for v in vs})
+                print(f"      （{'/'.join(venues_unk)} 未接列合约能力 → 这几个所全是 ?）")
+    except Exception as e:  # noqa: BLE001 — 纯展示
+        print(f"品种覆盖:   (跳过: {type(e).__name__}: {e})")
+
     # 4) skill
     try:
         from .skillkit import SkillRegistry

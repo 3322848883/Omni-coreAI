@@ -56,5 +56,67 @@ class TestCoverageMatrix(unittest.TestCase):
         self.assertFalse(coverage.supports_listing("nope"))
 
 
+class TestFormatRows(unittest.TestCase):
+    """矩阵的**渲染**也要与 CLI/deploy-check 共用一份（别两处各写一套，会漂移）。"""
+
+    def test_three_states_are_distinguishable(self):
+        m = coverage.coverage_matrix(["BTC_USDT"], venue_symbols={"gate": ["BTC_USDT"]})
+        line = coverage.format_rows(m)[0]
+        self.assertTrue(line.startswith("BTC_USDT: "), line)
+        self.assertIn("gate=有", line)
+        self.assertIn("=?", line, "未校验的所要标 ?（不知道 ≠ 没有）")
+
+    def test_missing_is_renderable(self):
+        m = coverage.coverage_matrix(["PEPE_USDT"], venue_symbols={"gate": ["BTC_USDT"]})
+        self.assertIn("gate=没有", coverage.format_rows(m)[0])
+
+    def test_empty_matrix_renders_nothing(self):
+        self.assertEqual(coverage.format_rows({}), [])
+
+
+class TestVenueListings(unittest.TestCase):
+    """`venue_listings`：尽力而为地取各所的实测清单 —— 取不到就**不进入返回**。
+
+    为什么不返回空集：`coverage_matrix` 把空集判成「确认没有」，那会把"取不到"
+    变成"上币差异"这个**结论**（正是 T16 要防的那类静默失真）。
+    """
+
+    def test_gate_failure_is_omitted(self):
+        from unittest import mock
+
+        with mock.patch("omnialpha.config.fetch_exchange_contracts", return_value=None):
+            self.assertEqual(coverage.venue_listings(["gate"]), {})
+
+    def test_gate_success_is_kept(self):
+        from unittest import mock
+
+        with mock.patch("omnialpha.config.fetch_exchange_contracts",
+                        return_value={"BTC_USDT"}):
+            self.assertEqual(coverage.venue_listings(["gate"]), {"gate": {"BTC_USDT"}})
+
+    def test_adapter_available_symbols_is_used(self):
+        from unittest import mock
+
+        from omnialpha.exchanges.bitget import BitgetExchange
+
+        with mock.patch.object(BitgetExchange, "available_symbols",
+                               return_value={"BTC_USDT", "ETH_USDT"}):
+            out = coverage.venue_listings(["bitget"])
+        self.assertEqual(out, {"bitget": {"BTC_USDT", "ETH_USDT"}})
+
+    def test_venue_without_capability_is_omitted(self):
+        """没有 `available_symbols` 的所 → 不进入返回（矩阵标 ?，而不是"没有"）。"""
+        self.assertEqual(coverage.venue_listings(["binance"]), {})
+
+    def test_never_raises(self):
+        from unittest import mock
+
+        from omnialpha.exchanges.bitget import BitgetExchange
+
+        with mock.patch.object(BitgetExchange, "available_symbols",
+                               side_effect=RuntimeError("network down")):
+            self.assertEqual(coverage.venue_listings(["bitget"]), {})
+
+
 if __name__ == "__main__":
     unittest.main()
