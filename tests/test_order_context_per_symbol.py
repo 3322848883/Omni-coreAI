@@ -186,5 +186,50 @@ class TestOrderContextBudget(unittest.TestCase):
                                  5)
 
 
+class TestCreateValidatesUniverse(unittest.TestCase):
+    """T347：`create(universe=…)` 越界**不落盘** —— 订单库是审计面。
+
+    写进一个本组根本不做的标的，会让「按币取单」（`_order_context_for`）与事后核对
+    一起失准：那条记录会一直躺在库里，而没有任何一轮真的交易过它。
+    """
+
+    UNI = ["BTC_USDT", "ETH_USDT"]
+
+    def test_out_of_universe_rejected_and_not_written(self):
+        with tempfile.TemporaryDirectory() as td:
+            st = SharedOrderStore(Path(td))
+            with self.assertRaises(ValueError):
+                st.create({"symbol": "SOL_USDT", "order_id": "o-bad"}, universe=self.UNI)
+            self.assertIsNone(st.get("o-bad"), "越界的记录不得落盘")
+
+    def test_in_universe_written(self):
+        with tempfile.TemporaryDirectory() as td:
+            st = SharedOrderStore(Path(td))
+            st.create({"symbol": "ETH_USDT", "order_id": "o-ok"}, universe=self.UNI)
+            self.assertIsNotNone(st.get("o-ok"))
+
+    def test_normalised_forms_are_accepted(self):
+        """`eth_usdt` / `ETHUSDT` 是同一个标的，不该被当成越界（归一后比较）。"""
+        with tempfile.TemporaryDirectory() as td:
+            st = SharedOrderStore(Path(td))
+            for i, raw in enumerate(("eth_usdt", "ETHUSDT")):
+                st.create({"symbol": raw, "order_id": f"o-{i}"}, universe=self.UNI)
+                self.assertIsNotNone(st.get(f"o-{i}"), raw)
+
+    def test_empty_symbol_is_not_out_of_universe(self):
+        """标的留空 = 「判不出来」，不是「写错」—— 调用方靠这一点保留原有语义。"""
+        with tempfile.TemporaryDirectory() as td:
+            st = SharedOrderStore(Path(td))
+            st.create({"symbol": "", "order_id": "o-nosym"}, universe=self.UNI)
+            self.assertIsNotNone(st.get("o-nosym"))
+
+    def test_without_universe_behaviour_unchanged(self):
+        """不给宇宙 → 不校验（旧调用方逐字不变）。"""
+        with tempfile.TemporaryDirectory() as td:
+            st = SharedOrderStore(Path(td))
+            st.create({"symbol": "SOL_USDT", "order_id": "o-any"})
+            self.assertIsNotNone(st.get("o-any"))
+
+
 if __name__ == "__main__":
     unittest.main()

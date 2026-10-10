@@ -64,7 +64,25 @@ class SharedOrderStore:
             raise ValueError(f"invalid order_id {order_id!r}")
         return self.dir / f"{oid}.json"
 
-    def create(self, order: dict) -> dict:
+    def create(self, order: dict, *, universe: Optional[list] = None) -> dict:
+        """新建（或覆盖）一条订单记录。
+
+        `universe` 给了就校验 `symbol` 落在其中 —— 订单库是**审计面**，写进一个本组
+        根本不做的标的，会让「按币取单」与事后核对一起失准（T347）。越界 `raise
+        ValueError`：宁可这一条不落盘，也不要留下一个指向别的币的记录。
+        **默认 `None` = 不校验**（旧调用方行为不变）。
+
+        `symbol` 为空不算越界（调用方在判不出标的时会留空，那是"不知道"，不是"写错"）。
+        """
+        sym = str(order.get("symbol") or "").strip()
+        if universe and sym:
+            from ..gate_client import resolve_symbol
+
+            allowed = {resolve_symbol(s) for s in universe if str(s or "").strip()}
+            if resolve_symbol(sym) not in allowed:
+                raise ValueError(
+                    f"order symbol {sym!r}（归一后 {resolve_symbol(sym)}）不在宇宙 "
+                    f"{sorted(allowed)} 内 —— 拒绝写入订单库")
         oid = str(order.get("order_id") or new_order_id())
         rec = dict(order)
         rec["order_id"] = oid

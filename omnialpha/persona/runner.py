@@ -110,7 +110,11 @@ class PersonaRunner:
                         "members": list(self.group.members),
                         "side": decision if decision in ("long", "short") else "",
                         "status": "open",
-                    })
+                    }, universe=universe)
+                except ValueError as e:
+                    # 越界不让写（T347）：上面虽然已经拦过一次，但订单库是审计面，
+                    # 这里再挡一道；**不能静默**——静默就没法发现判据漂移。
+                    log.warning("persona %s: 订单记录未写入：%s", self.group.name, e)
                 except Exception:  # noqa: BLE001
                     pass
             for bot_id, plan in flat.items():
