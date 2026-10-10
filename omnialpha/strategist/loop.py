@@ -382,6 +382,23 @@ class PlanRunner:
                     if r.get("target_account") == bid}
             chips = {str(getattr(c, "symbol", "") or "").strip().upper(): c
                      for c in (getattr(plan, "chips", None) or [])}
+            pos_rows = ((snapshot or {}).get("account") or {}).get("positions") or []
+
+            def _pos_of(k: str) -> dict:
+                for p in pos_rows:
+                    if (isinstance(p, dict)
+                            and str(p.get("contract") or "").strip().upper() == k):
+                        return p
+                return {}
+
+            def _side_from_position(k: str) -> str:
+                """从快照的持仓推方向 —— 管理动作本身不带方向（`modify_tp_sl` 没有 side）。"""
+                try:
+                    sz = float(_pos_of(k).get("size") or 0)
+                except (TypeError, ValueError):
+                    return ""
+                return "long" if sz > 0 else ("short" if sz < 0 else "")
+
             for o in orders or []:
                 if not isinstance(o, dict):
                     continue
@@ -392,38 +409,48 @@ class PlanRunner:
                 if not key or not ev:
                     continue
                 rec = mine.get(key)
+                if (ev == "open" and rec is not None
+                        and str(rec.get("side") or "") not in ("", side)):
+                    # 方向反转 → 旧单关闭，下面另起一张
+                    store.add_lifecycle(rec["order_id"], "close", "reversed", by=bid)
+                    store.update(rec["order_id"], status="closed")
+                    store.refresh_recent_events(rec["order_id"])
+                    rec = None
+                if rec is None:
+                    if ev == "close":
+                        continue            # 本来就没记录，不必为一次平仓造一条
+                    # **管理动作也要建**：持仓中的 bot（实盘 brooks-btc 就是）只发
+                    # `hold`→`modify_tp_sl`，没有 open 动作 —— 只在 open 时建记录的话，
+                    # 这类 bot 的订单记忆会**永远为空**（2026-10-10 部署到实盘后实测踩到：
+                    # 每轮 exec=True orders=1，而订单库一条都没有）。
+                    # 方向只能从快照的持仓推；推不出（无仓/取数失败）就**不建**，不猜。
+                    guess = side or _side_from_position(key)
+                    if not guess:
+                        continue
+                    pos = _pos_of(key)
+                    rec = store.create({
+                        "order_id": new_order_id(),
+                        "symbol": sym,
+                        "target_account": bid,
+                        "side": guess,
+                        "status": "open",
+                        "entry_price": (o.get("price") or o.get("trigger_price")
+                                        or pos.get("entry_price")),
+                        "size_usd": o.get("size_usd"),
+                        "tp": o.get("tp"),
+                        "sl": o.get("sl"),
+                    }, universe=self.cfg.symbols or None)
+                    mine[key] = rec
                 if ev == "open":
-                    if rec is not None and str(rec.get("side") or "") not in ("", side):
-                        store.add_lifecycle(rec["order_id"], "close", "reversed", by=bid)
-                        store.update(rec["order_id"], status="closed")
-                        store.refresh_recent_events(rec["order_id"])
-                        rec = None
-                    if rec is None:
-                        rec = store.create({
-                            "order_id": new_order_id(),
-                            "symbol": sym,
-                            "target_account": bid,
-                            "side": side,
-                            "status": "open",
-                            "entry_price": o.get("price") or o.get("trigger_price"),
-                            "size_usd": o.get("size_usd"),
-                            "tp": o.get("tp"),
-                            "sl": o.get("sl"),
-                        }, universe=self.cfg.symbols or None)
-                        mine[key] = rec
                     store.add_lifecycle(rec["order_id"], "open", act, by=bid)
                 elif ev == "close":
-                    if rec is None:
-                        continue
                     store.add_lifecycle(rec["order_id"], "close", act, by=bid)
                     store.update(rec["order_id"], status="closed")
                     store.refresh_recent_events(rec["order_id"])
                     mine.pop(key, None)     # 已关掉，别在下面的回收里再关一次
                     continue
                 else:                       # modify / reduce
-                    if rec is None:
-                        continue
-                    prices = {k: o.get(k) for k in ("tp", "sl") if o.get(k) is not None}
+                    prices = {k2: o.get(k2) for k2 in ("tp", "sl") if o.get(k2) is not None}
                     if prices:
                         store.update(rec["order_id"], **prices)
                     store.add_lifecycle(rec["order_id"], ev, act, by=bid)

@@ -353,6 +353,81 @@ class TestSingleBotWritesOrderMemory(unittest.TestCase):
                                    side_effect=RuntimeError("disk full")):
                 self._open(root, r)      # 不应抛出
 
+    # ── 管理动作也要建记录（实盘部署后踩到的 case）──────────────────
+
+    @staticmethod
+    def _snap(state="position_open", size=-56, entry="82790"):
+        return {"account": {"position_state": {"BTC_USDT": state},
+                            "positions": ([{"contract": "BTC_USDT", "size": size,
+                                            "entry_price": entry}] if size else [])}}
+
+    def test_manage_action_creates_record_from_position(self):
+        """**实盘踩到的那一个**：持仓中的 bot 只发 `modify_tp_sl`（没有 open 动作）。
+
+        只在 `open_*` 时建记录的话，这类 bot 的订单记忆**永远为空** —— 部署到实盘后实测：
+        `brooks-btc` 每轮 `exec=True orders=1`，而订单库一条都没有。而 `modify_tp_sl`
+        本身不带 `side`，方向只能从快照的持仓推。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            r = _loop_runner(["BTC_USDT"])
+            r._sync_order_memory(
+                root, "b1", self._plan([self._chip("BTC_USDT", 83000.0)]),
+                [{"symbol": "BTC_USDT", "action": "modify_tp_sl", "sl": 83500.0}],
+                self._snap())
+            opens = SharedOrderStore(root).list_open()
+            self.assertEqual(len(opens), 1, "管理动作必须也能建出记录")
+            self.assertEqual(opens[0]["side"], "short", "方向从持仓推（size<0 → 空）")
+            self.assertEqual(opens[0]["entry_price"], "82790")
+            self.assertEqual(opens[0]["sl"], 83500.0)
+            self.assertTrue([e for e in opens[0]["lifecycle"] if e["act"] == "modify_sl"])
+            self.assertIsNotNone(r._order_context_for(root, "b1", via_group=False),
+                                 "这正是实盘缺的那一段上下文")
+
+    def test_manage_action_with_long_position(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            r = _loop_runner(["BTC_USDT"])
+            r._sync_order_memory(root, "b1", self._plan(), [
+                {"symbol": "BTC_USDT", "action": "modify_tp_sl", "tp": 90000.0}],
+                self._snap(size=56))
+            self.assertEqual(SharedOrderStore(root).list_open()[0]["side"], "long")
+
+    def test_manage_action_without_position_does_not_invent(self):
+        """推不出方向 → **不建**（不猜）。"""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            r = _loop_runner(["BTC_USDT"])
+            r._sync_order_memory(root, "b1", self._plan(), [
+                {"symbol": "BTC_USDT", "action": "modify_tp_sl", "sl": 1.0}],
+                self._snap(state="flat", size=0))
+            self.assertEqual(SharedOrderStore(root).list_open(), [])
+
+    def test_close_without_record_creates_nothing(self):
+        """本来就没记录 → 不为一次平仓造一条（省掉一堆只有 open+close 的空记录）。"""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            r = _loop_runner(["BTC_USDT"])
+            r._sync_order_memory(root, "b1", self._plan(),
+                                 [{"symbol": "BTC_USDT", "action": "close"}],
+                                 self._snap())
+            self.assertEqual(SharedOrderStore(root).list_open(), [])
+
+    def test_modify_then_reuse_same_record(self):
+        """第二轮管理动作复用同一条记录（不是每轮新建）。"""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            r = _loop_runner(["BTC_USDT"])
+            acts = [{"symbol": "BTC_USDT", "action": "modify_tp_sl", "sl": 83500.0},
+                    {"symbol": "BTC_USDT", "action": "modify_tp_sl", "sl": 83800.0}]
+            for o in acts:
+                r._sync_order_memory(root, "b1", self._plan(), [o], self._snap())
+            opens = SharedOrderStore(root).list_open()
+            self.assertEqual(len(opens), 1)
+            self.assertEqual(opens[0]["sl"], 83800.0, "第二次的价要覆盖第一次")
+            self.assertEqual(len([e for e in opens[0]["lifecycle"]
+                                  if e["act"] == "modify_sl"]), 2, "两次事件都要留痕")
+
     # ── 过期记录回收（快照的 position_state 是唯一判据）──────────────
 
     def _sync_state(self, root, runner, state):
