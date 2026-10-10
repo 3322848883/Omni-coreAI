@@ -274,7 +274,11 @@ def cmd_tools(args) -> int:
         tcfg = dict(s.get("tools") or {})
         mk = dict(s.get("market") or {})
         allow, deny = tcfg.get("allow"), tcfg.get("deny")
-        eff = filter_tool_schemas(base, allow=allow, deny=deny)
+        # `symbols=` 按**每个 bot 自己的宇宙**注入 `account.symbols` 的 enum ——
+        # 要在这里算而不是复用 `base`，否则多币 bot 看到的仍是"任意字符串"（T6）。
+        eff = filter_tool_schemas(
+            available_native_tools(paths.root, symbols=getattr(bot, "symbols", None)),
+            allow=allow, deny=deny)
         eff_names = [(t.get("function") or {}).get("name") for t in eff]
         skills = s.get("skills") if s.get("skills") is not None else getattr(bot, "skills", None)
         print("=" * 78)

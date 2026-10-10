@@ -262,10 +262,6 @@ class TestAccountSymbolsSchema(unittest.TestCase):
         self.assertNotIn("error", out, out)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestUnifiedPrecheck(unittest.TestCase):
     """T6：**全部**需要 symbol 的工具都走统一前置（不再各自 `or "BTC_USDT"`）。
 
@@ -327,6 +323,67 @@ class TestUnifiedPrecheck(unittest.TestCase):
         """缺 symbol 不再返回「全表最新 N 行」（那是**任意币**的数据）。"""
         out = run_tool(None, "sentiment", {}, symbols=MULTI)
         self.assertEqual(out.get("error"), "symbol_required", out)
+
+
+class _SpyLLM:
+    """只做一件事：把 `chat_message_full` 收到的 tools 留下来。"""
+
+    def __init__(self):
+        self.tools = None
+
+    def chat_message_full(self, messages, tools=None, tool_choice=None):
+        self.tools = tools
+        return {"content": "no tools this round", "tool_calls": []}
+
+
+class TestEnumWiringInProductionPath(unittest.TestCase):
+    """**接线断言**：生产路径必须把宇宙带进 schema。
+
+    `_bind_symbol_enum` 本身有测试（`TestAccountSymbolsSchema`），但本仓最常见的
+    失效形态正是「helper 与测试都写好了、生产调用点没接上」（独立评审一次抓到 5 处，
+    而 `available_native_tools(symbols=)` 自己就是第 6 处）。所以这里不扫源码，
+    直接跑**生产方法** `_chat_native_tools`、抓它交给 LLM 的 tools。
+    """
+
+    @staticmethod
+    def _runner(symbols):
+        from omnialpha.strategist.loop import PlanRunner, StrategistConfig
+
+        r = PlanRunner.__new__(PlanRunner)
+        r.cfg = StrategistConfig(symbols=list(symbols))
+        r.llm = _SpyLLM()
+        return r
+
+    @staticmethod
+    def _symbols_prop(tools):
+        for t in tools or []:
+            fn = t.get("function") or {}
+            if fn.get("name") == "account":
+                return fn["parameters"]["properties"]["symbols"]
+        raise AssertionError("account 工具不在工具面里（枚举没地方注入）")
+
+    def test_multi_symbol_loop_exposes_universe_in_schema(self):
+        r = self._runner(MULTI)
+        r._chat_native_tools([{"role": "user", "content": "x"}], max_rounds=0)
+        self.assertIsNotNone(r.llm.tools, "生产路径没把 tools 传给 LLM")
+        self.assertEqual(self._symbols_prop(r.llm.tools)["items"]["enum"], MULTI,
+                         "多币下模型必须直接看到合法标的（否则要靠一次越界往返去猜）")
+
+    def test_single_symbol_loop_gets_unique_enum(self):
+        """单币宇宙也给 enum —— 值是**唯一合法解**，不是新增约束。
+
+        I11 例外（工具 schema ≠ prompt 文本）：`account.symbols` 在单币 bot 上
+        本来也只能填那一个值，写进 enum 是把隐含约束显式化。
+        """
+        r = self._runner(["BTC_USDT"])
+        r._chat_native_tools([{"role": "user", "content": "x"}], max_rounds=0)
+        self.assertEqual(self._symbols_prop(r.llm.tools)["items"]["enum"], ["BTC_USDT"])
+
+    def test_no_universe_leaves_schema_untouched(self):
+        r = self._runner([])
+        r._chat_native_tools([{"role": "user", "content": "x"}], max_rounds=0)
+        self.assertNotIn("enum", self._symbols_prop(r.llm.tools)["items"],
+                         "没有宇宙可注入时必须与改动前逐字一致")
 
 
 if __name__ == "__main__":

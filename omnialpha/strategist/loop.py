@@ -504,6 +504,9 @@ class PlanRunner:
         self._save_last_cycle(plan.cycle_id)
         rejected_triggers = self._apply_ai_triggers(plan)
         risk_result = apply_risk(plan, self.cfg.risk)
+        # 解析期的**宽容告警**（如 `scenarios` 非对象被丢弃，D9/T12）此前只落 `log.warning`，
+        # run 结果与 ledger 里都看不到 —— 等于告警没有出口。这里并进 notes。
+        run_notes = risk_result.notes + rejected_triggers + list(plan.notes or [])
         payload = chips_to_signal(plan, risk_result, bot_id=self.cfg.bot_id or self.inbox.name)
         orders = payload.get("orders") or []
         # agent-memory：每轮决策入 journal（含快照摘要/模型/缓存命中，设计 S2.4）
@@ -540,7 +543,7 @@ class PlanRunner:
             if self.cfg.write_hold:
                 write_hold_audit(self.history_dir, plan, cycle_id=plan.cycle_id)
             self._record_plan(cycle_id=plan.cycle_id, trigger=trigger, orders=0,
-                              notes=risk_result.notes + rejected_triggers,
+                              notes=run_notes,
                               reasoning=plan.reasoning)
             # monitoring: decay（hold 不计盈亏）
             self._record_decay(plan, executed=False, equity=self._decay_equity(snapshot))
@@ -548,14 +551,14 @@ class PlanRunner:
                 "ok": True,
                 "cycle_id": plan.cycle_id,
                 "orders": 0,
-                "notes": risk_result.notes + rejected_triggers,
+                "notes": run_notes,
                 "rejected": len(risk_result.rejected),
                 "trigger": trigger,
                 **tail_extra,
             }
         path = write_signal_file(self.inbox, payload, cycle_id=plan.cycle_id)
         self._record_plan(cycle_id=plan.cycle_id, trigger=trigger, orders=len(orders),
-                          notes=risk_result.notes + rejected_triggers, reasoning=plan.reasoning)
+                          notes=run_notes, reasoning=plan.reasoning)
         # monitoring: decay（执行后按方向记 PnL）
         self._record_decay(plan, executed=True, equity=self._decay_equity(snapshot))
         return {
@@ -563,7 +566,7 @@ class PlanRunner:
             "cycle_id": plan.cycle_id,
             "orders": len(orders),
             "file": str(path),
-            "notes": risk_result.notes + rejected_triggers,
+            "notes": run_notes,
             "rejected": len(risk_result.rejected),
             "trigger": trigger,
         }
@@ -1404,8 +1407,10 @@ class PlanRunner:
         # tools.available_native_tools 的说明。
         # 再按 bot 配置收窄（`strategist.tools.allow` / `.deny`，支持通配）——
         # 这是**程序强制**的：模型看不到就调不到，不依赖它自觉遵守提示词。
+        # `symbols=` 把【品种宇宙】注入 `account.symbols` 的 enum：多币下模型一眼就能
+        # 看到合法标的，不必靠一次「越界被拒」的往返去猜（T6）。不传 = 行为与改动前一致。
         base_tools = filter_tool_schemas(
-            available_native_tools(self.cfg.bot_root),
+            available_native_tools(self.cfg.bot_root, symbols=self.cfg.symbols),
             allow=self.cfg.tools.get("allow"),
             deny=self.cfg.tools.get("deny"),
         )

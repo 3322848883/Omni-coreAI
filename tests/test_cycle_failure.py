@@ -173,5 +173,44 @@ class TestRunOnceDegrade(unittest.TestCase):
                 self.assertEqual(notify.call_count, 1)
 
 
+class TestParseWarningsSurfaceInNotes(unittest.TestCase):
+    """解析期的**宽容告警**（D9/T12）必须出现在 run 结果里。
+
+    此前 `plan.notes` 只落 `log.warning`，run 结果与 ledger 都读不到 ——
+    "这一轮的 `scenarios` 被丢弃了"在调用方看来等于没发生过，正是本仓
+    「要求了但不消费 / 静默失效」的老形态。
+
+    复用 `TestRunOnceDegrade` 的 run_once 夹具（同一套 mock，避免两份漂移）。
+    """
+
+    _PLAN = json.dumps({
+        "cycle_id": "c1",
+        "reasoning": "x",
+        "chips": [{"symbol": "BTC_USDT", "action": "hold", "scenarios": "不是对象"}],
+    }, ensure_ascii=False)
+
+    def _harness(self):
+        return TestRunOnceDegrade("test_parse_failure_degrades_to_hold")
+
+    def test_scenarios_discard_warning_reaches_run_result(self):
+        harness = self._harness()
+        with tempfile.TemporaryDirectory() as td:
+            res = harness._run(td, lambda *_a, **_kw: self._PLAN)
+            self.assertTrue(res["ok"], res)
+            joined = " | ".join(res.get("notes") or [])
+            self.assertIn("scenarios", joined, f"解析告警没进 run 结果: {res}")
+
+    def test_clean_plan_has_no_extra_notes(self):
+        """正常计划不得凭空多出 notes（否则等于把告警变成噪音）。"""
+        harness = self._harness()
+        clean = json.dumps({"cycle_id": "c1", "reasoning": "x",
+                            "chips": [{"symbol": "BTC_USDT", "action": "hold"}]},
+                           ensure_ascii=False)
+        with tempfile.TemporaryDirectory() as td:
+            res = harness._run(td, lambda *_a, **_kw: clean)
+            self.assertTrue(res["ok"], res)
+            self.assertEqual(res.get("notes"), [], res)
+
+
 if __name__ == "__main__":
     unittest.main()
