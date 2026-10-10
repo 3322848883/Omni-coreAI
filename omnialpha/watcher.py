@@ -1049,7 +1049,7 @@ def _exchange_pnl_sweep(bot: BotConfig, paths: ProjectPaths) -> int:
     return added
 
 
-def _guard_round(bot: BotConfig, paths: ProjectPaths):
+def _guard_round(bot: BotConfig):
     """本轮扫描的**共享 client** + 扫描集合（算一次，5 个 sweep 复用）。
 
     原先每个 sweep 各建一个 client、各自按币查持仓/挂单 —— REST 调用数按
@@ -1106,7 +1106,7 @@ def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[
                 # 浮盈回撤平仓放**快扫描**：回撤保护对时间敏感，300s 一次太慢。
                 # 只在开关打开时才去算扫描集合 —— 否则白付一次账户快照的 REST。
                 if (getattr(bot, "account_risk", None) or {}).get("give_back", False):
-                    client, scan = _guard_round(bot, paths)
+                    client, scan = _guard_round(bot)
                     try:
                         _give_back_sweep(bot, paths, give_back_alerted,
                                          client=client, symbols=scan["symbols"])
@@ -1118,7 +1118,7 @@ def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[
                 # → 最后上移已有保护（防坐电梯）**。
                 # 上移放最后：它读的是「现有 SL 在哪」，前面三步刚把 SL 集合收拾干净，
                 # 这时候的目标价才是稳的。
-                client, scan = _guard_round(bot, paths)
+                client, scan = _guard_round(bot)
                 syms = scan["symbols"]
                 try:
                     _reconcile_sweep(bot, paths, client=client, symbols=syms)
