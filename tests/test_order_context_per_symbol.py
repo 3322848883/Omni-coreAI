@@ -353,6 +353,103 @@ class TestSingleBotWritesOrderMemory(unittest.TestCase):
                                    side_effect=RuntimeError("disk full")):
                 self._open(root, r)      # 不应抛出
 
+    # ── 过期记录回收（快照的 position_state 是唯一判据）──────────────
+
+    def _sync_state(self, root, runner, state):
+        """跑一轮「没下单」的同步，并带上快照里的持仓状态。"""
+        runner._sync_order_memory(root, "b1", self._plan(), [],
+                                  {"account": {"position_state": {"BTC_USDT": state}}})
+
+    def test_flat_retires_stale_record(self):
+        """交易所侧 SL/TP 触发平仓**没有信号** → 记录不会自己关，靠快照的 flat 回收。
+
+        不回收的后果：下一轮 prompt 里挂着一个**已经不存在的仓位**。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            r = _loop_runner(["BTC_USDT"])
+            self._open(root, r)
+            oid = SharedOrderStore(root).list_open()[0]["order_id"]
+            self._sync_state(root, r, "flat")
+            self.assertEqual(SharedOrderStore(root).list_open(), [])
+            rec = SharedOrderStore(root).get(oid)
+            self.assertEqual(rec["status"], "closed")
+            self.assertTrue([e for e in rec["lifecycle"] if e["detail"] == "stale_flat"])
+
+    def test_entry_pending_must_not_be_retired(self):
+        """**最关键的一条**：待成交的突破单正是记录的正常来源。
+
+        实测 ab-multi-new 那张 `stop_entry_long`（XAU 挂单未成交）就落在这个状态；
+        若把它当过期回收，模型会丢掉自己挂的单 —— 比没有记忆更糟。
+        （`flat` 在 snapshot.py 的定义是「无持仓**且**无待成交入场单」，两者靠这个区分。）
+        """
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            r = _loop_runner(["BTC_USDT"])
+            self._open(root, r)
+            self._sync_state(root, r, "entry_pending")
+            self.assertEqual(len(SharedOrderStore(root).list_open()), 1)
+
+    def test_position_open_is_not_retired(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            r = _loop_runner(["BTC_USDT"])
+            self._open(root, r)
+            self._sync_state(root, r, "position_open")
+            self.assertEqual(len(SharedOrderStore(root).list_open()), 1)
+
+    def test_unknown_and_missing_state_are_not_retired(self):
+        """`unknown`（持仓取数失败）与缺键一律**不动** —— 宁可留一条过期记录，
+        也不要因为读不到就抹掉证据（与规则 14/16 对 unknown 的处理同源）。"""
+        for snap in ({"account": {"position_state": {"BTC_USDT": "unknown"}}},
+                     {"account": {"position_state": {}}},
+                     {"account": {}},
+                     {}):
+            with self.subTest(snap=snap):
+                with tempfile.TemporaryDirectory() as td:
+                    root = Path(td)
+                    r = _loop_runner(["BTC_USDT"])
+                    self._open(root, r)
+                    r._sync_order_memory(root, "b1", self._plan(), [], snap)
+                    self.assertEqual(len(SharedOrderStore(root).list_open()), 1)
+
+    def test_pending_inbox_signal_blocks_retirement(self):
+        """**时序闸**：plan-loop 只写信号，挂单的是 `run`（轮询 ~2s）。
+
+        在它消费之前账户上什么都没有 —— 若不看这一点，就会把**刚挂出去、还没落地**的订单
+        当成过期回收（本地实测：没有 `run` 进程时第一轮就被误回收）。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            r = _loop_runner(["BTC_USDT"])
+            r.inbox = root / "inbox"
+            r.inbox.mkdir(parents=True)
+            self._open(root, r)
+            (r.inbox / "sig.json").write_text("{}", encoding="utf-8")   # 未被消费
+            self._sync_state(root, r, "flat")
+            self.assertEqual(len(SharedOrderStore(root).list_open()), 1,
+                             "inbox 还有未消费的信号 → 不回收")
+
+    def test_empty_inbox_still_retires(self):
+        """inbox 空（信号已被消费）→ 该回收还是要回收。"""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            r = _loop_runner(["BTC_USDT"])
+            r.inbox = root / "inbox"
+            r.inbox.mkdir(parents=True)
+            self._open(root, r)
+            self._sync_state(root, r, "flat")
+            self.assertEqual(SharedOrderStore(root).list_open(), [])
+
+    def test_without_snapshot_behaviour_unchanged(self):
+        """不给快照 → 不回收（旧调用方逐字不变）。"""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            r = _loop_runner(["BTC_USDT"])
+            self._open(root, r)
+            r._sync_order_memory(root, "b1", self._plan(), [])
+            self.assertEqual(len(SharedOrderStore(root).list_open()), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

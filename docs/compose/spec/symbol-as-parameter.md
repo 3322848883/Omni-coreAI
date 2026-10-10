@@ -110,7 +110,11 @@ commits: 07ae1b0..e0948ec（38 commits / 101 文件；`e0948ec` 已推 origin/ma
 - **单 bot 也写订单记录**（T14 / D-7 的最后一环，2026-10-10）：`PlanRunner._sync_order_memory`
   在落盘信号后按 symbol 建/复用/关闭共享订单记录（方向反转另起一张），把 lifecycle /
   recent_events / 模型声明的前提失效价写进去。此前全仓只有 persona 一个写入方，
-  `plan-loop` 的 `[订单上下文]` 永远为空。
+  `plan-loop` 的 `[订单上下文]` 永远为空。**过期记录回收**：交易所侧的 SL/TP 触发平仓
+  **没有信号**，记录不会自己关 —— 现按快照的 `position_state` 回收，**只信 `flat`**
+  （`entry_pending` / `position_open` / `unknown` / 缺键一律不动）。另加一道**时序闸**：
+  plan-loop 只写信号、挂单的是 `run`（轮询 ~2s），所以「inbox 里还有未消费的信号」时
+  **不回收** —— 否则会把刚挂出去、还没落地的订单误判成过期（本地实测踩到）。
 - **`[订单上下文]` 的空态文案**：原先渲染成「（当前无持仓）」—— 那是关于**持仓**的断言，
   而这一段只知道「有没有订单记录」；实测 brooks-btc 持 -56 BTC 时 prompt 里照样这么写。
   现改为「（无订单记录 —— 持仓状态以快照 `account.position_state` 为准）」，如实说明并

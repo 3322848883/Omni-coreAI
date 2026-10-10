@@ -354,7 +354,8 @@ class PlanRunner:
         "flatten": ("close", ""),
     }
 
-    def _sync_order_memory(self, root: Path, bid: str, plan: Any, orders: list) -> None:
+    def _sync_order_memory(self, root: Path, bid: str, plan: Any, orders: list,
+                           snapshot: Optional[dict] = None) -> None:
         """单 bot 也写共享订单库（T14 / D-7）。**尽力而为**：失败只告警，绝不影响下单。
 
         为什么必须写：`[订单上下文]` 读的是 `data/shared/orders/`，而此前**只有 persona 组
@@ -366,8 +367,11 @@ class PlanRunner:
 
         口径与 persona 侧一致：按 symbol 复用本 bot 的 open 记录；**方向反转另起一张**
         （旧单关闭）—— 否则注入的持仓方向会与账户相反，比没有记忆更危险。
+
+        `snapshot` 给了还会**回收过期记录**（见下 `_retire` 的判据）：交易所侧的 SL/TP 触发
+        平仓**没有信号**，记录不会因此关闭；留着它，模型会以为还有一个不存在的仓位。
         """
-        if not orders:
+        if not orders and snapshot is None:
             return
         try:
             from ..persona.orders import SharedOrderStore, new_order_id
@@ -378,7 +382,7 @@ class PlanRunner:
                     if r.get("target_account") == bid}
             chips = {str(getattr(c, "symbol", "") or "").strip().upper(): c
                      for c in (getattr(plan, "chips", None) or [])}
-            for o in orders:
+            for o in orders or []:
                 if not isinstance(o, dict):
                     continue
                 sym = str(o.get("symbol") or "").strip()
@@ -414,6 +418,7 @@ class PlanRunner:
                     store.add_lifecycle(rec["order_id"], "close", act, by=bid)
                     store.update(rec["order_id"], status="closed")
                     store.refresh_recent_events(rec["order_id"])
+                    mine.pop(key, None)     # 已关掉，别在下面的回收里再关一次
                     continue
                 else:                       # modify / reduce
                     if rec is None:
@@ -434,8 +439,44 @@ class PlanRunner:
                         oid, float(inv),
                         str(getattr(chip, "reasoning", "") or "")[:120])
                 store.refresh_recent_events(oid)
+            self._retire_flat_orders(store, bid, mine, snapshot)
         except Exception as e:  # noqa: BLE001 — 记忆是增益，不该拖垮下单
             log.warning("订单记忆同步失败（不影响下单）：%s", e)
+
+    def _retire_flat_orders(self, store: Any, bid: str, mine: dict,
+                            snapshot: Optional[dict]) -> None:
+        """把「快照说这个币是 `flat`」却还 open 的记录关掉。
+
+        为什么需要：交易所侧的 SL/TP 触发平仓**没有信号**（`run` 的对账能看到，`plan-loop`
+        看不到），记录于是永远 open —— 模型下一轮会看到一个**已经不存在的仓位**。
+
+        **只信 `flat`**（`snapshot.py` 的定义是「无持仓**且**无待成交入场单」）：
+        `entry_pending` 恰恰是记录的正常来源（预挂/待成交的突破单，实测 ab-multi-new
+        那张 `stop_entry_long` 就是），`position_open` 有仓，`unknown`（持仓取数失败）与
+        缺键一律**不动** —— 宁可留一条过期记录，也不要因为读不到就抹掉证据
+        （与规则 14/16 对 `unknown` 的处理同源）。
+
+        **还有一道时序闸**：plan-loop 只写信号，真正挂单的是另一个进程（`run`，轮询 ~2s）。
+        在它消费之前，账户上当然什么都还没有 —— 若不看这一点，就会把**刚挂出去、还没落地的
+        订单**当成过期回收（本地实测：没有 `run` 进程时，第一轮就被误回收）。
+        判据取「inbox 里还有未消费的信号」：有 → 说明执行进程还没跟上，本轮不回收。
+        """
+        inbox = getattr(self, "inbox", None)
+        try:
+            if inbox is not None and any(Path(inbox).glob("*.json")):
+                return
+        except Exception:  # noqa: BLE001 — 判不了就当"没有堆积"，不因此放弃回收
+            pass
+        ps = ((snapshot or {}).get("account") or {}).get("position_state")
+        if not isinstance(ps, dict):
+            return
+        norm = {str(k).strip().upper(): str(v or "").strip() for k, v in ps.items()}
+        for key, rec in list((mine or {}).items()):
+            if norm.get(key) != "flat":
+                continue
+            store.add_lifecycle(rec["order_id"], "close", "stale_flat", by=bid)
+            store.update(rec["order_id"], status="closed")
+            store.refresh_recent_events(rec["order_id"])
 
     def _assemble_prompt(self, root: Path, bid: str,
                          system: str, user: str, *,
@@ -642,6 +683,9 @@ class PlanRunner:
             self._record_plan(cycle_id=plan.cycle_id, trigger=trigger, orders=0,
                               notes=run_notes,
                               reasoning=plan.reasoning)
+            # 没下单的一轮**也要**维护订单记忆：交易所侧 SL/TP 触发平仓就发生在这种轮次里
+            # （那种成交没有信号），不跑这一步，过期记录会一直留着。
+            self._sync_order_memory(root, bid, plan, [], snapshot)
             # monitoring: decay（hold 不计盈亏）
             self._record_decay(plan, executed=False, equity=self._decay_equity(snapshot))
             return {
@@ -655,7 +699,7 @@ class PlanRunner:
             }
         path = write_signal_file(self.inbox, payload, cycle_id=plan.cycle_id)
         # 单 bot 也写订单记忆（T14/D-7）——否则 [订单上下文] 那一节永远是空的
-        self._sync_order_memory(root, bid, plan, orders)
+        self._sync_order_memory(root, bid, plan, orders, snapshot)
         self._record_plan(cycle_id=plan.cycle_id, trigger=trigger, orders=len(orders),
                           notes=run_notes, reasoning=plan.reasoning)
         # monitoring: decay（执行后按方向记 PnL）
