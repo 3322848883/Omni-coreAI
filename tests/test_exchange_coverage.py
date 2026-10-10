@@ -118,5 +118,46 @@ class TestVenueListings(unittest.TestCase):
             self.assertEqual(coverage.venue_listings(["bitget"]), {})
 
 
+class TestFetchExchangeContractsUsesListings(unittest.TestCase):
+    """`validate_contracts: true` 不能只认 gate。
+
+    此前 `fetch_exchange_contracts` 对非 gate **直接 return None**，于是"配了该所没有的币"
+    在 bitget/hyperliquid 上永远发现不了 —— 而这两个适配器早就有了 `available_symbols()`。
+    必须是 `None`（未校验）而不是空集：空集会被判成「确认没有」。
+    """
+
+    def setUp(self):
+        from omnialpha import config
+
+        config._CONTRACTS_CACHE.clear()
+
+    def test_non_gate_venue_uses_listings(self):
+        from unittest import mock
+
+        from omnialpha import config
+
+        with mock.patch("omnialpha.exchanges.coverage.venue_listings",
+                        return_value={"bitget": {"BTC_USDT", "ETH_USDT"}}):
+            self.assertEqual(config.fetch_exchange_contracts("bitget"),
+                             {"BTC_USDT", "ETH_USDT"})
+
+    def test_unavailable_venue_is_none_not_empty(self):
+        from unittest import mock
+
+        from omnialpha import config
+
+        with mock.patch("omnialpha.exchanges.coverage.venue_listings", return_value={}):
+            self.assertIsNone(config.fetch_exchange_contracts("bybit"))
+
+    def test_failure_is_none_not_raise(self):
+        from unittest import mock
+
+        from omnialpha import config
+
+        with mock.patch("omnialpha.exchanges.coverage.venue_listings",
+                        side_effect=RuntimeError("boom")):
+            self.assertIsNone(config.fetch_exchange_contracts("okx"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -267,9 +267,12 @@ _CONTRACTS_CACHE: dict[tuple[str, str], Optional[set]] = {}
 def fetch_exchange_contracts(exchange: str, env: str = "live") -> Optional[set]:
     """该所当前可用合约名集合；**取不到就返回 None**（调用方跳过校验，绝不拦启动）。
 
-    只实现 Gate（公开端点 `/futures/usdt/contracts`，无需密钥）：其余五所的适配器
-    要先有密钥才能建 client，把「配置校验」变成「凭据校验」是更坏的取舍（宁可少校验
-    一所，也不能让无密钥/离线环境起不来）。T16 补各所真实元数据时再铺开。
+    实现分两类，**都走公开端点、都不需要密钥**（否则「配置校验」会变成「凭据校验」）：
+    - `gate` —— `/futures/usdt/contracts`
+    - 有 `available_symbols()` 的适配器（bitget / hyperliquid）—— 经 `coverage.venue_listings`
+      统一取；**此前这里对非 gate 直接 `return None`**，于是 `validate_contracts: true`
+      只能校验 gate，bitget/hyperliquid 上「配了不存在的币」永远发现不了（T348 的另一半）。
+    - 其余所（binance / okx / bybit）仍未接列合约能力 → `None`（未校验，不拦启动）
     """
     key = ((exchange or "gate").strip().lower(), env)
     if key in _CONTRACTS_CACHE:
@@ -284,7 +287,15 @@ def fetch_exchange_contracts(exchange: str, env: str = "live") -> Optional[set]:
             log.warning("合约存在性校验: 拉取 %s 合约列表失败，本次跳过（%s）", key[0], e)
             result = None
     else:
-        log.info("合约存在性校验: exchange=%s 暂未实现（跳过）", key[0])
+        try:
+            from .exchanges.coverage import venue_listings
+
+            result = venue_listings([key[0]], env=key[1]).get(key[0])
+            if result is None:
+                log.info("合约存在性校验: %s 取不到合约清单（未接列合约能力或暂不可达）", key[0])
+        except Exception as e:  # noqa: BLE001
+            log.warning("合约存在性校验: 拉取 %s 合约列表失败，本次跳过（%s）", key[0], e)
+            result = None
     _CONTRACTS_CACHE[key] = result
     return result
 
