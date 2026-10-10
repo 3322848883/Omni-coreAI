@@ -259,6 +259,37 @@ class TestSaveThinkingKline(unittest.TestCase):
                 reasoning=["cot"])
             self.assertNotIn("kline", self._read(td))
 
+    def test_symbol_recorded_and_multi_becomes_array(self):
+        """D-27：审计体要能回答「这轮给模型发了哪几个币的逐K读」。
+
+        原先只留**首个**有内容的 chip → 其余币的逐K读凭空消失，且不带 symbol，
+        按币审计根本无从下手。
+        """
+        with tempfile.TemporaryDirectory() as t:
+            td = Path(t)
+            self._runner(td)._save_thinking(
+                cycle_id="c1", trigger="t",
+                content=('{"chips":['
+                         '{"symbol":"BTC_USDT","kline_tf":"5m","kline_read":["b1"]},'
+                         '{"symbol":"ETH_USDT","kline_tf":"15m","kline_read":["e1","e2"]}]}'),
+                reasoning=["cot"])
+            k = self._read(td)["kline"]
+            self.assertEqual(k["symbol"], "BTC_USDT", "旧字段仍要能读到（向后兼容）")
+            self.assertEqual(k["kline_read"], ["b1"])
+            self.assertEqual([e["symbol"] for e in k["kline_reads"]],
+                             ["BTC_USDT", "ETH_USDT"], "多币必须落数组")
+            self.assertEqual(k["kline_reads"][1]["kline_read"], ["e1", "e2"])
+
+    def test_single_chip_keeps_flat_shape(self):
+        """单 chip 不加数组 —— 单币 bot 的 thinking.json 形状不变（I11）。"""
+        with tempfile.TemporaryDirectory() as t:
+            td = Path(t)
+            self._runner(td)._save_thinking(
+                cycle_id="c1", trigger="t",
+                content='{"chips":[{"symbol":"BTC_USDT","kline_tf":"5m","kline_read":["b1"]}]}',
+                reasoning=["cot"])
+            self.assertNotIn("kline_reads", self._read(td)["kline"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

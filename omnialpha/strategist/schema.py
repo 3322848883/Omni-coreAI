@@ -285,7 +285,10 @@ def extract_kline_reads(text: str) -> dict:
     这个审计字段去调整落盘顺序，会把「解析失败也要留下 CoT」这条现有行为改掉。
 
     不抛异常：正文坏掉、没有该字段、chips 为空都返回 `{}`（调用方据此跳过落盘）。
-    返回 `{"kline_tf": str, "kline_read": [str]}`，两者皆空时返回 `{}`。
+
+    返回 `{"symbol", "kline_tf", "kline_read"}`；**多币时**额外带 `"kline_reads"`
+    数组（每个有内容的 chip 一条）—— 原先只留首个 chip，其余币的逐K读凭空消失，
+    而"这轮给模型发了哪几个币的逐K读"正是按币审计要回答的问题（D-27）。
     """
     try:
         data = _extract_json_object(text or "")
@@ -293,19 +296,27 @@ def extract_kline_reads(text: str) -> dict:
         return {}
     if not isinstance(data, dict):
         return {}
-    tf, bars = "", []
+    tf, bars, sym = "", [], ""
+    per: list = []
     for c in (data.get("chips") or []):
         if not isinstance(c, dict):
             continue
-        if not tf:
-            tf = str(c.get("kline_tf") or "").strip()[:16]
+        ctf = str(c.get("kline_tf") or "").strip()[:16]
         got = _kline_read(c.get("kline_read"))
-        if got:
-            bars = got
-            break
-    if not bars and not tf:
+        if not got and not ctf:
+            continue          # 该 chip 什么都没写，不算一条
+        per.append({"symbol": str(c.get("symbol") or "").strip(),
+                    "kline_tf": ctf, "kline_read": got})
+        if not bars and got:  # 兼容旧形状：首个**有内容**的 chip 顶上去
+            tf, bars, sym = ctf, got, str(c.get("symbol") or "").strip()
+    if not per:
         return {}
-    return {"kline_tf": tf, "kline_read": bars}
+    out = {"symbol": sym or per[0]["symbol"],
+           "kline_tf": tf or per[0]["kline_tf"],
+           "kline_read": bars or per[0]["kline_read"]}
+    if len(per) > 1:
+        out["kline_reads"] = per
+    return out
 
 
 def parse_plan(data: Any, symbols: Optional[list[str]] = None) -> Plan:
