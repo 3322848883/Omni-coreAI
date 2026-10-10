@@ -657,7 +657,11 @@ class TestSnapshot(unittest.TestCase):
                 ["BTC_USDT"],
                 candles=30,
                 interval="15m",
-                market_cfg=MarketConfig(mode="hybrid", pa_data_root=str(data)),
+                # `indicators` 必须显式列出 —— K 线表自带的 ema20/atr14 现在会按
+                # 有效指标集剥离（T180），不列就不给（这正是下面那条断言要证明的：
+                # **库里那一列的值**能流到快照，而不是"快照无条件带上它"）。
+                market_cfg=MarketConfig(mode="hybrid", pa_data_root=str(data),
+                                        indicators=["ema20", "atr14"]),
                 env="live",
             )
             self.assertEqual(snap["meta"]["candle_source"]["BTC_USDT"], "local")

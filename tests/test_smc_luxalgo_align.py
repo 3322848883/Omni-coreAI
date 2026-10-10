@@ -23,9 +23,6 @@ from omnialpha.strategist.smc_map import (
     _leg_series,
     compute_smc_map,
 )
-from omnialpha.strategist.tools import _strip_carried_indicators
-
-
 def bars_from(highs, lows, closes):
     """`o` 取前一根收盘（与 `c` 不同），贴近真实 OHLC。"""
     out = []
@@ -264,17 +261,23 @@ class TestKlinesLeak(unittest.TestCase):
     ROW = {"t": 1, "o": 1.0, "h": 2.0, "l": 0.5, "c": 1.5, "v": 10.0,
            "ema20": "84583.09806979", "atr14": "17.98579215"}
 
+    def _strip(self, wanted):
+        """实现已收进 `indicators.py`（tools 与 snapshot 共用，T180），接口是**列表**版。"""
+        from omnialpha.strategist.indicators import strip_carried_indicators
+
+        return strip_carried_indicators([dict(self.ROW)], _resolve_wanted(wanted))[0]
+
     def test_explicit_empty_indicators_strips_carried_columns(self):
-        out = _strip_carried_indicators(dict(self.ROW), _resolve_wanted([]))
+        out = self._strip([])
         self.assertEqual(sorted(out), ["c", "h", "l", "o", "t", "v"])
 
     def test_unset_indicators_keeps_default_columns(self):
-        out = _strip_carried_indicators(dict(self.ROW), _resolve_wanted(None))
+        out = self._strip(None)
         self.assertIn("ema20", out)
         self.assertIn("atr14", out)
 
     def test_partial_whitelist_keeps_only_requested(self):
-        out = _strip_carried_indicators(dict(self.ROW), _resolve_wanted(["ema20"]))
+        out = self._strip(["ema20"])
         self.assertIn("ema20", out)
         self.assertNotIn("atr14", out)
 

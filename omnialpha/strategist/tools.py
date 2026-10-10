@@ -40,7 +40,8 @@ from typing import Any, Optional
 from ..gate_client import GateClient, GateApiError
 
 
-from .indicators import _resolve_wanted, attach_indicators, latest_indicators
+from .indicators import (_resolve_wanted, attach_indicators, latest_indicators,
+                         strip_carried_indicators)
 
 
 from .market import MarketConfig, resolve_candles
@@ -180,14 +181,8 @@ TOOL_NAMES = (
 
 
 # kline 表自带 ema20/atr14 两列，bar dict 会一路带进工具返回 —— 即使
-# `strategist.market.indicators: []` 也关不掉。返回前按 wanted 剥掉。
-_CARRIED_INDICATOR_KEYS = ("ema20", "atr14")
-
-
-def _strip_carried_indicators(row: dict, wanted) -> dict:
-    allow = set(wanted or ())
-    return {k: v for k, v in row.items()
-            if k not in _CARRIED_INDICATOR_KEYS or k in allow}
+# `strategist.market.indicators: []` 也关不掉。实现收在 `indicators.py`（唯一一份），
+# 快照路径（`snapshot.py` 的 candles）与这里共用，避免「同一件事两处实现」再次漂移。
 
 
 
@@ -1686,7 +1681,7 @@ def run_tool(
                 "stale": res.stale,
 
 
-                "rows": [_strip_carried_indicators(r, wanted) for r in rows[-limit:]],
+                "rows": strip_carried_indicators(rows[-limit:], wanted),
 
 
             }
@@ -1743,7 +1738,7 @@ def run_tool(
                 "latest": latest_indicators(rows, names) if rows else {},
 
 
-                "rows": [_strip_carried_indicators(r, names) for r in rows[-limit:]],
+                "rows": strip_carried_indicators(rows[-limit:], names),
 
 
             }

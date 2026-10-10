@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..gate_client import GateApiError, GateClient
-from .indicators import attach_indicators, latest_indicators
+from .indicators import attach_indicators, latest_indicators, strip_carried_indicators
 from .market import MarketConfig, resolve_candles
 
 TICKER_FIELDS = (
@@ -325,7 +325,11 @@ def collect_snapshot(
                 env=env,
                 bot_root=bot_root,
             )
-            rows = attach_indicators(list(result.rows), cfg.indicators)
+            # 先 attach（`_fill_*_from` 是「已有值就沿用」，配置要的指标保留库里那份），
+            # 再剥掉 K 线表自带的 ema20/atr14 —— 否则 `indicators: []` 关不掉它们（T180：
+            # 工具路径早已修过，快照路径一直在漏，模型因此能引用被禁的指标）。
+            rows = strip_carried_indicators(
+                attach_indicators(list(result.rows), cfg.indicators), cfg.indicators)
             entry["candles"] = rows
             entry["candle_source"] = result.source
             entry["stale"] = result.stale
@@ -353,7 +357,9 @@ def collect_snapshot(
                             client, sym, tf, n_extra,
                             market_cfg=cfg, env=env, bot_root=bot_root,
                         )
-                        xrows = attach_indicators(list(xres.rows), cfg.indicators)
+                        xrows = strip_carried_indicators(
+                            attach_indicators(list(xres.rows), cfg.indicators),
+                            cfg.indicators)
                         entry["tf"][tf] = {
                             "candles": xrows[-n_extra:] if xrows else [],
                             "indicators": latest_indicators(xrows, cfg.indicators) if xrows else {},

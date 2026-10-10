@@ -1159,6 +1159,37 @@ def _resolve_wanted(wanted) -> list[str]:
     return list(DEFAULT_INDICATORS if wanted is None else wanted)
 
 
+# K 线表（`kline`）自带这两列，bar dict 会一路带进**所有**返回快照的地方 ——
+# 即使 bot 配了 `strategist.market.indicators: []` 也关不掉。谁把它们交出去，
+# 谁就得先按 `wanted` 剥一遍（`tools.py` 的行情工具与 `snapshot.py` 的 candles 都用这个）。
+# 实测（T180）：SMC 人格配了 `indicators: []`，模型仍在 reasoning 里引用 EMA20/ATR；
+# 快照路径当时**没剥**，而工具路径已经修过 —— 同一件事两处实现必然漂移，故收在这里。
+CARRIED_INDICATOR_KEYS = ("ema20", "atr14")
+
+
+def strip_carried_indicators(rows: list[dict[str, Any]], wanted) -> list[dict[str, Any]]:
+    """剥掉 K 线自带的那几列，除非 `wanted` 明确要它。
+
+    **必须在 `attach_indicators` 之后调用**：`_fill_*_from` 是「已有值就沿用」，所以
+    先 attach 再剥 —— 配置**要**的指标保留库里那份（长历史算出来的，比用 60 根重算准），
+    配置**不要**的才被拿走。
+
+    `wanted` 语义与 `attach_indicators` 一致（走 `_resolve_wanted`）：**None = 没配 →
+    默认集**（默认集含 `atr14`，所以不配就是留着它），`[]` = 显式关掉 → 一个都不留。
+    不能写 `wanted or ()` —— 那会让「没配」比「显式配」剥得更狠（默认集里的 `atr14`
+    被顺手拿走），与工具路径不一致。
+    """
+    allow = set(_resolve_wanted(wanted))
+    out = []
+    for r in (rows or []):
+        if not isinstance(r, dict):
+            out.append(r)
+            continue
+        out.append({k: v for k, v in r.items()
+                    if k not in CARRIED_INDICATOR_KEYS or k in allow})
+    return out
+
+
 def attach_indicators(rows: list[dict[str, Any]], wanted: list[str] | None = None) -> list[dict[str, Any]]:
     """Attach indicator columns; raises IndicatorNameError on unknown names.
 

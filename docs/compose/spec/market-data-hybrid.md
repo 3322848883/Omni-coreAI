@@ -83,6 +83,7 @@ strategist/indicators.py
 strategist/snapshot.py
   collect_snapshot(client, symbols, candles, interval, market_cfg=None, env="live")
   # 行结构: t,o,h,l,c,v[,sum][,ema20][,ema50][,atr14][,rsi14]
+  # 其中库自带的 ema20/atr14 **按 cfg.indicators 剥**：没声明的交不出去（显式 [] 就一个都没有）
   # 顶层 meta: {market_mode, candle_source[sym], degraded[], stale[]}
   # account 失败 → {"account": {"error": ...}, ...}；由 PlanRunner 判定 abort
 ```

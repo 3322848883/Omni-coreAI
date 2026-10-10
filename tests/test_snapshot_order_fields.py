@@ -255,5 +255,76 @@ class TestPositionStateNoteTellsApart(unittest.TestCase):
         self.assertEqual(st, "flat")
 
 
+class TestCandlesDoNotLeakCarriedIndicators(unittest.TestCase):
+    """T180：`indicators: []` 必须真的关掉 K 线表自带的 `ema20`/`atr14`。
+
+    `kline` 表自带这两列（`market.py` 的 SQL 直接 SELECT），所以「配置没要」与
+    「数据里有」是两件事：工具路径早就按 `wanted` 剥过，**快照路径一直在漏** ——
+    实测 SMC 人格配了 `indicators: []`，模型仍在 reasoning 里引用 EMA20 / ATR。
+
+    这里测的是**接线**（真跑 `collect_snapshot`），不是只测 helper。
+    """
+
+    @staticmethod
+    def _rows():
+        return [{"t": 1000, "o": 1, "h": 1, "l": 1, "c": 1, "v": 1, "sum": 1,
+                 "ema20": 84712.0, "atr14": 22.0}]
+
+    def _patch(self, rows):
+        from unittest import mock
+
+        import omnialpha.strategist.snapshot as snap
+
+        fake = SimpleNamespace(rows=rows, source="local", stale=False,
+                               degraded=[], error=None)
+        return mock.patch.object(snap, "resolve_candles", return_value=fake)
+
+    @staticmethod
+    def _bar(snap):
+        return snap["market"]["BTC_USDT"]["candles"][0]
+
+    def test_empty_indicators_strips_carried(self):
+        from omnialpha.strategist.market import MarketConfig
+
+        with self._patch(self._rows()):
+            snap = collect_snapshot(_Client(), ["BTC_USDT"], candles=5,
+                                    market_cfg=MarketConfig(indicators=[]))
+        bar = self._bar(snap)
+        self.assertNotIn("ema20", bar, "配置没要的指标不得出现在快照里")
+        self.assertNotIn("atr14", bar)
+        self.assertEqual(snap["market"]["BTC_USDT"]["indicators"], {})
+
+    def test_requested_indicator_kept_others_stripped(self):
+        from omnialpha.strategist.market import MarketConfig
+
+        with self._patch(self._rows()):
+            snap = collect_snapshot(_Client(), ["BTC_USDT"], candles=5,
+                                    market_cfg=MarketConfig(indicators=["ema20"]))
+        bar = self._bar(snap)
+        self.assertEqual(bar["ema20"], 84712.0, "配置要的指标保留库里的值")
+        self.assertNotIn("atr14", bar, "没要的那个仍要剥掉")
+
+    def test_default_set_is_honoured_too(self):
+        """没配 `indicators` → 用**默认集**；快照里出现哪些「自带列」必须与那个集一致。
+
+        不假设默认集里有什么（实测它含 `atr14`、**不含 `ema20`**）—— 断言的是
+        「是否出现 == 是否在该集合里」，这样默认集将来变了也不会假红。
+        **`cfg.indicators is None` 也是「没配」**，必须与工具路径一样解析成默认集
+        （写成 `wanted or ()` 会让「没配」比「显式配」剥得更狠）。
+        """
+        from omnialpha.strategist.indicators import _resolve_wanted
+        from omnialpha.strategist.market import MarketConfig
+
+        cfg = MarketConfig()
+        with self._patch(self._rows()):
+            snap = collect_snapshot(_Client(), ["BTC_USDT"], candles=5, market_cfg=cfg)
+        eff = {str(x).lower() for x in _resolve_wanted(cfg.indicators)}
+        self.assertTrue(eff, "默认集不该是空的（空 = 这个测试证明不了任何事）")
+        bar = self._bar(snap)
+        for k in ("ema20", "atr14"):
+            self.assertEqual(k in bar, k in eff,
+                             f"{k} 是否出现应与有效指标集一致（集={sorted(eff)}）")
+
+
 if __name__ == "__main__":
     unittest.main()
