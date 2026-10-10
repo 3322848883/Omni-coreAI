@@ -154,9 +154,10 @@ class PlanRunner:
         核对工具数值（如 SMC 的 structure_scale.atr）只能靠复现，无法判断模型
         是**引用了真实值**还是**自己估算**。
 
-        `raw_args` = **模型原样给出的参数**。`run_tool` 会就地把补全后的 symbol
-        写回 `args`（`tools.py:1528`），所以只有原始副本能回答「模型自己写了
-        symbol 没有」—— 缺 symbol 率就是靠它算的。
+        `raw_args` = **模型原样给出的参数**。`run_tool` 进来就 `args = dict(args or {})`
+        （`tools.py:1524`）—— 它对入参做的是**拷贝**，补全后的 symbol **不会**回写调用方。
+        但调用方自己不持有那份副本，所以「模型自己写了 symbol 没有」仍然只能靠
+        显式传进来的 `raw_args` 回答 —— 缺 symbol 率就是靠它算的。
         """
         try:
             text = str(result) if result is not None else ""
@@ -195,7 +196,24 @@ class PlanRunner:
         except Exception:  # noqa: BLE001
             pass
 
-    def _prompt_risk(self, snapshot: dict) -> dict:
+    def _per_symbol_risk(self, base: dict, universe: list, overrides: Optional[dict]) -> dict:
+        """每币预算：以全局值为底，再套用**宇宙内**的覆盖（宇宙外一律忽略）。
+
+        宇宙外的覆盖静默忽略而不是报错 —— 它是**调用方**的输入，不是模型的输出；
+        真正的越界拒绝在 `risk.apply_risk` 与 plan 闸门（T5）上，那才是硬闸门。
+        """
+        out = {sym: {"min_confidence": base["min_confidence"],
+                     "max_notional_usd": base["max_notional_usd"],
+                     "max_chips": base["max_chips"]} for sym in universe}
+        for sym, ov in (overrides or {}).items():
+            if sym not in out or not isinstance(ov, dict):
+                continue
+            for k in ("min_confidence", "max_notional_usd", "max_chips"):
+                if k in ov:
+                    out[sym][k] = ov[k]
+        return out
+
+    def _prompt_risk(self, snapshot: dict, per_symbol: Optional[dict] = None) -> dict:
         """给 AI 的预算取「配置值」与「权益 × max_notional_pct」的较小值。
 
         执行器的硬闸门是 equity×max_notional_pct（见 executor._check_notional）。
@@ -218,18 +236,23 @@ class PlanRunner:
         if equity > 0 and pct > 0:
             cap = equity * pct
             limit = cap if limit is None else min(float(limit), cap)
-        return {
+        risk = {
             "min_confidence": self.cfg.risk.min_confidence,
             "max_notional_usd": round(limit, 2) if limit is not None else None,
             "max_chips": self.cfg.risk.max_chips,
-            # 品种宇宙与每币名额也进风控段：名额是按币给的（T8/D8），不告诉模型配额，
-            # 它会以为"几条 chip 都能落在同一个币上"，于是把别的币饿死。
-            "symbols": list(self.cfg.symbols or []),
-            "max_chips_per_symbol": getattr(self.cfg.risk, "max_chips_per_symbol", 1),
-            "allow_actions": sorted(self.cfg.risk.allow_actions)
-            if self.cfg.risk.allow_actions
-            else None,
         }
+        # 品种宇宙与每币名额**只在多币时**注入：名额是按币给的（T8/D8），不告诉模型配额，
+        # 它会以为"几条 chip 都能落在同一个币上"，于是把别的币饿死。
+        # 单币标的唯一、名额无从谈起 —— 多注入两个键只会改 prompt 文本、让缓存前缀失效，
+        # 违反 I11（单币逐字不变）。
+        universe = list(self.cfg.symbols or [])
+        if len(universe) > 1:
+            risk["symbols"] = universe
+            risk["max_chips_per_symbol"] = getattr(self.cfg.risk, "max_chips_per_symbol", 1)
+            risk["per_symbol"] = self._per_symbol_risk(risk, universe, per_symbol)
+        risk["allow_actions"] = (sorted(self.cfg.risk.allow_actions)
+                                 if self.cfg.risk.allow_actions else None)
+        return risk
 
     def _active_triggers_block(self) -> str:
         """把已生效的自设触发器列给 AI（空则返回 ""）。

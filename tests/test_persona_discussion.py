@@ -163,8 +163,13 @@ class TestDiscussionSymbolNotHardcoded(unittest.TestCase):
         self.assertEqual(chip["size_usd"], 1000, "原始 size_usd 必须保留")
         self.assertEqual(chip["tp"], 85000, "原始 tp 必须保留")
 
-    def test_execute_corrects_symbol_outside_whitelist(self):
-        """chip 的标的不在该 bot 白名单里 → 纠正成该 bot 自己的标的并留痕。"""
+    def test_execute_rejects_symbol_outside_whitelist(self):
+        """chip 的标的不在该 bot 白名单里 → **拒绝该 chip**（不改成白名单首币）。
+
+        旧行为是"唯一解时纠正成 `allowed[0]`"：模型本意 BTC 的结论会被执行成
+        ETH，而"它当时说的是哪个币"这个事实被丢掉（B-15）。「唯一解」只对
+        **漏写** symbol 成立，不对「写错」成立 —— 见 test_degrade_per_symbol。
+        """
         group = PersonaGroup(name="t", members=["a"], target_account="a",
                              fusion="weighted_vote", on_conflict="hold")
         bots = {"a": _FakeBot(["ETH_USDT"])}
@@ -175,12 +180,16 @@ class TestDiscussionSymbolNotHardcoded(unittest.TestCase):
         fusion = {"decision": "long", "action": "stop_entry_long", "confidence": 0.7,
                   "votes": {"a": "long"}, "mode": "weighted_vote"}
         with tempfile.TemporaryDirectory() as td:
-            r = PersonaRunner(Path(td), group, bots, {})
+            root = Path(td)
+            r = PersonaRunner(root, group, bots, {})
             res = r._execute(fusion, plans, None)
-            sig = json.loads(Path(res["signal_file"]).read_text(encoding="utf-8"))
-        self.assertEqual(sig["symbol"], "ETH_USDT",
-                         "白名单外的标的必须被纠正，不能原样写进信号")
-        self.assertEqual(sig["meta"]["symbol_corrected"], "BTC_USDT→ETH_USDT")
+            inbox = list((root / "data" / "bots" / "a" / "inbox").glob("*.json"))
+        self.assertFalse(res.get("executed"), "越界标的不得下单")
+        self.assertTrue(res.get("rejected"))
+        self.assertEqual(inbox, [], "被拒的 chip 不该落盘信号")
+        self.assertEqual(res["meta"]["reason"], "symbol_not_in_universe")
+        self.assertEqual(res["meta"]["corrected_from"], "BTC_USDT")
+        self.assertEqual(res["meta"]["universe"], ["ETH_USDT"])
 
     def test_execute_keeps_valid_symbol(self):
         """标的本来就在白名单里 → 原样保留，不留纠正痕迹。"""

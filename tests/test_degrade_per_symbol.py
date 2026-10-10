@@ -257,5 +257,203 @@ class TestNoHardcodedSymbolInDegradePaths(unittest.TestCase):
                 self.assertNotIn("BTC_USDT", self._literals(fn))
 
 
+# ─────────────────────────────────────────────────────
+# 3. persona 执行：越界/缺失一律拒绝（B-15 / D-22）
+# ─────────────────────────────────────────────────────
+class _FakeBot:
+    def __init__(self, symbols):
+        self.symbols = list(symbols)
+        self.strategist = {}
+
+
+def _persona(root: Path, symbols) -> PersonaRunner:
+    g = PersonaGroup(name="t", members=["a"], target_account="a",
+                     fusion="weighted_vote", on_conflict="hold")
+    return PersonaRunner(root, g, {"a": _FakeBot(symbols)}, {})
+
+
+def _fusion(action="open_long", decision="long") -> dict:
+    return {"action": action, "decision": decision, "confidence": 0.7,
+            "votes": {"a": decision}, "mode": "weighted_vote"}
+
+
+def _plans(symbol: str, action: str = "open_long") -> dict:
+    return {"a": {"decision": "long", "chips": [
+        {"symbol": symbol, "action": action, "size_usd": 100,
+         "sl": 84000.0, "tp": 86000.0, "type": "market"}]}}
+
+
+class TestExecuteRejectsBadSymbol(unittest.TestCase):
+    """越界/无法确定的标的 → **拒绝该 chip**：不下单、不落盘信号，只留痕。
+
+    旧行为是静默改成 `allowed[0]`（B-15，审计里唯一的实盘安全级）：模型本意 SOL
+    的结论会被执行成 ETH，而"模型当时说的是哪个币"这个事实被丢掉。
+    唯一解（单币宇宙）下**漏写** symbol 才自动补 —— 那是无歧义的补全，不是改币。
+    """
+
+    def _run(self, root: Path, symbols, symbol, action="open_long"):
+        r = _persona(root, symbols)
+        res = r._execute(_fusion(action=action), _plans(symbol, action), None)
+        files = list((root / "data" / "bots" / "a" / "inbox").glob("*.json"))
+        sig = json.loads(files[0].read_text(encoding="utf-8")) if files else {}
+        return res, sig
+
+    def test_out_of_universe_symbol_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            res, sig = self._run(root, ["BTC_USDT", "ETH_USDT"], "SOL_USDT")
+            self.assertFalse(res.get("executed"), "越界标的不得执行")
+            self.assertTrue(res.get("rejected"))
+            self.assertEqual(sig, {}, "被拒的 chip 不该写进 inbox（那是错币下单）")
+            meta = res["meta"]
+            self.assertEqual(meta["corrected_from"], "SOL_USDT", "拒绝要留痕")
+            self.assertEqual(meta["reason"], "symbol_not_in_universe")
+            self.assertEqual(meta["universe"], ["BTC_USDT", "ETH_USDT"])
+            self.assertEqual(meta["rejected_action"], "open_long",
+                             "被丢掉的动作要留在痕里（可归因）")
+
+    def test_single_universe_out_of_universe_symbol_also_rejected(self):
+        """单币宇宙也不能静默改币 —— 「唯一解」只对**漏写**成立，不对「写错」成立。"""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            res, sig = self._run(root, ["ETH_USDT"], "BTC_USDT")
+            self.assertFalse(res.get("executed"))
+            self.assertEqual(sig, {})
+            self.assertEqual(res["meta"]["corrected_from"], "BTC_USDT")
+            self.assertEqual(res["meta"]["universe"], ["ETH_USDT"])
+
+    def test_missing_symbol_rejected_in_multi_universe(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            res, sig = self._run(root, ["BTC_USDT", "ETH_USDT"], "")
+            self.assertFalse(res.get("executed"), "多币下缺 symbol 不得补首币")
+            self.assertEqual(sig, {})
+            self.assertEqual(res["meta"]["reason"], "symbol_missing")
+            self.assertEqual(res["meta"]["corrected_from"], "")
+
+    def test_missing_symbol_autofilled_when_universe_unique(self):
+        """单币宇宙 + chip 没写 symbol → 自动补（唯一解；实盘单币行为不变）。"""
+        with tempfile.TemporaryDirectory() as td:
+            _, sig = self._run(Path(td), ["ETH_USDT"], "")
+            self.assertEqual(sig["symbol"], "ETH_USDT")
+            self.assertEqual(sig["meta"]["symbol_autofilled"], "ETH_USDT")
+
+    def test_empty_whitelist_does_not_invent_symbol(self):
+        """没有白名单可依据时**不写 BTC**（原先的硬编码兜底）。"""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            res, sig = self._run(root, [], "")
+            self.assertFalse(res.get("executed"))
+            self.assertEqual(sig, {})
+            self.assertNotIn("BTC_USDT", json.dumps(res, ensure_ascii=False))
+
+    def test_in_universe_symbol_kept(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, sig = self._run(Path(td), ["BTC_USDT", "ETH_USDT"], "ETH_USDT")
+            self.assertEqual(sig["symbol"], "ETH_USDT")
+            self.assertNotIn("symbol_corrected", sig["meta"])
+            self.assertNotIn("symbol_autofilled", sig["meta"])
+
+
+class TestSymbolOfNoHardcodedFallback(unittest.TestCase):
+    def test_chip_symbol_wins(self):
+        with tempfile.TemporaryDirectory() as td:
+            r = _persona(Path(td), ["BTC_USDT", "ETH_USDT"])
+            self.assertEqual(r._symbol_of(_plans("ETH_USDT")), "ETH_USDT")
+
+    def test_unique_member_symbol_fallback(self):
+        with tempfile.TemporaryDirectory() as td:
+            r = _persona(Path(td), ["ETH_USDT"])
+            self.assertEqual(r._symbol_of({"a": {"chips": []}}), "ETH_USDT")
+
+    def test_multi_member_symbols_no_guess(self):
+        """成员自己管多币且 chip 没带标的 → 不猜（原先是 BTC_USDT 兜底）。"""
+        with tempfile.TemporaryDirectory() as td:
+            r = _persona(Path(td), ["BTC_USDT", "ETH_USDT"])
+            self.assertEqual(r._symbol_of({"a": {"chips": []}}), "")
+
+
+class TestResolveOrderIdPerSymbol(unittest.TestCase):
+    def _with_two_open(self, root: Path) -> PersonaRunner:
+        r = _persona(root, ["BTC_USDT", "ETH_USDT"])
+        for oid, sym in (("o-btc", "BTC_USDT"), ("o-eth", "ETH_USDT")):
+            r.orders.create({"order_id": oid, "symbol": sym, "side": "long",
+                             "group": "t", "members": ["a"], "target_account": "a",
+                             "status": "open"})
+        return r
+
+    def test_reuses_order_of_that_symbol(self):
+        with tempfile.TemporaryDirectory() as td:
+            r = self._with_two_open(Path(td))
+            self.assertEqual(r._resolve_order_id("long", {}, symbol="ETH_USDT"), "o-eth",
+                             "必须复用该币自己的单，不能拿 opens[0]")
+            self.assertEqual(r._resolve_order_id("hold", {}, symbol="BTC_USDT"), "o-btc")
+
+    def test_reversal_closes_only_that_symbol(self):
+        with tempfile.TemporaryDirectory() as td:
+            r = self._with_two_open(Path(td))
+            new_id = r._resolve_order_id("short", {}, symbol="ETH_USDT")
+            self.assertNotEqual(new_id, "o-eth")
+            self.assertEqual(r.orders.get("o-eth")["status"], "closed")
+            self.assertEqual(r.orders.get("o-btc")["status"], "open",
+                             "反转 ETH 不得关掉 BTC 的单")
+
+    def test_no_symbol_keeps_legacy_behaviour(self):
+        """旧调用方（不传 symbol）行为不变。"""
+        with tempfile.TemporaryDirectory() as td:
+            r = self._with_two_open(Path(td))
+            self.assertEqual(r._resolve_order_id("long", {}), "o-btc")
+
+
+# ─────────────────────────────────────────────────────
+# 4. 策略风控块：多币带 symbols / per_symbol（T8 的策略侧）
+# ─────────────────────────────────────────────────────
+class TestPromptRiskPerSymbol(unittest.TestCase):
+    def _runner(self, symbols, **risk_kw) -> PlanRunner:
+        r = PlanRunner.__new__(PlanRunner)
+        r.cfg = StrategistConfig(symbols=list(symbols), risk=RiskConfig(**risk_kw))
+        return r
+
+    def test_single_symbol_block_unchanged(self):
+        """I11：单币标的唯一、名额无从谈起 → 风控块**不得多出任何键**。
+
+        多出 `symbols`/`max_chips_per_symbol` 会改 prompt 文本并让缓存前缀失效。
+        """
+        out = self._runner(["BTC_USDT"])._prompt_risk({"account": {"total": 90.0}})
+        for key in ("symbols", "per_symbol", "max_chips_per_symbol"):
+            self.assertNotIn(key, out, f"单币风控块不该多出 {key}")
+
+    def test_multi_symbol_block_lists_universe_and_quota(self):
+        """多币：名额是按币给的（T8/D8），不告诉模型配额它会以为几条 chip 能挤在同一个币上。"""
+        out = self._runner(["BTC_USDT", "ETH_USDT"])._prompt_risk(
+            {"account": {"total": 90.0}})
+        self.assertEqual(out["symbols"], ["BTC_USDT", "ETH_USDT"])
+        self.assertEqual(out["max_chips_per_symbol"], 1)
+        self.assertEqual(sorted(out["per_symbol"]), ["BTC_USDT", "ETH_USDT"],
+                         "每个币的生效预算都要给全（模型按币出价）")
+
+    def test_per_symbol_override_defaults_to_global(self):
+        r = self._runner(["BTC_USDT", "ETH_USDT"])
+        out = r._prompt_risk({"account": {"total": 90.0}},
+                             per_symbol={"ETH_USDT": {"max_chips": 2}})
+        self.assertEqual(out["per_symbol"]["ETH_USDT"]["max_chips"], 2)
+        self.assertEqual(out["per_symbol"]["BTC_USDT"]["max_chips"], out["max_chips"],
+                         "没被覆盖的币仍用全局值")
+        self.assertEqual(out["per_symbol"]["BTC_USDT"]["min_confidence"],
+                         out["min_confidence"])
+
+    def test_per_symbol_chip_quota_surfaced(self):
+        r = self._runner(["BTC_USDT", "ETH_USDT"])
+        setattr(r.cfg.risk, "max_chips_per_symbol", 1)
+        out = r._prompt_risk({"account": {"total": 90.0}})
+        self.assertEqual(out["max_chips_per_symbol"], 1)
+
+    def test_out_of_universe_override_ignored(self):
+        r = self._runner(["BTC_USDT", "ETH_USDT"])
+        out = r._prompt_risk({"account": {"total": 90.0}},
+                             per_symbol={"SOL_USDT": {"max_chips": 9}})
+        self.assertNotIn("SOL_USDT", out.get("per_symbol", {}))
+
+
 if __name__ == "__main__":
     unittest.main()

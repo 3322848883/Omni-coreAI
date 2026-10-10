@@ -91,7 +91,7 @@ class PersonaRunner:
         # `create` 前校验宇宙：订单库是**审计面**，写一个本组根本不做的标的进去，
         # 会让「按币取单」与事后核对都失准（T14）。组宇宙 = 各成员 symbols 的并集；
         # 取不到（全组都没配）时不拦（不猜）。
-        universe = sorted({s for b in self.group.members for s in self._symbols_of(b)})
+        universe = self._group_universe()
         if universe and sym and sym.upper() not in {u.upper() for u in universe}:
             log.warning("persona %s: 本轮标的 %s 不在宇宙 %s 内 → 不归档该标的",
                         self.group.name, sym, universe)
@@ -166,6 +166,10 @@ class PersonaRunner:
             result.update({"ok": False, "error": f"exec: {e}"})
         self._log({"event": "decision", "decision": decision, "fusion": fusion,
                    "order_id": order_id, "exec": result.get("executed")})
+        if result.get("rejected"):
+            # 被拒的一轮否则在事件流里完全不可见（元凶是模型写错/漏写币）
+            self._log({"event": "symbol_rejected", "decision": decision,
+                       "order_id": order_id, "meta": result.get("meta")})
         # agent-memory 挂钩：lifecycle + journal
         self._post_exec_hooks(order_id, fusion, flat, result, cycle_id)
         return result
@@ -582,19 +586,20 @@ class PersonaRunner:
         syms = getattr(bot, "symbols", None) if bot is not None else None
         return [str(s) for s in (syms or []) if s]
 
+    def _group_universe(self) -> list[str]:
+        """组宇宙 = 各成员 `symbols` 的并集（订单归档与建单校验共用同一口径）。"""
+        return sorted({s for b in self.group.members for s in self._symbols_of(b)})
+
     def _symbol_of(self, plans: dict) -> str:
         for p in plans.values():
             chips = p.get("chips") or []
             if chips and isinstance(chips, list) and chips[0].get("symbol"):
                 return str(chips[0]["symbol"])
-        # 兜底用第一个成员自己的标的 —— 原先是硬编码 "BTC_USDT"，
-        # 对只做 ETH 的组会把共享订单的 symbol 写错。
-        # 全组都没配 symbols 时返回 ""（**不猜**）：写一个错的标的比留空更危险。
-        for b in self.group.members:
-            syms = self._symbols_of(b)
-            if syms:
-                return syms[0]
-        return ""
+        # 兜底用**全组宇宙的唯一解** —— 原先是硬编码 "BTC_USDT"（对只做 ETH 的组会把
+        # 共享订单的 symbol 写错），其后改成"第一个成员的第一个币"，多币成员下同样会猜错。
+        # 多币宇宙没有唯一解 → 返回 ""（**不猜**）：写一个错的标的比留空更危险（T3/D1）。
+        universe = self._group_universe()
+        return universe[0] if len(universe) == 1 else ""
 
     def _resolve_order_id(self, decision: str, fusion: dict,
                           symbol: str = "") -> Optional[str]:
@@ -659,21 +664,30 @@ class PersonaRunner:
         # 归一化为 schema 合法 action（close_long/close_short 不在 ACTIONS，需拆成 close+side）
         action, side_override = self._normalize_action(action)
 
-        # chip 的标的必须落在该 bot 自己的白名单里。分两种情形：
-        #  ① 该 bot 只配了一个币 → **纠正**它（唯一解；模型写错标的但价位是那个币的，
-        #     白名单就是它的意图）—— 这是旧行为，保留并留痕 `meta.symbol_corrected`；
-        #  ② 多币宇宙 → **拒绝**（把动作降成 hold）。此时"首币"不是唯一解，
-        #     原实现静默改成 `allowed[0]`，会让模型本意 SOL 的结论被**执行成 ETH**。
+        # chip 的标的必须落在该 bot 自己的白名单里。两种情形**分开处理**（T3/D1）：
+        #  ① 漏写 symbol → 唯一解（单币宇宙）自动补，留痕 `meta.symbol_autofilled`
+        #     —— 那是**无歧义的补全**，不是改币，实盘单币 bot 不必白烧一轮；
+        #  ② 越界 symbol（含"单币宇宙下写错"）→ **一律拒绝**，动作降成 hold 且
+        #     **不落盘信号**。旧行为是静默改成 `allowed[0]`（B-15，审计里唯一的实盘
+        #     安全级）：模型本意 SOL 的结论会被**执行成 ETH**，而"它当时说的是哪个币"
+        #     这个事实被丢掉。「唯一解」只对**漏写**成立，不对「写错」成立。
         sym = str(chip.get("symbol") or "").strip()
         allowed = self._symbols_of(source_bot)
-        symbol_rejected = ""
+        rejected_reason = ""
         corrected_from = ""
-        if not sym or (allowed and sym not in allowed):
+        autofilled = ""
+        if sym and allowed and sym not in allowed:
+            rejected_reason, corrected_from = "symbol_not_in_universe", sym
+            sym = ""
+        elif not sym and chip:
+            # 只有**模型确实表达了 intent**（plan 里真有 chip）时才在这里拒。
+            # 整份 plan 一个 chip 都没有 = 没有要执行的东西，保持旧行为（落一份空标的
+            # 信号，交给执行器拒）—— 那条路径从来没有替换过标的，不属于 B-15 的范围。
             if len(allowed) == 1:
-                corrected_from = sym
-                sym = allowed[0]
+                autofilled = sym = allowed[0]
             else:
-                symbol_rejected = sym or "(missing)"
+                # 多币/白名单为空 → 没有唯一解可依据 → 拒绝（**不写 BTC**）
+                rejected_reason = "symbol_missing"
                 sym = ""
 
         payload = {
@@ -692,14 +706,19 @@ class PersonaRunner:
                 "confidence": fusion.get("confidence") or 0.0,
             },
         }
-        if symbol_rejected:
-            # 拒绝而不是纠正：动作降成 hold（不下单），把原因与宇宙留在 meta 里可查
-            payload["action"] = "hold"
-            payload["meta"]["symbol_rejected"] = symbol_rejected
-            payload["meta"]["rejected_action"] = action
-            payload["meta"]["universe"] = allowed
-        if corrected_from:
-            payload["meta"]["symbol_corrected"] = f"{corrected_from}→{sym}"
+        if rejected_reason:
+            # 拒绝而不是纠正：**不下单、不落盘信号**（原先把动作降成 hold 后照样写
+            # inbox —— 那仍是用一个错的标的下了单，只是换了个动作名）。
+            meta = dict(payload["meta"])
+            meta["fusion_reason"] = meta.get("reason")
+            meta["reason"] = rejected_reason
+            meta["corrected_from"] = corrected_from
+            meta["universe"] = allowed
+            meta["rejected_action"] = action
+            return {"executed": False, "rejected": True,
+                    "topology": self.group.topology, "meta": meta}
+        if autofilled:
+            payload["meta"]["symbol_autofilled"] = autofilled
         if side_override:
             payload["side"] = side_override
         # 执行机制字段的透传 —— 尤其 `trigger_price`：没有它，stop_entry_*
