@@ -121,16 +121,23 @@ def _est_tokens(text: str) -> int:
     return cjk + (len(text) - cjk + 3) // 4
 
 
+# 订单记忆为空时的文案。**不能说「当前无持仓」** —— 那是关于**持仓**的断言，而这一段
+# 只知道「有没有订单记录」。实测 brooks-btc 持 -56 BTC 时，prompt 里照样写着
+# 「[订单上下文]（当前无持仓）」：一句错话，而模型只能靠契约规则 16 去仲裁。
+# 现在改成如实说明，并顺手指向权威来源（快照的 position_state）。
+_NO_ORDER_CTX = "（无订单记录 —— 持仓状态以快照 account.position_state 为准）"
+
+
 def _format_order_context(ctx: Optional[dict]) -> str:
     if not ctx:
-        return "（当前无持仓）"
+        return _NO_ORDER_CTX
     # 多币：按币各一张（`_order_context_for` 的容器形态）。合并成一张会让模型以为
     # 只有一笔持仓，其余币的前提失效价/理由全看不到（D-19）—— 而「上一轮我给 ETH
     # 定的失效价是多少」正是这一轮该照着判断的东西。
     many = ctx.get("orders") if isinstance(ctx, dict) else None
     if isinstance(many, list):
         parts = [_format_one_order(c) for c in many if isinstance(c, dict)]
-        return "\n\n".join(parts) if parts else "（当前无持仓）"
+        return "\n\n".join(parts) if parts else _NO_ORDER_CTX
     return _format_one_order(ctx)
 
 

@@ -90,8 +90,16 @@ class TestOrderContextPerSymbol(unittest.TestCase):
             self.assertIsNone(_loop_runner(["BTC_USDT"])._order_context_for(
                 Path(td), "b1", via_group=False))
 
-    def test_empty_context_renders_placeholder(self):
-        self.assertEqual(_format_order_context(None), "（当前无持仓）")
+    def test_empty_context_does_not_claim_no_position(self):
+        """空订单记忆**不能**说「当前无持仓」—— 那是关于持仓的断言，而这一段只知道订单。
+
+        实盘实测：brooks-btc 持 -56 BTC 时 prompt 里照样写着「（当前无持仓）」——
+        一句错话，模型只能靠契约规则 16 去仲裁。现在改成如实说明并指向权威来源。
+        """
+        txt = _format_order_context(None)
+        self.assertNotIn("无持仓", txt)
+        self.assertIn("position_state", txt, "要指向权威来源（快照）")
+        self.assertEqual(_format_order_context({"orders": []}), txt, "容器形态同样处理")
 
 
 class TestListOpenSymbolFilter(unittest.TestCase):
@@ -229,6 +237,121 @@ class TestCreateValidatesUniverse(unittest.TestCase):
             st = SharedOrderStore(Path(td))
             st.create({"symbol": "SOL_USDT", "order_id": "o-any"})
             self.assertIsNotNone(st.get("o-any"))
+
+
+class TestSingleBotWritesOrderMemory(unittest.TestCase):
+    """T14 / D-7：单 bot **也写**订单库 —— 否则 `[订单上下文]` 永远是空的。
+
+    此前 `SharedOrderStore` 全仓只有一个写入方（`persona/runner.py`），于是 `plan-loop`
+    的 `_order_context_for` 恒为 None：模型每轮看不到**订单级**的 lifecycle /
+    recent_events / 自己声明的前提失效价（轮级记忆走 journal，不受影响）。
+    """
+
+    @staticmethod
+    def _chip(sym="BTC_USDT", inv=None, reason="破位走人"):
+        return SimpleNamespace(symbol=sym, invalidation=inv, reasoning=reason)
+
+    @staticmethod
+    def _plan(chips=(), reasoning="因为是区间上沿", refs=("c-0",)):
+        return SimpleNamespace(cycle_id="c1", reasoning=reasoning,
+                               memory_refs=list(refs), chips=list(chips))
+
+    def _open(self, root, runner, sym="BTC_USDT", side="long", inv=81000.0):
+        runner._sync_order_memory(root, "b1", self._plan([self._chip(sym, inv)]),
+                                  [{"symbol": sym, "action": f"open_{side}", "size_usd": 100,
+                                    "tp": 90000.0, "sl": 80000.0}])
+
+    def test_open_creates_record_and_context_becomes_visible(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            r = _loop_runner(["BTC_USDT"])
+            self.assertIsNone(r._order_context_for(root, "b1", via_group=False),
+                              "写之前应当取不到（这正是要修的缺口）")
+            self._open(root, r)
+            recs = SharedOrderStore(root).list_open()
+            self.assertEqual(len(recs), 1)
+            rec = recs[0]
+            self.assertEqual(rec["target_account"], "b1", "归属按 bot 记账，单 bot 才取得到")
+            self.assertEqual(rec["side"], "long")
+            self.assertEqual(rec["symbol"], "BTC_USDT")
+            self.assertEqual(rec["premise_invalidation"]["price"], 81000.0)
+            self.assertEqual(rec["reason_text"], "因为是区间上沿")
+            self.assertIn("c-0", rec["memory_refs"])
+            self.assertTrue([e for e in rec["lifecycle"] if e["act"] == "open"])
+            self.assertTrue(rec["recent_events"], "recent_events 要跟着刷新")
+            self.assertIsNotNone(r._order_context_for(root, "b1", via_group=False),
+                                 "写了记录之后必须能取到订单上下文")
+
+    def test_reversal_starts_new_record(self):
+        """方向反转**另起一张**（旧单关闭）—— 否则注入的持仓方向与账户相反。"""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            r = _loop_runner(["BTC_USDT"])
+            self._open(root, r, side="long")
+            old = SharedOrderStore(root).list_open()[0]["order_id"]
+            self._open(root, r, side="short")
+            opens = SharedOrderStore(root).list_open()
+            self.assertEqual(len(opens), 1)
+            self.assertEqual(opens[0]["side"], "short")
+            self.assertNotEqual(opens[0]["order_id"], old)
+            self.assertEqual(SharedOrderStore(root).get(old)["status"], "closed")
+
+    def test_close_retires_record(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            r = _loop_runner(["BTC_USDT"])
+            self._open(root, r)
+            r._sync_order_memory(root, "b1", self._plan(),
+                                 [{"symbol": "BTC_USDT", "action": "close"}])
+            self.assertEqual(SharedOrderStore(root).list_open(), [])
+            self.assertIsNone(r._order_context_for(root, "b1", via_group=False))
+
+    def test_multi_symbol_writes_one_record_each(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            r = _loop_runner(["BTC_USDT", "ETH_USDT"])
+            r._sync_order_memory(
+                root, "b1",
+                self._plan([self._chip("BTC_USDT", 81000.0), self._chip("ETH_USDT", 2400.0)]),
+                [{"symbol": "BTC_USDT", "action": "open_long", "size_usd": 50},
+                 {"symbol": "ETH_USDT", "action": "open_short", "size_usd": 50}])
+            recs = {r_["symbol"]: r_ for r_ in SharedOrderStore(root).list_open()}
+            self.assertEqual(sorted(recs), ["BTC_USDT", "ETH_USDT"])
+            self.assertEqual(recs["ETH_USDT"]["side"], "short")
+
+    def test_modify_updates_prices_without_new_record(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            r = _loop_runner(["BTC_USDT"])
+            self._open(root, r)
+            oid = SharedOrderStore(root).list_open()[0]["order_id"]
+            r._sync_order_memory(root, "b1", self._plan(),
+                                 [{"symbol": "BTC_USDT", "action": "modify_tp_sl",
+                                   "tp": 88000.0, "sl": 82000.0}])
+            recs = SharedOrderStore(root).list_open()
+            self.assertEqual(len(recs), 1)
+            self.assertEqual(recs[0]["order_id"], oid)
+            self.assertEqual(recs[0]["sl"], 82000.0)
+            self.assertTrue([e for e in recs[0]["lifecycle"] if e["act"] == "modify_sl"])
+
+    def test_unknown_action_is_ignored(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            r = _loop_runner(["BTC_USDT"])
+            r._sync_order_memory(root, "b1", self._plan(),
+                                 [{"symbol": "BTC_USDT", "action": "hold"}])
+            self.assertEqual(SharedOrderStore(root).list_open(), [])
+
+    def test_failure_never_breaks_the_cycle(self):
+        """记忆是增益：写库炸了只能告警，不能影响下单。"""
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            r = _loop_runner(["BTC_USDT"])
+            with mock.patch.object(SharedOrderStore, "create",
+                                   side_effect=RuntimeError("disk full")):
+                self._open(root, r)      # 不应抛出
 
 
 if __name__ == "__main__":

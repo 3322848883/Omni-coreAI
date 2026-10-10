@@ -340,6 +340,103 @@ class PlanRunner:
             self.last_snapshot_digest = ""
         return self.last_snapshot_digest
 
+    # 单 bot 的订单记忆：动作 → (lifecycle 事件名, 方向)。与 persona 侧同源口径。
+    _ORDER_MEMORY_EVENT = {
+        "open_long": ("open", "long"),
+        "open_short": ("open", "short"),
+        "stop_entry_long": ("open", "long"),
+        "stop_entry_short": ("open", "short"),
+        "reduce_long": ("reduce", "long"),
+        "reduce_short": ("reduce", "short"),
+        "modify_tp_sl": ("modify_sl", ""),
+        "close": ("close", ""),
+        "close_all": ("close", ""),
+        "flatten": ("close", ""),
+    }
+
+    def _sync_order_memory(self, root: Path, bid: str, plan: Any, orders: list) -> None:
+        """单 bot 也写共享订单库（T14 / D-7）。**尽力而为**：失败只告警，绝不影响下单。
+
+        为什么必须写：`[订单上下文]` 读的是 `data/shared/orders/`，而此前**只有 persona 组
+        会写** —— 于是 `plan-loop` 的 `_order_context_for` 恒为 `None`，prompt 里那一节
+        永远是「无订单记录」，**即使这个 bot 真的持仓**（实测 brooks-btc 持 -56 BTC 时就是
+        这样）。缺的是**订单级**记忆：`lifecycle` / `recent_events`(加权 top-5) / 模型自己
+        声明的前提失效价。（轮级记忆走 journal，不受影响：`[近况]` / `[近期决策索引]` /
+        `[上轮方案状态]` 照旧。）
+
+        口径与 persona 侧一致：按 symbol 复用本 bot 的 open 记录；**方向反转另起一张**
+        （旧单关闭）—— 否则注入的持仓方向会与账户相反，比没有记忆更危险。
+        """
+        if not orders:
+            return
+        try:
+            from ..persona.orders import SharedOrderStore, new_order_id
+
+            store = SharedOrderStore(root)
+            mine = {str(r.get("symbol") or "").strip().upper(): r
+                    for r in store.list_open()
+                    if r.get("target_account") == bid}
+            chips = {str(getattr(c, "symbol", "") or "").strip().upper(): c
+                     for c in (getattr(plan, "chips", None) or [])}
+            for o in orders:
+                if not isinstance(o, dict):
+                    continue
+                sym = str(o.get("symbol") or "").strip()
+                key = sym.upper()
+                act = str(o.get("action") or "")
+                ev, side = self._ORDER_MEMORY_EVENT.get(act, ("", ""))
+                if not key or not ev:
+                    continue
+                rec = mine.get(key)
+                if ev == "open":
+                    if rec is not None and str(rec.get("side") or "") not in ("", side):
+                        store.add_lifecycle(rec["order_id"], "close", "reversed", by=bid)
+                        store.update(rec["order_id"], status="closed")
+                        store.refresh_recent_events(rec["order_id"])
+                        rec = None
+                    if rec is None:
+                        rec = store.create({
+                            "order_id": new_order_id(),
+                            "symbol": sym,
+                            "target_account": bid,
+                            "side": side,
+                            "status": "open",
+                            "entry_price": o.get("price") or o.get("trigger_price"),
+                            "size_usd": o.get("size_usd"),
+                            "tp": o.get("tp"),
+                            "sl": o.get("sl"),
+                        }, universe=self.cfg.symbols or None)
+                        mine[key] = rec
+                    store.add_lifecycle(rec["order_id"], "open", act, by=bid)
+                elif ev == "close":
+                    if rec is None:
+                        continue
+                    store.add_lifecycle(rec["order_id"], "close", act, by=bid)
+                    store.update(rec["order_id"], status="closed")
+                    store.refresh_recent_events(rec["order_id"])
+                    continue
+                else:                       # modify / reduce
+                    if rec is None:
+                        continue
+                    prices = {k: o.get(k) for k in ("tp", "sl") if o.get(k) is not None}
+                    if prices:
+                        store.update(rec["order_id"], **prices)
+                    store.add_lifecycle(rec["order_id"], ev, act, by=bid)
+                # 模型声明的东西：理由 / memory_refs / 前提失效价（每轮刷新）
+                oid = rec["order_id"]
+                store.set_reason(oid, getattr(plan, "reasoning", "") or "")
+                for ref in (getattr(plan, "memory_refs", None) or []):
+                    store.add_memory_ref(oid, str(ref))
+                chip = chips.get(key)
+                inv = getattr(chip, "invalidation", None) if chip is not None else None
+                if isinstance(inv, (int, float)):
+                    store.set_premise_invalidation(
+                        oid, float(inv),
+                        str(getattr(chip, "reasoning", "") or "")[:120])
+                store.refresh_recent_events(oid)
+        except Exception as e:  # noqa: BLE001 — 记忆是增益，不该拖垮下单
+            log.warning("订单记忆同步失败（不影响下单）：%s", e)
+
     def _assemble_prompt(self, root: Path, bid: str,
                          system: str, user: str, *,
                          via_group: bool = True) -> tuple[str, str]:
@@ -557,6 +654,8 @@ class PlanRunner:
                 **tail_extra,
             }
         path = write_signal_file(self.inbox, payload, cycle_id=plan.cycle_id)
+        # 单 bot 也写订单记忆（T14/D-7）——否则 [订单上下文] 那一节永远是空的
+        self._sync_order_memory(root, bid, plan, orders)
         self._record_plan(cycle_id=plan.cycle_id, trigger=trigger, orders=len(orders),
                           notes=run_notes, reasoning=plan.reasoning)
         # monitoring: decay（执行后按方向记 PnL）

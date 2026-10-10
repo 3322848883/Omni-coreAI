@@ -195,7 +195,10 @@ class TestContextAssembly(unittest.TestCase):
                                 snapshot={"market": {"price": 84000}})
             self.assertIn("system", ctx["messages"][0]["role"])
             self.assertIn("交易AI", ctx["messages"][0]["content"])
-            self.assertIn("无持仓", ctx["messages"][1]["content"])
+            # 空订单记忆不能断言"无持仓" —— 那是关于**持仓**的断言，而这一段只知道订单；
+            # 持仓在快照里（brooks-btc 持 -56 BTC 时 prompt 里曾写着「当前无持仓」，是错话）。
+            self.assertNotIn("无持仓", ctx["messages"][1]["content"])
+            self.assertIn("无订单记录", ctx["messages"][1]["content"])
             self.assertIn("84000", ctx["messages"][1]["content"])
 
     def test_build_context_with_position(self):
