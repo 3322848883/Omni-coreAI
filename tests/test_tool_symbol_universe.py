@@ -25,7 +25,7 @@ from omnialpha.strategist.symbols import (  # noqa: E402
     resolve_symbol_arg,
     symbol_error_payload,
 )
-from omnialpha.strategist.tools import run_tool  # noqa: E402
+from omnialpha.strategist.tools import NATIVE_TOOLS, run_tool  # noqa: E402
 
 MULTI = ["BTC_USDT", "ETH_USDT"]
 
@@ -119,19 +119,151 @@ class TestToolsHonourUniverse(unittest.TestCase):
 class TestNoHardcodedSymbolLeft(unittest.TestCase):
     """反断言：源码里不得再有硬编码币种兜底（防回归）。"""
 
+    # 三个工具源文件都要扫：orderflow_tools 原先的 schema 示例写死 `e.g. BTC_USDT`，
+    # 上一版只扫了 tools/tv_tools —— 漏一个文件，那个文件就能重新长回兜底。
+    TOOL_SOURCES = (
+        "omnialpha/strategist/tools.py",
+        "omnialpha/strategist/tv_tools.py",
+        "omnialpha/strategist/orderflow_tools.py",
+    )
+
     def test_no_btc_default_in_tool_sources(self):
-        for rel in ("omnialpha/strategist/tools.py", "omnialpha/strategist/tv_tools.py"):
+        for rel in self.TOOL_SOURCES:
             hits = []
             for i, line in enumerate((ROOT / rel).read_text(encoding="utf-8").splitlines(), 1):
                 if 'or "BTC_USDT"' in line or "e.g. BTC_USDT" in line:
                     hits.append("%s:%d: %s" % (rel, i, line.strip()[:80]))
             self.assertEqual(hits, [], "仍有硬编码币种兜底：\n" + "\n".join(hits))
 
+    def test_no_symbol_fallback_of_any_coin(self):
+        """兜底形态与币名无关：`or "<任何币>_USDT"` / `e.g. <任何币>_USDT` 都不许有。
+
+        只盯 BTC 会漏掉「换成 ETH 写死」这种同形改动。注释行跳过 —— 注释里
+        解释「为什么不能写死」是允许的（那正是这条守卫的说明）。
+        """
+        import re
+
+        pat = re.compile(r'(?:\bor|\be\.g\.)\s*["\']?[A-Z0-9]{2,10}_USDT')
+        hits = []
+        for rel in self.TOOL_SOURCES:
+            for i, line in enumerate((ROOT / rel).read_text(encoding="utf-8").splitlines(), 1):
+                if line.lstrip().startswith("#"):
+                    continue
+                if pat.search(line):
+                    hits.append("%s:%d: %s" % (rel, i, line.strip()[:100]))
+        self.assertEqual(hits, [], "仍有硬编码币种兜底：\n" + "\n".join(hits))
+
     def test_run_tool_accepts_universe(self):
         import inspect
 
         sig = inspect.signature(run_tool)
         self.assertIn("symbols", sig.parameters)
+
+    def test_available_native_tools_accepts_universe(self):
+        import inspect
+
+        from omnialpha.strategist.tools import available_native_tools
+
+        sig = inspect.signature(available_native_tools)
+        self.assertIn("symbols", sig.parameters)
+
+
+class _FakeGate:
+    """只记录收到了什么 symbol，不真取数 —— 用来断言「拒绝时一个 REST 都没发」。"""
+
+    def __init__(self):
+        self.tickers: list = []
+        self.order_calls: list = []
+
+    def get_ticker(self, sym):
+        self.tickers.append(sym)
+        return {"last": "1", "mark_price": "1", "funding_rate": "0"}
+
+    def get_account(self):
+        return {"available": "10", "total": "10", "position_mode": "single"}
+
+    def get_positions(self):
+        return []
+
+    def list_orders(self, sym=None):
+        self.order_calls.append(sym)
+        return []
+
+    def list_price_orders(self, sym):
+        self.order_calls.append(sym)
+        return []
+
+
+class TestTickerNeverGuesses(unittest.TestCase):
+    """`ticker` 空符号曾经拿回**任意币**的数据（`/tickers` 不带 contract 返回全量、
+    代码取 `raw[0]`，返回体的 symbol 还是空串 —— 完全静默的错币，A-6/B-6）。"""
+
+    def test_missing_symbol_rejected_without_calling_exchange(self):
+        c = _FakeGate()
+        out = run_tool(c, "ticker", {}, symbols=MULTI)
+        self.assertEqual(out.get("error"), "symbol_required", out)
+        self.assertEqual(c.tickers, [], "拒绝时不得发起 /tickers（空 contract 会取回任意币）")
+
+    def test_auto_filled_symbol_is_what_the_exchange_sees(self):
+        c = _FakeGate()
+        run_tool(c, "ticker", {}, symbols=["ETH_USDT"])
+        self.assertEqual(c.tickers, ["ETH_USDT"], "单币自动补必须真的传到取数层")
+
+
+class TestAccountSymbolsSchema(unittest.TestCase):
+    """`account.symbols`：进 schema（enum=宇宙）、与宇宙求交、**归一后**才用。"""
+
+    @staticmethod
+    def _account_fn(schemas):
+        for t in schemas:
+            if (t.get("function") or {}).get("name") == "account":
+                return t["function"]
+        raise AssertionError("account tool not found")
+
+    def _symbols_prop(self, schemas):
+        return self._account_fn(schemas)["parameters"]["properties"]["symbols"]
+
+    def test_schema_declares_symbols_array(self):
+        prop = self._symbols_prop(NATIVE_TOOLS)
+        self.assertEqual(prop["type"], "array")
+        self.assertEqual(prop["items"]["type"], "string")
+
+    def test_enum_injected_from_universe(self):
+        from omnialpha.strategist.tools import available_native_tools
+
+        prop = self._symbols_prop(available_native_tools(None, symbols=MULTI))
+        self.assertEqual(prop["items"]["enum"], MULTI)
+
+    def test_enum_not_written_into_module_constant(self):
+        """多 bot 同进程共用 `NATIVE_TOOLS` —— 注入必须落在副本上（否则串味）。"""
+        from omnialpha.strategist.tools import available_native_tools
+
+        available_native_tools(None, symbols=MULTI)
+        self.assertNotIn("enum", self._symbols_prop(NATIVE_TOOLS)["items"])
+
+    def test_out_of_universe_rejected_before_any_rest(self):
+        c = _FakeGate()
+        out = run_tool(c, "account", {"symbols": ["FAKE_USDT"]}, symbols=MULTI)
+        self.assertEqual(out.get("error"), "symbol_not_in_universe", out)
+        self.assertEqual(c.order_calls, [], "越界时不该发起任何查单 REST")
+        self.assertTrue(out.get("universe"), "错误体要带宇宙（模型据此自我纠正）")
+
+    def test_lowercase_is_normalised_not_treated_as_out_of_universe(self):
+        """大小写不是「越界」：宇宙里的币名是配置声明的大写形态，`eth_usdt` 是同一个标的。"""
+        c = _FakeGate()
+        out = run_tool(c, "account", {"symbols": ["eth_usdt"]}, symbols=MULTI)
+        self.assertNotIn("error", out, out)
+        self.assertIn("ETH_USDT", c.order_calls, "归一后的币必须真的用于查单")
+
+    def test_account_without_symbol_is_still_allowed(self):
+        """`account` 是账户级工具：不指定币是合法用法，不该被强制要 symbol。"""
+        c = _FakeGate()
+        out = run_tool(c, "account", {}, symbols=MULTI)
+        self.assertNotIn("error", out, out)
+
+
+if __name__ == "__main__":
+    unittest.main()
 
 
 class TestUnifiedPrecheck(unittest.TestCase):

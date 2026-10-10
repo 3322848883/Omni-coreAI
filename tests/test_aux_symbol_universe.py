@@ -120,6 +120,19 @@ class TestAuxFormsAreNormalised(_AuxDbCase):
                     self.assertTrue(out.get(field),
                                     f"{tool}: 库里存 {form} 时查不到（返回 {out}）")
 
+    def test_requested_form_does_not_matter(self):
+        """调用方写 `BTCUSDT` / `BTC` 也该命中 —— 入口归一到同一个币（三层同一解）。
+
+        这条钉的是端到端：宽松写法 → `symbols.py`/`gate_client.resolve_symbol` 归一
+        → aux 三形态查表。任一层缺失都会表现为「查不到 → 静默返回空」。
+        """
+        for tool, (_tbl, _col, field, _key) in PER_COIN.items():
+            for asked in FORMS:
+                with self.subTest(tool=tool, asked=asked):
+                    out = self._call(tool, {"symbol": asked}, "BTC_USDT", MULTI)
+                    self.assertTrue(out.get(field),
+                                    f"{tool}: 传 {asked} 时查不到（返回 {out}）")
+
     def test_other_coin_is_not_returned(self):
         """查不到就是空 —— 但**不得**因此退回别的币（不静默跨币）。"""
         for tool, (_tbl, _col, field, _key) in PER_COIN.items():

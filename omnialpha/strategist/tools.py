@@ -47,7 +47,7 @@ from .market import MarketConfig, resolve_candles
 
 
 from .snapshot import collect_snapshot
-from .symbols import resolve_symbol_arg, symbol_error_payload
+from .symbols import OUT_OF_UNIVERSE, resolve_symbol_arg, symbol_error_payload
 
 
 
@@ -1262,7 +1262,7 @@ AUX_TOOL_NAMES = (
 )
 
 
-def available_native_tools(bot_root=None) -> list:
+def available_native_tools(bot_root=None, symbols=None) -> list:
     """按数据源可用性过滤后的工具 schema 列表。
 
     数据源（`aux_cache.db`）不在时**不把那 10 个 aux 工具挂给模型** —— 模型看不到
@@ -1270,6 +1270,9 @@ def available_native_tools(bot_root=None) -> list:
     那条原则的直接落地（同 HealthMonitor 装饰性、AI 预算 vs 闸门那一类）。
 
     订单流工具同理：`orderflow.db` 不在（采集未启用）时不挂。
+
+    `symbols` 给了就把【品种宇宙】注入 `account.symbols` 的 enum（`_bind_symbol_enum`）；
+    不给则返回与改动前逐字一致。
     """
     out = NATIVE_TOOLS
     if _aux_db(bot_root) is None:
@@ -1278,6 +1281,29 @@ def available_native_tools(bot_root=None) -> list:
     if _orderflow_db(bot_root) is None:
         out = [t for t in out
                if (t.get("function") or {}).get("name") not in ORDERFLOW_TOOL_NAMES]
+    return _bind_symbol_enum(out, symbols)
+
+
+def _bind_symbol_enum(schemas: list, symbols) -> list:
+    """把【品种宇宙】写进 `account.symbols` 的 enum（schema 层的「看不到」）。
+
+    为什么要复制一份再改：`NATIVE_TOOLS` 是**模块常量**，宇宙要到运行时才知道；
+    就地改常量会让同进程内不同 bot 互相串味。schema 只负责「模型看不到」，
+    执行侧仍以 `run_tool` 的求交为准 —— schema 不是安全边界。
+    """
+    uni = [str(x).strip().upper() for x in (symbols or []) if str(x).strip()]
+    if not uni:
+        return list(schemas)
+    import copy
+
+    out = []
+    for t in schemas:
+        fn = t.get("function") or {}
+        props = (fn.get("parameters") or {}).get("properties") or {}
+        if fn.get("name") == "account" and isinstance(props.get("symbols"), dict):
+            t = copy.deepcopy(t)
+            t["function"]["parameters"]["properties"]["symbols"]["items"]["enum"] = uni
+        out.append(t)
     return out
 
 
@@ -1907,14 +1933,24 @@ def run_tool(
 
             # 与宇宙求交（T6）：越界/任意字符串不再被接受（此前 `symbols: ["FAKE_USDT"]`
             # 也会照样去查）。放在任何 REST 调用**之前** —— 无效参数不该先烧一次网络往返。
-            _universe = [str(x) for x in (symbols or [])]
-            _asked = args.get("symbols") or ([args.get("symbol")] if args.get("symbol") else [])
+            # 归一（大写 + 去空白）后再求交：宇宙里的币名是配置声明的大写形态，
+            # 模型写 `eth_usdt` 是同一个标的，不该被当成越界（同 `symbols.py::_norm`）。
+            _universe = [str(x).strip().upper() for x in (symbols or [])]
+            _raw = args.get("symbols") or ([args.get("symbol")] if args.get("symbol") else [])
+            if isinstance(_raw, str):        # 模型偶尔把数组写成单个字符串
+                _raw = [_raw]
+            _asked = [str(x).strip().upper() for x in _raw if str(x).strip()]
             if _universe and _asked:
-                _outside = [str(x) for x in _asked if str(x) not in _universe]
+                _outside = [x for x in _asked if x not in _universe]
                 if _outside:
-                    return {"error": "symbol_not_in_universe",
+                    # 复用统一错误体：形状/文案与其它工具一致（带 universe + hint），
+                    # 只多一个 outside 说明越界的是哪一个。
+                    return {**symbol_error_payload(OUT_OF_UNIVERSE, symbols, tool="account"),
                             "message": "account.symbols 有宇宙外的币",
-                            "outside": _outside, "universe": sorted(_universe)}
+                            "outside": _outside}
+            if _asked:
+                # 归一后回填：下游按这些币逐个查单，大小写不该改变结果
+                args["symbols"] = _asked
 
             # Always REST (authoritative); local account.db may lag (no keys / stalled push)
 
