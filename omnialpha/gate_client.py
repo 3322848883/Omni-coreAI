@@ -5,12 +5,15 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Optional
+
+log = logging.getLogger(__name__)
 
 LIVE_REST = "https://api.gateio.ws"
 TESTNET_REST = "https://api-testnet.gateapi.io"
@@ -333,17 +336,60 @@ class GateClient:
     def get_price_order(self, price_order_id: str) -> dict:
         return self.rest_signed_request("GET", f"{FUTURES_API}/price_orders/{price_order_id}", "") or {}
 
+    # 挂单/条件单翻页上限：100 条/页 × 10 页。上限的作用是「病态账户不把一轮
+    # 扫描拖死」，而不是「我们相信永远不会超过 1000 条」—— 超了会打日志。
+    _OPEN_PAGE_SIZE = 100
+    _OPEN_MAX_PAGES = 10
+
     def list_orders(self, contract: Optional[str] = None) -> list:
-        qs = "status=open"
-        if contract:
-            qs += f"&contract={contract}"
-        return self.rest_signed_request("GET", f"{FUTURES_API}/orders", qs) or []
+        """当前挂单（**翻页取全**）。
+
+        Gate 默认一页 100 条，超出就**静默截断** —— 而调用方（executor 的归属扫描、
+        watcher 的守护扫描）把这批单当作「本 bot 在该合约上的全部挂单」用。
+        截断的后果是**漏判归属**：真实存在的保护单不在结果里 → 对账/清理看不见它
+        （fail-open），多币下更容易触发（每合约的单少了，但账户总量会超）。
+        """
+        return self._list_open_paged(f"{FUTURES_API}/orders", contract)
 
     def list_price_orders(self, contract: Optional[str] = None) -> list:
+        return self._list_open_paged(f"{FUTURES_API}/price_orders", contract)
+
+    def _list_open_paged(self, path: str, contract: Optional[str] = None) -> list:
         qs = "status=open"
         if contract:
             qs += f"&contract={contract}"
-        return self.rest_signed_request("GET", f"{FUTURES_API}/price_orders", qs) or []
+        rows: list = []
+        seen: set = set()
+        for page in range(self._OPEN_MAX_PAGES):
+            got = self.rest_signed_request(
+                "GET", path,
+                f"{qs}&limit={self._OPEN_PAGE_SIZE}&offset={page * self._OPEN_PAGE_SIZE}") or []
+            if not got:
+                break
+            fresh = [r for r in got if self._order_key(r) not in seen]
+            if not fresh:
+                # 服务端忽略了 offset（或返回了同一页）→ 立刻停：否则会重复 N 倍
+                log.warning("%s 翻页无新数据（offset 可能不被支持）→ 提前结束", path)
+                break
+            for r in fresh:
+                seen.add(self._order_key(r))
+            rows.extend(fresh)
+            if len(got) < self._OPEN_PAGE_SIZE:
+                break
+        else:
+            log.warning("%s 已取满 %d 页（%d 条），可能仍有未取到的单",
+                        path, self._OPEN_MAX_PAGES, len(rows))
+        return rows
+
+    @staticmethod
+    def _order_key(row: Any) -> Any:
+        """翻页去重键：优先交易所 id，取不到就退回整条内容的指纹。"""
+        if isinstance(row, dict):
+            for k in ("id", "order_id", "text"):
+                if row.get(k) is not None:
+                    return (k, str(row[k]))
+            return ("raw", repr(sorted(row.items(), key=lambda kv: str(kv[0]))))
+        return ("raw", repr(row))
 
     def list_position_close(self, contract: Optional[str] = None,
                             limit: int = 100) -> list:
