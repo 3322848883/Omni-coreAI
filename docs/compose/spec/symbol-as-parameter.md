@@ -78,6 +78,10 @@ commits: 07ae1b0..e0948ec（38 commits / 101 文件；`e0948ec` 已推 origin/ma
    单币 persona 组因此可能"少做一轮"（旧行为是用模型没说的币下单）。**实盘两个 bot 走的是
    单 bot strategist 路径，不受影响**（那条路径的越界由 plan 层 `PlanError` → 降级 hold 拦住，
    而旧版也会被 executor 白名单拒，两版都不同单）。
+9. **单 bot 的 `[订单上下文]` 从空变成有内容**（2026-10-10，T14/D-7）：`plan-loop` 现在也写
+   共享订单库，于是单币 prompt 多出订单级信息（reason / lifecycle / recent_events /
+   前提失效价），且空态文案从「（当前无持仓）」改成中性的「（无订单记录 …）」。这是**有意的
+   行为变化**（原先那句话是错的），代价是**单币 token 略增、缓存前缀可能失效一次**。
 
 ### 2026-10-10 收尾（部署后核实 + 补齐 + 勾选更正）
 
@@ -103,6 +107,17 @@ commits: 07ae1b0..e0948ec（38 commits / 101 文件；`e0948ec` 已推 origin/ma
 - kline 审计体带 `symbol`（多币落 `kline_reads` 数组）；挂单/条件单**翻页取全**；
   `quick_order.py` 第三份 `SYMBOL_MAP` 收口；`coverage._VENUE_LISTING_SUPPORT` 的
   bitget/hyperliquid 改 `True`；`coverage_matrix` 接进 `deploy-check`（只显示不阻断）。
+- **单 bot 也写订单记录**（T14 / D-7 的最后一环，2026-10-10）：`PlanRunner._sync_order_memory`
+  在落盘信号后按 symbol 建/复用/关闭共享订单记录（方向反转另起一张），把 lifecycle /
+  recent_events / 模型声明的前提失效价写进去。此前全仓只有 persona 一个写入方，
+  `plan-loop` 的 `[订单上下文]` 永远为空。
+- **`[订单上下文]` 的空态文案**：原先渲染成「（当前无持仓）」—— 那是关于**持仓**的断言，
+  而这一段只知道「有没有订单记录」；实测 brooks-btc 持 -56 BTC 时 prompt 里照样这么写。
+  现改为「（无订单记录 —— 持仓状态以快照 `account.position_state` 为准）」，如实说明并
+  指向权威来源。
+- **`fetch_exchange_contracts` 不再只认 gate**：bitget / hyperliquid 的适配器已有
+  `available_symbols()`（公开端点、无需密钥），复核时改走 `coverage.venue_listings` ——
+  否则 `validate_contracts: true` 在这两所上永远发现不了"配了不存在的币"。
 
 **部署与生效证据**（`e0948ec`，服务器 `/opt/omnialpha`）：
 
@@ -118,16 +133,14 @@ commits: 07ae1b0..e0948ec（38 commits / 101 文件；`e0948ec` 已推 origin/ma
 
 **仍未闭合**（如实记录，见 §Tasks 的勾选口径）：
 
-1. **单 bot 不写订单记录**（原 D-7/T14 的"单 bot 也写订单记录"）——全仓 `SharedOrderStore`
-   只有 `persona/runner.py` 一个写入方，`loop.py:296` 只读。**但影响比最初判断的小**：
-   `memory/context.py:245` 已用**决策日志**回看上一轮 Tier-1（含 `invalidation` /
-   `time_stop_bars` / `give_back_pct`，多币按币）补上，注明来源是独立评审 Critical 3。
-   真正仍缺的是**订单级**记忆：`lifecycle` / `recent_events`(top-5) / `votes` / `reason_text`。
-2. `SharedOrderStore.create` 此前不校验宇宙（现在加了可选 `universe=`，见提交），
-   但**启动路径**仍没有"每所是否有这些币"的阻断式校验 —— `config.validate_contracts`
-   是**默认关**的选项（理由：离线测试/只读巡检/容器构建不该依赖网络），
-   三态矩阵现在只是在 `deploy-check` 里**显示**。
-3. 历史 `trades.symbol` 全 NULL 且 `migrate` 有导入标记不会重导 → 旧数据仍无法按币审计。
+1. **启动路径没有"阻断式"的品种校验** —— `config.validate_contracts` 是**默认关**的选项
+   （理由：离线测试/只读巡检/容器构建不该依赖网络），三态矩阵现在只是在 `deploy-check`
+   里**显示**。开启该校验时已能覆盖 gate + bitget + hyperliquid（见上）。
+   这一条属**取舍**，不是缺陷；要收紧需先解决"配置校验不得依赖网络"这个约束。
+2. 历史 `trades.symbol` 全 NULL 且 `migrate` 有导入标记不会重导 → 旧数据仍无法按币审计。
+   （回填脚本见 `scripts/backfill_symbols.py`，默认 dry-run、只补空、幂等；需人工 `--apply`。）
+3. `_exchange_pnl_sweep` 仍以 `bot.symbols` 作**统计白名单**（不是守护集合）—— 属 T13 口径，
+   有意保留。
 
 ### Journey log
 
@@ -473,7 +486,7 @@ N=5 时旧人格 214k 买 1 个币、新人格 229k 买 5 个（差 4.6×）。
 - [x] T11: journal / Tier-1 / 近况按币（`symbols[]`、`decisions[]`、`tier1{symbol:{…}}`、近况与索引按币渲染） — acceptance: 两币 → journal 两条独立可还原记录；**单币输出逐字不变**（golden） (covers: S2.4⑩)
 - [x] T12: 解析加固（`repair_json`：去围栏/去尾逗号/按栈补括号；`scenarios` 非对象 → 丢弃 + notes） — acceptance: 少一个 `}`、尾逗号、`scenarios:"x"` 三种坏输入都能解析成功；降级率降为 0 (covers: S2.4⑨)
 - [x] T13: 画像/盈亏/decay 按币 + 缓存前缀分层（`ledger_stats` per-symbol、paper `group by contract`、`exchange_pnl.by_contract`、decay 带 symbol、画像移出稳定前缀、`check_prefix` 分 hash） — acceptance: 两币各自独立胜率/盈亏；单币画像逐字不变 (covers: S2.4⑩; depends: T11)
-- [~] T14: 订单上下文与共享订单库按币（按 symbol 各一张 ≤3、`list_open(group, symbol)`、`create` 校验宇宙、单 bot 也写订单记录） — **部分完成**：前三项已交付；`create` 的宇宙校验于 2026-10-10 补上（可选 `universe=`，越界不落盘）；**「单 bot 也写订单记录」未做**（关键字段已由决策日志的 `[上轮方案状态]` 补上，影响评估见「2026-10-10 收尾」§仍未闭合 1） — acceptance: 多币多单时两张单的 `premise_invalidation` 都在 prompt 里；不再关错币的单 (covers: S2.4⑩; depends: T11)
+- [x] T14: 订单上下文与共享订单库按币（按 symbol 各一张 ≤3、`list_open(group, symbol)`、`create` 校验宇宙、单 bot 也写订单记录） — 四项均已交付（`create` 的宇宙校验与**单 bot 写订单记录**于 2026-10-10 补齐，见「2026-10-10 收尾」；后者使单币 prompt 不再逐字不变，记入 I11 例外 9） — acceptance: 多币多单时两张单的 `premise_invalidation` 都在 prompt 里；不再关错币的单 (covers: S2.4⑩; depends: T11)
 - [x] T15: ledger 写 symbol（`insert_trade` 补 symbol / `symbols_json`、`plans.symbols_json`、查询加 symbol 参数） — acceptance: 新写入的 `trades.symbol` 非 NULL 且可按币查询 (covers: S2.4⑩)
 - [x] T16: 数据源闭环（`fetch_aux.CONTRACTS` 从 watchlist 读、aux/data monitor per-symbol 覆盖告警、per-venue 覆盖矩阵 + 启动校验、Bitget/HL 真实元数据） — acceptance: 新增币后 aux 工具**不再静默空**（要么有数据、要么显式告警）；"某币零数据"能被监控报出 (covers: S2.4⑪)
 - [x] T17: 测试补多币断言（`fills` 测试表补 `contract`、画像/盈亏/近况各加"两币→两条独立记录"、prompt 多币预算守卫） — acceptance: 故意把 symbol 维度删掉时新测试必须失败（不是假绿） (covers: S2.4⑪; depends: T11, T13)
