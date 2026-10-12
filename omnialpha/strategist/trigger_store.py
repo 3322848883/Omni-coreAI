@@ -120,6 +120,9 @@ class AITrigger:
     created_at: float = 0.0
     expire_at: float = 0.0
     last_fire: float = 0.0
+    # 边沿判据的跨进程状态：条件当前是否为真。没有它，重启后一个"仍为真"的
+    # 状态型条件会被当成新边沿补报一次。由 PlanRunner._persist_trigger_state() 回写。
+    last_true: bool = False
     reason: str = ""
     source: str = "llm"
 
@@ -224,6 +227,7 @@ class AITriggerStore:
                         created_at=float(row.get("created_at") or 0),
                         expire_at=float(row.get("expire_at") or 0),
                         last_fire=float(row.get("last_fire") or 0),
+                        last_true=bool(row.get("last_true", False)),
                         reason=str(row.get("reason") or ""),
                         source=str(row.get("source") or "llm"),
                     )

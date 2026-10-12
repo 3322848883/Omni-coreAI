@@ -1128,6 +1128,10 @@ class Executor:
         # 偏差超过 30% 过大 → 钳到应有值；过小（<50%）保留（可主动降风险）
         if float(size_usd) > target * 1.3:
             note = f"size_clamped {where}{float(size_usd):.0f}->{target:.0f} (risk {risk_pct:.1%} expected)"
+            # P0 观测补丁（martin-grid 6h 体检）：note 之前只进 StepResult.detail，
+            # 日志里完全看不到 —— 产线 29 张/754U 被钳成 11 张/275U 长期无感知。
+            # 钳制改变实际风险敞口，必须进 WARNING 级日志。
+            log.warning("RISK_ALIGN %s", note)
             return target, note
         if cap is not None and float(size_usd) > float(cap):
             # 没超过 target×1.3，但仍越过了名义硬顶 → 必须钳，否则 _check_notional 会拒
