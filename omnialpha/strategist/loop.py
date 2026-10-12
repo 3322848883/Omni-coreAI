@@ -33,7 +33,7 @@ from .symbols import (
     resolve_symbol_arg,
 )
 from .tools import NATIVE_TOOLS, TOOL_GUIDE, available_native_tools, extract_tool_calls, filter_tool_schemas, run_tool
-from .triggers import check_conditions, parse_conditions
+from .triggers import ConditionState, check_conditions, parse_conditions
 from .trigger_store import AITriggerPolicy, AITriggerStore, TriggerPolicyError, validate_trigger_payload
 
 log = logging.getLogger("omnialpha.strategist")
@@ -50,6 +50,10 @@ class StrategistConfig:
     # 条件事件：EMA/ATR/RSI/price_break 等（见 triggers.py）
     conditions: list = field(default_factory=list)
     check_interval_sec: float = 1.0
+    # 条件事件轮与上一轮的最小间隔（秒）。None = 用 interval_sec/2；0 = 关掉这道闸。
+    # 见 PlanRunner._cond_gap_sec() 的说明：没有这道闸，一个 interval 周期里会
+    # 叠出「定时轮 + 事件轮」两轮，15 分钟节拍被打散。
+    cond_gap_sec: Optional[float] = None
     ai_triggers: dict = field(default_factory=dict)
     symbols: list[str] = field(default_factory=list)
     prompt_file: str = "prompts/vergex_default.md"
@@ -117,6 +121,10 @@ class PlanRunner:
             allow_modify=bool((cfg.ai_triggers or {}).get("allow_modify", True)),
         )
         self._ai_store = AITriggerStore(self.history_dir / "ai_triggers.json", self._ai_policy)
+        # 冷却/边沿状态**跨进程**：把落盘的 last_fire / last_true 种回内存 `_cond_states`。
+        # 不种的话进程一重启（部署、崩溃、看门狗拉起）冷却就归零 —— 而 `last_fire`
+        # 此前根本没落过盘（`mark_fired` 是死代码，见 `_persist_trigger_state`）。
+        self._seed_cond_states()
         # 工具使用统计（每轮累计，随 thinking 落盘）——防 AI 偷懒不查数据
         self.tool_usage: list[dict] = []
         # 本轮发出的 K 线图**元数据**（symbol/周期/成功与否/字节数）——
@@ -1745,6 +1753,87 @@ class PlanRunner:
                     notes.append(f"trigger_rejected: {e}")
         return notes
 
+    def _seed_cond_states(self) -> None:
+        """把 AI 触发器落盘的 `last_fire` / `last_true` 种进内存冷却状态。
+
+        场景：部署 / 崩溃 / 看门狗拉起后进程重建，`_cond_states` 是空的 →
+        冷却归零，同一条触发器下一次求值就再次命中。产线实测 margtin-grid 上线
+        8 小时内 `cond[...]` 触发 5 次，每次都紧跟一次进程事件（重启 / 部署）。
+
+        只处理 AI 触发器（yaml `conditions[]` 是静态配置、且 key 是下标，重建本就无害）。
+        """
+        store = getattr(self, "_ai_store", None)
+        if store is None:
+            return
+        try:
+            items = store.active()
+        except Exception:  # noqa: BLE001
+            return
+        for t in items:
+            last_fire = float(getattr(t, "last_fire", 0.0) or 0.0)
+            last_true = bool(getattr(t, "last_true", False))
+            if last_fire > 0 or last_true:
+                self._cond_states[t.id] = ConditionState(
+                    last_fire=last_fire, last_true=last_true
+                )
+
+    def _persist_trigger_state(self) -> None:
+        """把内存冷却状态回写 `ai_triggers.json`（只动 AI 触发器）。
+
+        `AITriggerStore.mark_fired()` 此前**全仓无调用点**（死代码）→ `last_fire`
+        恒为 0、`updated_at` 停在最后一次 add/remove。后果两条：
+          ① 观测失真 —— 看不出哪条触发器在响、响了几次（产线文件里 3 条 last_fire 全 0，
+             而同时段日志里 cond 命中 5 次）；
+          ② 重启后冷却归零 → 同一条触发器立刻重触发（配合 `_seed_cond_states` 修掉）。
+        落盘的是**全部**活着的 AI 触发器的状态（含本轮没命中的），这样 `last_true`
+        （边沿判据）也一起跨进程存活。只在真的变了才写盘，避免每轮无谓 IO。
+        """
+        store = getattr(self, "_ai_store", None)
+        if store is None:
+            return
+        try:
+            items = store.active()
+        except Exception:  # noqa: BLE001
+            return
+        changed = False
+        for t in items:
+            st = self._cond_states.get(t.id)
+            if st is None:
+                continue
+            lf = float(getattr(st, "last_fire", 0.0) or 0.0)
+            lt = bool(getattr(st, "last_true", False))
+            if lf != float(getattr(t, "last_fire", 0.0) or 0.0) or lt != bool(getattr(t, "last_true", False)):
+                t.last_fire = lf
+                t.last_true = lt
+                changed = True
+        if changed:
+            try:
+                store.save()
+            except Exception:  # noqa: BLE001
+                log.warning("ai_triggers 状态回写失败（不影响本轮）", exc_info=True)
+
+    def _cond_gap_sec(self) -> float:
+        """条件事件轮距上一轮的最小间隔（秒）。
+
+        为什么要有这道闸：`interval_sec` 是「**至少**每 N 秒分析一次」的节拍承诺。
+        此前事件轮不推进定时器（`last_interval` 只在 interval 分支里更新）→ 事件命中时
+        （产线上常见于定时轮之后 3~5 分钟）会在同一个周期里**再插一轮**，实测轮间隔
+        出现 212 / 261 / 290 / 349 / 610 / 645 秒 —— 15 分钟节拍名不副实，每多一轮
+        就是一次完整 LLM 调用。
+
+        现在 `run_forever` 里**任何一轮都推进定时器**，并且事件轮还要额外满足
+        `now - last_round >= cond_gap_sec`。默认取 `interval_sec / 2`（保留「破位提前
+        叫醒」的能力，又挡住贴着定时轮的那一次重复）。`strategist.cond_gap_sec` 覆盖。
+        """
+        raw = getattr(self.cfg, "cond_gap_sec", None)
+        if raw is not None:
+            try:
+                return max(0.0, float(raw))
+            except (TypeError, ValueError):
+                pass
+        iv = float(self.cfg.interval_sec or 0)
+        return iv / 2.0 if iv > 0 else 0.0
+
     def _check_condition_events(self) -> Optional[str]:
         ai_conds = []
         try:
@@ -1758,6 +1847,9 @@ class PlanRunner:
         fired = check_conditions(
             self.client, all_conds, interval, states=self._cond_states
         )
+        # 无论有没有命中都把状态落盘：`last_true`（边沿判据）也必须跨进程存活，
+        # 否则重启后一个「当前仍为真」的状态型条件会立刻补报一次。
+        self._persist_trigger_state()
         if not fired:
             return None
         reasons = "; ".join(f"{f['type']}:{f['symbol']}:{f['reason']}" for f in fired)
@@ -1765,17 +1857,18 @@ class PlanRunner:
         return f"cond[{reasons}]"
 
     def run_forever(self) -> None:
-        last_interval = 0.0
+        last_round = 0.0
         while True:
             now = time.time()
             fire = False
             trigger = ""
-            if self.cfg.interval_sec and now - last_interval >= self.cfg.interval_sec:
+            # 节拍：**任何**一轮（定时 / 收盘 / 事件）都把下一轮推到 `last_round + interval`。
+            # 事件轮不是"额外加一轮"，而是"把这一轮提前到现在"—— 见 `_cond_gap_sec()`。
+            if self.cfg.interval_sec and now - last_round >= self.cfg.interval_sec:
                 fire, trigger = True, "interval"
-                last_interval = now
             elif self.cfg.event_on_kline_close and self._kline_closed():
                 fire, trigger = True, self._kline_close_trigger()
-            else:
+            elif now - last_round >= self._cond_gap_sec():
                 cond = self._check_condition_events()
                 if cond:
                     fire, trigger = True, cond
@@ -1791,4 +1884,6 @@ class PlanRunner:
                     log.exception("plan[%s] failed: %s", trigger, e)
                 finally:
                     self._busy.release()
+                # 注意：`_busy` 抢不到时 `continue` 走了，不算一轮。
+                last_round = time.time()
             time.sleep(self.cfg.check_interval_sec or 1.0)
