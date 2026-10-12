@@ -168,6 +168,7 @@ class Executor:
         root: Optional[Path] = None,
         bot_id: str = "",
         account: str = "",
+        place_before_cancel: bool = False,
     ):
         self.client = client
         self.symbols_whitelist = (
@@ -191,6 +192,8 @@ class Executor:
         self.account = str(account or "").strip()
         # bot namespace: order texts always under t-{label_prefix}*; signal labels cannot escape
         self.label_prefix = str(label_prefix or "").strip()
+        # place-before-cancel：显式撤类 intent 转换为「快照差集」语义（config 逐 bot 开启）
+        self.place_before_cancel = bool(place_before_cancel)
         # P0.4 告警落盘：权益偏离 / 孤儿保护单
         self.alert_store = alert_store
 
@@ -202,13 +205,58 @@ class Executor:
                 StepResult("hold", "", True, detail={"skipped": True})
             )
             return report
-        # Snapshot owned resting orders before new placements (place-before-cancel).
-        # Do NOT cancel here — new protection first, then withdraw old owned ones.
+
+        # ---- D 组合风险闸门（account_risk.total_risk_pct，默认关，逐 bot）----
+        # 单档 _align_size_to_risk 只保证「每档 ≤ 权益×risk%÷dist」，挡不住
+        # 「每档都合规、10 档加起来爆表」（martin-grid 满阶 29 张止损 ≈40% 权益）。
+        # 组合口径：Σ(size_usd × |entry-sl|/entry) > equity × total_risk_pct 时，
+        # 全部 open 类等比缩小。触发必打 WARNING（P0 盲区教训）。
+        if self.account_risk.get("total_risk_pct"):
+            intents, budget_note = self._cap_combined_risk(intents)
+            if budget_note:
+                log.warning("RISK_BUDGET %s", budget_note)
+
+        # ---- P1 空窗修复（place_before_cancel，逐 bot 开启，默认关）----
+        # 显式撤类 intent（cancel_all 等）按优先级排最前先执行 → 「撤完旧的、新的
+        # 还没挂上」的交易所空窗（实测 martin-grid 每轮 ~4 分钟无本 bot 挂单）。
+        # 开启本开关时，撤类 intent **不单独执行**，转换为「快照差集」语义：
+        # replace_mode 提升为 symbol，由末尾 _cancel_stale_owned 在新单挂完后
+        # 撤「快照里有、新 plan 里没有」的旧单 —— 撤的是旧单差集，不会误撤新单。
+        # 快照面必须覆盖撤类 intent 触及的 symbol（否则撤单语义丢失）→ 用原始 intents。
+        converted_cancels: list = []
+        need_all_snapshot = False
+        if self.place_before_cancel and intents:
+            cancel_set = {a for a, p in _INTENT_PRIORITY.items() if p == 3}
+            cancels = [i for i in intents
+                       if str(getattr(i, "action", "") or "").lower() in cancel_set]
+            if cancels and len(cancels) < len(intents):
+                snapshot_intents = intents
+                intents = [i for i in intents
+                           if str(getattr(i, "action", "") or "").lower() not in cancel_set]
+                converted_cancels = cancels
+                # symbol 为空的撤类（= 全合约）→ 快照面必须扩到全部
+                need_all_snapshot = any(
+                    not str(getattr(c, "symbol", "") or "").strip() for c in cancels
+                )
+
         replace_mode = self._replace_mode(signal, intents)
-        # 无条件快照「本轮开始前」的本 bot 挂单 —— 回滚要用它当基线（见 _rollback_newly_placed）。
-        # `replace=all` 时快照面扩到「本 bot 有单的**全部**合约」（见 _all_owned_symbols）——
-        # 这就是它与 `replace=symbol`（只看本轮 payload 触及的币）的区别。
-        pre_owned = self._snapshot_owned(intents, replace_mode)
+        if converted_cancels:
+            # 撤类被转换 → 必须激活 stale 清理；cancel_all 的语义 ≈ replace=symbol
+            if replace_mode == "none":
+                replace_mode = "all" if need_all_snapshot else "symbol"
+        pre_owned = self._snapshot_owned(
+            snapshot_intents if converted_cancels else intents, replace_mode
+        )
+
+        # 审计留痕：撤类转换必须可见（否则复盘「这轮为什么没撤单」时无从归因）
+        for ci in converted_cancels:
+            report.results.append(StepResult(
+                str(getattr(ci, "action", "cancel")) or "cancel",
+                str(getattr(ci, "symbol", "") or ""),
+                True,
+                detail={"converted": "place_before_cancel",
+                        "deferred_to": "stale_cleanup"},
+            ))
 
         # 排序：**先平仓、后开仓**（参照 nofx 的 `sortDecisionsByPriority`）。
         # 先释放保证金再开新仓 —— 否则同轮换仓会因保证金不足被拒，或两笔叠加
@@ -1083,6 +1131,64 @@ class Executor:
             raise GateApiError(
                 f"{where}size_usd={size_usd} exceeds max_notional_usd={self.max_notional_usd}"
             )
+
+    def _cap_combined_risk(self, intents: list) -> tuple[list, str]:
+        """组合止损上限：Σ(size_usd × dist) > equity × total_risk_pct 时全部 open 等比缩。
+
+        与单档 `_align_size_to_risk` 的分工：单档管「每笔 ≤ 权益×risk%÷dist」，
+        本方法管「所有 open 档加起来的止损合计」。只对 size_usd 型 + 带 sl + 有
+        entry 的 open/stop_entry 生效（张数型/无 sl 的交给各自闸门）。
+        权益拿不到 → 原样返回（fail-open，不 block 下单——它只缩仓不拒单）。
+        """
+        try:
+            pct = float(self.account_risk.get("total_risk_pct") or 0)
+        except (TypeError, ValueError):
+            pct = 0.0
+        if pct <= 0:
+            return intents, ""
+        open_acts = {"open_long", "open_short", "stop_entry_long", "stop_entry_short"}
+        risked = []
+        for i in intents:
+            if str(getattr(i, "action", "") or "").lower() not in open_acts:
+                continue
+            sz = getattr(i, "size_usd", None)
+            sl = getattr(i, "sl", None)
+            entry = getattr(i, "price", None)
+            if sz is None or sl is None or not entry:
+                continue
+            try:
+                dist = abs(float(entry) - float(sl)) / float(entry)
+            except (TypeError, ValueError, ZeroDivisionError):
+                continue
+            if dist <= 0:
+                continue
+            risked.append((i, dist * float(sz)))
+        if not risked:
+            return intents, ""
+        try:
+            acct = self.client.get_account() or {}
+            equity = float(acct.get("total") or acct.get("balance") or 0)
+        except Exception:  # noqa: BLE001
+            return intents, ""
+        if equity <= 0:
+            return intents, ""
+        limit = equity * pct
+        total = sum(r[1] for r in risked)
+        if total <= limit:
+            return intents, ""
+        scale = limit / total
+        risked_ids = {id(r[0]) for r in risked}
+        out = []
+        for i in intents:
+            if id(i) in risked_ids:
+                try:
+                    i.size_usd = round(float(i.size_usd) * scale, 2)
+                except (TypeError, ValueError):
+                    pass
+            out.append(i)
+        note = (f"combined stop-loss {total:.0f}U > equity {equity:.0f}U × {pct:.0%}"
+                f" → {len(risked)} open legs ×{scale:.2f}")
+        return out, note
 
     def _align_size_to_risk(self, intent: Intent, entry: float) -> tuple[float, str]:
         """按风险公式钳制 size_usd：应有 = 权益×risk% ÷ SL距离% × 入场。

@@ -19,10 +19,18 @@ from omnialpha.skillkit import (  # noqa: E402
 )
 from omnialpha.skillkit.models import SkillError  # noqa: E402
 
-from tests._skill_fixtures import fixture_root, fixture_skills_dir  # noqa: E402
+from tests._skill_fixtures import fixture_root, fixture_skills_dir, has_real_skill  # noqa: E402
 
 SKILLS = fixture_skills_dir()
 JOURNAL = fixture_root() / "logs" / "skill_journal.jsonl"
+
+# price-action-trading 是真实 skill（仓库根 skills/，.gitignore 的个人内容），
+# 干净 checkout（worktree/CI）里缺失 → 依赖它的测试必须 skip 而非 fail。
+PA = "price-action-trading"
+needs_pa = unittest.skipUnless(
+    has_real_skill(PA),
+    "real skill 'price-action-trading' not installed (skills/ is gitignored personal content)",
+)
 
 
 class TestAllowedToolsNarrowing(unittest.TestCase):
@@ -33,6 +41,7 @@ class TestAllowedToolsNarrowing(unittest.TestCase):
         self.assertIsNotNone(pkg.meta.allowed_tools)
         self.assertEqual(pkg.meta.allowed_tools, frozenset({"klines", "indicators", "ticker"}))
 
+    @needs_pa
     def test_no_allowed_tools_means_not_narrowed(self):
         pkg = load_package(SKILLS / "price-action-trading")
         self.assertIsNone(pkg.meta.allowed_tools)
@@ -60,6 +69,7 @@ class TestBodyBudgetTruncation(unittest.TestCase):
         self.assertIn("truncated", out)
         self.assertLess(len(out), 2000)
 
+    @needs_pa
     def test_no_truncation_when_under_budget(self):
         reg = SkillRegistry()
         reg.scan([SKILLS])
@@ -126,6 +136,9 @@ class TestSecurityMatrix(unittest.TestCase):
             rep = validate_package(d)
             self.assertTrue(any("E01" in e for e in rep.errors))
 
+    @unittest.skipIf(sys.platform == "win32",
+                     "Windows symlink 语义不同（创建成功但 realpath containment 不触发），"
+                     "逃逸防护在 POSIX 上验证")
     def test_realpath_containment_on_load(self):
         """bundled 文件符号链接逃逸应被 load 拒绝。"""
         with tempfile.TemporaryDirectory() as td:
@@ -171,10 +184,22 @@ class TestCliLifecycle(unittest.TestCase):
     """CLI 全生命周期：validate → install → list → show → remove。"""
 
     def _cli(self, *args, cwd=ROOT):
+        # cwd 常指向临时目录 —— omnialpha 包不在那里，靠 PYTHONPATH 注入仓库根。
+        # （editable install 的 .pth 只对本解释器生效，子进程换 cwd 后会
+        #  `No module named omnialpha`。）依赖也一并注入：父进程 sys.path 里的
+        # 相对路径（如 `../.venv/Lib/site-packages`）在子进程的 cwd 下会失配，
+        # 只保留绝对路径。
+        import os
+        env = dict(os.environ)
+        # 相对路径（如 `../.venv/Lib/site-packages`）resolve 成绝对 ——
+        # 子进程 cwd 不同，相对路径会失配
+        abs_paths = [str(ROOT)] + sorted({str(Path(p).resolve()) for p in sys.path
+                                          if p and Path(p).exists()})
+        env["PYTHONPATH"] = os.pathsep.join(abs_paths)
         return subprocess.run(
             [sys.executable, "-m", "omnialpha", *args],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            cwd=str(cwd), timeout=60,
+            cwd=str(cwd), timeout=60, env=env,
         )
 
     def test_full_roundtrip(self):
@@ -249,6 +274,7 @@ class TestSkillRefL3(unittest.TestCase):
         self.assertIn("content", r)
         self.assertIn(f"[skill_ref:price-action-trading:{rel}]", r["content"])
 
+    @needs_pa
     def test_path_escape_blocked(self):
         from omnialpha.strategist.tools import run_tool
         r = run_tool(None, "skill_ref",

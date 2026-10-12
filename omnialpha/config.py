@@ -38,6 +38,12 @@ class BotConfig:
     position_policy: str = "strict"
     # none | symbol | all — default replace before new plan (anti pile-up)
     default_replace: str = "none"
+    # 显式撤单转 place-before-cancel（默认关）：
+    # plan 同时含撤类（cancel_all 等）与挂类（open_*）时，把撤类 intent 转换成
+    # 「快照差集」语义 —— 先挂新单，再撤本轮开始前的旧单。消除「撤完旧的、
+    # 新的还没挂上」的交易所空窗（实测 martin-grid 每轮 4 分钟）。
+    # ⚠️ 仅对本 bot 生效：其他 bot 不配置就走原语义（撤类先执行）。
+    place_before_cancel: bool = False
     # own = only manage orders with text prefix t-{label}; all = wipe symbol (legacy)
     order_scope: str = "own"
     # pre-trade: open/stop_entry must carry sl
@@ -442,6 +448,7 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
         exchange=exchange,
         position_policy=str(data.get("position_policy") or "strict").strip().lower(),
         default_replace=str(data.get("default_replace") or "none").strip().lower(),
+        place_before_cancel=bool(data.get("place_before_cancel", False)),
         order_scope=str(data.get("order_scope") or "own").strip().lower(),
         require_sl=bool(data.get("require_sl", True)),
         account=eff_account,

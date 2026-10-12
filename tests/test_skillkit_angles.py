@@ -20,11 +20,20 @@ from omnialpha.skillkit import (  # noqa: E402
 from omnialpha.skillkit.models import SkillError, SkillMeta  # noqa: E402
 from omnialpha.skillkit.budget import CatalogBudget  # noqa: E402
 
-from tests._skill_fixtures import fixture_root, fixture_skills_dir  # noqa: E402
+from tests._skill_fixtures import fixture_root, fixture_skills_dir, has_real_skill  # noqa: E402
 
 SKILLS = fixture_skills_dir()
 
+# price-action-trading 是真实 skill（仓库根 skills/，被 .gitignore 的个人内容），
+# 干净 checkout（worktree/CI）里缺失 → 依赖它的测试必须 skip 而非 fail。
+PA = "price-action-trading"
+needs_pa = unittest.skipUnless(
+    has_real_skill(PA),
+    "real skill 'price-action-trading' not installed (skills/ is gitignored personal content)",
+)
 
+
+@needs_pa
 class TestMultiSkillVisibility(unittest.TestCase):
     """多 skill 安装后的可见性矩阵。"""
 
@@ -113,11 +122,13 @@ class TestValidateAngles(unittest.TestCase):
         pkg2 = load_package(SKILLS / "test-helper")
         self.assertTrue(pkg2.meta.model_invocation)
 
+    @needs_pa
     def test_all_installed_validate_pass(self):
         for sid in ("price-action-trading", "sentinel-risk", "test-helper"):
             rep = validate_package(SKILLS / sid)
             self.assertTrue(rep.ok, f"{sid}: {rep.summary()}")
 
+    @needs_pa
     def test_tool_unknown_lists_available(self):
         reg = SkillRegistry()
         reg.scan([SKILLS])
@@ -152,6 +163,7 @@ class TestRunToolWhitelistEnforcement(unittest.TestCase):
     导致 bot 配 skills: [] 时 LLM 仍能加载 skill。
     """
 
+    @needs_pa
     def test_skills_empty_rejected(self):
         from omnialpha.strategist.tools import run_tool
         r = run_tool(None, "skill", {"name": "price-action-trading"},
@@ -159,6 +171,7 @@ class TestRunToolWhitelistEnforcement(unittest.TestCase):
         self.assertIn("error", r)
         self.assertIn("not enabled", r["error"])
 
+    @needs_pa
     def test_whitelist_allows(self):
         from omnialpha.strategist.tools import run_tool
         r = run_tool(None, "skill", {"name": "price-action-trading"},
@@ -171,6 +184,7 @@ class TestRunToolWhitelistEnforcement(unittest.TestCase):
                      bot_root=str(fixture_root()), bot_id="b", skill_ids=["test-helper"])
         self.assertIn("error", r)
 
+    @needs_pa
     def test_none_defaults_all_visible(self):
         from omnialpha.strategist.tools import run_tool
         r = run_tool(None, "skill", {"name": "price-action-trading"},

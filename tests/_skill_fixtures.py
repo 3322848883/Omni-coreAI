@@ -48,3 +48,13 @@ def _cleanup() -> None:
 def fixture_skills_dir() -> Path:
     """临时 root 下的 skills/ 目录。"""
     return fixture_root() / "skills"
+
+
+def has_real_skill(name: str) -> bool:
+    """真实 skill（仓库根 skills/，.gitignore 的个人内容）是否进了 fixture 集。
+
+    price-action-trading 等真实 skill 不入库 —— 干净 checkout（worktree/CI）里
+    天然缺失。依赖它的断言必须 skipUnless(has_real_skill(...)) 守卫，
+    否则测试套件只在「装了 skill 的开发机」上是绿的。
+    """
+    return (fixture_skills_dir() / name).is_dir()

@@ -14,7 +14,15 @@ sys.path.insert(0, str(ROOT))
 from omnialpha.skillkit import SkillRegistry, load_package  # noqa: E402
 from omnialpha.strategist.tools import NATIVE_TOOLS  # noqa: E402
 
-from tests._skill_fixtures import fixture_root, fixture_skills_dir  # noqa: E402
+from tests._skill_fixtures import fixture_root, fixture_skills_dir, has_real_skill  # noqa: E402
+
+# price-action-trading 是真实 skill（仓库根 skills/，.gitignore 的个人内容），
+# 干净 checkout（worktree/CI）里缺失 → 依赖它的测试必须 skip 而非 fail。
+PA = "price-action-trading"
+needs_pa = unittest.skipUnless(
+    has_real_skill(PA),
+    "real skill 'price-action-trading' not installed (skills/ is gitignored personal content)",
+)
 
 SKILLS = fixture_skills_dir()
 
@@ -95,6 +103,7 @@ class TestHotReload(unittest.TestCase):
 class TestConcurrentBotsIsolation(unittest.TestCase):
     """并发多 bot：不同白名单互不影响。"""
 
+    @needs_pa
     def test_two_bots_different_whitelists(self):
         from omnialpha.strategist.tools import run_tool
         # bot A 只启用 test-helper
@@ -113,6 +122,7 @@ class TestConcurrentBotsIsolation(unittest.TestCase):
                        bot_root=str(fixture_root()), bot_id="bot-b", skill_ids=["price-action-trading"])
         self.assertIn("error", rb2)
 
+    @needs_pa
     def test_catalog_isolation(self):
         from omnialpha.skillkit import render_catalog
         reg = SkillRegistry()
