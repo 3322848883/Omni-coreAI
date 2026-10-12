@@ -1645,6 +1645,27 @@ class PlanRunner:
             pass
         return None
 
+    @staticmethod
+    def _forced_skill_choice(tools: list, *, skills_required: bool = False,
+                             skill_ids=None) -> Optional[dict]:
+        """`skills_required` + native 模式下的首轮 tool_choice 硬制。
+
+        实测（10-12 brooks-eth 5 轮 + A/B 60 次）：catalog hint 升级到「每轮必载」
+        文案在实盘多工具竞争下 0/5 生效 —— native 模式 tool_choice=auto 时模型
+        自己选，提示词层约束不构成强制。真正强制只有一条路：首轮把 tool_choice
+        钉死到 skill 函数（OpenAI 兼容 named function choice），技能加载后
+        后续轮恢复 auto。
+
+        返回 None = 不硬制（默认关闭 / 无技能白名单 / skill 工具不在工具面），
+        行为与改动前逐字一致。
+        """
+        if not skills_required or not skill_ids:
+            return None
+        for t in tools:
+            if (t.get("function") or {}).get("name") == "skill":
+                return {"type": "function", "function": {"name": "skill"}}
+        return None
+
     def _chat_native_tools(self, messages: list, max_rounds: int) -> str:
         """DeepSeek function calling + thinking: must echo reasoning_content on tool turns.
 
@@ -1664,9 +1685,25 @@ class PlanRunner:
             deny=self.cfg.tools.get("deny"),
         )
         active_tools: Optional[list] = None
+        # skills_required 硬制：首轮钉死调 skill（网关拒绝 named choice 则回退 auto）
+        force_choice = self._forced_skill_choice(
+            base_tools,
+            skills_required=bool(getattr(self.cfg, "skills_required", False)),
+            skill_ids=self.cfg.skills,
+        )
         for _round in range(max(1, max_rounds) + 1):
             tools = active_tools if active_tools is not None else base_tools
-            msg = self.llm.chat_message_full(messages, tools=tools, tool_choice="auto")
+            choice = force_choice if (_round == 0 and active_tools is None) else None
+            try:
+                msg = self.llm.chat_message_full(messages, tools=tools,
+                                                 tool_choice=choice or "auto")
+            except Exception as e:  # noqa: BLE001
+                if choice is None:
+                    raise
+                log.warning("forced skill tool_choice rejected by provider (%s); "
+                            "falling back to auto", e)
+                msg = self.llm.chat_message_full(messages, tools=tools,
+                                                 tool_choice="auto")
             calls = msg.get("tool_calls") or []
             if not calls:
                 return msg.get("content") or ""
