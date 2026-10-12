@@ -1,0 +1,128 @@
+# 马丁网格 · ETH 单币实盘 — 阶梯网格 + 马丁格尔（SMC 结构入场）
+# 策略：prompts/ladder_nogate.md
+#
+# 上线状态：enabled: false —— 先「配置 + plan 试跑」，确认无误后再开。
+# 启用方式：在 config/bots.local/ 加 overlay `enabled: true`，再部署到服务器。
+#   （config/bots/ 是基线，全部 enabled: false；watchdog 只拉起 enabled: true 的 bot）
+
+bot_id: martin-grid
+enabled: false
+env: live
+# 接管原 ladder-eth 的独立账户。
+# ⚠️ 上线前必须确认服务器 /opt/omnialpha/.env 里已定义
+#    GATE_GRID_API_KEY / GATE_GRID_API_SECRET —— 缺失时 create_client 会直接抛
+#    GateApiError(missing credentials)（gate_client.py:490）。
+api_key_env: GATE_GRID_API_KEY
+api_secret_env: GATE_GRID_API_SECRET
+
+symbols:
+  - ETH_USDT
+
+max_notional_usd: 1200
+max_orders_per_file: 32
+max_files_per_run: 20
+poll_interval_sec: 2
+# ⚠️ 新前缀 mtg：接管账户后**不会**接管原 ladder-eth 的 lad 挂单。
+#    停止旧网格时必须手动撤掉遗留的 lad 挂单，否则它们会一直挂在交易所。
+label_prefix: mtg
+# free：做T需要多档建仓 + 双向持仓，strict 会拦反向加仓
+position_policy: free
+# none：做T的挂单要留在市场上等成交，不能每轮被自动替换掉
+default_replace: none
+# P1 空窗修复（2026-10-12）：显式 cancel_all 转换为「快照差集」语义——先挂新单，
+# 新单就位后撤「本轮开始前的旧单」差集。消除「撤完旧的、新的还没挂上」的
+# ~4 分钟交易所空窗。副作用（正是想要的）：stale 清理会连旧批保护单一起撤
+# （本轮新保护挂上后 fresh_protection 生效）→ 新旧 tp 价位并存问题一并解决。
+place_before_cancel: true
+order_scope: own
+require_sl: true
+
+account_risk:
+  halt: false
+  # 固定 50x：交易所杠杆上限 + prompt 里逐档写死的 leverage=50，两处必须一致
+  # （executor MAX_LEVERAGE 闸门：intent.leverage > max_leverage 整笔拒）。
+  max_leverage: 50
+  # 绝对值兜底；真正 bind 的是下面的「权益倍数」闸门
+  max_total_notional_usd: 1200
+  # 马丁真加码路线（2026-10-12 拍板）：
+  #   - risk_pct: 0.12 —— 放行 prompt 设计的马丁 6/7/9 张。钳制公式
+  #     expected = equity×risk_pct÷dist，超 expected×1.3 就钳。最贴边的是马 1：
+  #     实测 160U（entry≈2495, dist≈6.0%）需要 rp ≥ 160×0.06÷(72×1.3) ≈ 0.103；
+  #     取 0.12 留 20% 余量（SL 收到 2360 时的 dist≈5.2% → 放行上限 216U）。
+  #     本地测试锁定：rp=0.04 时马 1 被钳到 49U（tests/test_risk_align_log.py）。
+  #     即使 SL 极端拉宽（dist 8%）触发钳制，也只钳到 ≈108U≈4 张，不再清零。
+  #     ⚠️ 该值实质是「放行开关」：真实风险由 SL+张数决定，满阶（29 张）止损
+  #     ≈29U ≈ 40% 权益，daily_loss_limit 15U 只能事后熔断挡不住这一下。
+  risk_pct: 0.12
+  # D 组合风险闸门（2026-10-12）：单档 risk_pct 挡不住「每档合规、10 档加起来爆表」。
+  # 满阶 29 张全成交后跌穿 SL 2345 ≈ 41U ≈ 40% 权益 → 设 35% 上限，超出时
+  # 全部 open 档等比缩小（触发打 WARNING(RISK_BUDGET)，不会静默）。
+  # 35% ≈ 25.2U：轻削 ~13% 张数；要更激进降风险改 0.30（砍 ~1/4）。
+  total_risk_pct: 0.35
+  # 单档名义 ≤ 4× 权益（72U 时 ≈288U）：马 3 设计峰值 214U 有余量，LLM 超设计
+  # 放大仓位时先被钳（size_capped）而不是默默成交
+  max_notional_pct: 4.0
+  # 总敞口 ≤ 14× 权益（72U 时 ≈1008U）：满阶设计 754U（10.5×）+ 权益下跌 10% 余量
+  max_total_notional_pct: 14.0
+  # 与风险口径对齐（拍板 15U）：≈1.4 次满阶止损 / 2 次半阶止损的空间
+  daily_loss_limit_usd: 15
+  # 阶梯**永远双向**：持有多单时也必须能继续挂空腿。
+  # no_flip 默认开启（禁止反向开仓），会让双向对冲退化成单边 —— 必须关。
+  no_flip: false
+  # 浮盈回撤保护：某腿浮盈后，价格从峰值回撤 peak_trail_atr×ATR(1h) 就把该腿 SL 上移
+  # （只上移不下移）。双向持仓下两条腿各自跟踪，状态按 bot 隔离。
+  peak_trail: true
+  peak_trail_atr: 2.0
+
+strategist:
+  enabled: true
+  prompt_file: prompts/ladder_nogate.md
+  # 15m 一轮：作业尺度也是 15m。
+  interval_sec: 900
+  timeframe: 15m
+  # 关掉 K 线收盘触发：它和 interval 是两条各自 15 分钟的节拍，相位错开会合并成
+  # 每 7.5 分钟一次（成本 ×2.5）。只留 interval 定时 + AI 价格触发。
+  event_on_kline_close: false
+  event_timeframe: 15m
+  # 做T要看结构，多给些 K 线
+  candles: 200
+  write_hold: true
+  # 关掉 vision：vision.py 默认叠加 EMA20，而人格明令只用 SMC + Al Brooks。
+  # 结构靠 smc_map / smc_events 取，不需要图。
+  vision: false
+  tools:
+    enabled: true
+    native: true
+    # SMC/ICT + Al Brooks 两套体系：SMC 用专用工具，Brooks 直接读 klines 的 OHLC。
+    max_rounds: 14
+    allow:
+      - klines        # Brooks 信号 K 线 + 结构高低点，全靠它
+      - ticker        # 现价
+      - contract      # 最小下单量 / 张值 / 杠杆上限
+      - smc_map       # 结构地图：swing/internal 趋势、OB、FVG、premium-discount、EQL/EQH
+      - smc_events    # 结构事件流：扫荡 sweep、CHoCH/MSS、OB/FVG 生命周期
+      # 有意不给 indicators：ATR(14) 由 market.indicators 直接注入快照
+  market:
+    mode: rest_only
+    # ATR 是做T的门槛校验输入，必须给
+    indicators: [atr14]
+    # 大周期定性需要日线与 4H
+    timeframes: ["5m", "15m", "1h", "4h", "1d"]
+    extra_candles: 60
+  ai_triggers:
+    # 2026-10-12 关闭：cond 事件轮是保护单堆积/churn 的主源头（两轮 plan 相隔 1-3 分钟、
+    # tp 占位价随现价漂移导致新旧两批并存）。节拍只留 interval 定时（900s）。
+    enabled: false
+    max_active: 5
+    default_cooldown_sec: 900
+  risk:
+    min_confidence: 0.55
+    # 密集多层阶梯：一次要能出 10+ 层（4 周期 × 每周期至少 3 档 ≈ 12 档，留余量）
+    max_chips: 32
+    max_notional_usd: 1200
+  skills: []
+  llm:
+    provider: gw-flash
+    reasoning_effort: high
+    # 密集多层 + 长推理，默认 8192 容易撞上限导致 JSON 写不出来
+    max_tokens: 32768

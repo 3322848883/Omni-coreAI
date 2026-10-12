@@ -93,6 +93,53 @@ def _to_float(v: Any) -> float:
         return 0.0
 
 
+def _sl_move_rejected(pos_side: str, entry: float, new_sl: float,
+                      old_sl: float = 0.0, mark: float = 0.0) -> str:
+    """SL 移动纪律（用户 2026-10-12 晚复盘修正版）。
+
+    用户规则原话：「止损移动应该只允许在盈利保本的时候」——判据是**持仓是否
+    浮盈**（mark vs entry），不是新 SL 相对 entry。实盘 18:01 实例：浮盈
+    +7.7 点时 SL 2539.3→2545.9（仍 < entry 2551.2）是合法锁盈（锁住 5.3 点），
+    首版判据（新 SL vs entry）会把它误拒、逼持仓裸奔到更远的旧 SL。
+
+    规则（多头；空头镜像）：
+    1. **浮盈才许动**：mark > entry 才能改 SL；mark 取不到（0）时退回保守
+       判据（新 SL >= entry）。
+    2. **只许收紧方向**：新 SL 必须 > 旧 SL（放宽/同值一律拒绝——同值重挂
+       churn 在这一步顺带被拦）。
+    3. **即时触发护栏**：新 SL >= mark 会挂上即触发平仓，拒绝。
+
+    返回非空 reason = 拒绝；"" = 放行。
+    """
+    is_long = pos_side == "long"
+    if mark > 0:
+        floating = (mark > entry) if is_long else (mark < entry)
+        if not floating:
+            return (f"not floating (mark {mark} vs entry {entry}); "
+                    "SL move only allowed in profit")
+    else:
+        # mark 缺失（老交易所响应/测试桩）→ 退回首版保守判据
+        if is_long and new_sl < entry:
+            return f"new_sl {new_sl} < entry {entry} (mark unknown; conservative)"
+        if not is_long and new_sl > entry:
+            return f"new_sl {new_sl} > entry {entry} (mark unknown; conservative)"
+    # 即时触发护栏
+    if mark > 0:
+        if is_long and new_sl >= mark:
+            return (f"new_sl {new_sl} >= mark {mark} "
+                    "(long SL would trigger instantly)")
+        if not is_long and new_sl <= mark:
+            return (f"new_sl {new_sl} <= mark {mark} "
+                    "(short SL would trigger instantly)")
+    # 只许收紧方向（同值 = 无效 churn，一并拒绝）
+    if old_sl > 0:
+        if is_long and new_sl <= old_sl:
+            return f"new_sl {new_sl} <= old_sl {old_sl} (long widen/no-op blocked)"
+        if not is_long and new_sl >= old_sl:
+            return f"new_sl {new_sl} >= old_sl {old_sl} (short widen/no-op blocked)"
+    return ""
+
+
 def _parse_symbol_positions(positions: list, symbol: str) -> list[dict]:
     """从 `/positions` 原始记录里取出该 symbol 的**非零**持仓。
 
@@ -168,6 +215,7 @@ class Executor:
         root: Optional[Path] = None,
         bot_id: str = "",
         account: str = "",
+        place_before_cancel: bool = False,
     ):
         self.client = client
         self.symbols_whitelist = (
@@ -191,6 +239,8 @@ class Executor:
         self.account = str(account or "").strip()
         # bot namespace: order texts always under t-{label_prefix}*; signal labels cannot escape
         self.label_prefix = str(label_prefix or "").strip()
+        # place-before-cancel：显式撤类 intent 转换为「快照差集」语义（config 逐 bot 开启）
+        self.place_before_cancel = bool(place_before_cancel)
         # P0.4 告警落盘：权益偏离 / 孤儿保护单
         self.alert_store = alert_store
 
@@ -202,13 +252,58 @@ class Executor:
                 StepResult("hold", "", True, detail={"skipped": True})
             )
             return report
-        # Snapshot owned resting orders before new placements (place-before-cancel).
-        # Do NOT cancel here — new protection first, then withdraw old owned ones.
+
+        # ---- D 组合风险闸门（account_risk.total_risk_pct，默认关，逐 bot）----
+        # 单档 _align_size_to_risk 只保证「每档 ≤ 权益×risk%÷dist」，挡不住
+        # 「每档都合规、10 档加起来爆表」（martin-grid 满阶 29 张止损 ≈40% 权益）。
+        # 组合口径：Σ(size_usd × |entry-sl|/entry) > equity × total_risk_pct 时，
+        # 全部 open 类等比缩小。触发必打 WARNING（P0 盲区教训）。
+        if self.account_risk.get("total_risk_pct"):
+            intents, budget_note = self._cap_combined_risk(intents)
+            if budget_note:
+                log.warning("RISK_BUDGET %s", budget_note)
+
+        # ---- P1 空窗修复（place_before_cancel，逐 bot 开启，默认关）----
+        # 显式撤类 intent（cancel_all 等）按优先级排最前先执行 → 「撤完旧的、新的
+        # 还没挂上」的交易所空窗（实测 martin-grid 每轮 ~4 分钟无本 bot 挂单）。
+        # 开启本开关时，撤类 intent **不单独执行**，转换为「快照差集」语义：
+        # replace_mode 提升为 symbol，由末尾 _cancel_stale_owned 在新单挂完后
+        # 撤「快照里有、新 plan 里没有」的旧单 —— 撤的是旧单差集，不会误撤新单。
+        # 快照面必须覆盖撤类 intent 触及的 symbol（否则撤单语义丢失）→ 用原始 intents。
+        converted_cancels: list = []
+        need_all_snapshot = False
+        if self.place_before_cancel and intents:
+            cancel_set = {a for a, p in _INTENT_PRIORITY.items() if p == 3}
+            cancels = [i for i in intents
+                       if str(getattr(i, "action", "") or "").lower() in cancel_set]
+            if cancels and len(cancels) < len(intents):
+                snapshot_intents = intents
+                intents = [i for i in intents
+                           if str(getattr(i, "action", "") or "").lower() not in cancel_set]
+                converted_cancels = cancels
+                # symbol 为空的撤类（= 全合约）→ 快照面必须扩到全部
+                need_all_snapshot = any(
+                    not str(getattr(c, "symbol", "") or "").strip() for c in cancels
+                )
+
         replace_mode = self._replace_mode(signal, intents)
-        # 无条件快照「本轮开始前」的本 bot 挂单 —— 回滚要用它当基线（见 _rollback_newly_placed）。
-        # `replace=all` 时快照面扩到「本 bot 有单的**全部**合约」（见 _all_owned_symbols）——
-        # 这就是它与 `replace=symbol`（只看本轮 payload 触及的币）的区别。
-        pre_owned = self._snapshot_owned(intents, replace_mode)
+        if converted_cancels:
+            # 撤类被转换 → 必须激活 stale 清理；cancel_all 的语义 ≈ replace=symbol
+            if replace_mode == "none":
+                replace_mode = "all" if need_all_snapshot else "symbol"
+        pre_owned = self._snapshot_owned(
+            snapshot_intents if converted_cancels else intents, replace_mode
+        )
+
+        # 审计留痕：撤类转换必须可见（否则复盘「这轮为什么没撤单」时无从归因）
+        for ci in converted_cancels:
+            report.results.append(StepResult(
+                str(getattr(ci, "action", "cancel")) or "cancel",
+                str(getattr(ci, "symbol", "") or ""),
+                True,
+                detail={"converted": "place_before_cancel",
+                        "deferred_to": "stale_cleanup"},
+            ))
 
         # 排序：**先平仓、后开仓**（参照 nofx 的 `sortDecisionsByPriority`）。
         # 先释放保证金再开新仓 —— 否则同轮换仓会因保证金不足被拒，或两笔叠加
@@ -1084,6 +1179,64 @@ class Executor:
                 f"{where}size_usd={size_usd} exceeds max_notional_usd={self.max_notional_usd}"
             )
 
+    def _cap_combined_risk(self, intents: list) -> tuple[list, str]:
+        """组合止损上限：Σ(size_usd × dist) > equity × total_risk_pct 时全部 open 等比缩。
+
+        与单档 `_align_size_to_risk` 的分工：单档管「每笔 ≤ 权益×risk%÷dist」，
+        本方法管「所有 open 档加起来的止损合计」。只对 size_usd 型 + 带 sl + 有
+        entry 的 open/stop_entry 生效（张数型/无 sl 的交给各自闸门）。
+        权益拿不到 → 原样返回（fail-open，不 block 下单——它只缩仓不拒单）。
+        """
+        try:
+            pct = float(self.account_risk.get("total_risk_pct") or 0)
+        except (TypeError, ValueError):
+            pct = 0.0
+        if pct <= 0:
+            return intents, ""
+        open_acts = {"open_long", "open_short", "stop_entry_long", "stop_entry_short"}
+        risked = []
+        for i in intents:
+            if str(getattr(i, "action", "") or "").lower() not in open_acts:
+                continue
+            sz = getattr(i, "size_usd", None)
+            sl = getattr(i, "sl", None)
+            entry = getattr(i, "price", None)
+            if sz is None or sl is None or not entry:
+                continue
+            try:
+                dist = abs(float(entry) - float(sl)) / float(entry)
+            except (TypeError, ValueError, ZeroDivisionError):
+                continue
+            if dist <= 0:
+                continue
+            risked.append((i, dist * float(sz)))
+        if not risked:
+            return intents, ""
+        try:
+            acct = self.client.get_account() or {}
+            equity = float(acct.get("total") or acct.get("balance") or 0)
+        except Exception:  # noqa: BLE001
+            return intents, ""
+        if equity <= 0:
+            return intents, ""
+        limit = equity * pct
+        total = sum(r[1] for r in risked)
+        if total <= limit:
+            return intents, ""
+        scale = limit / total
+        risked_ids = {id(r[0]) for r in risked}
+        out = []
+        for i in intents:
+            if id(i) in risked_ids:
+                try:
+                    i.size_usd = round(float(i.size_usd) * scale, 2)
+                except (TypeError, ValueError):
+                    pass
+            out.append(i)
+        note = (f"combined stop-loss {total:.0f}U > equity {equity:.0f}U × {pct:.0%}"
+                f" → {len(risked)} open legs ×{scale:.2f}")
+        return out, note
+
     def _align_size_to_risk(self, intent: Intent, entry: float) -> tuple[float, str]:
         """按风险公式钳制 size_usd：应有 = 权益×risk% ÷ SL距离% × 入场。
 
@@ -1599,6 +1752,56 @@ class Executor:
                 "modify_tp_sl", intent.symbol, False,
                 error="AMBIGUOUS_SIDE: dual position requires side=long|short",
             )
+        # SL 移动纪律（用户 2026-10-12 晚复盘修正）：判据是「持仓是否浮盈」
+        # （mark vs entry），不是新 SL 相对 entry。18:01 实例：浮盈 +7.7 点时
+        # SL 2539.3→2545.9（< entry 2551.2）是合法锁盈，首版判据会误拒。
+        # prefix/owned 提前取（纪律校验要读旧 SL），后面复用不再重复请求。
+        prefix = self._own_prefix(intent.label)
+        owned = self._owned_price_orders(intent.symbol, prefix) if prefix else []
+
+        def _kind_of(po: dict) -> str:
+            text = str((po.get("initial") or {}).get("text") or po.get("text") or "")
+            if text.endswith("-tp") or text.endswith("-lp"):
+                return "tp"
+            if text.endswith("-sl") or text.endswith("-ls"):
+                return "sl"
+            return ""
+
+        entry = float(pos.get("entry_price") or 0)
+        mark = float(pos.get("mark_price") or 0)
+        sl_rejected_reason = ""
+        if intent.sl is not None and entry > 0:
+            sl_prices = []
+            for po in owned:
+                if _kind_of(po) != "sl":
+                    continue
+                trig = po.get("trigger") or {}
+                px = _to_float(trig.get("price")
+                               or (po.get("initial") or {}).get("trigger_price")
+                               or 0)
+                if px > 0:
+                    sl_prices.append(px)
+            if sl_prices:
+                # 紧的那条 = 多头里最高、空头里最低（多条 SL 属历史遗留）
+                old_sl = (max(sl_prices) if side == "long" else min(sl_prices))
+            else:
+                old_sl = 0.0
+            reason = _sl_move_rejected(side, entry, float(intent.sl),
+                                       old_sl=old_sl, mark=mark)
+            if reason:
+                log.warning("SL_REJECT(modify) %s %s: %s (保留旧 SL)",
+                            intent.symbol, side, reason)
+                sl_rejected_reason = reason
+                if intent.tp is None:
+                    # 纯 SL 修改被拒：旧 SL 原样保留，本轮良性 no-op（不算失败）
+                    return StepResult(
+                        "modify_tp_sl", intent.symbol, True,
+                        detail={"sl_rejected": reason,
+                                "noop": "sl move blocked; old sl kept"},
+                    )
+                # TP+SL 同改：丢 SL 腿、TP 照改（撤旧逻辑见 intent.sl is None 跳过旧 SL）
+                log.info("SL_REJECT(modify) %s: SL 腿丢弃，TP 照改", intent.symbol)
+                intent.sl = None
         size = abs(int(pos["size"]))
         meta = self.client.get_contract(intent.symbol)
         pos_side = side
@@ -1612,23 +1815,14 @@ class Executor:
         # _place_trigger signs by intent.side
         intent.side = pos_side
 
-        prefix = self._own_prefix(intent.label)
-        owned = self._owned_price_orders(intent.symbol, prefix) if prefix else []
-
-        def _kind_of(po: dict) -> str:
-            text = str((po.get("initial") or {}).get("text") or po.get("text") or "")
-            if text.endswith("-tp") or text.endswith("-lp"):
-                return "tp"
-            if text.endswith("-sl") or text.endswith("-ls"):
-                return "sl"
-            return ""
-
         new_ids: set[str] = set()
         detail: dict[str, Any] = {
             "position_side": pos_side,
             "position_size": size,
             "prefix": prefix,
         }
+        if sl_rejected_reason:
+            detail["sl_rejected"] = sl_rejected_reason
         errors: list[str] = []
 
         # 触发价合法性：与 `_open` / `_stop_entry` 同源前置校验。漏了这一步，
