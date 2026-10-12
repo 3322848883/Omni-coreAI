@@ -201,10 +201,15 @@ class TestParseWarningsSurfaceInNotes(unittest.TestCase):
             self.assertIn("scenarios", joined, f"解析告警没进 run 结果: {res}")
 
     def test_clean_plan_has_no_extra_notes(self):
-        """正常计划不得凭空多出 notes（否则等于把告警变成噪音）。"""
+        """正常计划不得凭空多出 notes（否则等于把告警变成噪音）。
+
+        chip 必须带 kline_tf：缺省会被引擎兜底补 timeframe 并打审计 note
+        （c2ef8c6 的设计行为），那不是「凭空的告警」而是缺口修复的留痕。
+        """
         harness = self._harness()
         clean = json.dumps({"cycle_id": "c1", "reasoning": "x",
-                            "chips": [{"symbol": "BTC_USDT", "action": "hold"}]},
+                            "chips": [{"symbol": "BTC_USDT", "action": "hold",
+                                       "kline_tf": "15m"}]},
                            ensure_ascii=False)
         with tempfile.TemporaryDirectory() as td:
             res = harness._run(td, lambda *_a, **_kw: clean)
