@@ -93,19 +93,50 @@ def _to_float(v: Any) -> float:
         return 0.0
 
 
-def _sl_move_rejected(pos_side: str, entry: float, new_sl: float) -> str:
-    """SL 移动是否在浮亏侧（应拒绝）。
+def _sl_move_rejected(pos_side: str, entry: float, new_sl: float,
+                      old_sl: float = 0.0, mark: float = 0.0) -> str:
+    """SL 移动纪律（用户 2026-10-12 晚复盘修正版）。
 
-    Brooks / 用户 2026-10-12 定的纪律：SL 只能往保本/锁盈方向移。
-    - 多头：新 SL 必须 >= entry（保本或锁盈）；新 SL < entry → 拒绝
-    - 空头：新 SL 必须 <= entry；新 SL > entry → 拒绝
+    用户规则原话：「止损移动应该只允许在盈利保本的时候」——判据是**持仓是否
+    浮盈**（mark vs entry），不是新 SL 相对 entry。实盘 18:01 实例：浮盈
+    +7.7 点时 SL 2539.3→2545.9（仍 < entry 2551.2）是合法锁盈（锁住 5.3 点），
+    首版判据（新 SL vs entry）会把它误拒、逼持仓裸奔到更远的旧 SL。
 
-    返回非空 reason = 拒绝；返回 "" = 放行。新 SL 恰 == entry（保本）放行。
+    规则（多头；空头镜像）：
+    1. **浮盈才许动**：mark > entry 才能改 SL；mark 取不到（0）时退回保守
+       判据（新 SL >= entry）。
+    2. **只许收紧方向**：新 SL 必须 > 旧 SL（放宽/同值一律拒绝——同值重挂
+       churn 在这一步顺带被拦）。
+    3. **即时触发护栏**：新 SL >= mark 会挂上即触发平仓，拒绝。
+
+    返回非空 reason = 拒绝；"" = 放行。
     """
-    if pos_side == "long" and new_sl < entry:
-        return f"new_sl {new_sl} < entry {entry} (long loss-side move blocked)"
-    if pos_side == "short" and new_sl > entry:
-        return f"new_sl {new_sl} > entry {entry} (short loss-side move blocked)"
+    is_long = pos_side == "long"
+    if mark > 0:
+        floating = (mark > entry) if is_long else (mark < entry)
+        if not floating:
+            return (f"not floating (mark {mark} vs entry {entry}); "
+                    "SL move only allowed in profit")
+    else:
+        # mark 缺失（老交易所响应/测试桩）→ 退回首版保守判据
+        if is_long and new_sl < entry:
+            return f"new_sl {new_sl} < entry {entry} (mark unknown; conservative)"
+        if not is_long and new_sl > entry:
+            return f"new_sl {new_sl} > entry {entry} (mark unknown; conservative)"
+    # 即时触发护栏
+    if mark > 0:
+        if is_long and new_sl >= mark:
+            return (f"new_sl {new_sl} >= mark {mark} "
+                    "(long SL would trigger instantly)")
+        if not is_long and new_sl <= mark:
+            return (f"new_sl {new_sl} <= mark {mark} "
+                    "(short SL would trigger instantly)")
+    # 只许收紧方向（同值 = 无效 churn，一并拒绝）
+    if old_sl > 0:
+        if is_long and new_sl <= old_sl:
+            return f"new_sl {new_sl} <= old_sl {old_sl} (long widen/no-op blocked)"
+        if not is_long and new_sl >= old_sl:
+            return f"new_sl {new_sl} >= old_sl {old_sl} (short widen/no-op blocked)"
     return ""
 
 
@@ -1721,15 +1752,42 @@ class Executor:
                 "modify_tp_sl", intent.symbol, False,
                 error="AMBIGUOUS_SIDE: dual position requires side=long|short",
             )
-        # SL 移动纪律（Brooks / 用户 2026-10-12 定）：SL 只能往保本/锁盈方向移，
-        # 不许在浮亏侧收紧或放宽。17:15 那单 entry 2551.2、SL 从 2539.3 收到
-        # 2545.9 仍 < entry —— 既没锁利润、又把止损空间从 11.9pt 压到 5.3pt，
-        # 一波动就被打。在此拦截：新 SL 在浮亏侧 → 丢弃 SL 腿（保留旧 SL），
-        # TP 照改。撤旧逻辑 line 1817 见 intent.sl is None 自动跳过旧 SL。
+        # SL 移动纪律（用户 2026-10-12 晚复盘修正）：判据是「持仓是否浮盈」
+        # （mark vs entry），不是新 SL 相对 entry。18:01 实例：浮盈 +7.7 点时
+        # SL 2539.3→2545.9（< entry 2551.2）是合法锁盈，首版判据会误拒。
+        # prefix/owned 提前取（纪律校验要读旧 SL），后面复用不再重复请求。
+        prefix = self._own_prefix(intent.label)
+        owned = self._owned_price_orders(intent.symbol, prefix) if prefix else []
+
+        def _kind_of(po: dict) -> str:
+            text = str((po.get("initial") or {}).get("text") or po.get("text") or "")
+            if text.endswith("-tp") or text.endswith("-lp"):
+                return "tp"
+            if text.endswith("-sl") or text.endswith("-ls"):
+                return "sl"
+            return ""
+
         entry = float(pos.get("entry_price") or 0)
+        mark = float(pos.get("mark_price") or 0)
         sl_rejected_reason = ""
         if intent.sl is not None and entry > 0:
-            reason = _sl_move_rejected(side, entry, float(intent.sl))
+            sl_prices = []
+            for po in owned:
+                if _kind_of(po) != "sl":
+                    continue
+                trig = po.get("trigger") or {}
+                px = _to_float(trig.get("price")
+                               or (po.get("initial") or {}).get("trigger_price")
+                               or 0)
+                if px > 0:
+                    sl_prices.append(px)
+            if sl_prices:
+                # 紧的那条 = 多头里最高、空头里最低（多条 SL 属历史遗留）
+                old_sl = (max(sl_prices) if side == "long" else min(sl_prices))
+            else:
+                old_sl = 0.0
+            reason = _sl_move_rejected(side, entry, float(intent.sl),
+                                       old_sl=old_sl, mark=mark)
             if reason:
                 log.warning("SL_REJECT(modify) %s %s: %s (保留旧 SL)",
                             intent.symbol, side, reason)
@@ -1757,30 +1815,14 @@ class Executor:
         # _place_trigger signs by intent.side
         intent.side = pos_side
 
-        detail: dict[str, Any] = {
-            "position_side": pos_side,
-            "position_size": size,
-            "prefix": self._own_prefix(intent.label),
-        }
-        if sl_rejected_reason:
-            detail["sl_rejected"] = sl_rejected_reason
-        prefix = self._own_prefix(intent.label)
-        owned = self._owned_price_orders(intent.symbol, prefix) if prefix else []
-
-        def _kind_of(po: dict) -> str:
-            text = str((po.get("initial") or {}).get("text") or po.get("text") or "")
-            if text.endswith("-tp") or text.endswith("-lp"):
-                return "tp"
-            if text.endswith("-sl") or text.endswith("-ls"):
-                return "sl"
-            return ""
-
         new_ids: set[str] = set()
         detail: dict[str, Any] = {
             "position_side": pos_side,
             "position_size": size,
             "prefix": prefix,
         }
+        if sl_rejected_reason:
+            detail["sl_rejected"] = sl_rejected_reason
         errors: list[str] = []
 
         # 触发价合法性：与 `_open` / `_stop_entry` 同源前置校验。漏了这一步，
