@@ -1,0 +1,74 @@
+# Brooks 价格行为 · ETH — 正式配置（独立 bot，与 brooks-btc 并行）
+# 模板：_brooks_btc.example.yaml ｜ 策略：prompts/brooks_eth_pa_slim.md
+#
+# 与 brooks-btc 的关系：**同账户（GATE_API_KEY）、不同 label_prefix（本 bot=bre）**。
+# 引擎强制 label_prefix 全局唯一（重名报 "label_prefix 重复" 并拒绝启动，防止两个
+# bot 互相撤/改单），所以必须与 brooks-btc 的 brk 错开。订单隔离 = symbol + label 双重过滤。
+
+bot_id: brooks-eth
+enabled: false
+env: live
+api_key_env: GATE_API_KEY
+api_secret_env: GATE_API_SECRET
+
+symbols:
+  - ETH_USDT
+
+max_notional_usd: 10000
+max_orders_per_file: 5
+max_files_per_run: 20
+poll_interval_sec: 2
+label_prefix: bre
+position_policy: strict
+default_replace: symbol
+order_scope: own
+require_sl: true
+
+account_risk:
+  halt: false
+  max_leverage: 50
+  max_total_notional_usd: 10000
+  # 单笔名义 ≤ 权益 × 此倍数（executor._check_notional）——预算的唯一真源。
+  max_notional_pct: 5.0
+  # 总量闸门（按比例）：持仓名义 + 本单 ≤ 权益 × 此倍数。随权益收紧，防止单调加仓。
+  max_total_notional_pct: 10.0
+  # 裸仓自动补保护：先跑 dry（只记录会挂什么、不下单），观察一轮再改 true。
+  auto_protect: "dry"
+  auto_protect_sl_pct: 2.0
+  # daily_loss_limit：按要求不启用熔断
+
+strategist:
+  enabled: true
+  prompt_file: prompts/brooks_eth_pa_slim.md
+  interval_sec: 900
+  # 主周期 5m：15m 上回抽挂单的窗口太长（实测「挂单 10 小时不成交、价格单边跌 2176 点」）。
+  timeframe: 5m
+  vision: true
+  # 多周期图：5m / 15m / 1h / 4h 四张
+  vision_timeframes: ["5m", "15m", "1h", "4h"]
+  event_on_kline_close: true
+  # K线收盘触发必须跟主周期走
+  event_timeframe: 5m
+  candles: 120
+  write_hold: true
+  tools:
+    enabled: true
+    native: true
+    max_rounds: 3
+  market:
+    mode: hybrid
+    indicators: [ema20, atr14]
+    timeframes: ["15m", "1h", "4h"]
+    extra_candles: 80
+  ai_triggers:
+    enabled: true
+    max_active: 5
+    # 事件唤醒回落到「辅助 interval」定位（主节奏仍是 interval_sec: 900）
+    default_cooldown_sec: 300
+  risk:
+    min_confidence: 0.6
+    max_chips: 1
+    max_notional_usd: 10000
+  llm:
+    provider: gw-flash
+    reasoning_effort: high

@@ -71,6 +71,10 @@ class StrategistConfig:
     bot_id: str = ""
     # SkillKit：None=默认可见全部；[]=无 skill；[id,...]=白名单
     skills: Optional[list] = None
+    # 必载模式：true 时 catalog hint 升级为「每轮决策前必须先调 skill 加载强制清单」。
+    # 背景：按需语义下实测 brooks-eth 152 轮仅 13% 主动加载（2026-10-12 审计）。
+    # 默认 False = 行为与改动前一致；建议与 skills 白名单（单一方法论技能）配套使用。
+    skills_required: bool = False
     # K 线图视觉识别（需模型支持 vision/image input）
     vision: bool = True
     # 发送哪些周期图（多选）；省略 = 只发主周期 timeframe
@@ -133,6 +137,11 @@ class PlanRunner:
         # 本轮快照摘要（设计 S2.4 的 journal `snapshot_digest`）；
         # persona 侧写 journal 时从这里取。
         self.last_snapshot_digest: str = ""
+        # 自上一轮以来新归属的平仓摘要（`{"closed": n, "realized_pnl": x}`）。
+        # 每轮 run_once 开头 sync 交易所盈亏投影得到，journal `exec_result` 带走 ——
+        # 否则 journal 链路里没有 pnl，[近况] 看不到亏损（LLM 金鱼记忆的根因之一，
+        # 2026-10-12 AI 层复盘定论）。
+        self._closed_summary: Optional[dict] = None
 
     def _audit_symbol(self, name: str, args: Optional[dict]) -> tuple[str, Optional[str]]:
         """工具调用审计里的 symbol 归因 → `(symbol, note)`；`note=None` = 该工具与币无关。
@@ -515,7 +524,8 @@ class PlanRunner:
 
     def _assemble_prompt(self, root: Path, bid: str,
                          system: str, user: str, *,
-                         via_group: bool = True) -> tuple[str, str]:
+                         via_group: bool = True,
+                         account_equity: Optional[float] = None) -> tuple[str, str]:
         """按缓存优化顺序组装 system/user（订单上下文 → 近况 → 快照 → 触发器）。
 
         **单 bot（`run_once`）与多人格（`analyze_once`）共用这一个入口** —— 两条路径
@@ -523,6 +533,8 @@ class PlanRunner:
 
         `via_group` 决定订单上下文的匹配范围（见 `_order_context_for`）：
         单 bot 只看自己账户，人格路径看全组。
+
+        `account_equity` 只用于 [盈亏] 段的当日亏损权益占比（HC-08 类条款）。
 
         失败不影响本轮：退回未加工的 system/user（少记忆，但不缺席）。
         """
@@ -535,11 +547,57 @@ class PlanRunner:
                 snapshot_text=user,
                 n_recent=3,
                 extra_suffix=self._active_triggers_block(),
+                account_equity=account_equity,
             )
             return ctx["system"], ctx["user"]
         except Exception as e:  # noqa: BLE001
             log.warning("memory context assembly failed, using plain prompts: %s", e)
             return system, user + self._active_triggers_block()
+
+    @staticmethod
+    def _account_equity(snapshot: Any) -> Optional[float]:
+        """快照里的账户权益（total/balance），取不到给 None。
+
+        与 `_decay_equity` 不同：这里**持仓中也给** —— HC-08 的当日亏损占比
+        恰恰要在持仓浮亏、连亏期间算，空仓才给会让闸门在最需要时失明。
+        """
+        try:
+            acct = (snapshot or {}).get("account") or {}
+            if acct.get("error"):
+                return None
+            v = acct.get("total")
+            if v is None:
+                v = acct.get("balance")
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _sync_exchange_pnl(self, root: Path, bid: str) -> Optional[dict]:
+        """同步交易所侧已实现盈亏投影，返回自上轮以来的新平仓摘要。
+
+        SL/TP 触发平仓发生在交易所、没有本地信号 —— watcher 的 sweep 有自己的周期，
+        这里每轮再同步一次（幂等，游标控制），保证 [盈亏] 段与 journal `exec_result`
+        拿到的是最新值。失败只告警不阻断：盈亏记忆是增强，不该让整轮决策打掉。
+        """
+        try:
+            from ..memory.exchange_pnl import sync as _sync
+            r = _sync(root, bid, self.client,
+                      contracts=list(self.cfg.symbols or []))
+            if not r.get("ok"):
+                return None
+            closed = [f for f in (r.get("closed") or []) if isinstance(f, dict)]
+            if not closed:
+                return None
+            total = 0.0
+            for f in closed:
+                try:
+                    total += float(f.get("pnl") or 0.0)
+                except (TypeError, ValueError):
+                    pass
+            return {"closed": len(closed), "realized_pnl": round(total, 2)}
+        except Exception as e:  # noqa: BLE001
+            log.warning("exchange pnl sync failed: %s", e)
+            return None
 
     def _record_cache_usage(self, root: Path, bid: str, system: str) -> tuple[int, str]:
         """记录本轮 prompt 缓存命中 + 前缀稳定性，返回 (命中token, 模型名)。
@@ -602,7 +660,11 @@ class PlanRunner:
         # 单 bot 路径 → 只看自己账户的仓位（via_group=False）
         root = self.cfg.bot_root or Path.cwd()
         bid = self.cfg.bot_id or self.inbox.name
-        system, user = self._assemble_prompt(root, bid, system, user, via_group=False)
+        # 轮间平仓同步要在**拼装之前**：[盈亏] 段与 journal `exec_result` 都从这里取
+        self._closed_summary = self._sync_exchange_pnl(root, bid)
+        system, user = self._assemble_prompt(
+            root, bid, system, user, via_group=False,
+            account_equity=self._account_equity(snapshot))
         # vision：多周期 K 线图（可选配置）
         charts: list = []
         if self.cfg.vision:
@@ -649,6 +711,7 @@ class PlanRunner:
         else:
             try:
                 plan = parse_plan_text(text, symbols=self.cfg.symbols)
+                self._fill_kline_tf(plan)
             except PlanError as e:
                 log.error("plan parse failed: %s", e)
                 degraded = f"parse_failed: {e}"
@@ -697,7 +760,11 @@ class PlanRunner:
                 llm_model=llm_model,
                 prompt_cache_hit_tokens=cache_hit,
                 executed=bool(orders),
-                exec_result={"orders": len(orders), "trigger": trigger},
+                # 自上一轮以来的新归属平仓（SL/TP 触发等轮间事件）。渲染端把它标成
+                # `[realized=±x]` 挂在 [近况] 行上 —— 模型这才看得到「上一轮之后
+                # 亏了多少钱」，连亏条款才有着落。
+                exec_result={"orders": len(orders), "trigger": trigger,
+                             **(getattr(self, "_closed_summary", None) or {})},
                 **self._tier1_journal_fields(plan),
             )
         except Exception:  # noqa: BLE001
@@ -771,7 +838,8 @@ class PlanRunner:
             reg.scan([root / ".mimocode" / "skills", root / "skills"])
             enabled = getattr(self.cfg, "skills", None)
             metas = reg.visible_for(self.cfg.bot_id or "", enabled)
-            return render_catalog(metas)
+            required = bool(getattr(self.cfg, "skills_required", False))
+            return render_catalog(metas, required=required)
         except Exception:  # noqa: BLE001
             return ""
 
@@ -879,7 +947,9 @@ class PlanRunner:
         # 没记忆的人格」，而画像/近况本来就为持仓管理而设计。
         root = self.cfg.bot_root or Path.cwd()
         bid = self.cfg.bot_id or self.inbox.name
-        system, user = self._assemble_prompt(root, bid, system, user)
+        system, user = self._assemble_prompt(
+            root, bid, system, user,
+            account_equity=self._account_equity(snapshot))
         # vision：从 snapshot 生成 K 线图（可配置多周期）
         charts: list = []
         if self.cfg.vision:
@@ -913,6 +983,7 @@ class PlanRunner:
             return self._hold_fallback(cycle_id, trigger, f"llm_failed: {e}")
         try:
             plan = parse_plan_text(text, symbols=self.cfg.symbols)
+            self._fill_kline_tf(plan)
         except PlanError as e:
             log.error("analyze plan parse failed: %s", e)
             return self._hold_fallback(cycle_id, trigger, f"parse_failed: {e}")
@@ -1859,31 +1930,59 @@ class PlanRunner:
     def run_forever(self) -> None:
         last_round = 0.0
         while True:
-            now = time.time()
-            fire = False
-            trigger = ""
-            # 节拍：**任何**一轮（定时 / 收盘 / 事件）都把下一轮推到 `last_round + interval`。
-            # 事件轮不是"额外加一轮"，而是"把这一轮提前到现在"—— 见 `_cond_gap_sec()`。
-            if self.cfg.interval_sec and now - last_round >= self.cfg.interval_sec:
-                fire, trigger = True, "interval"
-            elif self.cfg.event_on_kline_close and self._kline_closed():
-                fire, trigger = True, self._kline_close_trigger()
-            elif now - last_round >= self._cond_gap_sec():
-                cond = self._check_condition_events()
-                if cond:
-                    fire, trigger = True, cond
-            if fire:
-                if not self._busy.acquire(blocking=False):
-                    continue
+            # 触发评估**整体**在锁内。旧版先在锁外消费事件（`_kline_closed()` 会推进
+            # kline 基线、`_check_condition_events()` 会更新边沿状态），抢锁失败又
+            # `continue` 跳过 `sleep` 忙等——事件被消费却没人处理，该次唤醒永久丢失
+            # （实测 kline_close 丢 11%），且空转打满 CPU。现在忙时什么都不评估、
+            # 直接落回 `sleep`：锁释放后的下一次循环按原有节拍补跑，事件只迟到、不丢。
+            if self._busy.acquire(blocking=False):
                 try:
-                    result = self.run_once(trigger=trigger)
-                    log.info("plan[%s] %s", trigger, result)
-                except LLMError as e:
-                    log.warning("plan[%s] llm error: %s", trigger, e)
-                except Exception as e:  # noqa: BLE001
-                    log.exception("plan[%s] failed: %s", trigger, e)
+                    now = time.time()
+                    fire = False
+                    trigger = ""
+                    # 节拍：**任何**一轮（定时 / 收盘 / 事件）都把下一轮推到 `last_round + interval`。
+                    # 事件轮不是"额外加一轮"，而是"把这一轮提前到现在"—— 见 `_cond_gap_sec()`。
+                    if self.cfg.interval_sec and now - last_round >= self.cfg.interval_sec:
+                        fire, trigger = True, "interval"
+                    elif self.cfg.event_on_kline_close and self._kline_closed():
+                        fire, trigger = True, self._kline_close_trigger()
+                    elif now - last_round >= self._cond_gap_sec():
+                        cond = self._check_condition_events()
+                        if cond:
+                            fire, trigger = True, cond
+                    if fire:
+                        try:
+                            result = self.run_once(trigger=trigger)
+                            log.info("plan[%s] %s", trigger, result)
+                        except LLMError as e:
+                            log.warning("plan[%s] llm error: %s", trigger, e)
+                        except Exception as e:  # noqa: BLE001
+                            log.exception("plan[%s] failed: %s", trigger, e)
+                        last_round = time.time()
                 finally:
                     self._busy.release()
-                # 注意：`_busy` 抢不到时 `continue` 走了，不算一轮。
-                last_round = time.time()
             time.sleep(self.cfg.check_interval_sec or 1.0)
+
+    def _fill_kline_tf(self, plan) -> None:
+        """kline_tf 为空的 chips 用策略主周期兜底。
+
+        模型经常不填该字段（多版本实测恒 None），而审计 / 回放靠它回答"读的是
+        哪个周期"。主周期本来就在 `cfg.timeframe` 里，没必要靠加提示词行去求。
+        已填的值（含 klines 工具读出的周期）一律保留，不覆盖。
+
+        填充结果只走**审计出口**：`plan.notes` → run_notes → plan.err 日志 /
+        `_record_plan`。刻意不进 `to_signal_dict`（Tier1 契约：kline_tf 不进
+        订单上下文，避免污染下一轮 prompt 缓存前缀）。
+        """
+        tf = (getattr(self.cfg, "timeframe", "") or "").strip()
+        if not tf:
+            return
+        filled = 0
+        for c in getattr(plan, "chips", None) or []:
+            if not (getattr(c, "kline_tf", "") or "").strip():
+                c.kline_tf = tf
+                filled += 1
+        if filled:
+            notes = getattr(plan, "notes", None)
+            if notes is not None:
+                notes.append(f"kline_tf 兜底: {filled} 个 chip 空值→{tf}")

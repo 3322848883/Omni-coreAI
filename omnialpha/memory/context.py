@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -24,6 +25,7 @@ def build_context(
     n_recent: int = 3,
     n_index: int = 20,
     extra_suffix: str = "",
+    account_equity: Optional[float] = None,
 ) -> dict:
     """组装每轮主上下文。
 
@@ -73,8 +75,14 @@ def build_context(
     snapshot_block = snapshot_text or _format_snapshot(snapshot or {})
     # 画像段：无成交时不写（别让模型看到「历史表现: 0笔」这种噪音）
     profile_block = f"[画像] {profile_summary}\n\n" if profile_summary else ""
+    # 盈亏段：画像只给**累计**统计，这里补模型每轮都该看到的**近期事实**——
+    # 最近几笔平仓、连亏计数、当日已实现。没有这一段，连亏条款（HC-09 类）
+    # 与当日亏损闸门（HC-08 类）就是死条文：模型连亏 5 笔也浑然不觉，
+    # 只能靠模式化合理化继续开仓（2026-10-12 AI 层复盘的定论）。
+    pnl_block = _pnl_block(root, bot_id, account_equity)
+    pnl_seg = f"{pnl_block}\n\n" if pnl_block else ""
 
-    user = f"""{profile_block}[订单上下文]
+    user = f"""{profile_block}{pnl_seg}[订单上下文]
 {order_block}
 
 [近况]
@@ -125,6 +133,76 @@ def _est_tokens(text: str) -> int:
 # 只知道「有没有订单记录」。实测 brooks-btc 持 -56 BTC 时，prompt 里照样写着
 # 「[订单上下文]（当前无持仓）」：一句错话，而模型只能靠契约规则 16 去仲裁。
 # 现在改成如实说明，并顺手指向权威来源（快照的 position_state）。
+def _fill_ts(f: dict) -> int:
+    """fill 的时间戳（秒）。缺失/损坏返回 0 —— 排在序列最旧端，且不进当日统计。"""
+    try:
+        return int(float(f.get("time") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _pnl_block(root: Path, bot_id: str, equity: Optional[float]) -> str:
+    """渲染 `[盈亏·已实现]` 段 —— 模型每轮的盈亏事实来源。
+
+    数据源是 `exchange_pnl.json`（`exchange_pnl.sync` 幂等投影：SL/TP 交易所触发 +
+    bot 主动平仓，全部归属本 bot）。画像只给**累计**统计，这里补**近期事实**：
+
+    - 最近 5 笔平仓（新→旧）—— 连亏场景的「上一笔亏了多少钱」
+    - 连亏计数 —— 连亏减仓条款（如 HC-09）的唯一触发依据
+    - 当日(UTC)已实现 —— 当日亏损闸门（如 HC-08）的触发依据
+
+    `equity` 用于把当日盈亏换算成权益占比。任何一步取不到都**降级不渲染**，
+    绝不渲染假数据 —— 模型对着编造的数字做风控比没有数据更糟。
+    """
+    try:
+        from .exchange_pnl import load as _pnl_load
+        rec = _pnl_load(root, bot_id)
+    except Exception:  # noqa: BLE001
+        return ""
+    fills = [f for f in (rec.get("fills") or []) if isinstance(f, dict)]
+    # 与写侧口径一致（`exchange_pnl._pnl_of`）：pnl==0 不是平仓，剔除 —— 否则
+    # 序列里挂一笔 +0.00u、连亏被它打断，模型读到的是噪音。
+    fills = [f for f in fills if f.get("pnl") not in (None, 0, 0.0, "0", "0.0")]
+    if not fills:
+        return ""
+    fills = sorted(fills, key=_fill_ts)
+    pnls: list[float] = []
+    for f in fills:
+        try:
+            pnls.append(float(f.get("pnl") or 0.0))
+        except (TypeError, ValueError):
+            pnls.append(0.0)
+
+    # 连亏：从最新一笔往回数连续 pnl<0（0 视为打断 —— 「不亏」不是「连亏」）
+    loss_streak = 0
+    for p in reversed(pnls):
+        if p < 0:
+            loss_streak += 1
+        else:
+            break
+
+    lines = ["[盈亏·已实现]"]
+    tail = list(zip(fills[-5:], pnls[-5:]))[::-1]
+    seq = " / ".join(
+        f"{p:+.2f}u" + (f" {f.get('contract')}" if f.get("contract") else "")
+        for f, p in tail
+    )
+    lines.append(f"最近平仓(新→旧): {seq}")
+    if loss_streak >= 2:
+        lines.append(f"连亏: {loss_streak} 笔")
+    # 当日（UTC 0 点起）：time 缺失（=0）的 fill 不参与，宁缺勿假
+    now = int(time.time())
+    day0 = now - (now % 86400)
+    day_pairs = [(f, p) for f, p in zip(fills, pnls) if _fill_ts(f) >= day0]
+    if day_pairs:
+        day_pnl = sum(p for _, p in day_pairs)
+        seg = f"当日(UTC)已实现: {day_pnl:+.2f}u（{len(day_pairs)} 笔）"
+        if equity and float(equity) > 0:
+            seg += f"，占权益 {abs(day_pnl) / float(equity) * 100:.1f}%"
+        lines.append(seg)
+    return "\n".join(lines)
+
+
 _NO_ORDER_CTX = "（无订单记录 —— 持仓状态以快照 account.position_state 为准）"
 
 
@@ -186,7 +264,17 @@ def _exec_tag(row: dict) -> str:
         n = int(ex.get("orders") or 0)
     except (TypeError, ValueError):
         n = 0
-    return f" [orders={n}]" if n else ""
+    tag = f" [orders={n}]" if n else ""
+    # 自上一轮以来的新归属平仓合计（journal `exec_result.realized_pnl`，loop 每轮
+    # sync 交易所投影后写入）。[盈亏] 段给的是**独立序列**，这个标记让 [近况] 行
+    # 本身就能回答「上一轮决策之后平仓结果如何」—— 两者互补，不是重复。
+    rp = ex.get("realized_pnl")
+    if rp is not None:
+        try:
+            tag += f" [realized={float(rp):+.2f}]"
+        except (TypeError, ValueError):
+            pass
+    return tag
 
 
 def _decision_text(r: dict) -> str:
