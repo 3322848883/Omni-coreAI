@@ -93,6 +93,22 @@ def _to_float(v: Any) -> float:
         return 0.0
 
 
+def _sl_move_rejected(pos_side: str, entry: float, new_sl: float) -> str:
+    """SL 移动是否在浮亏侧（应拒绝）。
+
+    Brooks / 用户 2026-10-12 定的纪律：SL 只能往保本/锁盈方向移。
+    - 多头：新 SL 必须 >= entry（保本或锁盈）；新 SL < entry → 拒绝
+    - 空头：新 SL 必须 <= entry；新 SL > entry → 拒绝
+
+    返回非空 reason = 拒绝；返回 "" = 放行。新 SL 恰 == entry（保本）放行。
+    """
+    if pos_side == "long" and new_sl < entry:
+        return f"new_sl {new_sl} < entry {entry} (long loss-side move blocked)"
+    if pos_side == "short" and new_sl > entry:
+        return f"new_sl {new_sl} > entry {entry} (short loss-side move blocked)"
+    return ""
+
+
 def _parse_symbol_positions(positions: list, symbol: str) -> list[dict]:
     """从 `/positions` 原始记录里取出该 symbol 的**非零**持仓。
 
@@ -1705,6 +1721,29 @@ class Executor:
                 "modify_tp_sl", intent.symbol, False,
                 error="AMBIGUOUS_SIDE: dual position requires side=long|short",
             )
+        # SL 移动纪律（Brooks / 用户 2026-10-12 定）：SL 只能往保本/锁盈方向移，
+        # 不许在浮亏侧收紧或放宽。17:15 那单 entry 2551.2、SL 从 2539.3 收到
+        # 2545.9 仍 < entry —— 既没锁利润、又把止损空间从 11.9pt 压到 5.3pt，
+        # 一波动就被打。在此拦截：新 SL 在浮亏侧 → 丢弃 SL 腿（保留旧 SL），
+        # TP 照改。撤旧逻辑 line 1817 见 intent.sl is None 自动跳过旧 SL。
+        entry = float(pos.get("entry_price") or 0)
+        sl_rejected_reason = ""
+        if intent.sl is not None and entry > 0:
+            reason = _sl_move_rejected(side, entry, float(intent.sl))
+            if reason:
+                log.warning("SL_REJECT(modify) %s %s: %s (保留旧 SL)",
+                            intent.symbol, side, reason)
+                sl_rejected_reason = reason
+                if intent.tp is None:
+                    # 纯 SL 修改被拒：旧 SL 原样保留，本轮良性 no-op（不算失败）
+                    return StepResult(
+                        "modify_tp_sl", intent.symbol, True,
+                        detail={"sl_rejected": reason,
+                                "noop": "sl move blocked; old sl kept"},
+                    )
+                # TP+SL 同改：丢 SL 腿、TP 照改（撤旧逻辑见 intent.sl is None 跳过旧 SL）
+                log.info("SL_REJECT(modify) %s: SL 腿丢弃，TP 照改", intent.symbol)
+                intent.sl = None
         size = abs(int(pos["size"]))
         meta = self.client.get_contract(intent.symbol)
         pos_side = side
@@ -1718,6 +1757,13 @@ class Executor:
         # _place_trigger signs by intent.side
         intent.side = pos_side
 
+        detail: dict[str, Any] = {
+            "position_side": pos_side,
+            "position_size": size,
+            "prefix": self._own_prefix(intent.label),
+        }
+        if sl_rejected_reason:
+            detail["sl_rejected"] = sl_rejected_reason
         prefix = self._own_prefix(intent.label)
         owned = self._owned_price_orders(intent.symbol, prefix) if prefix else []
 
