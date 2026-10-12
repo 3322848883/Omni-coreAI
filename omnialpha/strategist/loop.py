@@ -649,6 +649,7 @@ class PlanRunner:
         else:
             try:
                 plan = parse_plan_text(text, symbols=self.cfg.symbols)
+                self._fill_kline_tf(plan)
             except PlanError as e:
                 log.error("plan parse failed: %s", e)
                 degraded = f"parse_failed: {e}"
@@ -913,6 +914,7 @@ class PlanRunner:
             return self._hold_fallback(cycle_id, trigger, f"llm_failed: {e}")
         try:
             plan = parse_plan_text(text, symbols=self.cfg.symbols)
+            self._fill_kline_tf(plan)
         except PlanError as e:
             log.error("analyze plan parse failed: %s", e)
             return self._hold_fallback(cycle_id, trigger, f"parse_failed: {e}")
@@ -1859,31 +1861,49 @@ class PlanRunner:
     def run_forever(self) -> None:
         last_round = 0.0
         while True:
-            now = time.time()
-            fire = False
-            trigger = ""
-            # 节拍：**任何**一轮（定时 / 收盘 / 事件）都把下一轮推到 `last_round + interval`。
-            # 事件轮不是"额外加一轮"，而是"把这一轮提前到现在"—— 见 `_cond_gap_sec()`。
-            if self.cfg.interval_sec and now - last_round >= self.cfg.interval_sec:
-                fire, trigger = True, "interval"
-            elif self.cfg.event_on_kline_close and self._kline_closed():
-                fire, trigger = True, self._kline_close_trigger()
-            elif now - last_round >= self._cond_gap_sec():
-                cond = self._check_condition_events()
-                if cond:
-                    fire, trigger = True, cond
-            if fire:
-                if not self._busy.acquire(blocking=False):
-                    continue
+            # 触发评估**整体**在锁内。旧版先在锁外消费事件（`_kline_closed()` 会推进
+            # kline 基线、`_check_condition_events()` 会更新边沿状态），抢锁失败又
+            # `continue` 跳过 `sleep` 忙等——事件被消费却没人处理，该次唤醒永久丢失
+            # （实测 kline_close 丢 11%），且空转打满 CPU。现在忙时什么都不评估、
+            # 直接落回 `sleep`：锁释放后的下一次循环按原有节拍补跑，事件只迟到、不丢。
+            if self._busy.acquire(blocking=False):
                 try:
-                    result = self.run_once(trigger=trigger)
-                    log.info("plan[%s] %s", trigger, result)
-                except LLMError as e:
-                    log.warning("plan[%s] llm error: %s", trigger, e)
-                except Exception as e:  # noqa: BLE001
-                    log.exception("plan[%s] failed: %s", trigger, e)
+                    now = time.time()
+                    fire = False
+                    trigger = ""
+                    # 节拍：**任何**一轮（定时 / 收盘 / 事件）都把下一轮推到 `last_round + interval`。
+                    # 事件轮不是"额外加一轮"，而是"把这一轮提前到现在"—— 见 `_cond_gap_sec()`。
+                    if self.cfg.interval_sec and now - last_round >= self.cfg.interval_sec:
+                        fire, trigger = True, "interval"
+                    elif self.cfg.event_on_kline_close and self._kline_closed():
+                        fire, trigger = True, self._kline_close_trigger()
+                    elif now - last_round >= self._cond_gap_sec():
+                        cond = self._check_condition_events()
+                        if cond:
+                            fire, trigger = True, cond
+                    if fire:
+                        try:
+                            result = self.run_once(trigger=trigger)
+                            log.info("plan[%s] %s", trigger, result)
+                        except LLMError as e:
+                            log.warning("plan[%s] llm error: %s", trigger, e)
+                        except Exception as e:  # noqa: BLE001
+                            log.exception("plan[%s] failed: %s", trigger, e)
+                        last_round = time.time()
                 finally:
                     self._busy.release()
-                # 注意：`_busy` 抢不到时 `continue` 走了，不算一轮。
-                last_round = time.time()
             time.sleep(self.cfg.check_interval_sec or 1.0)
+
+    def _fill_kline_tf(self, plan) -> None:
+        """kline_tf 为空的 chips 用策略主周期兜底。
+
+        模型经常不填该字段（多版本实测恒 None），而审计 / 回放靠它回答"读的是
+        哪个周期"。主周期本来就在 `cfg.timeframe` 里，没必要靠加提示词行去求。
+        已填的值（含 klines 工具读出的周期）一律保留，不覆盖。
+        """
+        tf = (getattr(self.cfg, "timeframe", "") or "").strip()
+        if not tf:
+            return
+        for c in getattr(plan, "chips", None) or []:
+            if not (getattr(c, "kline_tf", "") or "").strip():
+                c.kline_tf = tf
