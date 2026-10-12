@@ -1900,10 +1900,20 @@ class PlanRunner:
         模型经常不填该字段（多版本实测恒 None），而审计 / 回放靠它回答"读的是
         哪个周期"。主周期本来就在 `cfg.timeframe` 里，没必要靠加提示词行去求。
         已填的值（含 klines 工具读出的周期）一律保留，不覆盖。
+
+        填充结果只走**审计出口**：`plan.notes` → run_notes → plan.err 日志 /
+        `_record_plan`。刻意不进 `to_signal_dict`（Tier1 契约：kline_tf 不进
+        订单上下文，避免污染下一轮 prompt 缓存前缀）。
         """
         tf = (getattr(self.cfg, "timeframe", "") or "").strip()
         if not tf:
             return
+        filled = 0
         for c in getattr(plan, "chips", None) or []:
             if not (getattr(c, "kline_tf", "") or "").strip():
                 c.kline_tf = tf
+                filled += 1
+        if filled:
+            notes = getattr(plan, "notes", None)
+            if notes is not None:
+                notes.append(f"kline_tf 兜底: {filled} 个 chip 空值→{tf}")

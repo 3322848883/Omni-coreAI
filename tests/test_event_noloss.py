@@ -145,16 +145,25 @@ class TestKlineTfFallback(unittest.TestCase):
                 SimpleNamespace(kline_tf=""),
                 SimpleNamespace(kline_tf="1h"),
                 SimpleNamespace(kline_tf=None),
-            ])
+            ], notes=[])
             runner._fill_kline_tf(plan)
             self.assertEqual(plan.chips[0].kline_tf, "15m")
             self.assertEqual(plan.chips[1].kline_tf, "1h")   # 已填 → 不覆盖
             self.assertEqual(plan.chips[2].kline_tf, "15m")
+            # 填充走审计出口：notes 记一笔（2 个空值被填）
+            self.assertEqual(plan.notes, ["kline_tf 兜底: 2 个 chip 空值→15m"])
+
+    def test_no_fill_no_note(self):
+        with tempfile.TemporaryDirectory() as td:
+            runner = _runner(td, timeframe="15m")
+            plan = SimpleNamespace(chips=[SimpleNamespace(kline_tf="5m")], notes=[])
+            runner._fill_kline_tf(plan)
+            self.assertEqual(plan.notes, [])                 # 没填 → 不记
 
     def test_no_timeframe_noop(self):
         with tempfile.TemporaryDirectory() as td:
             runner = _runner(td, timeframe="")
-            plan = SimpleNamespace(chips=[SimpleNamespace(kline_tf="")])
+            plan = SimpleNamespace(chips=[SimpleNamespace(kline_tf="")], notes=[])
             runner._fill_kline_tf(plan)
             self.assertEqual(plan.chips[0].kline_tf, "")
 
