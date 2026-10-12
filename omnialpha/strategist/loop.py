@@ -639,6 +639,7 @@ class PlanRunner:
             market_cfg=self.cfg.market,
             env=self.cfg.env,
             bot_root=self.cfg.bot_root,
+            vision_timeframes=self.cfg.vision_timeframes,
         )
         self._remember_snapshot_digest(snapshot)
         account = snapshot.get("account") or {}
@@ -926,6 +927,7 @@ class PlanRunner:
             market_cfg=self.cfg.market,
             env=self.cfg.env,
             bot_root=self.cfg.bot_root,
+            vision_timeframes=self.cfg.vision_timeframes,
         )
         self._remember_snapshot_digest(snapshot)
         account = snapshot.get("account") or {}
@@ -1519,43 +1521,6 @@ class PlanRunner:
         """单图（主周期）；多周期请用 _generate_charts。"""
         charts = self._generate_charts(snapshot)
         return charts[0] if charts else None
-        """从 snapshot 的 candles/indicators 生成 K 线图 base64（vision 模式）。"""
-        try:
-            from .vision import generate_and_encode
-            symbols = self.cfg.symbols or []
-            if not symbols:
-                return None
-            sym = symbols[0]
-            market = snapshot.get("market") or {}
-            # snapshot: market[sym] = {candles, indicators, ...}
-            m = market.get(sym) or {}
-            if not isinstance(m, dict):
-                m = {}
-            klines = (
-                m.get("candles")
-                or m.get("klines")
-                or m.get("kline")
-                or market.get("klines")
-                or []
-            )
-            if isinstance(klines, dict):
-                klines = klines.get("candles") or klines.get("klines") or []
-            if not klines or len(klines) < 10:
-                return None
-            # 指标：snapshot.indicators → 合并进 kline 字段（vision 自算兜底）
-            ind = m.get("indicators") or {}
-            merged = []
-            for i, k in enumerate(klines):
-                row = dict(k) if isinstance(k, dict) else {"c": k}
-                for name, series in (ind or {}).items():
-                    if isinstance(series, (list, tuple)) and i < len(series):
-                        row.setdefault(name, series[i])
-                merged.append(row)
-            return generate_and_encode(
-                merged, symbol=sym, timeframe=self.cfg.timeframe,
-            )
-        except Exception:  # noqa: BLE001
-            return None
 
     def _chat_with_tools(self, system: str, user: str, chart_base64=None) -> str:
         """工具循环 + **防偷懒**：若全程未调用任何工具，强制重试一次。"""

@@ -243,6 +243,7 @@ def collect_snapshot(
     market_cfg: Optional[MarketConfig] = None,
     env: str = "live",
     bot_root: Optional[Path] = None,
+    vision_timeframes: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     cfg = market_cfg or MarketConfig()
     refresh = set(cfg.refresh or [])
@@ -343,6 +344,12 @@ def collect_snapshot(
 
             # multi-timeframe extras (compact: last N bars + latest indicators)
             extra_tfs = [str(tf).lower() for tf in (getattr(cfg, "extra_timeframes", None) or [])]
+            # vision 请求的周期并入拉取：vision_timeframes 配了 5m 而市场层没配时，
+            # snapshot 永远没有 5m 数据 → vision 每轮 no_candles（2026-10-13 定性）。
+            for _vtf in (vision_timeframes or []):
+                _v = str(_vtf).lower()
+                if _v and _v not in extra_tfs:
+                    extra_tfs.append(_v)
             extra_tfs = [tf for tf in extra_tfs if tf and tf != str(interval).lower()]
             if extra_tfs:
                 entry["tf"] = {}
