@@ -71,6 +71,10 @@ class StrategistConfig:
     bot_id: str = ""
     # SkillKit：None=默认可见全部；[]=无 skill；[id,...]=白名单
     skills: Optional[list] = None
+    # 必载模式：true 时 catalog hint 升级为「每轮决策前必须先调 skill 加载强制清单」。
+    # 背景：按需语义下实测 brooks-eth 152 轮仅 13% 主动加载（2026-10-12 审计）。
+    # 默认 False = 行为与改动前一致；建议与 skills 白名单（单一方法论技能）配套使用。
+    skills_required: bool = False
     # K 线图视觉识别（需模型支持 vision/image input）
     vision: bool = True
     # 发送哪些周期图（多选）；省略 = 只发主周期 timeframe
@@ -772,7 +776,8 @@ class PlanRunner:
             reg.scan([root / ".mimocode" / "skills", root / "skills"])
             enabled = getattr(self.cfg, "skills", None)
             metas = reg.visible_for(self.cfg.bot_id or "", enabled)
-            return render_catalog(metas)
+            required = bool(getattr(self.cfg, "skills_required", False))
+            return render_catalog(metas, required=required)
         except Exception:  # noqa: BLE001
             return ""
 

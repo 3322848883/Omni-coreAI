@@ -93,6 +93,7 @@ def _build_plan_runner(bot, paths: ProjectPaths):
         bot_id=bot.bot_id,
         account_risk=dict(getattr(bot, "account_risk", None) or {}),
         skills=(s.get("skills") if s.get("skills") is not None else getattr(bot, "skills", None)),
+        skills_required=bool(s.get("skills_required", False)),
         risk=RiskConfig(
             min_confidence=float(risk.get("min_confidence") or 0.75),
             max_notional_usd=float(risk["max_notional_usd"]) if risk.get("max_notional_usd") is not None else bot.max_notional_usd,
