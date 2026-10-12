@@ -120,6 +120,10 @@ class Chip:
     time_stop_bars: Optional[int] = None   # 最大持仓轮数
     give_back_pct: Optional[float] = None  # 浮盈回撤阈值(%)
     risk_pct: Optional[float] = None       # 本单实际风险占权益比例
+    # 网格档目标止盈（= 本档与上一档的中值）。挂单时 `tp` 只能写占位价 ——
+    # 交易所要求多单 tp > mark，而中值必在现价下方，写了会整笔中止；
+    # 所以真值放这里，成交后由下一轮 `modify_tp_sl` 把 tp 改过去。
+    tp_target: Optional[float] = None
     rule_ids: list[str] = field(default_factory=list)
     scenarios: dict = field(default_factory=dict)
     # ── 逐K形态读（人格可选产出，见 prompts/brooks_btc_pa.md）──
@@ -185,6 +189,8 @@ class Chip:
             d["scenarios"] = dict(self.scenarios)
         if self.reasoning:
             d.setdefault("meta", {})["reasoning"] = self.reasoning
+        if self.tp_target is not None:
+            d.setdefault("meta", {})["tp_target"] = self.tp_target
         return d
 
 
@@ -400,6 +406,15 @@ def parse_plan(data: Any, symbols: Optional[list[str]] = None) -> Plan:
                 f"chips[{i}].scenarios 非对象已丢弃（got {type(scenarios_raw).__name__}）")
             log.warning("plan chips[%d].scenarios 非对象已丢弃：%r", i, scenarios_raw)
             scenarios_raw = {}
+        # 目标止盈：模型写在 `meta.tp_target`（网格档成交后要改成的中值价）。
+        # 执行辅助字段 —— 一律**宽松解析**，非法/缺失置 None，绝不因此拒掉整轮。
+        tp_target_raw = raw.get("tp_target")
+        if tp_target_raw is None and isinstance(raw.get("meta"), dict):
+            tp_target_raw = (raw.get("meta") or {}).get("tp_target")
+        try:
+            tp_target = float(tp_target_raw) if tp_target_raw not in (None, "") else None
+        except (TypeError, ValueError):
+            tp_target = None
         # 逐K读是观测性字段，一律宽松处理（不抛 PlanError，见 _kline_read 说明）
         kline_tf_raw = str(raw.get("kline_tf") or "").strip()[:16]
         chips.append(
@@ -424,6 +439,7 @@ def parse_plan(data: Any, symbols: Optional[list[str]] = None) -> Plan:
                 time_stop_bars=_int(raw.get("time_stop_bars"), "time_stop_bars", i),
                 give_back_pct=_f(raw.get("give_back_pct"), "give_back_pct", i),
                 risk_pct=_f(raw.get("risk_pct"), "risk_pct", i),
+                tp_target=tp_target,
                 rule_ids=[str(x) for x in rule_ids_raw],
                 scenarios=dict(scenarios_raw),
                 kline_tf=kline_tf_raw,
