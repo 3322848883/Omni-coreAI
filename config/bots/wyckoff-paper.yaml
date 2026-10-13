@@ -10,7 +10,7 @@ max_notional_usd: 50000
 max_orders_per_file: 10
 max_files_per_run: 20
 poll_interval_sec: 2
-label_prefix: wyk
+label_prefix: wykp
 position_policy: manage_only
 default_replace: none
 order_scope: own

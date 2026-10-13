@@ -32,7 +32,6 @@ account_risk:
   halt: false
   max_leverage: 50
   max_notional_pct: 5.0
-  auto_protect: "dry"
 
 strategist:
   enabled: true

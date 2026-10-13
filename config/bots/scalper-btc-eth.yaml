@@ -13,7 +13,7 @@ max_notional_usd: 30
 max_orders_per_file: 3
 max_files_per_run: 10
 poll_interval_sec: 2
-label_prefix: sc
+label_prefix: scbe
 position_policy: strict
 default_replace: symbol
 order_scope: own
