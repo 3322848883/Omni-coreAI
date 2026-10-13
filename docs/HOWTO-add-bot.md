@@ -142,6 +142,7 @@ python -m omnialpha run
 | 误撤别的 bot 挂单 | `label_prefix` 撞了或 `order_scope: all` | 前缀唯一；保持 `own` |
 | `symbol ... not in whitelist` | 币不在 `symbols` | 加白名单 |
 | LLM 找不到 prompt | `prompt_file` 路径不对 | 相对项目根 `prompts/...` |
+| **查不到「谁平的仓 / 谁挂的止损」** | 程序 sweep 直接调交易所、不经过 `execute_signal`，本地日志原先没有它 | 看 `data/bots/<bot_id>/logs/trades.jsonl` 的 `source` 字段：`watcher`=信号执行、`watcher:give_back`=程序回调锁盈全平、`watcher:auto_protect`=程序兜底补 SL；交易所侧 `position_close` 的 `text` 只对「本 bot 条件单触发」可靠（`ao-<id>` 且 id 在 `trades.jsonl` 里），`api`/`app`/`web` 分别代表程序主动单 / 手动 |
 
 ---
 

@@ -196,6 +196,63 @@ def run_partial_round():
     print(f"  watcher 挂单       {client2.placed}（应为空）")
 
 
+class GiveBackClient(IncidentClient):
+    """多 25 张 @2532，owned SL 2520（1R = |2532−2520|×25×0.01 = 3.0 USD），mark 可变。"""
+
+    def __init__(self, mark: float = 2560.0):
+        super().__init__()
+        self.mark = mark
+        self.price_orders = [{
+            "id": 5150, "status": "open",
+            "initial": {"contract": "ETH_USDT", "size": -25, "text": "t-bre-sl",
+                        "is_reduce_only": True, "is_close": True},
+            "trigger": {"price": "2520.0", "rule": 2, "price_type": 0},
+        }]
+
+    def get_ticker(self, symbol=None):
+        return {"mark_price": self.mark, "last": self.mark}
+
+    def close_position(self, contract, side=None, size=0):
+        # Gate 的下单回报通常不带 pnl → 引擎退回按 mark 推算的值（标注 engine）
+        self.calls.append(("close_position", contract, side, size))
+        return {"id": "close-x", "status": "finished"}
+
+
+def run_give_back_log_round():
+    """程序全平（give_back）→ `trades.jsonl` 必须留下可归因的一行。"""
+    import json
+
+    from omnialpha.config import BotConfig
+    from omnialpha.watcher import ProjectPaths, _give_back_sweep
+
+    client = GiveBackClient()
+    with tempfile.TemporaryDirectory() as td:
+        ex = Executor(client, label_prefix="bre", root=Path(td), bot_id="brooks-eth",
+                      account_risk={"give_back": True})
+        ex.remember_give_back("ETH_USDT", "long", 30)
+        bot = BotConfig(bot_id="brooks-eth", env="paper", symbols=["ETH_USDT"],
+                        label_prefix="bre", account_risk={"give_back": True})
+        bot.create_client = lambda: client
+        paths = ProjectPaths(root=Path(td))
+        _give_back_sweep(bot, paths, {})       # 武装：mark 2560 → 峰值浮盈 7.0（≥1R）
+        client.mark = 2540.0                   # 回撤到 2.0（峰值 7.0 的 28.6%）→ 触发
+        _give_back_sweep(bot, paths, {})
+        p = Path(td) / "data" / "bots" / "brooks-eth" / "logs" / "trades.jsonl"
+        rows = ([json.loads(x) for x in p.read_text(encoding="utf-8").splitlines()
+                 if x.strip()] if p.is_file() else [])
+
+    print(f"\n{'=' * 64}\nE｜程序全平留痕（give_back → trades.jsonl）\n{'=' * 64}")
+    print(f"  平仓调用           {[c for c in client.calls if 'close_position' in str(c)]}")
+    print(f"  trades.jsonl 行数  {len(rows)}（此前恒为 0 —— 两条归因链都查不到）")
+    if rows:
+        st = rows[0]["steps"][0]
+        print(f"  source             {rows[0]['source']}")
+        print(f"  action / trigger   {st['action']} / {st['detail'].get('trigger')}")
+        print(f"  realized_pnl       {st['detail'].get('realized_pnl')}"
+              f"（来源 {st['detail'].get('pnl_source')}）")
+        print(f"  平仓单 id          {st['detail'].get('close_order_id')}")
+
+
 def main():
     print("复刻 2026-10-13 BROOKS 账户：用户手动 ETH 多 25 张 @2532，无 SL")
     print("模型动作（人格 §54 强制）：reduce_long 15 → close 剩余 → sweep 补 SL")
@@ -212,6 +269,7 @@ def main():
     print(f"  C 交易所写操作调用数: {len([x for x in c if 'close_position' in str(x) or 'place_price_order' in str(x)])}  ← 减仓放行、全平被拒")
 
     run_partial_round()
+    run_give_back_log_round()
 
 
 if __name__ == "__main__":

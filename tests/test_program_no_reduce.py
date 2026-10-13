@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT))
 from omnialpha.config import BotConfig  # noqa: E402
 from omnialpha.executor import Executor  # noqa: E402
 from omnialpha.gate_client import ContractMeta, GateApiError  # noqa: E402
+from omnialpha.memory.exchange_pnl import local_order_ids, local_realized_pnl  # noqa: E402
 from omnialpha.watcher import ProjectPaths, _auto_protect_sweep, _give_back_sweep  # noqa: E402
 
 
@@ -343,6 +344,97 @@ class TestGiveBackIndependentSwitch(unittest.TestCase):
             bot.create_client = lambda: client
             self.assertEqual(_give_back_sweep(bot, ProjectPaths(root=Path(td)), {}), 0)
             self.assertEqual(client.closed, [])
+
+
+# ─────────────────────────────────────────────────────────────
+# 五、留痕：程序自主的敞口动作必须落进 trades.jsonl
+# ─────────────────────────────────────────────────────────────
+class TestProgramActionTradeLog(unittest.TestCase):
+    """「谁平的仓 / 谁挂的止损」必须查得到。
+
+    两条归因链同时消失的成因：sweep 直接调交易所、**不经过 `execute_signal`**
+    → 本地 `trades.jsonl` 没有它；交易所侧 `text` 是 `api`（主动平仓，不可归属）
+    或 `ao-<id>` 而 id 不在 `local_order_ids`（条件单触发）→ 同样判为未归属。
+    """
+
+    def _log(self, td):
+        return Path(td) / "data" / "bots" / "paper-test" / "logs" / "trades.jsonl"
+
+    def _rows(self, td):
+        p = self._log(td)
+        if not p.is_file():
+            return []
+        return [json.loads(x) for x in
+                p.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+    def _give_back_bot(self, client):
+        bot = BotConfig(bot_id="paper-test", env="paper", symbols=["BTC_USDT"],
+                        label_prefix="pt", account_risk={"give_back": True})
+        bot.create_client = lambda: client
+        return bot
+
+    def _run_give_back(self, td):
+        """两轮扫描：第 1 轮武装（mark 86000），第 2 轮回撤 → 平仓。"""
+        client = StubClient(mark=86000.0)
+        client.set_position(10)
+        client.add_protector("t-pt-sl", -10, 83500)
+        _ex(client, td, account_risk={"give_back": True}).remember_give_back(
+            "BTC_USDT", "long", 30)
+        bot = self._give_back_bot(client)
+        paths = ProjectPaths(root=Path(td))
+        _give_back_sweep(bot, paths, {})
+        client.mark = 85200.0
+        _give_back_sweep(bot, paths, {})
+        return client
+
+    def test_give_back_close_is_logged_with_source(self):
+        with tempfile.TemporaryDirectory() as td:
+            client = self._run_give_back(td)
+            self.assertEqual(len(client.closed), 1)
+            rows = self._rows(td)
+            self.assertEqual(len(rows), 1, rows)
+            self.assertEqual(rows[0]["source"], "watcher:give_back")
+            step = rows[0]["steps"][0]
+            self.assertEqual(step["action"], "close")
+            self.assertEqual(step["detail"]["trigger"], "give_back")
+            self.assertIsNotNone(step["detail"]["realized_pnl"])
+            self.assertEqual(step["detail"]["close_order_id"], "close-1")
+
+    def test_give_back_close_counts_into_exchange_pnl(self):
+        """写进 jsonl 后，`local_realized_pnl`（盈亏的「bot 主动平仓」来源）能收到。"""
+        with tempfile.TemporaryDirectory() as td:
+            self._run_give_back(td)
+            rec = local_realized_pnl(self._log(td))
+            self.assertEqual(len(rec), 1, rec)
+            self.assertGreater(rec[0]["pnl"], 0)
+
+    def test_close_order_id_does_not_pollute_attribution_ids(self):
+        """平仓市价单的 id 不能混进「本 bot 条件单 id」集合（会污染 `is_ours`）。"""
+        with tempfile.TemporaryDirectory() as td:
+            self._run_give_back(td)
+            self.assertNotIn("close-1", local_order_ids(self._log(td)))
+
+    def test_auto_protect_sl_is_logged_and_attributable(self):
+        """补挂的 SL 必须留痕 —— 它的 id 要进 `local_order_ids`，将来触发才归得了属。"""
+        with tempfile.TemporaryDirectory() as td:
+            client = StubClient()
+            client.set_position(25)
+            bot = BotConfig(
+                bot_id="paper-test", env="paper", symbols=["BTC_USDT"],
+                label_prefix="pt",
+                account_risk={"auto_protect": True, "auto_protect_sl_pct": 2.0})
+            bot.create_client = lambda: client
+            _auto_protect_sweep(bot, ProjectPaths(root=Path(td)), {})
+            self.assertEqual(len(client.placed), 1)
+
+            oid = str(client.price_orders[-1]["id"])
+            rows = self._rows(td)
+            self.assertEqual(len(rows), 1, rows)
+            self.assertEqual(rows[0]["source"], "watcher:auto_protect")
+            self.assertEqual(rows[0]["steps"][0]["detail"]["sl_placed"]["id"], oid)
+            self.assertIn(oid, local_order_ids(self._log(td)))
+            # 只是挂单、没有盈亏 → 不能被算成一笔平仓
+            self.assertEqual(local_realized_pnl(self._log(td)), [])
 
 
 if __name__ == "__main__":

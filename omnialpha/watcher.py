@@ -29,6 +29,46 @@ def _alert_store(paths: "ProjectPaths", bot_id: str):
         return None
 
 
+def _log_program_action(paths: "ProjectPaths", bot: BotConfig, *, source: str,
+                        action: str, symbol: str, detail: dict) -> None:
+    """把**程序自主**的敞口动作补写进 `trades.jsonl`（归因 + 计盈亏）。
+
+    为什么必须补写（2026-10-14）：watcher 的 sweep 直接调交易所，**不经过
+    `execute_signal`**，于是这类动作在两条归因链上会同时消失 ——
+      ① 本地 `trades.jsonl` 没有它 → `exchange_pnl` 的「bot 主动平仓」来源
+         （`local_realized_pnl`）收不到，盈亏统计漏账；
+      ② 交易所侧 `position_close` 里 `text` 要么是 `api`（主动平仓，不可归属），
+         要么是 `ao-<id>` 而 id 不在 `local_order_ids` 里 → 同样判为未归属。
+    结果就是「程序平了仓 / 挂了止损，事后查不到是谁干的」。
+
+    写进去之后：`source` 标明是谁干的；`detail.sl_placed` 的 id 会进
+    `local_order_ids`，条件单将来触发时才能归属；`detail.realized_pnl` 会进
+    `local_realized_pnl`，计入已实现盈亏。
+
+    **detail 的键名有讲究**：`local_order_ids` 只收
+    `order` / `tp_placed` / `sl_placed` / `tp_orders` / `sl_orders` 五处的 id。
+    挂出的保护单要用 `sl_placed`（才能归属）；而平仓**市价单**的 id 不能用
+    `order`，否则会混进「本 bot 条件单 id」集合、污染 `is_ours` 的归属判据。
+
+    失败只记 warning —— 留痕不该拖垮扫描循环。
+    """
+    try:
+        from .tradelog import TradeLogger, trade_log_path
+
+        TradeLogger(trade_log_path(paths.root, bot.bot_id)).log_execution(
+            bot.bot_id, {},
+            {"ok": True, "steps": [{
+                "action": action, "symbol": symbol, "ok": True,
+                "detail": detail, "error": "",
+            }]},
+            source=source,
+            env=getattr(bot, "env", "live") or "live",
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("trade log write failed (%s %s %s): %s",
+                    source, bot.bot_id, symbol, e)
+
+
 # ── 守护扫描集合：`bot.symbols` ∪ 「交易所上本 bot 有归属痕迹的合约」─────
 #
 # 为什么必须扩展（设计 S2.4⑦ / D6）：5 个 sweep 原先一律 `for sym in bot.symbols`
@@ -809,6 +849,27 @@ def _auto_protect_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict, *,
                 "auto protect %s %s: 裸仓补 SL id=%s price=%s size=%s",
                 bot.bot_id, sym, out["placed"].get("id"), out.get("sl"), out.get("position_size"),
             )
+            # 补挂的 SL 也要留痕：它的 id 必须进 `local_order_ids`，否则将来这条
+            # 条件单触发时，交易所侧 `ao-<id>` 认不出是本 bot 的 → 盈亏落进 excluded。
+            # 键名用 `sl_placed`（`local_order_ids` 认得）；无 pnl 字段 → 不计盈亏。
+            _log_program_action(
+                # action 刻意用「不在 notify 的 open/close/reduce 集合里」的名字：
+                # 这是一次保护单**挂出**，不是开仓 —— 否则会推出一张「开仓告警」卡片。
+                paths, bot, source="watcher:auto_protect", action="auto_protect",
+                symbol=sym,
+                detail={
+                    "trigger": "auto_protect",
+                    "sl_placed": {
+                        "id": out["placed"].get("id"),
+                        "price": out.get("sl"),
+                        "size": out.get("position_size"),
+                    },
+                    "position_side": out.get("position_side"),
+                    "covered_size": out.get("covered_size"),
+                    "mark": out.get("mark"),
+                    "sl_pct": out.get("sl_pct"),
+                },
+            )
             continue
         if out.get("auto_protect") == "dry":
             log.info(
@@ -974,12 +1035,29 @@ def _give_back_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict, *,
         for res in (out.get("sides") or []):
             if res.get("closed"):
                 done += 1
+                closed = res["closed"]
                 log.warning(
                     "give back %s %s/%s: 平仓 pnl=%.4f (peak=%.4f size=%s)",
                     bot.bot_id, sym, res.get("position_side"),
-                    float(res["closed"].get("pnl") or 0),
-                    float(res["closed"].get("peak_pnl") or 0),
-                    res["closed"].get("size"),
+                    float(closed.get("pnl") or 0),
+                    float(closed.get("peak_pnl") or 0),
+                    closed.get("size"),
+                )
+                # 程序全平必须留痕（见 `_log_program_action`）——否则「谁平的仓」查不到
+                _log_program_action(
+                    paths, bot, source="watcher:give_back", action="close",
+                    symbol=sym,
+                    detail={
+                        "executed_as": "close",
+                        "trigger": "give_back",
+                        "realized_pnl": closed.get("pnl"),
+                        "pnl_source": closed.get("pnl_source"),
+                        "position_side": res.get("position_side"),
+                        "size": closed.get("size"),
+                        "peak_pnl": closed.get("peak_pnl"),
+                        # 刻意不叫 `order`：避免混进 local_order_ids（见 helper 注释）
+                        "close_order_id": closed.get("order_id"),
+                    },
                 )
                 continue
             if dry and res.get("skipped") == "dry":

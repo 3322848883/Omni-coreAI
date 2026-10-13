@@ -3238,13 +3238,23 @@ class Executor:
             out["skipped"] = "dry"
             return out
         try:
-            oid = self.client.close_position(symbol, side=side, size=0).get("id")
+            order = self.client.close_position(symbol, side=side, size=0) or {}
         except GateApiError as e:
             out["error"] = str(e)[:160]
             return out
         state.pop(key, None)                   # 平掉了 → 清峰值
-        out["closed"] = {"order_id": oid, "pnl": round(cur_pnl, 4),
-                         "peak_pnl": round(peak, 4), "size": size}
+        # 已实现盈亏：优先取**交易所回报**（含手续费/资金费，与 `_close` 同口径），
+        # 交易所没回 `pnl` 时退回引擎按 mark 推算的值 —— 用 `pnl_source` 标注来源，
+        # 复盘时能区分「账面推算」与「交易所实结」。
+        pnl, pnl_source = cur_pnl, "engine"
+        if order.get("pnl") is not None:
+            try:
+                pnl, pnl_source = float(order["pnl"]), "venue"
+            except (TypeError, ValueError):
+                pnl, pnl_source = cur_pnl, "engine"
+        out["closed"] = {"order_id": order.get("id"), "pnl": round(pnl, 4),
+                         "peak_pnl": round(peak, 4), "size": size,
+                         "pnl_source": pnl_source}
         return out
 
     def check_peak_trail(self, symbol: str) -> dict:
