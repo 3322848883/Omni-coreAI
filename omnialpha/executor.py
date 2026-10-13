@@ -94,8 +94,9 @@ def _to_float(v: Any) -> float:
 
 
 def _sl_move_rejected(pos_side: str, entry: float, new_sl: float,
-                      old_sl: float = 0.0, mark: float = 0.0) -> str:
-    """SL 移动纪律（用户 2026-10-12 晚复盘修正版）。
+                      old_sl: float = 0.0, mark: float = 0.0,
+                      policy: str = "strict") -> str:
+    """SL 移动纪律（用户 2026-10-12 晚复盘修正版；2026-10-13 加 ladder 分派）。
 
     用户规则原话：「止损移动应该只允许在盈利保本的时候」——判据是**持仓是否
     浮盈**（mark vs entry），不是新 SL 相对 entry。实盘 18:01 实例：浮盈
@@ -109,20 +110,32 @@ def _sl_move_rejected(pos_side: str, entry: float, new_sl: float,
        churn 在这一步顺带被拦）。
     3. **即时触发护栏**：新 SL >= mark 会挂上即触发平仓，拒绝。
 
+    `policy`（2026-10-13，阶梯「没跑满 10 层就止损」修复）：
+      - ``"strict"``（默认，brooks 类单腿策略）：上面三条全保留。
+      - ``"ladder"``（阶梯/马丁网格）：**跳过浮盈 gate**（网格就是低吸建仓，
+        浮亏是常态）并**允许往深挪（widen）**——被保护单路径（peak_trail）
+        推浅的 SL 挪回「最深档之外」是**必要修正**，不是风险放宽。仍保留：
+        ① 同值 no-op 拒绝（churn）；② 即时触发护栏（挂上即触发仍拒）。
+      为什么必须分开：网格的 SL 是「全梯共用的一条最后防线」，语义与单腿
+      移动止损不同；用单腿纪律去管它，结果是浮亏时全线锁死、浅 SL 修不掉。
+
     返回非空 reason = 拒绝；"" = 放行。
     """
     is_long = pos_side == "long"
-    if mark > 0:
-        floating = (mark > entry) if is_long else (mark < entry)
-        if not floating:
-            return (f"not floating (mark {mark} vs entry {entry}); "
-                    "SL move only allowed in profit")
-    else:
-        # mark 缺失（老交易所响应/测试桩）→ 退回首版保守判据
-        if is_long and new_sl < entry:
-            return f"new_sl {new_sl} < entry {entry} (mark unknown; conservative)"
-        if not is_long and new_sl > entry:
-            return f"new_sl {new_sl} > entry {entry} (mark unknown; conservative)"
+    ladder = str(policy or "strict").strip().lower() in (
+        "ladder", "grid", "widen", "free")
+    if not ladder:
+        if mark > 0:
+            floating = (mark > entry) if is_long else (mark < entry)
+            if not floating:
+                return (f"not floating (mark {mark} vs entry {entry}); "
+                        "SL move only allowed in profit")
+        else:
+            # mark 缺失（老交易所响应/测试桩）→ 退回首版保守判据
+            if is_long and new_sl < entry:
+                return f"new_sl {new_sl} < entry {entry} (mark unknown; conservative)"
+            if not is_long and new_sl > entry:
+                return f"new_sl {new_sl} > entry {entry} (mark unknown; conservative)"
     # 即时触发护栏
     if mark > 0:
         if is_long and new_sl >= mark:
@@ -131,12 +144,18 @@ def _sl_move_rejected(pos_side: str, entry: float, new_sl: float,
         if not is_long and new_sl <= mark:
             return (f"new_sl {new_sl} <= mark {mark} "
                     "(short SL would trigger instantly)")
-    # 只许收紧方向（同值 = 无效 churn，一并拒绝）
+    # 方向纪律
     if old_sl > 0:
-        if is_long and new_sl <= old_sl:
-            return f"new_sl {new_sl} <= old_sl {old_sl} (long widen/no-op blocked)"
-        if not is_long and new_sl >= old_sl:
-            return f"new_sl {new_sl} >= old_sl {old_sl} (short widen/no-op blocked)"
+        if ladder:
+            # ladder：允许往深挪（widen），只拦同值 no-op（churn）
+            if abs(new_sl - old_sl) < 1e-6:
+                return f"new_sl {new_sl} == old_sl {old_sl} (no-op churn blocked)"
+        else:
+            # strict：只许收紧方向（同值 = 无效 churn，一并拒绝）
+            if is_long and new_sl <= old_sl:
+                return f"new_sl {new_sl} <= old_sl {old_sl} (long widen/no-op blocked)"
+            if not is_long and new_sl >= old_sl:
+                return f"new_sl {new_sl} >= old_sl {old_sl} (short widen/no-op blocked)"
     return ""
 
 
@@ -1593,12 +1612,34 @@ class Executor:
                 )
                 (tp_orders if rec_ else exit_errors).append(rec_ or err_)
         if intent.sl is not None:
+            # P1（2026-10-13）：同向同价 SL 归并 —— 详见 `_plan_shared_sl`。
+            # 阶梯是逐档调 `_open` 建仓的，每档都带自己的 `intent.sl`；照搬
+            # 「每档挂一条 size=本档」就会累积成 N 条同价小单（实测 4 条
+            # t-mtg-sl，sz 9/1/1/6）。这里把同价旧单并进来，新单张数 = 旧单之和 +
+            # 本档。**先挂新、后撤旧**：新单落盘前旧单一直在（无保护空窗）；新单挂
+            # 失败则旧单原样保留（保护不退化）。
+            sl_size = exit_size
+            merge_ids: list[str] = []
+            if intent.sl_mode != "limit_order":
+                try:
+                    sl_size, merge_ids = self._plan_shared_sl(
+                        intent.symbol, pos_side, float(intent.sl), exit_size, meta)
+                except Exception as e:  # noqa: BLE001 — 归并只是优化，失败不该阻断挂 SL
+                    log.warning("shared-SL merge probe failed %s: %s",
+                                intent.symbol, e)
+                    sl_size, merge_ids = exit_size, []
             rec_, err_ = self._place_exit_leg(
-                lambda: self._place_limit_exit(intent, pos_side, intent.sl, is_tp=False, meta=meta, size=exit_size)
+                lambda: self._place_limit_exit(intent, pos_side, intent.sl, is_tp=False, meta=meta, size=sl_size)
                 if intent.sl_mode == "limit_order"
-                else self._place_trigger(intent, trigger_side, intent.sl, is_tp=False, meta=meta, size=exit_size),
+                else self._place_trigger(intent, trigger_side, intent.sl, is_tp=False, meta=meta, size=sl_size),
                 kind="sl", price_order=(intent.sl_mode != "limit_order"),
             )
+            if rec_ and merge_ids:
+                for _pid in merge_ids:
+                    try:
+                        self.client.cancel_price_order(_pid)
+                    except Exception:  # noqa: BLE001 — 撤旧失败不影响保护（新单已在）
+                        log.warning("shared-SL merge: cancel old %s failed", _pid)
             (sl_orders if rec_ else exit_errors).append(rec_ or err_)
         detail["tp_orders"] = tp_orders
         detail["sl_orders"] = sl_orders
@@ -1786,8 +1827,13 @@ class Executor:
                 old_sl = (max(sl_prices) if side == "long" else min(sl_prices))
             else:
                 old_sl = 0.0
+            # 策略分派：阶梯/马丁网格走 "ladder"（允许把推浅的 SL 挪回深位），
+            # 单腿 brooks 类保持 "strict"。配置项 account_risk.sl_move_policy。
+            sl_policy = str((self.account_risk or {}).get("sl_move_policy")
+                            or "strict")
             reason = _sl_move_rejected(side, entry, float(intent.sl),
-                                       old_sl=old_sl, mark=mark)
+                                       old_sl=old_sl, mark=mark,
+                                       policy=sl_policy)
             if reason:
                 log.warning("SL_REJECT(modify) %s %s: %s (保留旧 SL)",
                             intent.symbol, side, reason)
@@ -2434,10 +2480,16 @@ class Executor:
         return cancelled
 
     def _resync_protectors(self, symbol: str, label: str = "") -> list:
-        """减仓/调仓后把保护单张数同步到剩余持仓。
+        """减仓/调仓后把保护单张数同步到剩余持仓，并**归并同向同价的 SL**。
 
         - flat：交给 _cleanup_orphan_protectors
-        - 有仓：|保护单size| != 持仓size → 撤旧、按现价重挂同 trigger 的等量保护单
+        - 有仓：
+          * **SL**：按 `(方向, 触发价)` 归并 —— 同一价位只留一条，张数 = **该方向**
+            的持仓量。原先「逐条重挂」在阶梯分腿 SL（实测 4 条同价 9/1/1/6）上会
+            撤 4 挂 4，每条都放大到全 symbol 的 total → 保护单**超配数倍**；双向
+            持仓时还会拿另一条腿的张数去挂本方向（语义就错了）。
+          * **TP / limit 腿**：保持原逻辑（|size| != 持仓 → 撤旧、按原 trigger
+            重挂等量）—— TP 是策略（每档各自的止盈位），**不做归并**。
         返回动作摘要列表。
 
         **归属判不出来就什么都不做**（fail-closed）：原先的条件是
@@ -2459,10 +2511,18 @@ class Executor:
         total = sum(abs(float(p.get("size") or 0)) for p in positions)
         if total <= 0:
             return notes
+        # 逐方向持仓量：SL 归并的目标张数按**该方向**算（双向持仓下不能拿 total）
+        per_side: dict[str, int] = {}
+        for p in positions:
+            _s = str(p.get("side") or "")
+            if _s:
+                per_side[_s] = per_side.get(_s, 0) + abs(int(float(p.get("size") or 0)))
         try:
             rows = self.client.list_price_orders(symbol) or []
         except Exception:  # noqa: BLE001
             return notes
+
+        sl_groups: dict[tuple[str, float], dict] = {}  # (方向, 触发价) → 归并组
         for p in rows:
             init = p.get("initial") or {}
             text = str(init.get("text") or p.get("text") or "")
@@ -2480,14 +2540,32 @@ class Executor:
                 psz = float(init.get("size") or p.get("size") or 0)
             except (TypeError, ValueError):
                 continue
-            if abs(psz) == total:
-                continue
             pid = self._order_id(p)
             trig = p.get("trigger") or {}
             trigger_price = trig.get("price") or init.get("trigger_price") or p.get("trigger_price")
             if not trigger_price:
                 continue
-            # 同向：多单保护为负 size，空单为正
+
+            if tail in ("sl", "ls"):
+                # 归并 SL：多单保护 size 为负、空单为正，**符号即方向**
+                side = "long" if psz < 0 else "short"
+                try:
+                    key = (side, round(float(trigger_price), 6))
+                except (TypeError, ValueError):
+                    continue
+                g = sl_groups.setdefault(key, {
+                    "ids": [], "size": 0.0, "px": str(trigger_price),
+                    "rule": trig.get("rule"), "price_type": trig.get("price_type"),
+                    "text": text or f"t-{tag}-sl",
+                })
+                if pid:
+                    g["ids"].append(pid)
+                g["size"] += abs(psz)
+                continue
+
+            # ── TP / limit 腿：保持原逻辑 ──
+            if abs(psz) == total:
+                continue
             new_size = -abs(int(total)) if psz < 0 else abs(int(total))
             try:
                 if pid:
@@ -2496,7 +2574,6 @@ class Executor:
                 pass
             # 按原 trigger 重挂
             try:
-                side = "buy" if new_size > 0 else "sell"
                 body = {
                     "initial": {
                         "contract": symbol,
@@ -2504,7 +2581,7 @@ class Executor:
                         "price": "0",
                         "tif": "ioc",
                         "reduce_only": True,
-                        "text": text or (f"t-{tag}-sl" if tail == "sl" else f"t-{tag}-tp"),
+                        "text": text or f"t-{tag}-tp",
                     },
                     "trigger": {
                         "rule": int(trig.get("rule") or (2 if psz < 0 else 1)),
@@ -2516,6 +2593,43 @@ class Executor:
                 notes.append({"resized": text or tail, "from": psz, "to": new_size, "trigger": trigger_price})
             except Exception as e:  # noqa: BLE001
                 notes.append({"resized_error": str(e), "text": text})
+
+        # ── SL 归并执行：一个 (方向, 触发价) 只留一条 ──
+        for (side, _key_px), g in sl_groups.items():
+            target = per_side.get(side, 0)
+            if target <= 0:
+                continue  # 该方向已无持仓 → 交给 _cleanup_orphan_protectors
+            if len(g["ids"]) <= 1 and abs(g["size"] - target) < 0.5:
+                continue  # 已是单条且张数正确 → 不动（避免无谓 churn）
+            new_size = -target if side == "long" else target
+            try:
+                body = {
+                    "initial": {
+                        "contract": symbol,
+                        "size": new_size,
+                        "price": "0",
+                        "tif": "ioc",
+                        "reduce_only": True,
+                        "text": g["text"],
+                    },
+                    "trigger": {
+                        "rule": int(g["rule"] or (2 if side == "long" else 1)),
+                        "price_type": int(g["price_type"] or 0),
+                        "price": g["px"],
+                    },
+                }
+                # **先挂新、后撤旧**：新单挂失败时旧单原样保留，保护不退化
+                self.client.place_price_order(body)
+                for pid in g["ids"]:
+                    try:
+                        self.client.cancel_price_order(pid)
+                    except Exception:  # noqa: BLE001
+                        pass
+                notes.append({"merged_sl": g["text"], "side": side, "n": len(g["ids"]),
+                              "from_size": g["size"], "to_size": target,
+                              "trigger": g["px"], "size": new_size})
+            except Exception as e:  # noqa: BLE001
+                notes.append({"merged_sl_error": str(e), "text": g["text"]})
         return notes
 
     def _owned_sl_size(self, symbol: str, prefix: str) -> int:
@@ -2593,6 +2707,81 @@ class Executor:
             side = "long" if raw_sz < 0 else "short"
             out.append((str(pid), px, abs(raw_sz), side))
         return out
+
+    def _plan_shared_sl(self, symbol: str, pos_side: str, new_sl: float,
+                        add_size: int, meta) -> tuple[int, list[str]]:
+        """为「全梯共用一条 SL」算出新 SL 应挂的张数，以及要撤掉的同价旧单。
+
+        阶梯网格是**逐档**调 `_open` 建仓的（每档一张或几张），每档都带自己的
+        `intent.sl`。若照搬「每档挂一条 size = 本档」，盘上会累积出 N 条同价 SL
+        （实测 martin-grid 4 条 `t-mtg-sl`，sz 9/1/1/6 —— 人格的设计却是
+        **全梯共用一条**，见 `prompts/ladder_nogate.md` §六）。而 `_modify_tp_sl`
+        路径挂的本来就是「一条 size = 持仓总量」，两条路径口径不一致正是分腿来源。
+
+        这里把**同向同价**的已有 SL 归并进来：新单张数 = 同价旧单张数之和 +
+        本档计划张数；旧单由调用方在新单**落盘后**再撤（先挂后撤，不留空窗）。
+
+        - 返回 `(size, cancel_ids)`。
+        - 只归并同价的**：人格 §4.3 的「远端档自带止损」落在不同价位，属于
+          独立仓位，**不在**归并范围 —— 靠价格比较把两类分开。
+        - 容差取 1 个最小变动价位（`meta.order_price_round`）；取不到时退化成
+          精确相等（宁可少归并、不可错并）。
+        - 张数**钳制在真实敞口内**（`_sl_cover_cap`）：逐档建仓时 `old_total`
+          恰好等于「前几档累加」，正常路径下 `old_total + add` 正好等于上限、
+          不会被削；只有旧 SL 被外部放大过（如历史 `peak_trail` 遗留）才会触发
+          钳制 —— 那时按真实敞口重挂才是对的。**永不挂出超过敞口的 protect 单**：
+          Gate 若因 reduce_only 超配而拒，`_open` 会走 rollback 把入场单也撤了。
+        """
+        add_size = int(add_size)
+        ids: list[str] = []
+        old_total = 0
+        try:
+            tol = abs(float(getattr(meta, "order_price_round", 0) or 0))
+        except (TypeError, ValueError):
+            tol = 0.0
+        target = round_price(float(new_sl), meta)
+        for pid, px, sz, side in self._owned_sl_orders_sided(symbol):
+            if side != pos_side:
+                continue
+            if abs(round_price(px, meta) - target) > tol + 1e-9:
+                continue
+            ids.append(pid)
+            old_total += int(sz)
+        if not ids:
+            return add_size, []          # 没有同价旧单 → 本档单挂（原行为）
+        out_size = min(old_total + add_size, self._sl_cover_cap(symbol, pos_side))
+        if out_size <= 0:
+            return add_size, []
+        return out_size, ids
+
+    def _sl_cover_cap(self, symbol: str, pos_side: str) -> int:
+        """该方向「SL 应当覆盖」的张数上限 = 已成交持仓 + 已挂未成交入场单。
+
+        给同价归并定一个不越界的上限（见 `_plan_shared_sl`）。入场单只算
+        **同向**：买单（size>0）建多头、卖单建空头，与保护单 reduce-only 的
+        符号方向一致。普通单的 `left` = 未成交张数。
+
+        查不到（API 抖动）时 `_owned_open_orders` 返回空 → 上限退化成持仓量 →
+        归并被削到「只覆盖已成交」= 安全侧（少并、不多挂）。
+        """
+        pos = 0
+        for p in self._symbol_positions(symbol):
+            if str(p.get("side") or "") == pos_side:
+                pos += abs(int(p.get("size") or 0))
+        pend = 0
+        for o in self._owned_open_orders(symbol, self._own_prefix("")):
+            if str(o.get("status") or "").lower() not in ("open", ""):
+                continue
+            try:
+                size = int(float(o.get("size") or 0))
+                left = int(float(o.get("left") or 0))
+            except (TypeError, ValueError):
+                continue
+            if size == 0 or left <= 0:
+                continue
+            if (size > 0) == (pos_side == "long"):
+                pend += left
+        return pos + pend
 
     def ensure_protection(self, symbol: str) -> dict:
         """裸仓兜底：持仓在、owned SL 不在时，按配置补一张 reduce_only SL。
