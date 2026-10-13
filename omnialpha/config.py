@@ -467,7 +467,7 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
     # 人格文件写的标的 ⊄ 白名单 → 告警（不报错，理由见该函数 docstring）
     _warn_persona_symbols(path, strategist.get("prompt_file"), symbols, unrestricted)
 
-    return BotConfig(
+    bot = BotConfig(
         bot_id=str(bot_id),
         enabled=enabled,
         env=env,
@@ -495,6 +495,48 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
         strategist=strategist,
         paper=dict(data.get("paper") or {}),
     )
+    _warn_risk_switch_conflicts(path, bot)
+    return bot
+
+
+def _warn_risk_switch_conflicts(path: Path, bot: "BotConfig") -> None:
+    """风控开关的**静默失效**组合 → 加载时告警（2026-10-14 全面检查发现）。
+
+    这些组合的共同点是「看起来配了、实际什么都不做」，正是本仓反复栽的
+    「静默失效」形态（同类先例：`f8b7f8b` 的 enabled 基线/overlay 冲突告警）。
+    只告警不报错：改不改是策略决定，但必须让人看得见。
+
+    ① `auto_protect` 开了但 `auto_protect_sl_pct <= 0` → `ensure_protection`
+       在 `pct <= 0` 时**直接早退**，连 dry 的「本来会挂什么」都不算 ——
+       实测 `ab-*` 5 个 bot 正是这个组合，dry 观察期其实什么都没观察到。
+    ② `peak_trail` 开了但 `peak_trail_atr <= 0` → `check_peak_trail` 同样早退。
+    ③ `manage_positions: false`（只开仓不管仓）却配了上面三个 → 总闸会先把它们
+       全部熄火，等于白配。
+    """
+    ar = dict(getattr(bot, "account_risk", None) or {})
+
+    def _num(key: str) -> float:
+        try:
+            return float(ar.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    ap, pk, gb = ar.get("auto_protect"), ar.get("peak_trail"), ar.get("give_back")
+    mgt = bool(getattr(bot, "manage_positions", True))
+
+    if ap and _num("auto_protect_sl_pct") <= 0:
+        log.warning(
+            "%s: account_risk.auto_protect=%s 但 auto_protect_sl_pct<=0 "
+            "→ 完全不生效（连 dry 的「本来会挂什么」都不计算），等于没开", path.name, ap)
+    if pk and _num("peak_trail_atr") <= 0:
+        log.warning(
+            "%s: account_risk.peak_trail=%s 但 peak_trail_atr<=0 → 完全不生效",
+            path.name, pk)
+    if not mgt and (ap or pk or gb):
+        log.warning(
+            "%s: manage_positions=false（只开仓不管仓）但配了 "
+            "auto_protect=%s / peak_trail=%s / give_back=%s → 总闸会全部熄火，白配",
+            path.name, ap, pk, gb)
 
 
 def check_label_prefixes(bots: dict[str, BotConfig]) -> None:
