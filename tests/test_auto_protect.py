@@ -401,10 +401,14 @@ class TestAutoProtectSweep(unittest.TestCase):
 
 
 class TestPartialCoverage(unittest.TestCase):
-    """SL 只覆盖一部分时按差额补 —— 此前会被判成「已受保护」跳过（静默半裸仓）。
+    """SL 只覆盖一部分 → **不补差额**，报 `partial_coverage` 交回 AI / 人工。
 
-    真会发生的路径：`_resync_protectors()` 只在 `_close()` 里跑（close/reduce 之后），
-    所以 `add_*` 让持仓变大后没有任何地方会把 SL 放大。
+    历史：这里原先断言「按差额补 6 张」。但差额补单的语义是「SL 触发时只平掉
+    一部分」= **程序减仓** —— 既不是全平、也不是结构减仓，没有任何交易理由
+    （覆盖记账口径泄漏成了仓位动作）。用户 2026-10-13 拍板禁止。
+
+    不变量：程序挂出的 SL 张数**恒等于持仓全量**（触发即全出 = 止损）。
+    完整不变量测试见 `tests/test_program_no_reduce.py`。
     """
 
     def _make(self, root, size):
@@ -416,16 +420,16 @@ class TestPartialCoverage(unittest.TestCase):
         client.set_position(size)
         return client, ex
 
-    def test_partial_sl_adds_only_the_shortfall(self):
+    def test_partial_sl_is_not_topped_up(self):
+        """部分覆盖 → 不挂任何单（差额补单 = 部分出场 = 程序减仓）。"""
         with tempfile.TemporaryDirectory() as td:
             client, ex = self._make(Path(td), 10)
             client.place_protector("t-pt-sl", -4, 83000)   # 只覆盖 4 张
             out = ex.ensure_protection("BTC_USDT")
-            self.assertIn("placed", out, out)
+            self.assertEqual(out["skipped"], "partial_coverage")
             self.assertEqual(out["covered_size"], 4)
-            self.assertEqual(out["need_size"], 6)
-            # 只补差额 6 张，不是重挂全量 10
-            self.assertEqual(abs(int(client.placed[0]["initial"]["size"])), 6)
+            self.assertEqual(out["shortfall"], 6)
+            self.assertEqual(client.placed, [])
 
     def test_full_coverage_skips(self):
         with tempfile.TemporaryDirectory() as td:
@@ -459,15 +463,16 @@ class TestPartialCoverage(unittest.TestCase):
             self.assertEqual(out["covered_size"], 0)
             self.assertEqual(out["need_size"], 10)
 
-    def test_short_position_partial_shortfall(self):
-        """空头同理：SL 覆盖 3 张 / 持仓 8 张 → 补 5 张。"""
+    def test_short_position_partial_not_topped_up(self):
+        """空头同理：SL 覆盖 3 张 / 持仓 8 张 → 不补，只报缺口 5 张。"""
         with tempfile.TemporaryDirectory() as td:
             client, ex = self._make(Path(td), -8)
             client.place_protector("t-pt-sl", 3, 87000)
             out = ex.ensure_protection("BTC_USDT")
-            self.assertIn("placed", out, out)
-            self.assertEqual(out["need_size"], 5)
-            self.assertEqual(int(client.placed[0]["initial"]["size"]), 5)
+            self.assertEqual(out["skipped"], "partial_coverage")
+            self.assertEqual(out["covered_size"], 3)
+            self.assertEqual(out["shortfall"], 5)
+            self.assertEqual(client.placed, [])
 
 
 if __name__ == "__main__":

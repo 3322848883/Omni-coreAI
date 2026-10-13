@@ -29,7 +29,9 @@ Copy-Item config\bots\_example.yaml config\bots\<bot_id>.yaml
 | `require_sl` | | 默认 `true` | 保持 true |
 | `order_scope` | | 默认 `own` | 多 bot 共账户必须 `own` |
 | `manage_positions` | | 默认 `true` | `false` = 只开仓不管仓（持仓/保护单不注入快照，close/reduce/modify_tp_sl/trail 全拒）。**阶梯/网格 bot 勿用**（依赖 modify_tp_sl + resync 维护 SL 归并） |
-| `allow_close` / `allow_reduce` | | 默认 `true` | 细粒度闸门：只禁平仓 / 只禁减仓（改保护放行） |
+| `allow_close` / `allow_reduce` | | 默认 `true` | 细粒度闸门：只禁平仓 / 只禁减仓（改保护放行）。**只作用于 AI 每轮的指令**，不作用于程序执行路径 |
+| `account_risk.auto_protect` | 可选 | 默认关 | `dry` = 只记录「本来会挂什么」；`true` = 裸仓补 SL（**张数恒 = 持仓全量**；SL 只覆盖一部分时**只告警不补差额**——差额补单会造成部分出场） |
+| `account_risk.give_back` | 可选 | 默认关 | 回调锁盈/保本平仓的**单独开关**（阈值由 AI 每笔填 `give_back_pct`、程序 60s 扫描执行）；不受 `allow_close` 影响 |
 | `strategist.prompt_file` | 可选 | `prompts/xxx.md` | 只跑外部信号可删 strategist 段 |
 
 **多账户**：不同 bot 写不同 `api_key_env`（如 `GATE_KEY_A` / `GATE_KEY_B`）。  

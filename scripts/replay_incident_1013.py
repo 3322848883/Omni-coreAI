@@ -136,6 +136,66 @@ def run_round(name: str, **gate_kw):
     return client.calls
 
 
+class PartialCoverageClient(IncidentClient):
+    """部分覆盖异常：多 25 张，但账户里只有一条覆盖 4 张的 SL。
+
+    这是 `ensure_protection` 唯一会产生「程序减仓」的输入 —— 旧逻辑按
+    `need = size - covered = 21` 挂一张 21 张的 SL，触发时只平掉 21 张
+    = **部分出场**（既非全平、也非结构减仓）。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.price_orders = [{
+            "id": 4242, "status": "open",
+            "initial": {"contract": "ETH_USDT", "size": -4, "text": "t-bre-sl",
+                        "is_reduce_only": True, "is_close": True},
+            "trigger": {"price": "2481.36", "rule": 2, "price_type": 0},
+        }]
+
+
+def run_partial_round():
+    """部分覆盖：旧逻辑 vs 新不变量（程序挂出的 SL 张数恒 = 持仓全量）。"""
+    import json
+
+    from omnialpha.config import BotConfig
+    from omnialpha.watcher import ProjectPaths, _auto_protect_sweep
+
+    client = PartialCoverageClient()
+    with tempfile.TemporaryDirectory() as td:
+        ex = Executor(
+            client, label_prefix="bre", root=Path(td), bot_id="brooks-eth",
+            account_risk={"auto_protect": True, "auto_protect_sl_pct": 2.0},
+        )
+        out = ex.ensure_protection("ETH_USDT")
+        legacy_size = 25 - 4          # 旧逻辑的差额补单张数（等价推演，不再执行）
+
+        # watcher 侧：必须让人看见（静默的半裸仓才是真危险）
+        client2 = PartialCoverageClient()
+        bot = BotConfig(
+            bot_id="brooks-eth", env="paper", symbols=["ETH_USDT"],
+            label_prefix="bre",
+            account_risk={"auto_protect": True, "auto_protect_sl_pct": 2.0},
+        )
+        bot.create_client = lambda: client2
+        paths = ProjectPaths(root=Path(td))
+        _auto_protect_sweep(bot, paths, {})
+        ap = Path(td) / "data" / "bots" / "brooks-eth" / "state" / "alerts.json"
+        alerts = (json.loads(ap.read_text(encoding="utf-8")).get("alerts")
+                  if ap.is_file() else [])
+
+    print(f"\n{'=' * 64}\nD｜部分覆盖（持仓 25 张，owned SL 只覆盖 4 张）\n{'=' * 64}")
+    print(f"  持仓/覆盖/缺口     25 / {out.get('covered_size')} / {out.get('shortfall')}")
+    print(f"  新行为             skipped={out.get('skipped')}  "
+          f"真挂出去的单={client.placed}  交易所写操作="
+          f"{[c for c in client.calls if 'place_price_order' in str(c)]}")
+    print(f"  旧行为（等价推演） 会挂 size={legacy_size} 的差额 SL → 触发即"
+          f"「部分出场」（减仓 {legacy_size} 张，剩 4 张）")
+    print(f"  watcher 告警       {len(alerts)} 条"
+          + (f" → {alerts[0]['type']}: {alerts[0]['detail'][:60]}…" if alerts else ""))
+    print(f"  watcher 挂单       {client2.placed}（应为空）")
+
+
 def main():
     print("复刻 2026-10-13 BROOKS 账户：用户手动 ETH 多 25 张 @2532，无 SL")
     print("模型动作（人格 §54 强制）：reduce_long 15 → close 剩余 → sweep 补 SL")
@@ -150,6 +210,8 @@ def main():
     print(f"  A 交易所写操作调用数: {len([x for x in a if 'close_position' in str(x) or 'place_price_order' in str(x)])}")
     print(f"  B 交易所写操作调用数: {len([x for x in b if 'close_position' in str(x) or 'place_price_order' in str(x)])}  ← 用户手动仓零干预")
     print(f"  C 交易所写操作调用数: {len([x for x in c if 'close_position' in str(x) or 'place_price_order' in str(x)])}  ← 减仓放行、全平被拒")
+
+    run_partial_round()
 
 
 if __name__ == "__main__":

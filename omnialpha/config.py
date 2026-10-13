@@ -62,6 +62,9 @@ class BotConfig:
     #   modify_tp_sl + resync_protectors 维护 SL 归并，关掉=挂完不管。
     # allow_close: false → 只禁平仓（close/close_all/flatten），减仓与改保护放行
     # allow_reduce: false → 只禁减仓（reduce*），平仓与改保护放行
+    #   ⚠️ 这两个是**AI 意图闸门**：只作用于 `_execute_intent`（AI 每轮发的指令）。
+    #   不作用于程序执行路径 —— 尤其 `account_risk.give_back`（AI 开仓时预先
+    #   授权阈值、程序 60s 扫描执行的回调锁盈平仓），它由自己的开关单独控制。
     # 三个都默认 true —— 不改变任何存量 bot 的行为。
     manage_positions: bool = True
     allow_close: bool = True

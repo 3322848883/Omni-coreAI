@@ -133,7 +133,8 @@ class TestAutoProtectOnPaperExchange(unittest.TestCase):
         self.assertEqual(out["skipped"], "sl_present")
         self.assertEqual(len(self._owned_price_orders()), n, "不应重复补")
 
-    def test_partial_coverage_places_only_shortfall(self):
+    def test_partial_coverage_places_nothing(self):
+        """部分覆盖 → 不补差额（差额补单会造成部分出场 = 程序减仓，已禁止）。"""
         self._open(10)
         # 先挂一张只覆盖 4 张的 SL（模拟 add_* 让持仓变大后的状态）
         self.ex.place_price_order({
@@ -141,10 +142,13 @@ class TestAutoProtectOnPaperExchange(unittest.TestCase):
                         "reduce_only": True, "text": "t-pt-sl"},
             "trigger": {"rule": 2, "price_type": 0, "price": str(self.feed.last - 5)},
         })
+        before = len(self._owned_price_orders())
         out = self.executor.ensure_protection(SYMBOL)
-        self.assertIn("placed", out, out)
+        self.assertEqual(out["skipped"], "partial_coverage")
         self.assertEqual(out["covered_size"], 4)
-        self.assertEqual(out["need_size"], 6)
+        self.assertEqual(out["shortfall"], 6)
+        self.assertNotIn("placed", out)
+        self.assertEqual(len(self._owned_price_orders()), before, "绝不能挂差额单")
 
     def test_dry_mode_places_nothing_on_real_exchange(self):
         self.executor.account_risk = {"auto_protect": "dry", "auto_protect_sl_pct": 2.0}

@@ -2857,8 +2857,10 @@ class Executor:
         只补 SL，**绝不补 TP**：SL 是风控，TP 是策略 —— 自动塞一个 TP 等于替 AI 做了
         它没做的决策，还会和它下一轮的意图打架。
 
-        **按覆盖张数判，不按「有没有 SL」判**（`_owned_sl_size`）：SL 只覆盖一部分
-        时按差额补，而不是判成「已受保护」跳过 —— 那是静默的半裸仓。
+        **按覆盖张数判，不按「有没有 SL」判**（`_owned_sl_size`）：判成「已受保护」
+        的门槛是 `covered >= size`（只有 TP 没有 SL 不算受保护）。但覆盖不足时
+        **不按差额补** —— 见下面「不变量」注释：差额补单会让 SL 触发时只平掉
+        一部分，那是「程序减仓」，本仓明确禁止。
 
         由 `account_risk` 逐 bot 开启（默认关）：
           auto_protect: false（默认）→ 只回报检测结果，不下单
@@ -2913,12 +2915,36 @@ class Executor:
         if covered >= size:
             out["skipped"] = "sl_present"
             return out
-        # 覆盖不足 → 只补**差额**，不重挂全量。会走到这里的两条路：
-        #   ① 完全没有 SL（covered=0）
-        #   ② SL 只覆盖了一部分 —— `add_*` 让持仓变大后没有任何地方会把 SL 放大
-        #      （`_resync_protectors()` 只在 `_close()` 里跑）。此前这种情况会被
-        #      判成「已受保护」而跳过，留下静默的半裸仓。
-        need = size - covered
+        # ── 不变量：程序挂出的 SL 张数**恒等于持仓全量** ──
+        # 触发即「全出」= 止损；不存在「程序平掉一部分」这种动作。
+        # 所以这里**绝不按缺口补单**：`size - covered` 是**内部覆盖记账**的口径，
+        # 把它直接当下单张数用（旧版 `size=need`），SL 触发时就只平掉差额张 ——
+        # 既不是全平、也不是结构减仓，没有任何交易理由，纯粹是记账泄漏成了
+        # 仓位动作（用户 2026-10-13 拍板：「不许程序减仓」）。
+        #
+        # 部分覆盖（0 < covered < size）只可能是异常：SL 被外部撤掉一半、或
+        # `add_*` 让持仓变大而 SL 没跟上（`_resync_protectors()` 只在 `_close()`
+        # 里跑）。异常**不猜、不补**，报出来交回 AI / 人工。
+        if covered > 0:
+            out.update({
+                "position_side": pos_side, "position_size": size,
+                "covered_size": covered, "shortfall": size - covered,
+                "skipped": "partial_coverage",
+            })
+            # 观察期（含 dry）要能看到「本来会挂什么」——否则 dry 验证不了任何东西
+            try:
+                ticker = self.client.get_ticker(symbol) or {}
+                mark = float(ticker.get("mark_price") or ticker.get("last") or 0)
+            except Exception:  # noqa: BLE001
+                mark = 0.0
+            if mark > 0:
+                meta = self.client.get_contract(symbol)
+                raw = (mark * (1 - pct / 100.0) if pos_side == "long"
+                       else mark * (1 + pct / 100.0))
+                out.update({"mark": mark, "sl": float(round_price(raw, meta)),
+                            "sl_pct": pct})
+            return out
+        # 走到这里 covered == 0：完全裸仓 → 挂**全量** SL（与旧版行为一致）
 
         try:
             ticker = self.client.get_ticker(symbol) or {}
@@ -2935,7 +2961,7 @@ class Executor:
         sl = float(round_price(raw, meta))
         out.update({
             "position_side": pos_side, "position_size": size,
-            "covered_size": covered, "need_size": need,
+            "covered_size": covered, "need_size": size,
             "mark": mark, "sl": sl, "sl_pct": pct,
         })
         if dry:
@@ -2957,7 +2983,8 @@ class Executor:
         try:
             rec, err = self._place_exit_leg(
                 lambda: self._place_trigger(
-                    intent, trigger_side, sl, is_tp=False, meta=meta, size=need
+                    # 张数恒 = 持仓全量（见上面「不变量」）：触发即全出，不是减仓
+                    intent, trigger_side, sl, is_tp=False, meta=meta, size=size
                 ),
                 kind="sl",
                 price_order=True,
@@ -3072,6 +3099,11 @@ class Executor:
         与 `check_peak_trail` 的区别：那个**上移 SL**（防坐电梯），这个**直接平仓**
         （落袋）。两者都挂在扫描循环上，不依赖 LLM 轮次。
 
+        **开关**：由 `account_risk.give_back`（off/dry/live，默认 off）逐 bot 单独
+        控制（watcher 的 `_give_back_sweep` 入口前置判断）；`manage_positions=false`
+        时一并熄火。**不受 `allow_close` 影响** —— 那条开关管的是「AI 每轮当场发的
+        close 指令」，本路径是「AI 开仓时预先授权、程序后台执行」，性质不同。
+
         **武装条件：峰值浮盈 ≥ 1R**（R = |入场价 − 本 bot 的 SL| × 张数 × quanto）。
         这等价于「TP1 之后才武装」——TP1 就设在 1R。没有这条，峰值只有 0.1R 时
         回撤 40% 也会平，而锁定的那点利润还不够付往返手续费。
@@ -3086,13 +3118,16 @@ class Executor:
         """
         out: dict[str, Any] = {"symbol": symbol, "give_back": "off", "sides": []}
         out["give_back"] = "dry" if dry else "live"
-        # 持仓管理闸门：这条路径**直接平仓**，是 allow_close 的消费方之一
-        # （另一个是模型意图）。总闸关 → 一律不动；只禁平仓 → 只平仓这条路熄火。
+        # 闸门：只受**总闸** manage_positions 管（`manage_positions=false` = 只开仓
+        # 不管仓，语义上包含它）。本路径自己的开关是 `account_risk.give_back`
+        # （off/dry/live，默认 off，由 watcher 的 `_give_back_sweep` 入口前置判断）。
+        #
+        # **不受 `allow_close` 影响**（2026-10-13 解绑）：那条开关管的是「AI 每轮
+        # 当场发的 close 指令」，而本路径是「AI 开仓那一刻预先授权阈值、程序在 60s
+        # 扫描里执行」—— 性质不同，不该被同一个开关连带熄火（绑错会导致「想放开
+        # AI 平仓却顺带关掉了它早已授权的回调锁盈」）。
         if not self.manage_positions:
             out["skipped"] = "manage_positions_off"
-            return out
-        if not self.allow_close:
-            out["skipped"] = "close_disabled"
             return out
 
         positions = self._symbol_positions(symbol)

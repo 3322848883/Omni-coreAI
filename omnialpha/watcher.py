@@ -761,6 +761,41 @@ def _auto_protect_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict, *,
         except Exception as e:  # noqa: BLE001 — 单个 symbol 失败不拖垮整轮扫描
             log.warning("auto protect %s %s raised: %s", bot.bot_id, sym, e)
             continue
+        if out.get("skipped") == "partial_coverage":
+            # SL 只覆盖一部分：程序按不变量**不补差额** —— 差额补单会让 SL 触发时
+            # 只平掉一部分（部分出场 = 程序减仓），本仓明确禁止。但必须让人看见：
+            # 「静默的半裸仓」正是这个功能要消灭的状态。
+            if out.get("auto_protect") == "dry":
+                log.info(
+                    "auto protect[dry] %s %s: partial_coverage %s/%s 张"
+                    "（程序不补差额，会挂 SL %s mark=%s）",
+                    bot.bot_id, sym, out.get("covered_size"), out.get("position_size"),
+                    out.get("sl"), out.get("mark"),
+                )
+                continue
+            key = f"{bot.bot_id}:{sym}:partial"
+            now = time.time()
+            if now - float(alerted.get(key) or 0) < _AUTO_PROTECT_ALERT_SEC:
+                continue
+            alerted[key] = now
+            detail = (
+                f"{sym} partial_coverage: SL 只覆盖 "
+                f"{out.get('covered_size')}/{out.get('position_size')} 张"
+                f"（缺口 {out.get('shortfall')} 张）—— 程序不补差额"
+                f"（差额补单会造成部分出场），需 AI 或人工处理"
+            )
+            log.error("auto protect %s %s: %s", bot.bot_id, sym, detail)
+            try:
+                if executor.alert_store is not None:
+                    executor.alert_store.raise_alert(
+                        "unprotected_position", detail, symbol=sym,
+                        covered_size=out.get("covered_size"),
+                        position_size=out.get("position_size"),
+                        shortfall=out.get("shortfall"),
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+            continue
         if out.get("skipped") or out.get("auto_protect") == "off":
             if out.get("skipped") and out.get("auto_protect") == "dry":
                 # dry 模式下必须把「为什么没动手」也记下来 —— 否则「没有日志」既可能是

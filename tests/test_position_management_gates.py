@@ -15,6 +15,8 @@
       modify_tp_sl/trail），watcher 的三条 sweep（auto_protect /
       peak_trail / give_back）同样熄火 → 「只开仓、不管仓」模式。
   allow_close: false  → 只禁平仓（close/close_all/flatten），减仓与改保护放行。
+      ⚠️ **不作用于 give_back**（AI 开仓时预先授权、程序 60s 扫描执行的回调锁盈
+      平仓）—— 那条由 `account_risk.give_back` 单独控制（2026-10-13 解绑）。
   allow_reduce: false → 只禁减仓（reduce*），平仓与改保护放行。
 
 注意 expand_signal 的别名映射：reduce/reduce_long/reduce_short 都落成
@@ -386,7 +388,13 @@ class TestSweepGates(unittest.TestCase):
             self.assertEqual([c for c in client.calls
                               if c[0] == "close_position"], [])
 
-    def test_give_back_off_under_allow_close_false(self):
+    def test_give_back_unaffected_by_allow_close_false(self):
+        """解绑验证：`allow_close` 只管「AI 每轮的 close 指令」，不压 give_back。
+
+        give_back 是「AI 开仓时预先授权阈值、程序后台执行」的回调锁盈平仓，
+        由 `account_risk.give_back` 单独控制。本桩没有 owned SL → 会走到
+        `no_owned_sl`（无法定义 1R），关键是**不再被 allow_close 拦下**。
+        """
         client = _SweepClient()
         with tempfile.TemporaryDirectory() as d:
             ex = self._make(d, client, allow_close=False,
@@ -394,9 +402,8 @@ class TestSweepGates(unittest.TestCase):
             client.set_position(10)
             ex.remember_give_back("BTC_USDT", "long", 30)
             out = ex.check_give_back("BTC_USDT")
-            self.assertEqual(out["skipped"], "close_disabled")
-            self.assertEqual([c for c in client.calls
-                              if c[0] == "close_position"], [])
+            self.assertNotEqual(out.get("skipped"), "close_disabled")
+            self.assertEqual(out["skipped"], "no_owned_sl")
 
     def test_watcher_sweep_respects_manage_positions(self):
         """接线验证：`_auto_protect_sweep` 构造的 Executor 必须带上闸门。
