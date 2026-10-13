@@ -80,6 +80,9 @@ class StrategistConfig:
     # 发送哪些周期图（多选）；省略 = 只发主周期 timeframe
     # 例: ["5m","15m","1h","4h"]
     vision_timeframes: Optional[list] = None
+    # 持仓管理总闸（与 BotConfig.manage_positions 同源，由 _build_plan_runner 注入）：
+    # false = 只开仓不管仓 —— 快照/account 工具不注入持仓与保护单。
+    manage_positions: bool = True
 
     def __post_init__(self) -> None:
         if not self.event_timeframe:
@@ -640,6 +643,7 @@ class PlanRunner:
             env=self.cfg.env,
             bot_root=self.cfg.bot_root,
             vision_timeframes=self.cfg.vision_timeframes,
+            manage_positions=self.cfg.manage_positions,
         )
         self._remember_snapshot_digest(snapshot)
         account = snapshot.get("account") or {}
@@ -928,6 +932,7 @@ class PlanRunner:
             env=self.cfg.env,
             bot_root=self.cfg.bot_root,
             vision_timeframes=self.cfg.vision_timeframes,
+            manage_positions=self.cfg.manage_positions,
         )
         self._remember_snapshot_digest(snapshot)
         account = snapshot.get("account") or {}
@@ -1583,6 +1588,7 @@ class PlanRunner:
                     bot_id=self.cfg.bot_id, skill_ids=self.cfg.skills,
                     allow=self.cfg.tools.get("allow"), deny=self.cfg.tools.get("deny"),
                     symbols=self.cfg.symbols,
+                    manage_positions=self.cfg.manage_positions,
                 )
                 self._record_tool_use(name, args, res, raw_args=raw_args)
                 results.append({"tool": name, "result": res})
@@ -1693,6 +1699,7 @@ class PlanRunner:
                     bot_id=self.cfg.bot_id, skill_ids=self.cfg.skills,
                     allow=self.cfg.tools.get("allow"), deny=self.cfg.tools.get("deny"),
                     symbols=self.cfg.symbols,
+                    manage_positions=self.cfg.manage_positions,
                 )
                 self._record_tool_use(name, args, result, raw_args=raw_args)
                 # 收窄：skill 成功加载且声明 allowed-tools → 限定后续工具面

@@ -218,6 +218,23 @@ def _sort_intents_by_priority(intents: list) -> list:
     )
 
 
+# ── 持仓管理闸门（manage_positions / allow_close / allow_reduce）──────────
+# 2026-10-13 账户归属事故的第二层防线：引擎按账户净持仓管理，而账户里可能
+# 躺着用户手动开的仓（order_scope 只过滤订单、不过滤持仓）。根治靠账户隔离，
+# 这里让「平仓/减仓/改保护」变成显式可关的配置（「只开仓、不管仓」模式）。
+#
+# 别名映射必须按 **requested_action** 判：expand_signal 把
+# reduce/reduce_long/reduce_short 统一落成 action="close"、flatten 落成
+# action="close_all"（原动作记在 meta.requested_action）—— 只按 action 判
+# 会让 allow_reduce=false 被 action="close" 悄悄放行。
+_MGMT_CLOSE_ACTS = {"close", "close_all", "flatten"}
+_MGMT_REDUCE_ACTS = {"reduce", "reduce_long", "reduce_short"}
+# 只受 manage_positions 总闸管辖、不受 allow_close/allow_reduce 影响：
+# 它们改的是**保护单价位**，不动敞口。
+_MGMT_PROTECT_ACTS = {"trail", "modify_tp_sl"}
+_MGMT_ACTS = _MGMT_CLOSE_ACTS | _MGMT_REDUCE_ACTS | _MGMT_PROTECT_ACTS
+
+
 class Executor:
     def __init__(
         self,
@@ -227,6 +244,9 @@ class Executor:
         position_policy: str = "free",
         default_replace: str = "none",
         order_scope: str = "own",
+        manage_positions: bool = True,
+        allow_close: bool = True,
+        allow_reduce: bool = True,
         require_sl: bool = True,
         account_risk: Optional[dict] = None,
         label_prefix: str = "",
@@ -245,6 +265,14 @@ class Executor:
         self.default_replace = (default_replace or "none").lower()
         # own = only cancel this bot's orders (text prefix t-{label}); all = legacy wipe
         self.order_scope = (order_scope or "own").lower()
+        # 持仓管理闸门（config.py 同名字段的执行侧；默认全放行）。
+        # 为什么必须在 executor：watcher 有 7 处 Executor 构造点、三条 sweep
+        # （auto_protect / peak_trail / give_back）**绕过 _execute_intent** 直接
+        # 动持仓/保护单 —— 闸门做在方法内部才能全覆盖（做在 execute_signal 入口
+        # 会漏掉 sweep，本仓反复出现「闸门测试全绿而生产路径没接线」）。
+        self.manage_positions = bool(manage_positions)
+        self.allow_close = bool(allow_close)
+        self.allow_reduce = bool(allow_reduce)
         # pre-trade: open_* must carry sl (unless explicitly disabled)
         self.require_sl = bool(require_sl)
         # account-level risk: halt / max_total_notional_usd / daily_loss_limit_usd / max_leverage
@@ -870,9 +898,43 @@ class Executor:
             return []
         return _parse_symbol_positions(positions, symbol)
 
+    def _management_gate(self, action: str, intent: Optional[Intent] = None) -> str:
+        """持仓管理动作闸门 → 拒绝原因（"" = 放行）。
+
+        判据用 **requested_action**（expand_signal 的别名原动作）回退到
+        action：reduce_* 落成 close、flatten 落成 close_all，只按 action
+        判会让 allow_reduce=false 被 close 悄悄放行。
+
+        返回的文案以机器可读代号开头（MANAGE_POSITIONS_OFF / CLOSE_DISABLED /
+        REDUCE_DISABLED），供调用方落 `gate_skipped` 与复盘归因。
+        """
+        requested = ""
+        if intent is not None:
+            requested = str((intent.meta or {}).get("requested_action") or "").strip().lower()
+        eff = requested or str(action or "").strip().lower()
+        if eff not in _MGMT_ACTS:
+            return ""
+        if not self.manage_positions:
+            return ("MANAGE_POSITIONS_OFF: manage_positions=false，本 bot 只开仓、"
+                    "不管仓（禁一切持仓管理动作）")
+        if eff in _MGMT_CLOSE_ACTS and not self.allow_close:
+            return f"CLOSE_DISABLED: allow_close=false，禁止平仓动作 {eff}"
+        if eff in _MGMT_REDUCE_ACTS and not self.allow_reduce:
+            return f"REDUCE_DISABLED: allow_reduce=false，禁止减仓动作 {eff}"
+        return ""
+
     def _execute_intent(self, intent: Intent) -> StepResult:
         print(self.client.banner())
         action = intent.action
+        # 持仓管理闸门（manage_positions / allow_close / allow_reduce）。
+        # 良性跳过：ok=True + gate_skipped —— 与 `_entry_gate` 的映射跳过同口径。
+        # 不能返回 ok=False：主循环见 False 会 break 并触发 _rollback_newly_placed
+        # （把同一信号里已挂好的新单撤掉），一个策略性禁用不该产生那种副作用。
+        gate = self._management_gate(action, intent)
+        if gate:
+            log.warning("MGMT_GATE %s %s: %s", action, intent.symbol, gate)
+            return StepResult(action, intent.symbol, True,
+                              detail={"gate_skipped": gate})
         # `scope` 必须一路传到钝动作：`symbol=""` 时它决定作用面（bot/account）。
         # 不传 = 永远命中「未显式声明 → 拒绝」分支（能力实现了，但生产路径接不上线 ——
         # 本仓踩过：闸门测试全绿而生产路径根本没接线）。
@@ -2820,6 +2882,10 @@ class Executor:
         的策略，那里才有跨轮状态。
         """
         out: dict[str, Any] = {"symbol": symbol, "auto_protect": "off"}
+        # 持仓管理总闸：只开仓不管仓的 bot 不补任何保护（补 SL 也是管仓）
+        if not self.manage_positions:
+            out["skipped"] = "manage_positions_off"
+            return out
         ar = self.account_risk or {}
         mode = ar.get("auto_protect", False)
         try:
@@ -3020,6 +3086,14 @@ class Executor:
         """
         out: dict[str, Any] = {"symbol": symbol, "give_back": "off", "sides": []}
         out["give_back"] = "dry" if dry else "live"
+        # 持仓管理闸门：这条路径**直接平仓**，是 allow_close 的消费方之一
+        # （另一个是模型意图）。总闸关 → 一律不动；只禁平仓 → 只平仓这条路熄火。
+        if not self.manage_positions:
+            out["skipped"] = "manage_positions_off"
+            return out
+        if not self.allow_close:
+            out["skipped"] = "close_disabled"
+            return out
 
         positions = self._symbol_positions(symbol)
         state = self._read_give_back()
@@ -3166,6 +3240,11 @@ class Executor:
           持仓消失 / 方向反转 / 入场价变了 / 上次观测太久远（`_PEAK_TRAIL_STALE_SEC`）。
         """
         out: dict[str, Any] = {"symbol": symbol, "peak_trail": "off", "sides": []}
+        # 持仓管理总闸：上移 SL 属于管仓 —— 只开仓不管仓的 bot 不挪任何止损
+        # （allow_close/allow_reduce 不适用：它不动敞口，只改保护价）。
+        if not self.manage_positions:
+            out["skipped"] = "manage_positions_off"
+            return out
         ar = self.account_risk or {}
         mode = ar.get("peak_trail", False)
         if not mode:

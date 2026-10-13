@@ -28,6 +28,8 @@ Copy-Item config\bots\_example.yaml config\bots\<bot_id>.yaml
 | `enabled` | | `true` | `false` 表示停用 |
 | `require_sl` | | 默认 `true` | 保持 true |
 | `order_scope` | | 默认 `own` | 多 bot 共账户必须 `own` |
+| `manage_positions` | | 默认 `true` | `false` = 只开仓不管仓（持仓/保护单不注入快照，close/reduce/modify_tp_sl/trail 全拒）。**阶梯/网格 bot 勿用**（依赖 modify_tp_sl + resync 维护 SL 归并） |
+| `allow_close` / `allow_reduce` | | 默认 `true` | 细粒度闸门：只禁平仓 / 只禁减仓（改保护放行） |
 | `strategist.prompt_file` | 可选 | `prompts/xxx.md` | 只跑外部信号可删 strategist 段 |
 
 **多账户**：不同 bot 写不同 `api_key_env`（如 `GATE_KEY_A` / `GATE_KEY_B`）。  

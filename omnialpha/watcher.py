@@ -431,6 +431,9 @@ def process_file(path: Path, bot: BotConfig, paths: ProjectPaths, executor: Opti
             position_policy=bot.position_policy,
             default_replace=bot.default_replace,
             order_scope=getattr(bot, "order_scope", "own"),
+            manage_positions=getattr(bot, "manage_positions", True),
+            allow_close=getattr(bot, "allow_close", True),
+            allow_reduce=getattr(bot, "allow_reduce", True),
             require_sl=getattr(bot, "require_sl", True),
             account_risk=getattr(bot, "account_risk", None) or {},
             label_prefix=getattr(bot, "label_prefix", "") or bot.bot_id,
@@ -591,6 +594,9 @@ def run_bot_once(bot: BotConfig, paths: ProjectPaths) -> dict:
                     position_policy=bot.position_policy,
                     default_replace=bot.default_replace,
                     order_scope=getattr(bot, "order_scope", "own"),
+                    manage_positions=getattr(bot, "manage_positions", True),
+                    allow_close=getattr(bot, "allow_close", True),
+                    allow_reduce=getattr(bot, "allow_reduce", True),
                     require_sl=getattr(bot, "require_sl", True),
                     account_risk=getattr(bot, "account_risk", None),
                     label_prefix=getattr(bot, "label_prefix", "") or bot.bot_id,
@@ -656,6 +662,9 @@ def _reconcile_sweep(bot: BotConfig, paths: ProjectPaths, *,
         bot_id=bot.bot_id,
         account=getattr(bot, "account", "") or "",
         alert_store=_alert_store(paths, bot.bot_id),
+        manage_positions=getattr(bot, "manage_positions", True),
+        allow_close=getattr(bot, "allow_close", True),
+        allow_reduce=getattr(bot, "allow_reduce", True),
     )
     total = 0
     for sym in _sweep_symbols(bot, client, symbols):
@@ -690,6 +699,9 @@ def _orphan_sweep(bot: BotConfig, paths: ProjectPaths, *,
         root=paths.root,
         bot_id=bot.bot_id,
         account=getattr(bot, "account", "") or "",
+        manage_positions=getattr(bot, "manage_positions", True),
+        allow_close=getattr(bot, "allow_close", True),
+        allow_reduce=getattr(bot, "allow_reduce", True),
     )
     total = 0
     for sym in _sweep_symbols(bot, client, symbols):
@@ -738,6 +750,9 @@ def _auto_protect_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict, *,
         account=getattr(bot, "account", "") or "",
         account_risk=getattr(bot, "account_risk", None),
         alert_store=_alert_store(paths, bot.bot_id),
+        manage_positions=getattr(bot, "manage_positions", True),
+        allow_close=getattr(bot, "allow_close", True),
+        allow_reduce=getattr(bot, "allow_reduce", True),
     )
     done = 0
     for sym in _sweep_symbols(bot, client, symbols):
@@ -815,6 +830,9 @@ def _peak_trail_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict, *,
         account=getattr(bot, "account", "") or "",
         account_risk=getattr(bot, "account_risk", None),
         alert_store=_alert_store(paths, bot.bot_id),
+        manage_positions=getattr(bot, "manage_positions", True),
+        allow_close=getattr(bot, "allow_close", True),
+        allow_reduce=getattr(bot, "allow_reduce", True),
     )
     done = 0
     for sym in _sweep_symbols(bot, client, symbols):
@@ -907,6 +925,9 @@ def _give_back_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict, *,
         account=getattr(bot, "account", "") or "",
         account_risk=getattr(bot, "account_risk", None),
         alert_store=_alert_store(paths, bot.bot_id),
+        manage_positions=getattr(bot, "manage_positions", True),
+        allow_close=getattr(bot, "allow_close", True),
+        allow_reduce=getattr(bot, "allow_reduce", True),
     )
     done = 0
     for sym in _sweep_symbols(bot, client, symbols):

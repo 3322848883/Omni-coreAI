@@ -244,7 +244,13 @@ def collect_snapshot(
     env: str = "live",
     bot_root: Optional[Path] = None,
     vision_timeframes: Optional[list[str]] = None,
+    manage_positions: bool = True,
 ) -> dict[str, Any]:
+    """`manage_positions=False`（只开仓不管仓）时，`positions` / `protections`
+    **不注入**（连交易所都不查）：模型看不到持仓就无从按人格 §54 去管它，
+    执行侧还有 `Executor._management_gate` 兜底（双保险，见 2026-10-13
+    账户归属事故）。`open_orders` 保留 —— 入场挂单是本 bot 自己的生意。
+    """
     cfg = market_cfg or MarketConfig()
     refresh = set(cfg.refresh or [])
     market: dict[str, Any] = {}
@@ -396,22 +402,33 @@ def collect_snapshot(
         account["error"] = "account: missing available"
         meta["degraded"].append("account")
     if "error" not in account:
-        try:
-            account["positions"] = [
-                {
-                    "contract": p.get("contract"),
-                    "mode": p.get("mode"),
-                    "size": p.get("size"),
-                    "entry_price": p.get("entry_price"),
-                    "leverage": p.get("leverage"),
-                }
-                for p in (client.get_positions() or [])
-                if int(p.get("size") or 0) != 0
-            ]
-        except Exception as e:  # noqa: BLE001
-            account["error"] = f"positions: {e}"
-            account.setdefault("positions", [])
-            meta["degraded"].append("positions")
+        if manage_positions:
+            try:
+                account["positions"] = [
+                    {
+                        "contract": p.get("contract"),
+                        "mode": p.get("mode"),
+                        "size": p.get("size"),
+                        "entry_price": p.get("entry_price"),
+                        "leverage": p.get("leverage"),
+                    }
+                    for p in (client.get_positions() or [])
+                    if int(p.get("size") or 0) != 0
+                ]
+            except Exception as e:  # noqa: BLE001
+                account["error"] = f"positions: {e}"
+                account.setdefault("positions", [])
+                meta["degraded"].append("positions")
+        else:
+            # 只开仓不管仓：持仓数据不注入，且显式标注（否则「空 positions」会被
+            # 误读成「真的没仓」→ 模型照人格 §54 给不出管理结论反而报错）。
+            account["positions"] = []
+            account["position_management"] = "disabled"
+            account["position_management_note"] = (
+                "**本 bot 配置为 manage_positions=false（只开仓、不管仓）**："
+                "持仓与保护单数据不注入，禁止输出 close/reduce/modify_tp_sl/trail"
+                " 等持仓管理动作（输出也会被执行层拒绝）。"
+            )
         # REST open orders + TP/SL (authoritative for position management)
         try:
             oos = []
@@ -435,48 +452,53 @@ def collect_snapshot(
         except Exception as e:  # noqa: BLE001
             account["open_orders"] = []
             meta["degraded"].append("open_orders")
-        try:
-            prot = []
-            syms = set(symbols) | {p.get("contract") for p in account.get("positions") or []}
-            for s in sorted(x for x in syms if x):
-                for p in (client.list_price_orders(s) or []):
-                    # 条件单有两种形状，必须都认：
-                    #   Gate  → 字段嵌在 initial / trigger 里
-                    #   paper → `_price_order_view` 是**扁平库行**（`dict(po)` + id），
-                    #           字段直接在顶层（trigger_price / size / rule）
-                    # 少了这层 fallback，模拟盘上 trigger_price/size/rule 全是 null ——
-                    # AI 看不到当前 TP/SL 设在哪、多大量，`modify_tp_sl` 变成半盲改单。
-                    # 实测 2026-10-04 模型自己指出「their trigger prices are null in the data」。
-                    ini = p.get("initial") or {}
-                    trg = p.get("trigger") or {}
-                    size_v = _first(ini.get("size"), p.get("size"))
-                    prot.append({
-                        "contract": s,
-                        "id": p.get("id"),
-                        "size": size_v,
-                        "trigger_price": _first(trg.get("price"), p.get("trigger_price")),
-                        "rule": _first(trg.get("rule"), p.get("rule")),
-                        "text": _first(ini.get("text"), p.get("text")),
-                        "status": p.get("status"),
-                        # **入场条件单与预挂保护单都落在这个数组里** —— 执行器挂
-                        # stop_entry 时会把 TP/SL 一起挂上（`hang_mode: simultaneous`，
-                        # 成交即生效、零裸仓窗口，是刻意设计）。两者的 6 个老字段
-                        # 形状完全一样，AI 只能靠 `text` 后缀猜。
-                        # 实测 2026-10-06：AI 花了上千字猜「85850 那个单是 stop 还是
-                        # limit」，而 trades.jsonl 里 order_type 写得清清楚楚。
-                        # `is_reduce_only` 是唯一可靠的判据：true = 保护单，false = 入场单。
-                        "is_reduce_only": _flag(
-                            ini.get("is_reduce_only"), ini.get("reduce_only"),
-                            p.get("is_reduce_only"), p.get("reduce_only"),
-                        ),
-                        "direction": _first(p.get("direction"), ini.get("direction"),
-                                            _side_of(size_v)),
-                        "order_type": _first(p.get("order_type"), ini.get("type")),
-                    })
-            account["protections"] = prot
-        except Exception as e:  # noqa: BLE001
+        if manage_positions:
+            try:
+                prot = []
+                syms = set(symbols) | {p.get("contract") for p in account.get("positions") or []}
+                for s in sorted(x for x in syms if x):
+                    for p in (client.list_price_orders(s) or []):
+                        # 条件单有两种形状，必须都认：
+                        #   Gate  → 字段嵌在 initial / trigger 里
+                        #   paper → `_price_order_view` 是**扁平库行**（`dict(po)` + id），
+                        #           字段直接在顶层（trigger_price / size / rule）
+                        # 少了这层 fallback，模拟盘上 trigger_price/size/rule 全是 null ——
+                        # AI 看不到当前 TP/SL 设在哪、多大量，`modify_tp_sl` 变成半盲改单。
+                        # 实测 2026-10-04 模型自己指出「their trigger prices are null in the data」。
+                        ini = p.get("initial") or {}
+                        trg = p.get("trigger") or {}
+                        size_v = _first(ini.get("size"), p.get("size"))
+                        prot.append({
+                            "contract": s,
+                            "id": p.get("id"),
+                            "size": size_v,
+                            "trigger_price": _first(trg.get("price"), p.get("trigger_price")),
+                            "rule": _first(trg.get("rule"), p.get("rule")),
+                            "text": _first(ini.get("text"), p.get("text")),
+                            "status": p.get("status"),
+                            # **入场条件单与预挂保护单都落在这个数组里** —— 执行器挂
+                            # stop_entry 时会把 TP/SL 一起挂上（`hang_mode: simultaneous`，
+                            # 成交即生效、零裸仓窗口，是刻意设计）。两者的 6 个老字段
+                            # 形状完全一样，AI 只能靠 `text` 后缀猜。
+                            # 实测 2026-10-06：AI 花了上千字猜「85850 那个单是 stop 还是
+                            # limit」，而 trades.jsonl 里 order_type 写得清清楚楚。
+                            # `is_reduce_only` 是唯一可靠的判据：true = 保护单，false = 入场单。
+                            "is_reduce_only": _flag(
+                                ini.get("is_reduce_only"), ini.get("reduce_only"),
+                                p.get("is_reduce_only"), p.get("reduce_only"),
+                            ),
+                            "direction": _first(p.get("direction"), ini.get("direction"),
+                                                _side_of(size_v)),
+                            "order_type": _first(p.get("order_type"), ini.get("type")),
+                        })
+                account["protections"] = prot
+            except Exception as e:  # noqa: BLE001
+                account["protections"] = []
+                meta["degraded"].append("protections")
+        else:
+            # 只开仓不管仓：保护单（TP/SL 条件单）同属持仓管理面，不注入 ——
+            # 否则模型仍会对着它写 modify_tp_sl（被执行层拒绝，白烧一轮）。
             account["protections"] = []
-            meta["degraded"].append("protections")
     # ── 按币分区（T5-a，见 docs/compose/spec/symbol-as-parameter.md [S2.4③]）──
     # 宇宙来自调用方的 symbols（唯一权威）。每行标 `in_universe`：账户可能是共享的，
     # 别人的持仓/挂单混在同一份快照里 —— 把「忽略别的 bot 的单」从提示词自律下沉为字段。

@@ -92,6 +92,9 @@ def _build_plan_runner(bot, paths: ProjectPaths):
         bot_root=paths.root,
         bot_id=bot.bot_id,
         account_risk=dict(getattr(bot, "account_risk", None) or {}),
+        # 持仓管理总闸与执行侧同源（config.manage_positions）：策略层看不到持仓，
+        # 执行层拒收管理动作，两边必须是同一个值（否则模型看着仓却被拒单）。
+        manage_positions=bool(getattr(bot, "manage_positions", True)),
         skills=(s.get("skills") if s.get("skills") is not None else getattr(bot, "skills", None)),
         skills_required=bool(s.get("skills_required", False)),
         risk=RiskConfig(

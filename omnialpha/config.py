@@ -46,6 +46,26 @@ class BotConfig:
     place_before_cancel: bool = False
     # own = only manage orders with text prefix t-{label}; all = wipe symbol (legacy)
     order_scope: str = "own"
+    # ── 持仓管理闸门（2026-10-13 账户归属事故后追加）──────────────────
+    # 背景：引擎没有「自开持仓」概念 —— order_scope 只按 label 过滤**订单**，
+    # get_positions() 是账户级全量；模型按人格「有仓必须给仓位管理结论」去管
+    # **账户里所有的仓**（含用户手动单）。实测：用户手动多 25 张 → bot 减 15
+    # + 挂 SL → 剩余 10 张被止损出局。根治靠账户隔离（bot 账户禁放手动单），
+    # 下面三个开关是**第二层防线**：让「止损/减仓/平仓」变成可选配置。
+    #
+    # manage_positions: false → 「只开仓、不管仓」模式：
+    #   · 快照 / account 工具不再注入持仓与保护单（模型看不到就无从管）
+    #   · executor 拒收 close/close_all/flatten/reduce*/modify_tp_sl/trail
+    #     （良性跳过：ok=True + gate_skipped，不触发整轮回滚）
+    #   · watcher 三条 sweep（auto_protect / peak_trail / give_back）同步熄火
+    #   ⚠️ 只适用于 brooks 类单腿策略。阶梯/网格（martin-grid）依赖
+    #   modify_tp_sl + resync_protectors 维护 SL 归并，关掉=挂完不管。
+    # allow_close: false → 只禁平仓（close/close_all/flatten），减仓与改保护放行
+    # allow_reduce: false → 只禁减仓（reduce*），平仓与改保护放行
+    # 三个都默认 true —— 不改变任何存量 bot 的行为。
+    manage_positions: bool = True
+    allow_close: bool = True
+    allow_reduce: bool = True
     # pre-trade: open/stop_entry must carry sl
     require_sl: bool = True
     # account-level risk: {halt, max_total_notional_usd, daily_loss_limit_usd, max_leverage}
@@ -463,6 +483,9 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
         default_replace=str(data.get("default_replace") or "none").strip().lower(),
         place_before_cancel=bool(data.get("place_before_cancel", False)),
         order_scope=str(data.get("order_scope") or "own").strip().lower(),
+        manage_positions=bool(data.get("manage_positions", True)),
+        allow_close=bool(data.get("allow_close", True)),
+        allow_reduce=bool(data.get("allow_reduce", True)),
         require_sl=bool(data.get("require_sl", True)),
         account=eff_account,
         account_risk=merged_risk,

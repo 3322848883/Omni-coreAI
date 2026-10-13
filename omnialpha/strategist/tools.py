@@ -1510,6 +1510,9 @@ def run_tool(
     deny: Optional[list] = None,
     # 【品种宇宙】：工具的 symbol 缺省策略要用它（见 strategist/symbols.py）
     symbols: Optional[list] = None,
+    # 持仓管理总闸（config.manage_positions）：false 时 account 工具不返回
+    # 持仓/保护单（只开仓不管仓的 bot 看不到就无从管；执行侧另有闸门兜底）
+    manage_positions: bool = True,
 
 
 ) -> Any:
@@ -1961,7 +1964,9 @@ def run_tool(
             pos = []
 
 
-            for p in (client.get_positions() or []):
+            # manage_positions=false（只开仓不管仓）：持仓不注入 —— 模型看不到
+            # 就无从按人格管仓；执行侧 Executor._management_gate 另有兜底。
+            for p in ((client.get_positions() or []) if manage_positions else []):
 
 
                 if int(p.get("size") or 0) == 0:
@@ -2105,7 +2110,8 @@ def run_tool(
                 try:
 
 
-                    for p in (client.list_price_orders(s) or []):
+                    # 保护单同属持仓管理面：manage_positions=false 时不查不返回
+                    for p in ((client.list_price_orders(s) or []) if manage_positions else []):
 
 
                         ini = p.get("initial") or {}
@@ -2171,6 +2177,13 @@ def run_tool(
                 "protections": price_orders,
 
 
+                # 只开仓不管仓：说清「为什么没有持仓数据」—— 否则空 positions 会被
+                # 误读成「查失败了」或「真的没仓」，模型照人格 §54 强行给管理结论。
+                **({} if manage_positions else {
+                    "note": ("manage_positions=false：本 bot 只开仓、不管仓 —— "
+                             "持仓与保护单数据不注入，禁止输出 close/reduce/"
+                             "modify_tp_sl/trail 等持仓管理动作"),
+                }),
             }
 
 
