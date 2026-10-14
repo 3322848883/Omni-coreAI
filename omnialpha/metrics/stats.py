@@ -216,6 +216,3 @@ def expectancy(realised: Sequence[float]) -> float:
         return 0.0
     return sum(rts) / len(rts)
 
-
-def sharpe_from_equity(equity: Sequence[float], periods_per_year: float = 365.0) -> float:
-    return sharpe(returns_from_equity(equity), periods_per_year)

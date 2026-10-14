@@ -411,6 +411,38 @@ def audit_observability() -> None:
 # ─────────────────────────────────────────────────────────────
 # 提示词层：系统契约 vs 策略人格的隔离
 # ─────────────────────────────────────────────────────────────
+def audit_dead_symbols() -> None:
+    """B14：零引用的公开符号（F3 棘轮）。"""
+    import ast
+    from collections import Counter
+
+    counts: Counter = Counter()
+    for p in ROOT.rglob("*.py"):
+        rel = p.relative_to(ROOT)
+        if "__pycache__" in rel.parts or ".worktrees" in rel.parts:
+            continue
+        counts.update(re.findall(r"[A-Za-z_][A-Za-z0-9_]*",
+                                 p.read_text(encoding="utf-8", errors="replace")))
+    dead = []
+    for p in sorted((ROOT / "omnialpha").rglob("*.py")):
+        if "__pycache__" in p.parts or p.name == "__init__.py":
+            continue
+        try:
+            tree = ast.parse(p.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+                continue
+            if node.name.startswith("_"):
+                continue
+            if counts[node.name] <= 1:
+                dead.append(f"{p.relative_to(ROOT).as_posix()}::{node.name}")
+    if dead:
+        fail(f"[B14] 零引用公开符号（建好没人调用）{len(dead)} 个：{dead[:5]}")
+    print(f"[B14] 零引用公开符号（{len(dead)} 个）           OK")
+
+
 def audit_repo_hygiene() -> None:
     """B13：仓库卫生 —— 根目录不留测试残留（`tmp*` / `x`）。
 
@@ -518,6 +550,7 @@ def main() -> int:
     audit_prompt_layer(bots)
     audit_observability()
     audit_repo_hygiene()
+    audit_dead_symbols()
 
     print()
     print("=" * 78)

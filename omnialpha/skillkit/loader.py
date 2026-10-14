@@ -196,9 +196,3 @@ def scan_skill_dirs(root: Path) -> list[Path]:
     walk(root, 0)
     return found
 
-
-def ensure_kebab_dirname(skill_dir: Path) -> None:
-    """目录名必须 kebab-case（validate 用）。"""
-    name = Path(skill_dir).name
-    if not KEBAB_RE.match(name):
-        raise SkillError(f"folder name {name!r} is not kebab-case")

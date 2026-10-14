@@ -247,15 +247,3 @@ def reconcile_protectors(executor: Any, symbol: str) -> dict:
         "kept": len(kept), "cancelled": cancelled,
     }
 
-
-def reconcile_bot(executor: Any, symbols: list[str]) -> dict:
-    """对一组 symbol 跑保护单对账，返回汇总。"""
-    out: dict = {"symbols": {}, "cancelled_total": 0}
-    for sym in symbols or []:
-        try:
-            res = reconcile_protectors(executor, sym)
-        except Exception as e:  # noqa: BLE001
-            res = {"ok": False, "error": str(e), "cancelled": []}
-        out["symbols"][sym] = res
-        out["cancelled_total"] += len(res.get("cancelled") or [])
-    return out

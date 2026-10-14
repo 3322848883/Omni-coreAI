@@ -1684,16 +1684,7 @@ class Executor:
             # t-mtg-sl，sz 9/1/1/6）。这里把同价旧单并进来，新单张数 = 旧单之和 +
             # 本档。**先挂新、后撤旧**：新单落盘前旧单一直在（无保护空窗）；新单挂
             # 失败则旧单原样保留（保护不退化）。
-            sl_size = exit_size
-            merge_ids: list[str] = []
-            if intent.sl_mode != "limit_order":
-                try:
-                    sl_size, merge_ids = self._plan_shared_sl(
-                        intent.symbol, pos_side, float(intent.sl), exit_size, meta)
-                except Exception as e:  # noqa: BLE001 — 归并只是优化，失败不该阻断挂 SL
-                    log.warning("shared-SL merge probe failed %s: %s",
-                                intent.symbol, e)
-                    sl_size, merge_ids = exit_size, []
+            sl_size, merge_ids = self._resolve_sl_size(intent, pos_side, exit_size, meta)
             rec_, err_ = self._place_exit_leg(
                 lambda: self._place_limit_exit(intent, pos_side, intent.sl, is_tp=False, meta=meta, size=sl_size)
                 if intent.sl_mode == "limit_order"
@@ -2773,6 +2764,41 @@ class Executor:
             side = "long" if raw_sz < 0 else "short"
             out.append((str(pid), px, abs(raw_sz), side))
         return out
+
+    def _resolve_sl_size(self, intent, pos_side: str, exit_size: int,
+                         meta) -> tuple[int, list[str]]:
+        """算出 SL 该挂多少张 + 要撤掉的同价旧单（F1）。
+
+        三步：
+          ① `sl_scope: shared` 的末层带 `sl_size_override`（= 全梯计划总量）→
+             **直接取它**，与 `tp_size_override` 对称。此前该字段**写了没人读**，
+             「全梯共用一条 SL」只能靠 ② 的同价归并逐档累加间接达成。
+          ② `_plan_shared_sl` 的同价归并（把旧同价单并进来 + 返回要撤的 id）。
+          ③ 若用了 ①，再钳制到**真实敞口**：`_plan_shared_sl` 只在「有同价旧单」
+             分支钳制，而末层先跑 / 前几档 SL 没挂上时 override 可能大于实际持仓 ——
+             这里兜底，保证**永不挂出超过敞口的 reduce_only 保护单**。
+
+        非 override 路径（`sl_scope: per_level` 与所有普通开仓）**逐字不变**：
+        第 ③ 步只在 ① 生效时执行。
+        """
+        override = int(intent.sl_size_override) if intent.sl_size_override else 0
+        sl_size = override or int(exit_size)
+        merge_ids: list[str] = []
+        if intent.sl_mode != "limit_order":
+            try:
+                sl_size, merge_ids = self._plan_shared_sl(
+                    intent.symbol, pos_side, float(intent.sl), sl_size, meta)
+            except Exception as e:  # noqa: BLE001 — 归并只是优化，失败不该阻断挂 SL
+                log.warning("shared-SL merge probe failed %s: %s", intent.symbol, e)
+                merge_ids = []
+        if override:
+            try:
+                cap = int(self._sl_cover_cap(intent.symbol, pos_side))
+                if cap > 0:
+                    sl_size = min(int(sl_size), cap)
+            except Exception as e:  # noqa: BLE001
+                swallow("executor._resolve_sl_size.cap", e, level=logging.WARNING)
+        return int(sl_size), merge_ids
 
     def _plan_shared_sl(self, symbol: str, pos_side: str, new_sl: float,
                         add_size: int, meta) -> tuple[int, list[str]]:

@@ -48,12 +48,3 @@ def render_catalog(
         )
     return "<skill_catalog>\n" + hint + "\n" + "\n".join(lines) + "\n</skill_catalog>"
 
-
-def catalog_prompt_hint() -> str:
-    """给 TOOL_GUIDE 的一小段说明。"""
-    return (
-        "【技能目录 skill_catalog】列出可加载的 skill（仅名称+简介）。"
-        "任务匹配某个 skill 时，调用 skill(name) 加载其完整指令；"
-        "不匹配则不要加载。skill 指令是分析方法论，只影响 Plan 的观点与理由，"
-        "不改变可下单动作与风控约束。"
-    )

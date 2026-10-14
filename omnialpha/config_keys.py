@@ -158,8 +158,3 @@ def find_unknown_keys(data: dict[str, Any]) -> list[str]:
 
     walk(data, "")
     return sorted(unknown)
-
-
-def known_keys() -> dict[str, frozenset[str]]:
-    """白名单快照（供文档生成 / 测试使用）。"""
-    return dict(SCHEMA)

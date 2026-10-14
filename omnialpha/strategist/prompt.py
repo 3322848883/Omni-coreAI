@@ -276,7 +276,16 @@ def build_messages(
     chart_base64: Optional[str] = None,
     skill_catalog: str = "",
 ):
-    """构建消息列表。chart_base64 非空时附 K 线图（vision 模式）。"""
+    """构建 messages 列表。chart_base64 非空时附 K 线图（vision 模式）。
+
+    **public API（供测试与工具脚本用）**：生产链路（`strategist/loop.py`）走
+    `build_system_prompt` + `build_user_prompt` + `memory.build_context` 手工拼装 ——
+    因为要按缓存优化顺序插入订单上下文/近况/触发器，本函数不参与那条路径。
+    保留它是为了给外部调用方一个**不需要 memory 依赖**的轻量入口。
+
+    分层不变量与生产路径一致：`system` 仍由 `build_system_prompt` 产出
+    （契约在前、人格殿后），本函数不会绕过它自己拼 system。
+    """
     system = build_system_prompt(strategy_prompt, skill_catalog=skill_catalog)
     text = build_user_prompt(snapshot, risk, symbols)
 
