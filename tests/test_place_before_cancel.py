@@ -79,8 +79,8 @@ class TestPlaceBeforeCancel(unittest.TestCase):
         ex._entry_gate = lambda i: None
         ex._snapshot_owned = lambda intents_, mode: (snapshot.append(mode), {})[-1] \
             if snapshot is not None else {}
-        ex._cancel_stale_owned = lambda pre, intents_, report: stale_calls.append(
-            [i.action for i in intents_])
+        ex._cancel_stale_owned = lambda pre, intents_, report, explicit_cancel_symbols=None: \
+            stale_calls.append([i.action for i in intents_])
         ex._rollback_newly_placed = lambda *a, **k: None
         signal = SignalFile(intents=intents)
         return ex.execute_signal(signal)
@@ -141,7 +141,7 @@ class TestPlaceBeforeCancel(unittest.TestCase):
         ex._execute_intent = _fail
         ex._entry_gate = lambda i: None
         ex._snapshot_owned = lambda intents_, mode: {}
-        ex._cancel_stale_owned = lambda pre, intents_, report: stale.append(1)
+        ex._cancel_stale_owned = lambda pre, intents_, report, explicit_cancel_symbols=None: stale.append(1)
         ex._rollback_newly_placed = lambda *a, **k: None
         signal = SignalFile(intents=[
             _intent("open_long", size_usd=28, sl=2345, price=2526),
@@ -195,7 +195,7 @@ class TestCombinedRiskCap(unittest.TestCase):
         ex._execute_intent = lambda i: StepResult(i.action, i.symbol, True, detail={})
         ex._entry_gate = lambda i: None
         ex._snapshot_owned = lambda intents_, mode: {}
-        ex._cancel_stale_owned = lambda pre, intents_, report: None
+        ex._cancel_stale_owned = lambda pre, intents_, report, explicit_cancel_symbols=None: None
         ex._rollback_newly_placed = lambda *a, **k: None
         with self.assertLogs("omnialpha.executor", level="WARNING") as cm:
             report = ex.execute_signal(SignalFile(intents=intents))

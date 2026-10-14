@@ -93,6 +93,9 @@ scripts/.deploy.env
 # 这里作为兜底：新写的测试若再漏登记，也不会污染 git status。
 tmp*/
 x/
+# tests/_skill_fixtures.py 在 import 期建 skillfix-<rand>/（atexit 清理，
+# Windows 文件锁下可能失败）→ 兜底忽略。
+skillfix-*/
 
 # 本地检查报告（各会话产物，不入库；verify_data/ 是历史跟踪目录，不在此列）
 reports/

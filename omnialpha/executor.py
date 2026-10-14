@@ -205,6 +205,16 @@ _INTENT_PRIORITY = {
     "hold": 9,
 }
 
+# 「管理类」动作：动仓 / 动保护，但**不动挂单簿**（与 _INTENT_PRIORITY 的 1/2/4 类同源）。
+# 用于 `_cancel_stale_owned` 的空窗守卫：只管理、不铺单的轮次里，replace 撤挂单簿
+# 没有任何承接物 → 一个轮次节拍的网格空窗（产线实测 2026-10-14，martin-grid 2 天
+# 16 次、每次 15~21min）。不含 open/add/stop_entry（那是铺单）与 cancel_*（那是显式
+# 撤单，单独走 explicit_cancel_symbols）。
+_MGMT_ONLY_ACTIONS = frozenset({
+    "modify_tp_sl", "reduce", "reduce_long", "reduce_short",
+    "close", "close_all", "close_long", "close_short", "flatten",
+})
+
 
 def _sort_intents_by_priority(intents: list) -> list:
     """按「先平仓 → 减仓 → 撤单 → 改保护 → 开仓」排序。
@@ -411,7 +421,16 @@ class Executor:
 
         # After successful steps: withdraw OLD owned orders (keep newly placed ids)
         if replace_mode != "none" and report.ok:
-            self._cancel_stale_owned(pre_owned, intents, report)
+            # A 修复（系统级网格空窗）：把「本轮有显式撤单意图的 symbol」一并传下去，
+            # 供 _cancel_stale_owned 判断「撤旧单到底有没有承接物」（详见该函数）。
+            # converted_cancels 是被 place_before_cancel 转换掉的 cancel_* —— 它们的
+            # 撤单语义已落到 stale 清理里，不能被「无承接物」守卫误杀。
+            cancel_syms = {
+                str(getattr(c, "symbol", "") or "") for c in converted_cancels
+            }
+            self._cancel_stale_owned(
+                pre_owned, intents, report, explicit_cancel_symbols=cancel_syms,
+            )
         return report
 
     def _replace_mode(self, signal: SignalFile, intents: list) -> str:
@@ -688,8 +707,16 @@ class Executor:
                     slot["order_ids"].add(oid)
         return snap
 
-    def _cancel_stale_owned(self, pre_owned: dict, intents: list, report: ExecReport) -> None:
-        """Cancel old owned orders that are not part of the new plan (place-before-cancel)."""
+    def _cancel_stale_owned(
+        self, pre_owned: dict, intents: list, report: ExecReport,
+        explicit_cancel_symbols: Optional[set] = None,
+    ) -> None:
+        """Cancel old owned orders that are not part of the new plan (place-before-cancel).
+
+        `explicit_cancel_symbols`：本轮带显式撤单意图（被 place_before_cancel 转换的
+        cancel_*）的 symbol 集合；空串 "" 代表全合约撤单意图。用于「无承接物守卫」——
+        详见下方 owned 路径的 A 修复说明。
+        """
         if self.order_scope == "all":
             # legacy wipe after new plan is in place
             positions, perr = self._positions_or_error()
@@ -768,6 +795,47 @@ class Executor:
             # 新保护单已就位；真有持仓对应的保护单仍由 `_should_keep_protection` 拦住。
             fresh_protection = bool(keep_price.get(sym))
             keep_pending = pending_entry and not fresh_protection
+
+            # ── A 修复（系统级网格空窗防护，2026-10-14）─────────────────────
+            # 撤旧单必须有「承接物」，否则撤了就是一个轮次节拍的网格空窗。
+            # 触发面（**管理轮**）：本轮对该 symbol 有「动仓/动保护但不动挂单簿」的
+            #   管理动作（modify_tp_sl / reduce* / close* / flatten），却没挂出新单。
+            #   此时 AI 明显是在管理已有持仓，不是重铺挂单簿 —— replace 把整梯撤空
+            #   就是 bug（产线实测 martin-grid 2 天 16 次、每次 15~21min 盘上无网格）。
+            # 承接物（二选一即可放行撤旧）：
+            #   ① 本轮为该 symbol 新挂出的 **普通单**（阶梯/入场挂单）—— 判据用「当前
+            #      普通单 id 集」减「本轮开始前的快照 id 集」，有新 id 即本轮挂了新挂单
+            #      （place-before-cancel 下新单此刻已就位）。
+            #   ② 本轮对该 symbol 的显式撤单意图（converted cancel_*）。
+            # ⚠️ 承接物**只认普通单**，绝不认条件单（TP/SL）：管理轮（modify_tp_sl）
+            #   本身就会挂一条新 TP，若把它算作承接物，守卫**永不触发** —— 实测
+            #   2026-10-14：本轮挂新 TP → placed_new=True → 10 张阶梯照撤、空窗照旧。
+            #   阶梯是普通单，它的承接物只能是新普通单。
+            # 边界（保持 replace 既有语义，不误伤）：空 intent 轮 / 纯 hold 轮不触发本
+            #   守卫 —— replace 的文档本义就是「挂新单前先撤旧单（anti-pile-up）」，
+            #   这类轮次在产线不会带非空挂单簿到达此处（hold 无 symbol → 快照为空），
+            #   保持原状以免改动作用域语义（test_dull_action_scope / test_cancel_safety
+            #   的 replace 作用域与持仓过滤契约）。
+            # 本守卫对**所有** trigger replace 的路径生效（含 default_replace=symbol
+            # 的配置型触发，与 bridge 的契约层修复互为纵深）。
+            placed_new = bool(set(cur_orders) - set(old_o))
+            has_cancel_intent = bool(
+                explicit_cancel_symbols
+                and (sym in explicit_cancel_symbols or "" in explicit_cancel_symbols)
+            )
+            is_mgmt_round = any(
+                str(getattr(i, "symbol", "") or "") in (sym, "")
+                and str(getattr(i, "action", "") or "").lower() in _MGMT_ONLY_ACTIONS
+                for i in intents
+            )
+            if is_mgmt_round and not placed_new and not has_cancel_intent:
+                report.results.append(StepResult(
+                    "replace_cancel", sym, True,
+                    detail={"skipped": "no_replacement", "prefix": prefix,
+                            "reason": "本轮未为该 symbol 挂新单且无显式撤单，"
+                                      "保留旧单避免网格空窗"}))
+                continue
+
             cancelled = []
             skipped = []
             for pid in sorted(old_p):
