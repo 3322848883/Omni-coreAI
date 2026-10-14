@@ -612,6 +612,40 @@ def cmd_persona_run(args) -> int:
             lock.release()
     return 0
 
+def acquire_run_locks(paths: "ProjectPaths", bots: dict, bot: Optional[str]):
+    """按「all ⊇ per-bot」取得运行锁。返回 `(lock, held)`；被占用时返回 `None`。
+
+    2026-10-14 N5：此前「跑全部」用 `data/bots/_all.run.lock`、「跑单个 bot」用
+    `data/bots/<bot>/state/run.lock` —— **两把锁互不相干**，于是 `run` 与
+    `run --bot X` 能同时驱动同一个 bot（两份进程各读同一 inbox、各自下单）。
+
+    修法（fail-closed）：
+      · `bot` 给定 → 只取该 bot 的 per-bot 锁；
+      · `bot` 为空（跑全部）→ 取 `_all` 锁**外加每个 bot 的 per-bot 锁**，
+        任一把拿不到就回滚已持有的并返回 `None`。
+    反向自然成立：某个 bot 在跑时，跑全部会拿不到它的锁而拒绝启动。
+    """
+    from .pidlock import PidLock
+
+    if bot:
+        lk = PidLock(paths.bot_paths(bot).lock_run).acquire()
+        return (lk, []) if lk is not None else None
+
+    all_lock = PidLock(paths.root / "data" / "bots" / "_all.run.lock").acquire()
+    if all_lock is None:
+        return None
+    held: list = []
+    for bid in sorted(bots):
+        lk = PidLock(paths.bot_paths(bid).lock_run).acquire()
+        if lk is None:
+            for h in held:
+                h.release()
+            all_lock.release()
+            return None
+        held.append(lk)
+    return (all_lock, held)
+
+
 def cmd_run(args) -> int:
     logging.basicConfig(
         level=logging.INFO,
@@ -619,26 +653,21 @@ def cmd_run(args) -> int:
     )
     paths = ProjectPaths(_root_from_args(args))
     paths.ensure()
-    from .pidlock import PidLock
-
-    # same lock path as supervisor: bot_paths().lock_run when --bot is set
-    if args.bot:
-        lock_path = paths.bot_paths(args.bot).lock_run
-        lock_name = f"{args.bot}/state/run.lock"
-    else:
-        lock_path = paths.root / "data" / "bots" / "_all.run.lock"
-        lock_name = "_all.run.lock"
-    lock = PidLock(lock_path).acquire()
-    if lock is None:
-        print(f"run already running ({lock_name})", flush=True)
-        return 3
     bots = load_all_bots(paths.config_dir)
+    got = acquire_run_locks(paths, bots, args.bot)
+    if got is None:
+        name = f"{args.bot}/state/run.lock" if args.bot else "_all.run.lock（或某个 bot 在跑）"
+        print(f"run already running ({name})", flush=True)
+        return 3
+    lock, held_locks = got
     try:
         run_forever(bots, paths, only=args.bot,
                     allow_disabled=bool(getattr(args, "allow_disabled", False)))
     except KeyboardInterrupt:
         print("bye")
     finally:
+        for h in held_locks:
+            h.release()
         if lock is not None:
             lock.release()
     return 0

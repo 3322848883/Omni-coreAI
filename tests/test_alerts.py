@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -100,7 +101,11 @@ class TestExecutorAlertHooks(unittest.TestCase):
             def get_account(self):
                 return {"total": "10000"}
 
-        store = AlertStore(Path(tempfile.mkdtemp()), "b1")
+        # `mkdtemp` 不自动清理 —— 不登记 cleanup 会在仓库根堆 `tmp*` 残留
+        # （2026-10-14 一次清理出 63 个，全是本文件与 test_venue_close 产的）。
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        store = AlertStore(root, "b1")
         ex = Executor(DummyClient(), alert_store=store)
         self.assertIs(ex.alert_store, store)
 
@@ -126,6 +131,7 @@ class TestExecutorAlertHooks(unittest.TestCase):
                 return True
 
         tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         store = AlertStore(tmp, "b1")
         ex = Executor(DummyClient(), label_prefix="bb", alert_store=store)
         cancelled = ex._cleanup_orphan_protectors("BTC_USDT")

@@ -411,6 +411,24 @@ def audit_observability() -> None:
 # ─────────────────────────────────────────────────────────────
 # 提示词层：系统契约 vs 策略人格的隔离
 # ─────────────────────────────────────────────────────────────
+def audit_repo_hygiene() -> None:
+    """B13：仓库卫生 —— 根目录不留测试残留（`tmp*` / `x`）。
+
+    根因是 `tempfile.mkdtemp()` 不自动清理（2026-10-14 一次清出 63 个 `tmp*`，
+    全部来自 test_alerts / test_venue_close）。已修调用点 + `.gitignore` 兜底，
+    这里再兜一层：残留重新出现时能立刻看到。
+    """
+    residue = []
+    for pat in ("tmp*", "x"):
+        for p in sorted(ROOT.glob(pat)):
+            if p.is_dir():
+                residue.append(p.name)
+    if residue:
+        warn(f"[B13] 仓库根有测试残留目录 {len(residue)} 个（{residue[:5]}…）—— "
+             f"检查测试是否漏登记 cleanup（tmp*/ 已在 .gitignore 兜底）")
+    print("[B13] 仓库卫生（无 tmp*/x 残留）            OK")
+
+
 def audit_prompt_layer(bots: dict) -> None:
     """C 段：保证「系统契约适用所有 bot、不受人格影响；人格多元化且互不影响」。
 
@@ -499,6 +517,7 @@ def main() -> int:
     audit_all_bots(bots, config_dir)
     audit_prompt_layer(bots)
     audit_observability()
+    audit_repo_hygiene()
 
     print()
     print("=" * 78)

@@ -9,6 +9,7 @@ vs 4 张持仓）。Gate 原生支持 `size=0` + `close=true`（dual 模式配
 **默认关闭**（`account_risk.use_venue_close`），因为需先在目标交易所实测
 `price_orders` 是否接受这些字段。默认路径行为完全不变。
 """
+import shutil
 import sys
 import tempfile
 import unittest
@@ -55,8 +56,11 @@ def _intent(side="long"):
 
 class TestVenueClose(unittest.TestCase):
     def _ex(self, client, **kw):
+        # `mkdtemp` 不自动清理 —— 必须登记 cleanup，否则仓库根堆 `tmp*` 残留。
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         return Executor(client, symbols_whitelist=["BTC_USDT"],
-                        root=Path(tempfile.mkdtemp()), bot_id="b1", **kw)
+                        root=root, bot_id="b1", **kw)
 
     def test_default_uses_explicit_size(self):
         """默认（未配 use_venue_close）→ 显式张数，行为不变。"""

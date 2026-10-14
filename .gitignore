@@ -87,3 +87,9 @@ config/.bots-backup/
 # 远程部署凭据（含密码，绝不入库）
 scripts/.deploy.env
 .gate-deploy.env
+
+# 测试残留（tempfile.mkdtemp 默认前缀 tmp；历史遗留目录 x/）
+# 根因已在 tests/test_alerts.py / test_venue_close.py 修掉（登记 cleanup），
+# 这里作为兜底：新写的测试若再漏登记，也不会污染 git status。
+tmp*/
+x/
