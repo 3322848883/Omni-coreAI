@@ -53,10 +53,8 @@ paper:
   feed_exchange: gate
   initial_capital: 10000
   leverage: 10
-  # ⚠️ 必须显式给 store_path：`BotConfig._create_paper_client` 解析 paper 账户库时
-  # 用的是 `OMNIALPHA_ROOT 或 CWD` + `data/bots/<id>/paper/account.db`，
-  # **完全不看 `--root`** —— 不给就会把账户写进当前工作目录、跨次运行叠加持仓。
-  store_path: {store}
+  # 刻意**不写** store_path：本脚本要验证「`--root` 本身就能隔离 paper 账户库」
+  # （2026-10-14 修复 `BotConfig.root` 之前，账户会落到 CWD 并跨次叠加持仓）。
 """
 
 SIGNAL = {
@@ -77,9 +75,8 @@ def main() -> int:
         (root / "config" / "bots.local").mkdir(parents=True)
         inbox = root / "data" / "bots" / BOT / "inbox"
         inbox.mkdir(parents=True)
-        store = root / "data" / "bots" / BOT / "paper" / "account.db"
         (root / "config" / "bots" / f"{BOT}.yaml").write_text(
-            BASELINE.format(bot=BOT, sym=SYM, store=store.as_posix()), encoding="utf-8")
+            BASELINE.format(bot=BOT, sym=SYM), encoding="utf-8")
         (root / "config" / "bots.local" / f"{BOT}.yaml").write_text(
             "enabled: true\naccount_risk:\n"
             "  auto_protect: true\n  auto_protect_sl_pct: 2.0\n", encoding="utf-8")
@@ -90,7 +87,10 @@ def main() -> int:
         print("1. 真实 CLI 端到端（once）")
         print("=" * 74)
         import os
-        env = dict(os.environ, OMNIALPHA_ROOT=str(root))   # 双保险：与 --root 一致
+        # 刻意**不设** OMNIALPHA_ROOT、也不写 paper.store_path：唯一能把账户库
+        # 放进临时根的就是 `--root`（即 `BotConfig.root`）。这样本脚本同时是
+        # 「`--root` 必须隔离 paper 账户」这条修复的回归护栏。
+        env = {k: v for k, v in os.environ.items() if k != "OMNIALPHA_ROOT"}
         r = subprocess.run(
             [sys.executable, "-m", "omnialpha", "--root", str(root), "once", "--bot", BOT],
             cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8",
@@ -135,6 +135,11 @@ def main() -> int:
               any(x.get("source") == "watcher" for x in rows), f"{len(rows)} 行")
         gb = root / "data" / "bots" / BOT / "state" / "give_back.json"
         check("give_back_pct 已落盘", gb.is_file() and "30" in gb.read_text(encoding="utf-8"))
+        # ── 隔离：paper 账户库必须在 --root 内，且不得污染仓库 data/ ──
+        store_in_tmp = root / "data" / "bots" / BOT / "paper" / "account.db"
+        check("paper 账户库落在 --root 内", store_in_tmp.is_file())
+        check("未污染仓库 data/（--root 隔离生效）",
+              not (ROOT / "data" / "bots" / BOT).exists())
 
         # ── 2. 程序层 sweep ──
         print()

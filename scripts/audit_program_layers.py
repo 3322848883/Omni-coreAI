@@ -310,6 +310,14 @@ def audit_all_bots(bots: dict, config_dir: Path) -> None:
         fail("[B10] give_back 留痕把平仓市价单 id 写成了 `order`（会污染 is_ours）")
     print("[B10] 留痕键名不污染归属判据                OK")
 
+    # ── B11 paper 账户库必须跟随项目根（`--root` 才能隔离） ──
+    cfg_src = _src("omnialpha/config.py")
+    if "root: str" not in cfg_src:
+        fail("[B11] BotConfig 缺 root 字段 —— `--root` 无法隔离 paper 账户库")
+    if "self.root" not in _body(cfg_src, "_create_paper_client"):
+        fail("[B11] _create_paper_client 未使用 BotConfig.root → 账户会落进 CWD")
+    print("[B11] paper 账户库跟随项目根（--root 隔离）  OK")
+
 
 def main() -> int:
     config_dir = ROOT / "config" / "bots"

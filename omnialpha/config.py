@@ -86,6 +86,12 @@ class BotConfig:
     exchange: str = "gate"
     # paper trading: {feed_exchange, initial_capital, leverage, fee_rate, ...}
     paper: dict = field(default_factory=dict)
+    # 本 bot 配置所在的**项目根**（`<root>/config/bots/<id>.yaml` → `<root>`），
+    # 由 `load_bot_config` 从配置文件路径推出。**只有它能让 `--root` 真正隔离**：
+    # paper 账户库路径必须跟着它走，否则 `--root <tmp>` 只隔离了配置、账户仍写进
+    # CWD（2026-10-14 实测：同一信号跑两次，持仓 3 → 6 张叠加）。
+    # 直接构造 BotConfig 时为空 → 回退 `OMNIALPHA_ROOT` / CWD（旧行为不变）。
+    root: str = ""
 
     def create_client(self):
         from .exchanges import create_exchange
@@ -114,8 +120,13 @@ class BotConfig:
         feed = create_exchange(feed_name, env=feed_env, api_key=key, api_secret=secret)
         store_path = pc.get("store_path")
         if not store_path:
-            root = _P(os.environ.get("OMNIALPHA_ROOT") or _P.cwd())
-            store_path = root / "data" / "bots" / self.bot_id / "paper" / "account.db"
+            # 优先级：bot 自己的**项目根**（由 `--root` / 配置文件位置推出）
+            # > `OMNIALPHA_ROOT` > CWD。
+            # 少了第一项，`--root <tmp>` 就只隔离配置、账户仍落进 CWD ——
+            # 跨次运行持仓叠加（实测同信号两次 3 → 6 张，SL 覆盖 4/6 对不上）。
+            base = _P(self.root) if self.root else _P(
+                os.environ.get("OMNIALPHA_ROOT") or _P.cwd())
+            store_path = base / "data" / "bots" / self.bot_id / "paper" / "account.db"
         cfg = {
             "initial_capital": pc.get("initial_capital", 10000),
             "leverage": pc.get("leverage", 20),
@@ -494,6 +505,10 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
         account_risk=merged_risk,
         strategist=strategist,
         paper=dict(data.get("paper") or {}),
+        # 项目根：`<root>/config/bots/<id>.yaml` → 往上三层
+        # （bots → config → <root>，与 `ProjectPaths.config_dir` 同布局）。
+        # 这是 `--root` 能真正隔离 paper 账户库的唯一依据（见 `_create_paper_client`）。
+        root=str(Path(path).resolve().parents[2]),
     )
     _warn_risk_switch_conflicts(path, bot)
     return bot

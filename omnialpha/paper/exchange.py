@@ -63,7 +63,11 @@ class PaperExchange(ExchangeClient):
 
             # .../data/bots/<bot_id>/paper/account.db → root + bot_id
             bot_id = store_path.parent.parent.name
-            root = store_path.parent.parent.parent.parent
+            # 往上 **5** 层才是项目根：paper → <bot_id> → bots → data → <root>。
+            # 原先只数了 4 层，拿到的是 `<root>/data`，于是 paper 引擎的告警落到
+            # `<root>/data/data/bots/<id>/state/alerts.json`（实测残留目录
+            # `data/data/bots/...`）。`parents[4]` 与 docstring 的布局一致。
+            root = store_path.parents[4]
             if not bot_id or bot_id == "data":
                 return None
             return AlertStore(root, bot_id)
