@@ -18,6 +18,10 @@ _ENTRY_ACTIONS = frozenset({
     "stop_entry_long", "stop_entry_short",
 })
 
+# 「显式撤单」动作 —— 与 executor._INTENT_PRIORITY 的第 3 类（撤单）同源。
+# ⚠️ 两处必须一致：`tests/test_plan_cancel_needs_entry.py::TestCancelSetInSync` 守这条。
+_CANCEL_ACTIONS = frozenset({"cancel_all", "cancel_price_all", "cancel_trail_all"})
+
 
 def chips_to_signal(plan: Plan, risk_result: RiskResult, bot_id: str = "") -> dict[str, Any]:
     """Map accepted chips to one SignalFile payload (orders[] + replace)."""
@@ -39,6 +43,52 @@ def chips_to_signal(plan: Plan, risk_result: RiskResult, bot_id: str = "") -> di
             item["meta"]["from_action"] = "hold"
         orders.append(item)
 
+    # ── 「撤单腿失去承接物」剥离（2026-10-14 网格空窗复发，破坏性半执行）────────
+    # LLM 的一轮计划常是「撤旧梯 + 重铺 N 层」= `cancel_all` + `open_long` × N。
+    # 风控是**逐 chip** 裁决的，而且低置信度的入场腿不是被丢，而是被**降级成 hold**
+    # （`risk.apply_risk`，`drop_on_low_conf=False`）→ 到了这里就是「计划本想铺单、
+    # 但通过风控的入场腿一条都没有」。
+    # 此时若照旧把 `cancel_all` 发出去，引擎的 `place_before_cancel` 会把它转成
+    # 「撤掉快照差集」→ **整梯被撤光且零替补** → 一个轮次节拍的网格空窗。
+    # 实测 2026-10-14 16:26:36：LLM `plan_reasoning` = 「旧梯首档距现价仅6点不合规,
+    # 重铺10层」，10 条 open_long 因 `confidence 0.0 < 0.55` 全被降级 → 只剩
+    # `cancel_all + modify_tp_sl` 落盘 → 10 张阶梯被撤空，直到 16:47:53 才重铺
+    # （**空窗 ≈18 分钟**）。破坏性的一半执行了、建设性的一半没有 —— 这是典型的
+    # 半执行事故。
+    #
+    # 判据：**计划里本来有入场腿、但通过风控的入场腿一条都没有** → 撤单腿是在为
+    # 「重铺」让位，而重铺没发生 → 剥掉撤单腿。
+    # 反例（必须保留撤单）：计划里**本就没有**入场腿（AI 单纯想清空挂单簿）→
+    # 撤单就是它的意图本身，照发；计划里的入场腿通过了 → 撤单是为重铺让位，照发
+    # （此时 `replace=symbol`，新梯接替旧梯）。
+    plan_entry_syms = {
+        str(getattr(c, "symbol", "") or "").strip().upper()
+        for c in (getattr(plan, "chips", None) or [])
+        if str(getattr(c, "action", "") or "").lower() in _ENTRY_ACTIONS
+    }
+    accepted_entry_syms = {
+        str(o.get("symbol") or "").strip().upper()
+        for o in orders
+        if str(o.get("action") or "").lower() in _ENTRY_ACTIONS
+    }
+    dropped_cancels: list[dict[str, Any]] = []
+    if plan_entry_syms:
+        kept: list[dict[str, Any]] = []
+        for o in orders:
+            act = str(o.get("action") or "").lower()
+            if act in _CANCEL_ACTIONS:
+                sym = str(o.get("symbol") or "").strip().upper()
+                orphaned = (
+                    (sym in plan_entry_syms and sym not in accepted_entry_syms)
+                    if sym
+                    else not (plan_entry_syms & accepted_entry_syms)
+                )
+                if orphaned:
+                    dropped_cancels.append({"symbol": sym or "<all>", "action": act})
+                    continue
+            kept.append(o)
+        orders = kept
+
     # ── replace 语义收紧（系统级网格空窗修复，2026-10-14）────────────────────
     # 原实现无条件给每个 LLM 计划打上 `replace: symbol`。引擎据此在本轮新单挂完后，
     # 撤掉该 symbol 上「快照里有、新计划里没有」的旧 owned 单。问题是：当本轮计划
@@ -54,6 +104,13 @@ def chips_to_signal(plan: Plan, risk_result: RiskResult, bot_id: str = "") -> di
     has_entry = any(
         str(o.get("action") or "").lower() in _ENTRY_ACTIONS for o in orders
     )
+    notes = list(risk_result.notes)
+    if dropped_cancels:
+        notes.append(
+            "剥掉撤单腿（计划里的入场腿一条都没通过风控 → 撤单失去承接物，"
+            "照发会变成只撤不挂的网格空窗）: "
+            + ", ".join(f"{d['symbol']}/{d['action']}" for d in dropped_cancels)
+        )
     payload: dict[str, Any] = {
         "replace": "symbol" if has_entry else "none",
         "orders": orders,
@@ -62,7 +119,8 @@ def chips_to_signal(plan: Plan, risk_result: RiskResult, bot_id: str = "") -> di
             "plan_reasoning": plan.reasoning,
             "kind": "llm_plan",
             "bot_id": bot_id,
-            "risk_notes": risk_result.notes,
+            "risk_notes": notes,
+            "dropped_cancels": dropped_cancels,
             "rejected": [
                 {"symbol": c.symbol, "action": c.action, "confidence": c.confidence}
                 for c in risk_result.rejected
