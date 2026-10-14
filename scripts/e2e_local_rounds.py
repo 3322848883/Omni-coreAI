@@ -234,9 +234,14 @@ def main() -> int:
         print("-" * 100)
         print("不变量与留痕：")
         final = rows[-1][2]
-        check("末轮已全平（持仓 0）", final["pos"] == 0, f"pos={final['pos']}")
-        check("末轮无遗留保护单（孤儿已清）", len(final["prot"]) == 0,
-              str(final["prot"]))
+        # 末态断言只在**跑完整套剧本**（含第 6 轮全平）时成立；
+        # `--rounds 3` 这类截断跑没到 close 步，持仓本就该还在。
+        if rounds >= 6:
+            check("末轮已全平（持仓 0）", final["pos"] == 0, f"pos={final['pos']}")
+            check("末轮无遗留保护单（孤儿已清）", len(final["prot"]) == 0,
+                  str(final["prot"]))
+        else:
+            print(f"  （轮数 {rounds} < 6：未跑到全平步骤，跳过末态断言）")
         over = [f"R{i}: cover={s['sl_cover']} pos={s['pos']}"
                 for i, _a, s, _sw, _n in rows if s["sl_cover"] > s["pos"]]
         check("每轮 SL 覆盖 ≤ 持仓（程序不挂超配保护单）", not over, "; ".join(over))
