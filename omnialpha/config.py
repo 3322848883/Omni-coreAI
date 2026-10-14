@@ -33,6 +33,10 @@ class BotConfig:
     max_orders_per_file: int = 20
     max_files_per_run: int = 50
     poll_interval_sec: float = 2.0
+    # 守护扫描的**币数上限**（成本闸门）：币越多每轮 REST 调用越多，无上限时扫描周期
+    # 随 N 线性拉长。超限只扫前 N 个并告警 + 落 `over_cap`（2026-10-14 N4：此前是模块
+    # 常量 `watcher._SCAN_SYMBOL_CAP`，bot 加币只会被静默少扫，无从调）。
+    max_scan_symbols: int = 12
     label_prefix: str = ""
     # free      = no entry gating (multi-strategy / same account)
     # manage_only = with position: only add/reduce/close/tp-sl replace (no new entry)
@@ -496,6 +500,8 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
         max_orders_per_file=int(data.get("max_orders_per_file") or 20),
         max_files_per_run=int(data.get("max_files_per_run") or 50),
         poll_interval_sec=float(data.get("poll_interval_sec") or 2.0),
+        # 0 / 未配 → 回落到 watcher 的默认上限（不改变存量行为）
+        max_scan_symbols=int(data.get("max_scan_symbols") or 12),
         label_prefix=str(data.get("label_prefix") or ""),
         exchange=exchange,
         position_policy=str(data.get("position_policy") or "strict").strip().lower(),

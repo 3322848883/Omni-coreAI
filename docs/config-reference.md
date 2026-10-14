@@ -17,7 +17,7 @@
 
 Bot 配置文件顶层（`config/bots/<id>.yaml`；启用走 `config/bots.local/`）
 
-共 **30** 个键：
+共 **31** 个键：
 
 - `account`
 - `account_risk`
@@ -38,6 +38,7 @@ Bot 配置文件顶层（`config/bots/<id>.yaml`；启用走 `config/bots.local/
 - `max_files_per_run`
 - `max_notional_usd`
 - `max_orders_per_file`
+- `max_scan_symbols`
 - `order_scope`
 - `paper`
 - `place_before_cancel`

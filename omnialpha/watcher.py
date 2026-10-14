@@ -14,6 +14,7 @@ from .config import BotConfig
 from .executor import ExecReport, Executor
 from .gate_client import GateApiError
 from .monitoring.alerts import TYPE_PEAK_TRAIL
+from .observability import swallow
 from .schema import SchemaError, parse_signal
 
 log = logging.getLogger("omnialpha.watcher")
@@ -167,12 +168,20 @@ def guard_scan_set(bot: BotConfig, client=None) -> dict:
                     extra.append(sym)
 
     scanned = universe + extra
-    if len(scanned) > _SCAN_SYMBOL_CAP:
-        for sym in scanned[_SCAN_SYMBOL_CAP:]:
+    cap = int(getattr(bot, "max_scan_symbols", 0) or 0) or _SCAN_SYMBOL_CAP
+    if len(scanned) > cap:
+        for sym in scanned[cap:]:
             skipped.append({"symbol": sym, "reason": "over_cap"})
-        scanned = scanned[:_SCAN_SYMBOL_CAP]
+        scanned = scanned[:cap]
+        # 超限是**成本闸门**生效，但也意味着「配了却没被守护的币」。此前只有一条
+        # log.warning 且上限不可配（模块常量），调用方拿到的 `skipped` 无人消费 ——
+        # 现在计数进 observability（供 health/巡检读），且上限可按 bot 配。
+        swallow("watcher.guard_scan_set.over_cap",
+                f"{len(universe) + len(extra) - cap} symbols skipped",
+                level=logging.WARNING,
+                note=f"{bot.bot_id}: cap={cap} universe={len(universe)} extra={len(extra)}")
         log.warning("guard scan %s: 币数 %d 超过上限 %d，本轮只扫前 %d 个（其余标记 over_cap）",
-                    bot.bot_id, len(universe) + len(extra), _SCAN_SYMBOL_CAP, _SCAN_SYMBOL_CAP)
+                    bot.bot_id, len(universe) + len(extra), cap, cap)
 
     positions: list[str] = []
     if client is not None:

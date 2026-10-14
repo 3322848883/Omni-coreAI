@@ -332,6 +332,85 @@ def audit_all_bots(bots: dict, config_dir: Path) -> None:
 # ─────────────────────────────────────────────────────────────
 # 提示词层：系统契约 vs 策略人格的隔离
 # ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# 可观测性：吞异常棘轮
+# ─────────────────────────────────────────────────────────────
+#: 裸吞异常（`except ...:` 后直接 pass / return 空）的**基线计数**。
+#: 棘轮语义：任何文件**不得超过**这里的数字（只能减少）。
+#: 允许「吞」，但要求「新增的吞必须走 `observability.swallow()` 留痕+计数」。
+_BARE_SWALLOW_BASELINE: dict[str, int] = {
+    "omnialpha/__main__.py": 2, "omnialpha/broadcast.py": 1,
+    "omnialpha/config.py": 2, "omnialpha/exchanges/binance.py": 1,
+    "omnialpha/exchanges/bitget.py": 1, "omnialpha/exchanges/bybit.py": 1,
+    "omnialpha/exchanges/hyperliquid.py": 3, "omnialpha/exchanges/okx.py": 1,
+    "omnialpha/executor.py": 28, "omnialpha/gate_client.py": 4,
+    "omnialpha/ledger.py": 1, "omnialpha/memory/cache_guard.py": 1,
+    "omnialpha/memory/context.py": 3, "omnialpha/memory/exchange_pnl.py": 9,
+    "omnialpha/memory/forget.py": 1, "omnialpha/memory/journal.py": 3,
+    "omnialpha/metrics/scoreboard.py": 1, "omnialpha/metrics/series.py": 2,
+    "omnialpha/metrics/trials.py": 1, "omnialpha/migrate.py": 1,
+    "omnialpha/monitoring/alerts.py": 1, "omnialpha/monitoring/decay.py": 3,
+    "omnialpha/monitoring/health.py": 4, "omnialpha/monitoring/notify.py": 1,
+    # observability 自身的 `except: pass` 是刻意的（可观测性绝不冒泡）
+    "omnialpha/observability.py": 1,
+    "omnialpha/paper/engine.py": 3, "omnialpha/paper/exchange.py": 3,
+    "omnialpha/paper/store.py": 2, "omnialpha/paths.py": 1,
+    "omnialpha/persona/orders.py": 2, "omnialpha/persona/runner.py": 12,
+    "omnialpha/pidlock.py": 5, "omnialpha/reconcile.py": 3,
+    "omnialpha/skillkit/journal.py": 5, "omnialpha/strategist/indicators.py": 1,
+    "omnialpha/strategist/llm_client.py": 2, "omnialpha/strategist/loop.py": 27,
+    "omnialpha/strategist/market.py": 3, "omnialpha/strategist/schema.py": 2,
+    "omnialpha/strategist/snapshot.py": 3, "omnialpha/strategist/symbols.py": 1,
+    "omnialpha/strategist/taker_delta.py": 1, "omnialpha/strategist/tools.py": 6,
+    "omnialpha/strategist/tv_indicators/wyckoff.py": 1,
+    "omnialpha/strategist/tv_tools.py": 2, "omnialpha/supervisor.py": 2,
+    "omnialpha/tradelog.py": 2, "omnialpha/watchdog.py": 4,
+    "omnialpha/watcher.py": 16,
+}
+
+_BARE_SWALLOW_RE = re.compile(
+    r"except[^\n]*:\s*(?:#[^\n]*)?\n\s+"
+    r"(pass|return None|return \[\]|return \{\}|return 0|return \"\")\s*(?:#.*)?$",
+    re.M)
+
+
+def _bare_swallow_counts() -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for p in sorted((ROOT / "omnialpha").rglob("*.py")):
+        if "__pycache__" in p.parts:
+            continue
+        n = len(_BARE_SWALLOW_RE.findall(p.read_text(encoding="utf-8")))
+        if n:
+            counts[p.relative_to(ROOT).as_posix()] = n
+    return counts
+
+
+def audit_observability() -> None:
+    """D 段：吞异常棘轮（只允许减少）+ observability 模块存在性。"""
+    try:
+        from omnialpha.observability import counts, swallow  # noqa: F401
+        ok = callable(swallow) and callable(counts)
+    except Exception as e:  # noqa: BLE001
+        fail(f"[B12] 无法导入 observability：{e}")
+        ok = False
+    if ok:
+        print("[B12] observability 模块（留痕+计数）        OK")
+
+    counts_now = _bare_swallow_counts()
+    grew = {k: (v, _BARE_SWALLOW_BASELINE.get(k, 0))
+            for k, v in counts_now.items()
+            if v > _BARE_SWALLOW_BASELINE.get(k, 0)}
+    if grew:
+        detail = ", ".join(f"{k} {b}→{n}" for k, (n, b) in sorted(grew.items()))
+        fail(f"[B12] 裸吞异常比基线更多（新增的吞必须走 observability.swallow）：{detail}")
+    else:
+        print(f"[B12] 裸吞异常未超基线（{sum(counts_now.values())}"
+              f" ≤ {sum(_BARE_SWALLOW_BASELINE.values())}）  OK")
+
+
+# ─────────────────────────────────────────────────────────────
+# 提示词层：系统契约 vs 策略人格的隔离
+# ─────────────────────────────────────────────────────────────
 def audit_prompt_layer(bots: dict) -> None:
     """C 段：保证「系统契约适用所有 bot、不受人格影响；人格多元化且互不影响」。
 
@@ -419,6 +498,7 @@ def main() -> int:
     audit_single_bot(bots)
     audit_all_bots(bots, config_dir)
     audit_prompt_layer(bots)
+    audit_observability()
 
     print()
     print("=" * 78)

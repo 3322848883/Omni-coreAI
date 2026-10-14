@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .gate_client import GateApiError, GateClient, resolve_symbol
+from .observability import swallow
 from .schema import (
     Intent,
     SignalFile,
@@ -894,7 +895,10 @@ class Executor:
     def _symbol_positions(self, symbol: str) -> list[dict]:
         try:
             positions = self.client.get_positions() or []
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            # 关键路径：账户取数失败被吞成空列表时，调用方会看到「无持仓」而不是
+            # 「取数失败」—— 这正是 2026-10-13 事故那类误判的温床。留痕 + 计数。
+            swallow("executor._symbol_positions", e, level=logging.WARNING)
             return []
         return _parse_symbol_positions(positions, symbol)
 
