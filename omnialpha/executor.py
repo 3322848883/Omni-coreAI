@@ -301,6 +301,10 @@ class Executor:
         self.place_before_cancel = bool(place_before_cancel)
         # P0.4 告警落盘：权益偏离 / 孤儿保护单
         self.alert_store = alert_store
+        # 本轮**将要被撤掉的旧普通单 id 集**（`execute_signal` 每轮重算；见 `_sl_cover_cap`）。
+        # 只被 `_open` → `_resolve_sl_size` → `_sl_cover_cap` 读取，而它只在**轮内**被调用，
+        # 所以即使跨轮残留也不会被别的路径读到（撤掉的旧 id 也不会再出现在挂单簿里）。
+        self._round_replaced_order_ids: set = set()
 
     def execute_signal(self, signal: SignalFile) -> ExecReport:
         report = ExecReport()
@@ -351,6 +355,22 @@ class Executor:
                 replace_mode = "all" if need_all_snapshot else "symbol"
         pre_owned = self._snapshot_owned(
             snapshot_intents if converted_cancels else intents, replace_mode
+        )
+        # ── 本轮「将被撤掉的旧普通单」预登记（2026-10-14，修 SL 超配）──────────
+        # `_cancel_stale_owned` 的语义是「撤掉本轮开始前快照里的**全部** owned 普通单」
+        # （`old_o` 整体撤，只有 reduce_only 保护单会被 `_should_keep_protection` 留下，
+        # 而 `_should_keep_protection` 对非 reduce_only 一律返回 False）→ 本轮结束后
+        # **旧梯一张不剩**。而 `place_before_cancel`（先挂后撤）期间新旧梯同时在场，
+        # `_sl_cover_cap` 会把旧梯也计入敞口 → 归并出来的 SL 张数 = 持仓 + 旧梯 + 新梯
+        # ＝**多算一整梯**（产线实测：持仓 5 + 挂单 26 → SL 57 而非 31）。
+        # 这里把旧梯 id 预登记下来，供 `_sl_cover_cap` 排除 —— 只在**本轮确实要撤旧**
+        # （replace_mode != none）时才登记：replace=none 的轮次旧梯会留着，不能排除。
+        self._round_replaced_order_ids = (
+            set().union(*(
+                (slot.get("order_ids") or set()) for slot in pre_owned.values()
+            ))
+            if replace_mode != "none" and pre_owned
+            else set()
         )
 
         # 审计留痕：撤类转换必须可见（否则复盘「这轮为什么没撤单」时无从归因）
@@ -2921,6 +2941,13 @@ class Executor:
         **同向**：买单（size>0）建多头、卖单建空头，与保护单 reduce-only 的
         符号方向一致。普通单的 `left` = 未成交张数。
 
+        **排除「本轮将被撤掉的旧梯」**（`_round_replaced_order_ids`）：`place_before_cancel`
+        期间新旧梯同时在场，不排除就会把旧梯算进敞口 → SL 多算一整梯
+        （产线实测 2026-10-14：持仓 5 + 挂单 26 → SL 57 而非 31，且因为管理轮有
+        no-op churn 守卫、铺单轮 cap 同样是放大值，57 会一直卡住不回落）。
+        该集合只由 `execute_signal` 在 `replace_mode != none` 时登记，其余时刻为空集
+        = 行为逐字不变。
+
         查不到（API 抖动）时 `_owned_open_orders` 返回空 → 上限退化成持仓量 →
         归并被削到「只覆盖已成交」= 安全侧（少并、不多挂）。
         """
@@ -2928,6 +2955,7 @@ class Executor:
         for p in self._symbol_positions(symbol):
             if str(p.get("side") or "") == pos_side:
                 pos += abs(int(p.get("size") or 0))
+        replaced = getattr(self, "_round_replaced_order_ids", None) or set()
         pend = 0
         for o in self._owned_open_orders(symbol, self._own_prefix("")):
             if str(o.get("status") or "").lower() not in ("open", ""):
@@ -2939,6 +2967,8 @@ class Executor:
                 continue
             if size == 0 or left <= 0:
                 continue
+            if str(o.get("id") or "") in replaced:
+                continue          # 本轮即将撤掉的旧梯 → 不算进敞口
             if (size > 0) == (pos_side == "long"):
                 pend += left
         return pos + pend
