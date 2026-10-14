@@ -166,10 +166,28 @@ class PaperExchange(ExchangeClient):
         return _price_order_view(o)
 
     def list_orders(self, contract: Optional[str] = None) -> list:
-        return [_order_view(o) for o in self.store.list_orders(contract=contract)]
+        """与 Gate `/orders` 对齐：**只返回未终结的单**（open / 部分成交）。
+
+        paper 库是**全量台账**（含 filled / cancelled / rejected 的历史行），而真实
+        Gate `/orders` 只列当前挂着的单。不过滤的后果（2026-10-14 多轮本地实跑发现）：
+        `_has_pending_entry` 会把**已成交的入场单**当成「还在挂」→ 该 symbol 的孤儿
+        保护单永远清不掉；`guard_scan_set` 也会把早已成交的合约当成「本 bot 有归属痕迹」。
+        """
+        rows = [o for o in self.store.list_orders(contract=contract)
+                if o.get("status") not in (ORDER_FILLED, ORDER_CANCELLED, ORDER_REJECTED)]
+        return [_order_view(o) for o in rows]
 
     def list_price_orders(self, contract: Optional[str] = None) -> list:
-        return [_price_order_view(o) for o in self.store.list_price_orders(contract=contract)]
+        """与 Gate `/price_orders` 对齐：只返回**活跃**条件单（未终结）。
+
+        同上：不过滤时，已被撤/已触发的 TP/SL 仍会出现在 `list_price_orders` 里 ——
+        表现为「全平后保护单还在」（实为 `status=cancelled` 的历史行），既误导本地
+        验证，也会让 `_plan_shared_sl` 的同价归并把历史单并进来**放大张数**。
+        """
+        dead = ("cancelled", "finished", "filled", "triggered", "failed", "closed")
+        rows = [o for o in self.store.list_price_orders(contract=contract)
+                if str(o.get("status") or "").lower() not in dead]
+        return [_price_order_view(o) for o in rows]
 
     def cancel_order(self, order_id: str) -> Any:
         o = self.store.get_order(str(order_id))

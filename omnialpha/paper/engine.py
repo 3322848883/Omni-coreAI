@@ -33,9 +33,36 @@ def _now() -> int:
 
 
 def _order_view(order: dict) -> dict:
-    """对齐 Gate 订单字段：id / text / status / size / price / tif。"""
+    """对齐 Gate 订单字段：id / text / status / size / price / tif / **left** / is_reduce_only。
+
+    `left` 与 `is_reduce_only` 是**必需**的对齐字段（2026-10-14 本地多轮实跑发现）：
+    paper 库行只有 `size` / `filled_size` / `reduce_only`，而
+    `Executor._has_pending_entry` 读的是 `o.get("left")` —— 缺字段时它按「可能未成交」
+    保守处理（`left is None → return True`），于是 **paper 环境下只要库里有历史成交单，
+    该 symbol 的孤儿保护单就永远清不掉**。
+
+    实测（`scripts/e2e_local_rounds.py` 6 轮）：全平后 5 条保护单原地不动、
+    `orphan_protector` 告警持续发出、`reconcile` 因 `target_size<=0` 也不接管 ——
+    两条清理路径同时失效。真实 Gate `/orders` 只返回**未成交**单，所以这不是线上
+    问题；但 `env: paper` 的 bot 会一直带着清不掉的保护单，本地验证也会被误导。
+
+    `finish_as` 同样对齐（`_open` 用它判断入场单是否全部成交）。
+    """
     out = dict(order)
     out["id"] = order.get("order_id")
+    status = str(order.get("status") or "")
+    try:
+        size = float(order.get("size") or 0)
+        filled = abs(float(order.get("filled_size") or 0))
+    except (TypeError, ValueError):
+        size, filled = 0.0, 0.0
+    if status == "filled":
+        out["left"] = 0.0
+    else:
+        # `left` 是**带符号**剩余量（Gate 对卖单返回负 size/left）——保持同号
+        out["left"] = size + filled if size < 0 else size - filled
+    out["is_reduce_only"] = bool(order.get("reduce_only"))
+    out["finish_as"] = "filled" if status == "filled" else None
     return out
 
 
