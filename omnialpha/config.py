@@ -11,7 +11,9 @@ from typing import Optional
 
 import yaml
 
+from .config_keys import find_unknown_keys
 from .gate_client import GateApiError, GateClient, load_credentials, resolve_symbol
+from .paths import resolve_root
 
 log = logging.getLogger("omnialpha.config")
 
@@ -121,11 +123,10 @@ class BotConfig:
         store_path = pc.get("store_path")
         if not store_path:
             # 优先级：bot 自己的**项目根**（由 `--root` / 配置文件位置推出）
-            # > `OMNIALPHA_ROOT` > CWD。
+            # > `OMNIALPHA_ROOT` > CWD —— 回落段走单一入口 `paths.resolve_root()`。
             # 少了第一项，`--root <tmp>` 就只隔离配置、账户仍落进 CWD ——
             # 跨次运行持仓叠加（实测同信号两次 3 → 6 张，SL 覆盖 4/6 对不上）。
-            base = _P(self.root) if self.root else _P(
-                os.environ.get("OMNIALPHA_ROOT") or _P.cwd())
+            base = _P(self.root).expanduser().resolve() if self.root else resolve_root()
             store_path = base / "data" / "bots" / self.bot_id / "paper" / "account.db"
         cfg = {
             "initial_capital": pc.get("initial_capital", 10000),
@@ -367,8 +368,12 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
             "baseline %s has enabled: true — IGNORED (enable via %s/%s instead)",
             path.name, ov_dir.name, path.name,
         )
+    # 未知键（typo / 已废弃键）→ 告警。基线 + overlay 分开查 —— 两个文件都可能写错。
+    # 阶段 1 只 WARN（理由见 config_keys 模块 docstring）。
+    _warn_unknown_keys(path, data, ov_data)
     data = deep_merge(data, ov_data)
     enabled = bool(ov_data.get("enabled", False))
+
     # ── 反向陷阱：基线显式关、overlay 又开 ──
     # 「在 git 基线里把 bot 关掉」是直觉操作，但按上面的规则它**完全不生效**，
     # 于是出现「我明明关了，它还在下单」——2026-10-13 brooks-eth 线上事故复盘：
@@ -513,6 +518,28 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
     _warn_risk_switch_conflicts(path, bot)
     _warn_skill_visibility_default(path, bot, strategist, Path(bot.root))
     return bot
+
+
+def _warn_unknown_keys(path: Path, baseline: dict, overlay: dict) -> None:
+    """配置里出现**白名单外**的键 → 告警（阶段 1 只 WARN，不报错）。
+
+    背景（N1）：`account_risk` / `strategist` / `paper` 等段是自由 dict，读不到的键
+    **静默 no-op** —— 键名 typo 此前连一条日志都没有。而「配了但不生效」是本仓最贵的
+    失败形态（先例：5 个 `ab-*` 的 `auto_protect: "dry"` 无 pct，dry 期什么都没观察）。
+
+    白名单在 `omnialpha/config_keys.py`（由「实际配置 ∪ dataclass 字段 ∪ 核实过的
+    消费键」三路并集得出）。这里只查**声明过嵌套结构的层**，未纳入白名单的自由映射
+    一律跳过（宁漏报不误报）。
+    """
+    for label, d in (("baseline", baseline), ("overlay", overlay)):
+        if not isinstance(d, dict) or not d:
+            continue
+        unknown = find_unknown_keys(d)
+        if unknown:
+            log.warning(
+                "%s (%s): 未知配置键 %s —— 不在白名单内，可能被静默忽略"
+                "（typo？或键已废弃；白名单见 omnialpha/config_keys.py）",
+                path.name, label, unknown)
 
 
 def _warn_risk_switch_conflicts(path: Path, bot: "BotConfig") -> None:

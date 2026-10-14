@@ -25,7 +25,8 @@ def _registry(root: Path) -> SkillRegistry:
 
 def cmd_skill(args: Any) -> int:
     """入口：按 args.skill_cmd 分派。"""
-    root = Path(args.root).resolve() if getattr(args, "root", None) else Path.cwd().resolve()
+    from ..paths import resolve_root
+    root = resolve_root(getattr(args, "root", None))
     sub = getattr(args, "skill_cmd", None)
     if sub == "install":
         return _install(args, root)

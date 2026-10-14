@@ -12,10 +12,8 @@ def main(argv=None) -> int:
     p.add_argument("cmd", nargs="?", default="score", choices=["score", "scan", "json"])
     p.add_argument("--root", default=None)
     args = p.parse_args(argv)
-    import os
-    root = Path(
-        args.root or os.environ.get("OMNIALPHA_ROOT") or Path.cwd()
-    ).expanduser().resolve()
+    from ..paths import resolve_root
+    root = resolve_root(args.root)
     from .scoreboard import build_scoreboard, format_table, write_scoreboard
     from .trials import scan_trials
 

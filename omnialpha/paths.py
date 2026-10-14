@@ -5,6 +5,7 @@ data/bots/<bot_id>/
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -69,6 +70,27 @@ class BotPaths:
 
 def bots_root(root: Path) -> Path:
     return Path(root).resolve() / "data" / "bots"
+
+
+def resolve_root(explicit: Optional[str | Path] = None) -> Path:
+    """项目根解析的**唯一入口**：`explicit` > `OMNIALPHA_ROOT` > CWD。
+
+    为什么要单一入口（2026-10-14 全面检查 N6）：此前 `__main__._root_from_args`、
+    `metrics/cli.py`、`config._create_paper_client` **各写了一遍**同样的优先级 ——
+    任何一处漏改就会出现「同一个 `--root`，两条链路看到不同的根」。实测先例：
+    paper 账户库曾完全不看 `--root`（只认 env/cwd），导致跨次运行持仓叠加（a98d9dc 修复）。
+
+    语义细节：
+      · `explicit` 为空串/None → 视为未指定（回落 env）；
+      · 一律 `expanduser().resolve()`，让 `~` 与相对路径都能用；
+      · **不做存在性校验** —— 调用方可能正在创建根（如首次启动建 data/）。
+    """
+    if explicit is not None and str(explicit).strip():
+        return Path(explicit).expanduser().resolve()
+    env = os.environ.get("OMNIALPHA_ROOT")
+    if env and env.strip():
+        return Path(env).expanduser().resolve()
+    return Path.cwd().resolve()
 
 
 def list_bot_ids(root: Path) -> list[str]:

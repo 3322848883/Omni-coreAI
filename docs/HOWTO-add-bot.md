@@ -37,6 +37,11 @@ Copy-Item config\bots\_example.yaml config\bots\<bot_id>.yaml
 **多账户**：不同 bot 写不同 `api_key_env`（如 `GATE_KEY_A` / `GATE_KEY_B`）。  
 **同账户多策略**：相同 `api_key_env`，**不同** `bot_id` + **不同** `label_prefix` + 各自 inbox。
 
+> 📖 **完整键清单见 [`config-reference.md`](config-reference.md)**（自动生成，与
+> `omnialpha/config_keys.py` 的白名单同步）。写错键名会在加载时**告警**：
+> 白名单之外的键一律提示「可能被静默忽略（typo？）」。改了白名单记得重跑
+> `python scripts/gen_config_reference.py`（有漂移测试守着）。
+
 ### 3) 准备密钥环境变量
 
 ```powershell

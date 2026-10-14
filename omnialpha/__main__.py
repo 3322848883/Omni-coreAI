@@ -11,17 +11,17 @@ from pathlib import Path
 
 from .config import load_accounts, load_all_bots, load_bot_config
 from .gate_client import GateApiError
+from .paths import resolve_root
 from .watcher import ProjectPaths, process_file, run_bot_once, run_forever
 
 
 def _root_from_args(args) -> Path:
-    """Project root: --root > OMNIALPHA_ROOT > cwd. Works under systemd/cron without cd."""
-    if getattr(args, "root", None):
-        return Path(args.root).expanduser().resolve()
-    env = os.environ.get("OMNIALPHA_ROOT")
-    if env:
-        return Path(env).expanduser().resolve()
-    return Path.cwd().resolve()
+    """Project root: `--root` > `OMNIALPHA_ROOT` > cwd（单一入口 `paths.resolve_root`）。
+
+    本函数只是 `resolve_root` 的薄适配层 —— 优先级逻辑不再在这里复制一份，
+    否则 `metrics/cli` / `config` 各写一遍就会出现「同一个 --root 两条链路不同根」。
+    """
+    return resolve_root(getattr(args, "root", None))
 
 
 def _resolve_list_cfg(mk: dict, key: str, default: list) -> list:
