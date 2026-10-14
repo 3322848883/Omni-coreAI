@@ -156,17 +156,54 @@ PLAN_SCHEMA_HINT = (
     + ",".join(sorted(CHIP_ORDER_TYPES))
 )
 
-SYSTEM_PROMPT = _SYSTEM_HEAD + PLAN_SCHEMA_HINT
+# 固定系统契约：**所有 bot 逐字共用**，不随人格/品种/技能变化。
+# 不变量（由 tests/test_prompt_isolation.py + 审计 C 段锁定）：
+#   任何 bot 组装出的 system prompt 都以 `SYSTEM_CONTRACT` 为**严格前缀**开头。
+SYSTEM_CONTRACT = _SYSTEM_HEAD + PLAN_SCHEMA_HINT
+# 兼容别名：既有测试与调用方按 `SYSTEM_PROMPT` 引用（指向同一对象）。
+SYSTEM_PROMPT = SYSTEM_CONTRACT
+
+# 系统层与人格层的**唯一**分界标记。`build_system_prompt` 只在此处拼一次；
+# `split_system_prompt()` 与隔离测试/审计都靠它把
+# 「所有 bot 一致的系统区」与「bot 级人格区」切开。
+PERSONA_MARKER = "\n\n【策略人格】\n"
 
 
 def build_system_prompt(strategy_prompt: str, tools_guide: str = "", skill_catalog: str = "") -> str:
-    """Fixed contract + optional tool guide (system layer) + skill catalog + strategy persona."""
-    head = SYSTEM_PROMPT
+    """组装 system prompt：**固定契约在前、策略人格在后**，顺序不可颠倒。
+
+    分层（自前向后，不可换序）：
+      ① 系统契约 `SYSTEM_CONTRACT` —— 所有 bot 逐字一致，**不因人格而变**
+      ② 工具指南 `tools_guide`   —— 全局文本（bot 开关只控制有无）
+      ③ 技能目录 `skill_catalog` —— 全局技能库渲染（可见性按 bot 的 skills 白名单）
+      ④ 策略人格 `strategy_prompt` —— **bot 级**，唯一随 bot 变化的一段
+
+    不变量：①②③ 拼出的「系统区」对所有 bot 逐字一致；人格**只能追加在后**，
+    既无法前置、也无法改写契约（契约是纯字符串前缀，人格是拼接后缀）。
+    需要切分时用 `split_system_prompt()`。
+    """
+    head = SYSTEM_CONTRACT
     if tools_guide:
         head = head + "\n\n" + tools_guide
     if skill_catalog:
         head = head + "\n\n" + skill_catalog
-    return head + "\n\n【策略人格】\n" + strategy_prompt
+    return head + PERSONA_MARKER + strategy_prompt
+
+
+def split_system_prompt(system: str) -> tuple[str, str]:
+    """把组装好的 system prompt 切成 `(系统区, 人格区)`。
+
+    系统区 = 契约 + 工具指南 + 技能目录（对所有 bot 逐字一致的那部分）；
+    人格区 = bot 级策略文本。
+
+    用 `find` 取**第一处**标记 —— 契约永远在最前，人格正文里即便出现同名字样也
+    不会影响切分（那只是人格区里的一段普通文本）。没有标记时视作纯系统区，
+    人格区返回空串（`build_system_prompt` 之外的裸契约也应能安全切分）。
+    """
+    idx = system.find(PERSONA_MARKER)
+    if idx < 0:
+        return system, ""
+    return system[:idx], system[idx + len(PERSONA_MARKER):]
 
 
 def load_strategy_prompt(

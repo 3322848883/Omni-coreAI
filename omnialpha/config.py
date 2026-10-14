@@ -511,6 +511,7 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
         root=str(Path(path).resolve().parents[2]),
     )
     _warn_risk_switch_conflicts(path, bot)
+    _warn_skill_visibility_default(path, bot, strategist, Path(bot.root))
     return bot
 
 
@@ -552,6 +553,62 @@ def _warn_risk_switch_conflicts(path: Path, bot: "BotConfig") -> None:
             "%s: manage_positions=false（只开仓不管仓）但配了 "
             "auto_protect=%s / peak_trail=%s / give_back=%s → 总闸会全部熄火，白配",
             path.name, ap, pk, gb)
+
+
+_SKILL_LIB_SCANNED: dict[str, bool] = {}
+_SKILL_VIS_WARNED = False
+
+
+def _global_skill_lib_nonempty(root: Path) -> bool:
+    """全局技能库里是否有可安装技能（纯文件系统探测，按 root 缓存一次）。
+
+    与 `SkillRegistry.scan()` 的差别：这里**不解析** frontmatter，只看有没有
+    `<dir>/<skill>/SKILL.md` —— 告警只需知道「库里有没有东西」，不该为一个警告
+    去加载全部技能包。探测失败一律当作「空」（宁可不告警，也不误报）。
+    """
+    key = str(root)
+    if key in _SKILL_LIB_SCANNED:
+        return _SKILL_LIB_SCANNED[key]
+    found = False
+    for d in (root / ".mimocode" / "skills", root / "skills"):
+        try:
+            if d.is_dir() and any(
+                    p.is_dir() and (p / "SKILL.md").is_file() for p in d.iterdir()):
+                found = True
+                break
+        except OSError:
+            continue
+    _SKILL_LIB_SCANNED[key] = found
+    return found
+
+
+def _warn_skill_visibility_default(path: Path, bot: "BotConfig",
+                                   strategist: dict, root: Path) -> None:
+    """技能目录默认全量可见 → 加载期**一次性**告警（跨 bot 影响路径）。
+
+    为什么值得告警：`strategist.skills` 不写时，`SkillRegistry.visible_for(bot, None)`
+    返回**全部** model-invocable 技能 —— 而技能目录是 **system prompt 的一部分**
+    （见 `strategist/prompt.py` 分层②③）。于是「往全局技能库加/删一个技能」会悄悄
+    改到**所有未声明 skills 的 bot** 的系统提示词，这正是「系统提示词适用所有 bot、
+    不受其它 bot / 运维改动影响」要防的路径。
+
+    只告警不报错：默认全量可见是**有意的设计**（未声明 = 不限制），改不改是策略决定。
+    仅对**已启用**的 bot 告警，且每进程只报一次（否则 60 个 bot 会刷屏）。
+    """
+    global _SKILL_VIS_WARNED
+    if _SKILL_VIS_WARNED or not getattr(bot, "enabled", False):
+        return
+    if "skills" in (strategist or {}):
+        return
+    if not _global_skill_lib_nonempty(root):
+        return
+    _SKILL_VIS_WARNED = True
+    log.warning(
+        "%s: 未声明 strategist.skills → 技能目录**默认全量可见**；"
+        "全局技能库（<root>/skills、.mimocode/skills）的任何变更都会改到本 bot 的"
+        "系统提示词。要隔离请显式写 skills: []（不用技能）或技能白名单"
+        "（本告警每进程只报一次；用 `omnialpha tools --bot <id>` 看生效值）",
+        path.name)
 
 
 def check_label_prefixes(bots: dict[str, BotConfig]) -> None:

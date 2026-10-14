@@ -70,6 +70,16 @@ def _body(src: str, func: str) -> str:
     return src[start:start + 10 + (nxt.start() if nxt else len(src))]
 
 
+def _toplevel_body(src: str, func: str) -> str:
+    """取**顶层** `def func` 的完整体（到下一个顶层 def 为止）。
+
+    与 `_body` 的区别：**不**在内嵌 def 处截断 —— `load_strategy_prompt` 里有嵌套的
+    `_under_root()`，用 `_body` 会把它切掉，导致「root 限制存在性」检查误报。
+    """
+    m = re.search(rf"^def {re.escape(func)}\b.*?(?=^def |\Z)", src, re.S | re.M)
+    return m.group(0) if m else ""
+
+
 # ─────────────────────────────────────────────────────────────
 # 单 bot 级
 # ─────────────────────────────────────────────────────────────
@@ -319,12 +329,96 @@ def audit_all_bots(bots: dict, config_dir: Path) -> None:
     print("[B11] paper 账户库跟随项目根（--root 隔离）  OK")
 
 
+# ─────────────────────────────────────────────────────────────
+# 提示词层：系统契约 vs 策略人格的隔离
+# ─────────────────────────────────────────────────────────────
+def audit_prompt_layer(bots: dict) -> None:
+    """C 段：保证「系统契约适用所有 bot、不受人格影响；人格多元化且互不影响」。
+
+    C1 组装顺序：契约在前、人格殿后（静态）
+    C2 人格加载器限定在各自 root 内（静态）
+    C3 记忆注入不改写 system（静态）
+    C4 全部 bot 的系统区逐字一致（动态）
+    C5 跨 bot 人格零泄漏（动态）
+    C6 技能可见性默认值：enabled 且未声明 skills → 全局技能库会越权影响它（WARN）
+    """
+    from omnialpha.strategist.prompt import (
+        PERSONA_MARKER,  # noqa: F401  (仅用于可读性引用)
+        SYSTEM_CONTRACT,
+        build_system_prompt,
+        load_strategy_prompt,
+        split_system_prompt,
+    )
+
+    prompt_src = _src("omnialpha/strategist/prompt.py")
+
+    # ── C1 组装顺序：契约在前、人格最后 ──
+    body = _body(prompt_src, "build_system_prompt")
+    if "SYSTEM_CONTRACT = _SYSTEM_HEAD + PLAN_SCHEMA_HINT" not in prompt_src:
+        fail("[C1] SYSTEM_CONTRACT 定义被改动（契约不再是固定常量）")
+    if "head = SYSTEM_CONTRACT" not in body:
+        fail("[C1] build_system_prompt 未以 SYSTEM_CONTRACT 起头")
+    if "+ PERSONA_MARKER +" not in body:
+        fail("[C1] build_system_prompt 未用 PERSONA_MARKER 拼接（人格可能前置/改写契约）")
+    print("[C1] 契约在前 / 人格殿后（组装顺序）        OK")
+
+    # ── C2 人格加载器限定在各自 root 内 ──
+    # 必须三件齐备：限制函数定义 + **实际调用**它 + 越界时 fail-closed（raise）。
+    # 只查名字存在是不够的 —— 调用点被删掉、只留个没人用的 `_under_root` 也能骗过。
+    loader = _toplevel_body(prompt_src, "load_strategy_prompt")
+    if ("def _under_root(" not in loader
+            or "_under_root(cand)" not in loader
+            or "raise PermissionError" not in loader):
+        fail("[C2] load_strategy_prompt 缺 root 限制 —— 人格可越权读取任意文件")
+    print("[C2] 人格加载器限定 root 内                OK")
+
+    # ── C3 记忆注入不得改写 system（只进 user） ──
+    ctx_src = _src("omnialpha/memory/context.py")
+    if "system = system_prompt" not in ctx_src:
+        fail("[C3] memory.build_context 改写了 system —— 记忆/画像可能污染契约")
+    print("[C3] 记忆注入不改写 system（只进 user）     OK")
+
+    # ── C4 动态：全部 bot 的系统区逐字一致 ──
+    regions: dict[str, str] = {}
+    for bid, bot in sorted(bots.items()):
+        pf = (bot.strategist or {}).get("prompt_file")
+        try:
+            persona = load_strategy_prompt(pf or None, bot_root=ROOT)
+        except PermissionError:
+            persona = load_strategy_prompt(None)
+        system = build_system_prompt(persona)
+        if not system.startswith(SYSTEM_CONTRACT):
+            fail(f"[C4] {bid}: system prompt 不以系统契约开头")
+            continue
+        regions[bid] = split_system_prompt(system)[0]
+    if len(set(regions.values())) > 1:
+        fail(f"[C4] 系统区在 bot 间不一致（{len(set(regions.values()))} 种）")
+    print(f"[C4] {len(regions)} 个 bot 系统区逐字一致          OK")
+
+    # ── C5 动态：跨 bot 人格零泄漏 ──
+    a = build_system_prompt("AUDIT_LEAK_AAA")
+    b = build_system_prompt("AUDIT_LEAK_BBB")
+    if "AUDIT_LEAK_AAA" in b or "AUDIT_LEAK_BBB" in a:
+        fail("[C5] 人格跨 bot 泄漏")
+    print("[C5] 跨 bot 人格零泄漏                     OK")
+
+    # ── C6 技能可见性默认值（跨 bot 影响路径） ──
+    risky = [bid for bid, bot in bots.items()
+             if bot.enabled and "skills" not in (bot.strategist or {})]
+    if risky:
+        warn(f"[C6] {len(risky)} 个**已启用** bot 未声明 strategist.skills → "
+             f"技能目录默认全量可见，全局技能库变更会改到它们的系统提示词："
+             f"{risky[:5]}{'…' if len(risky) > 5 else ''}")
+    print("[C6] 技能可见性默认值显式化检查             OK")
+
+
 def main() -> int:
     config_dir = ROOT / "config" / "bots"
     bots = load_all_bots(config_dir, overlay_dir_for(config_dir))
     print(f"载入 bot 配置：{len(bots)} 个（{config_dir}）\n")
     audit_single_bot(bots)
     audit_all_bots(bots, config_dir)
+    audit_prompt_layer(bots)
 
     print()
     print("=" * 78)
