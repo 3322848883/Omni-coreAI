@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """P0.4 alerts.json 告警落盘测试。"""
 from __future__ import annotations
 

@@ -149,9 +149,12 @@ class TestJournal(unittest.TestCase):
 
     def test_append_only_immutable(self):
         """Journal 只有 append，没有 update/delete 方法。"""
-        j = MemoryJournal(Path("x"), "bot-a")
-        self.assertFalse(hasattr(j, "update"))
-        self.assertFalse(hasattr(j, "delete"))
+        # 不能用字面量 `Path("x")` 当 root —— 会在 CWD 建 `x/data/bots/...` 残留
+        # （2026-10-14 审计 B13 抓到，`.gitignore` 只是兜底）。
+        with tempfile.TemporaryDirectory() as td:
+            j = MemoryJournal(Path(td), "bot-a")
+            self.assertFalse(hasattr(j, "update"))
+            self.assertFalse(hasattr(j, "delete"))
 
     def test_snapshot_digest(self):
         d = MemoryJournal.snapshot_digest({"a": 1, "b": 2})

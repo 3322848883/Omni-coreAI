@@ -42,9 +42,17 @@ class _StubClient:
         return []
 
 
-def _patch_market():
-    """triggers._load_candles 走 `from .market import fetch_rest_candles`，就地打桩。"""
+def _patch_market(case: unittest.TestCase) -> None:
+    """就地打桩 `triggers._load_candles` 依赖的 `market.fetch_rest_candles`。
+
+    **必须登记恢复**（2026-10-14 N2 发现）：此前直接赋值且从不还原，等于把
+    「所有 symbol/interval 都返回这份 1970 年的 ETH 假 K 线」这个桩**永久**留在
+    进程里 —— 同一进程后续跑的 `test_triggers*.py` 全部拿到错数据而失败
+    （逐文件独立进程的 unittest 掩盖了它；pytest 单进程一跑就暴露 26 个失败）。
+    """
+    orig = market_mod.fetch_rest_candles
     market_mod.fetch_rest_candles = lambda client, symbol, interval, limit: _candles()
+    case.addCleanup(setattr, market_mod, "fetch_rest_candles", orig)
 
 
 def _runner(hist: Path, **ai) -> PlanRunner:
@@ -67,7 +75,7 @@ TRIG = {"type": "price_break", "symbol": SYM, "lookback": 20, "side": "low",
 
 class TestTriggerStatePersistence(unittest.TestCase):
     def setUp(self):
-        _patch_market()
+        _patch_market(self)
 
     def _add_trigger(self, runner):
         from omnialpha.strategist.trigger_store import validate_trigger_payload
@@ -130,7 +138,7 @@ class TestTriggerStatePersistence(unittest.TestCase):
 
 class TestCondGapGate(unittest.TestCase):
     def setUp(self):
-        _patch_market()
+        _patch_market(self)
 
     def test_cond_gap_default_is_half_interval(self):
         with tempfile.TemporaryDirectory() as td:

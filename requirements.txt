@@ -1,3 +1,6 @@
 pyyaml>=6.0
 matplotlib>=3.7
 Pillow>=10.0
+# 测试（可选）：`scripts/run_tests.py` 做 unittest + pytest 双跑。
+# 主链路只需 unittest；pytest 用于覆盖 fixture / 参数化风格。
+pytest>=8.0

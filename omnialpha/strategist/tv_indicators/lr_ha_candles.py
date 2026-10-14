@@ -1,4 +1,4 @@
-﻿"""TV Indicator 3: Linear Regression Heikin Ashi Candles (B3AR_Trades)
+"""TV Indicator 3: Linear Regression Heikin Ashi Candles (B3AR_Trades)
 
 LR HA Candles + T3 Moving Average + Volatility Bands.
 """

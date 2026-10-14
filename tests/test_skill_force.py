@@ -3,14 +3,23 @@
 背景：hint 升级「必载」文案实盘 0/5 生效（native tool_choice=auto 模型自选）。
 本组测试锁定：required=true 时首轮 tool_choice 钉死 skill 函数、后续轮恢复
 auto、网关拒绝 named choice 时回退 auto；默认关闭行为逐字不变。
+
+**2026-10-14（N2）**：本文件此前是 pytest 风格（类未继承 `TestCase`），
+`unittest` 收集到 **0 个测试** → 在只跑 unittest 的流程里**静默不执行**。
+已改写为 unittest 兼容（`TestCase` + `self.assert*`），两种 runner 下都能跑。
 """
 from pathlib import Path
+import sys
+import unittest
 from unittest import mock
 
-from omnialpha.strategist import loop as loop_mod
-from omnialpha.strategist.loop import PlanRunner, StrategistConfig
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
-REPO = Path(__file__).resolve().parents[1]
+from omnialpha.strategist import loop as loop_mod  # noqa: E402
+from omnialpha.strategist.loop import PlanRunner, StrategistConfig  # noqa: E402
+
+REPO = ROOT
 
 SKILL_TOOL = {"type": "function", "function": {"name": "skill"}}
 KLINE_TOOL = {"type": "function", "function": {"name": "klines"}}
@@ -40,30 +49,32 @@ def _runner(**kw):
     return r
 
 
-class TestForcedSkillChoice:
+class TestForcedSkillChoice(unittest.TestCase):
     def test_default_off_returns_none(self):
         tools = [SKILL_TOOL, KLINE_TOOL]
-        assert PlanRunner._forced_skill_choice(tools) is None
+        self.assertIsNone(PlanRunner._forced_skill_choice(tools))
 
     def test_required_without_skills_returns_none(self):
-        assert PlanRunner._forced_skill_choice([SKILL_TOOL], skills_required=True) is None
-        assert PlanRunner._forced_skill_choice([SKILL_TOOL], skills_required=True,
-                                               skill_ids=[]) is None
+        self.assertIsNone(
+            PlanRunner._forced_skill_choice([SKILL_TOOL], skills_required=True))
+        self.assertIsNone(
+            PlanRunner._forced_skill_choice([SKILL_TOOL], skills_required=True,
+                                            skill_ids=[]))
 
     def test_skill_tool_absent_returns_none(self):
         """skill 不在工具面（被 allow 过滤）时绝不能硬制——否则请求必炸。"""
-        assert PlanRunner._forced_skill_choice(
+        self.assertIsNone(PlanRunner._forced_skill_choice(
             [KLINE_TOOL], skills_required=True,
-            skill_ids=["price-action-trading"]) is None
+            skill_ids=["price-action-trading"]))
 
     def test_forced_dict_shape(self):
         out = PlanRunner._forced_skill_choice(
             [SKILL_TOOL, KLINE_TOOL], skills_required=True,
             skill_ids=["price-action-trading"])
-        assert out == FORCED
+        self.assertEqual(out, FORCED)
 
 
-class TestChatNativeToolsForce:
+class TestChatNativeToolsForce(unittest.TestCase):
     def _base_tools(self):
         return [SKILL_TOOL, KLINE_TOOL]
 
@@ -88,17 +99,17 @@ class TestChatNativeToolsForce:
         ]
         with mock.patch.object(loop_mod, "run_tool", return_value={"content": "x"}):
             llm, out = self._run(r, script)
-        assert out == "{}"
-        assert llm.calls[0]["tool_choice"] == FORCED
-        assert llm.calls[1]["tool_choice"] == "auto"
+        self.assertEqual(out, "{}")
+        self.assertEqual(llm.calls[0]["tool_choice"], FORCED)
+        self.assertEqual(llm.calls[1]["tool_choice"], "auto")
 
     def test_default_off_all_auto(self):
         """默认关闭：逐字旧行为，全轮 auto。"""
         r = _runner(skills=["price-action-trading"])
         r._record_tool_use = lambda *a, **k: None
         llm, out = self._run(r, [{"content": "{}", "tool_calls": []}])
-        assert out == "{}"
-        assert llm.calls[0]["tool_choice"] == "auto"
+        self.assertEqual(out, "{}")
+        self.assertEqual(llm.calls[0]["tool_choice"], "auto")
 
     def test_provider_rejects_forced_falls_back_auto(self):
         """网关不认 named tool_choice → 回退 auto，本轮不炸。"""
@@ -108,12 +119,16 @@ class TestChatNativeToolsForce:
             RuntimeError("tool_choice unsupported"),
             {"content": "{}", "tool_calls": []},
         ])
-        assert out == "{}"
-        assert [c["tool_choice"] for c in llm.calls] == [FORCED, "auto"]
+        self.assertEqual(out, "{}")
+        self.assertEqual([c["tool_choice"] for c in llm.calls], [FORCED, "auto"])
 
     def test_no_tool_call_round_still_forced(self):
         """首轮即使直接出 Plan（无工具调用），请求也是硬制发出的。"""
         r = _runner(skills=["price-action-trading"], skills_required=True)
         llm, out = self._run(r, [{"content": "{}", "tool_calls": []}])
-        assert out == "{}"
-        assert llm.calls[0]["tool_choice"] == FORCED
+        self.assertEqual(out, "{}")
+        self.assertEqual(llm.calls[0]["tool_choice"], FORCED)
+
+
+if __name__ == "__main__":
+    unittest.main()
