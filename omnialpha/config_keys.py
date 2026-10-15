@@ -41,7 +41,7 @@ TOP_LEVEL: frozenset[str] = frozenset({
 # 注意：必须覆盖 `config._RISK_CAP_KEYS`（账户级合并的「越小越严」字段）——
 # 有测试 `test_risk_cap_keys_are_whitelisted` 守着，新增合并键忘了加白名单会红。
 ACCOUNT_RISK: frozenset[str] = frozenset({
-    "auto_protect", "auto_protect_sl_pct", "daily_loss_limit_usd",
+    "auto_protect", "auto_protect_sl_pct", "grid_tp_auto", "daily_loss_limit_usd",
     "equity_deviation_halt", "equity_deviation_halt_pct", "give_back", "halt",
     "max_leverage", "max_notional_pct", "max_notional_usd",
     "max_total_notional_pct", "max_total_notional_usd", "no_flip",

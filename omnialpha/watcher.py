@@ -688,12 +688,18 @@ def _record_exec_latency(bot: BotConfig, paths: ProjectPaths, seconds: float,
 
 def _reconcile_sweep(bot: BotConfig, paths: ProjectPaths, *,
                      client=None, symbols=None) -> int:
-    """保护单张数对账：同方向 tp/sl 合计 > 持仓张数时保留最新一组、撤其余。
+    """保护单**去重**：只裁「同向+同价+同文本」的重复腿，保留不同触发价的多级 TP。
 
     与 `_orphan_sweep` 的分工：那个管「**无持仓**时的孤儿」，这个管
-    「**有持仓**但保护单张数超额」—— 后者是每轮重挂入场单的必然产物
+    「保护单**重复堆积**」—— 后者是每轮重挂入场单的必然产物
     （实测 eth-disc 6 小时堆到 30 个 / 202 张 vs 4 张持仓），而
     `executor._resync_protectors` 只在平/减仓路径被调用，加仓路径没人管。
+
+    **判据已于 2026-10-15 重写**（原「按张数裁到 持仓+待成交」）：因为 SL 单张
+    就覆盖整个目标，原判据会**周期性吃掉逐档 TP**（做 T 腿）—— 实测把马丁共用
+    TP 的三条腿（6/7/9 张）裁成一条、并会撤掉 `ensure_grid_tp` 挂的逐档腿。
+    新判据见 `reconcile.reconcile_protectors` docstring：TP 按**触发价**保留，
+    只裁重复。
 
     fail-closed：取不到交易所报告、无持仓、有未成交入场单 → 都不动。
     """
@@ -724,8 +730,10 @@ def _reconcile_sweep(bot: BotConfig, paths: ProjectPaths, *,
             continue
         n = len(res.get("cancelled") or [])
         if n:
-            log.info("reconcile %s %s: 撤掉 %d 笔超额保护单（持仓 %s 张）",
-                     bot.bot_id, sym, n, res.get("position_size"))
+            log.info("reconcile %s %s: 清理重复保护单 %d 笔（保留 %d 笔，"
+                     "其中多级 TP %s 条；重复 %s／超上限 %s）",
+                     bot.bot_id, sym, n, res.get("kept"), res.get("tp_legs"),
+                     res.get("dedup"), res.get("capped"))
         total += n
     return total
 
@@ -905,6 +913,66 @@ def _auto_protect_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict, *,
             except Exception:  # noqa: BLE001
                 pass
     return done
+
+
+def _grid_tp_sweep(bot: BotConfig, paths: ProjectPaths, *,
+                   client=None, symbols: list[str]) -> None:
+    """阶梯档「**条件限价**止盈」执行（2026-10-15）：**AI 写目标价、程序成交后执行**。
+
+    与 `_auto_protect_sweep` 的分工：那个补**风控**（SL，程序可以兜底）；这个只
+    **执行 AI 已经写进计划的目标价**（`meta.tp_target` → 落盘在
+    `data/bots/<bot>/state/ladder_levels.json`）—— 程序**绝不自己造价格**，
+    缺目标价就跳过把决定交回 AI（详见 `Executor.ensure_grid_tp`）。
+
+    为什么需要：入场腿挂单时只能带**占位 TP**（多单 TP 触发价必须 > mark，而档位
+    目标在现价下方 → 非法挂不上）；档位成交后目标价才合法 —— 由本扫描在成交后
+    补挂「条件限价」单（trigger=目标价、限价=目标价、reduce_only）。
+
+    逐 bot 由 `account_risk.grid_tp_auto` 开启（默认 off）：
+      false/"off"（默认）→ 不动作 ｜ "dry" → 只记录「本来会挂什么」 ｜ true/"live" → 真挂
+    """
+    mode = (getattr(bot, "account_risk", None) or {}).get("grid_tp_auto", "off")
+    if not mode or str(mode).lower() in ("off", "false", "none"):
+        return
+    if client is None:
+        try:
+            client = bot.create_client()
+        except Exception:  # noqa: BLE001
+            return
+    executor = Executor(
+        client,
+        label_prefix=getattr(bot, "label_prefix", "") or bot.bot_id,
+        root=paths.root,
+        bot_id=bot.bot_id,
+        account=getattr(bot, "account", "") or "",
+        account_risk=getattr(bot, "account_risk", None),
+        alert_store=_alert_store(paths, bot.bot_id),
+        manage_positions=getattr(bot, "manage_positions", True),
+        allow_close=getattr(bot, "allow_close", True),
+        allow_reduce=getattr(bot, "allow_reduce", True),
+    )
+    for sym in _sweep_symbols(bot, client, symbols):
+        try:
+            out = executor.ensure_grid_tp(sym)
+        except Exception as e:  # noqa: BLE001 — 单个 symbol 失败不拖垮整轮扫描
+            log.warning("grid tp %s %s raised: %s", bot.bot_id, sym, e)
+            continue
+        placed = out.get("placed") or []
+        if out.get("grid_tp") == "dry":
+            if out.get("candidates"):
+                log.info("grid tp[dry] %s %s: 会挂 %s", bot.bot_id, sym, out["candidates"])
+            continue
+        if placed:
+            log.info("grid tp %s %s: 挂条件限价 TP %d 条 %s", bot.bot_id, sym, len(placed), placed)
+            _log_program_action(
+                paths, bot, source="watcher:grid_tp", action="auto_grid_tp",
+                symbol=sym,
+                detail={"tp_placed": [{"id": p.get("id"), "price": p.get("tp"),
+                                       "size": p.get("size")} for p in placed],
+                        "mode": out.get("grid_tp")},
+            )
+        if out.get("errors"):
+            log.warning("grid tp %s %s 未挂成的腿: %s", bot.bot_id, sym, out["errors"])
 
 
 def _peak_trail_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict, *,
@@ -1277,6 +1345,11 @@ def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[
                                         client=client, symbols=syms)
                 except Exception as e:  # noqa: BLE001
                     log.warning("auto protect sweep %s failed: %s", bot.bot_id, e)
+                try:
+                    # 阶梯档条件限价 TP（AI 写目标价、程序成交后执行）；默认 off
+                    _grid_tp_sweep(bot, paths, client=client, symbols=syms)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("grid tp sweep %s failed: %s", bot.bot_id, e)
                 try:
                     _peak_trail_sweep(bot, paths, peak_trail_alerted,
                                       client=client, symbols=syms)

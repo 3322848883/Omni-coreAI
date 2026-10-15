@@ -254,6 +254,17 @@ _MGMT_ONLY_ACTIONS = frozenset({
 })
 
 
+def _skip_placeholder_tp(account_risk: dict, meta: dict) -> bool:
+    """网格腿是否**跳过占位 TP**（2026-10-15，见 `_open` 内详细注释）。
+
+    真值条件 = ① `account_risk.grid_tp_auto` 真会挂单（live/true/on）
+              ② 该腿是**网格腿**（`meta.tp_target` 存在；马丁腿不填）。
+    只在 live 时成立：dry/off 下若也跳过，档位就彻底没有止盈了。
+    """
+    gta = str((account_risk or {}).get("grid_tp_auto", "off")).lower()
+    return gta in ("live", "true", "on") and bool((meta or {}).get("tp_target"))
+
+
 def _sort_intents_by_priority(intents: list) -> list:
     """按「先平仓 → 减仓 → 撤单 → 改保护 → 开仓」排序。
 
@@ -1894,7 +1905,21 @@ class Executor:
         sl_orders = []
         exit_errors = []
         # 多级止盈：tp/tp2/tp3（缺省均分或 tp1_share/tp2_share）
-        legs = self._tp_legs(intent, exit_size)
+        # ── 网格腿「去占位 TP」（2026-10-15）─────────────────────────────────
+        # 官方做法（Gate/Zoomex/Hummingbot 三源一致）：入场腿是**纯限价买单、不挂
+        # TP**，成交后立即在相邻上一格挂反向单。而「占位 TP」正是假网格的根源 ——
+        #   ① 必须事后改（实测 LLM 从没改过 → 整仓只剩 1 个共用 TP）；
+        #   ② 改的时候撤不掉旧占位（档位表 `executor.py:_record_ladder_level` 在
+        #      TP 挂单**之前**跑，没记下 TP 单 id）→ 双 TP / 张数超配；
+        #   ③ 占位价 `现价×1.03` 与真实目标无关 → 一旦漏改就是远端假止盈。
+        # 故：`grid_tp_auto` 真会挂单（live）时，**网格腿不再挂占位 TP**，逐档 TP
+        # 完全交给 `ensure_grid_tp`（成交后按 AI 的 `meta.tp_target` 挂）。
+        # **马丁腿（无 `meta.tp_target`）照挂共用 TP** —— 设计需求，不动。
+        # 只在 live 时跳过：dry/off 下若也跳过，档位就彻底没有止盈了。
+        skip_placeholder_tp = _skip_placeholder_tp(self.account_risk, intent.meta or {})
+        legs = [] if skip_placeholder_tp else self._tp_legs(intent, exit_size)
+        if skip_placeholder_tp:
+            detail["tp_placeholder_skipped"] = "grid_tp_auto=live（改由 ensure_grid_tp 成交后挂）"
         if legs:
             for tp_px, tp_sz, idx in [(p, s, i) for i, (p, s) in enumerate(legs)]:
                 rec_, err_ = self._place_exit_leg(
@@ -1931,7 +1956,7 @@ class Executor:
         detail["tp_orders"] = tp_orders
         detail["sl_orders"] = sl_orders
         detail["exit_errors"] = exit_errors
-        detail["leg_tp_ok"] = intent.tp is None or bool(tp_orders)
+        detail["leg_tp_ok"] = skip_placeholder_tp or intent.tp is None or bool(tp_orders)
         detail["leg_sl_ok"] = intent.sl is None or bool(sl_orders)
         detail["exits_ok"] = detail["leg_tp_ok"] and detail["leg_sl_ok"] and not exit_errors
         detail["all_legs_ok"] = detail["leg_entry_ok"] and detail["exits_ok"]
@@ -3413,6 +3438,146 @@ class Executor:
             return out
         order = rec.get("order") or {}
         out["placed"] = {"id": str(order.get("id") or ""), "price": sl, "check": rec.get("check")}
+        return out
+
+    def ensure_grid_tp(self, symbol: str) -> dict:
+        """阶梯档「**条件限价**止盈」执行器 —— **AI 定计划，程序只执行**。
+
+        背景（2026-10-15 用户拍板）：入场腿在挂单时只能带**占位 TP**（多单 TP 触发价
+        必须 > mark，而档位目标在现价下方 → 非法，挂不上）。档位成交后目标价才合法。
+        本方法在**成交后**把 AI 已经写进计划的目标价（`meta.tp_target`，落盘在
+        `ladder_levels.json`）执行成一张 **conditional-limit reduce_only TP**
+        （trigger = 目标价、限价 = 目标价、tif=gtc）—— 即「条件限价平仓单」。
+
+        **边界（硬约束）**：程序**绝不自己造价格**。`tp_target` 缺失 → 跳过并留痕，
+        交回 AI（与 `ensure_protection` 的「只补 SL、绝不补 TP」同源精神：TP 是策略，
+        不是风控兜底；这里只执行 AI 已经写下的目标，不替它决策）。
+
+        由 `account_risk.grid_tp_auto` 逐 bot 开启（默认关）：
+          false/"off"（默认）/None → 不动作
+          "dry"                    → 只回报「本来会挂什么」，不下单
+          true/"live"              → 真挂
+        """
+        out: dict[str, Any] = {"symbol": symbol, "grid_tp": "off",
+                               "candidates": [], "placed": [], "errors": [], "skipped": []}
+        if not self.manage_positions:
+            out["skipped"] = "manage_positions_off"
+            return out
+        ar = self.account_risk or {}
+        mode = ar.get("grid_tp_auto", "off")
+        if not mode or str(mode).lower() in ("off", "false", "none"):
+            return out
+        dry = str(mode).lower() == "dry"
+        out["grid_tp"] = "dry" if dry else "live"
+        if not self.bot_id:
+            out["skipped"] = "no_bot_id"
+            return out
+
+        path = (Path(self.root) / "data" / "bots" / self.bot_id
+                / "state" / "ladder_levels.json")
+        if not path.exists():
+            out["skipped"] = "no_ladder_table"
+            return out
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            out["skipped"] = "ladder_table_corrupt"
+            return out
+        levels = [lv for lv in (data.get("levels") or [])
+                  if isinstance(lv, dict) and lv.get("symbol") == symbol
+                  and lv.get("status") == "pending"]
+
+        # 已有的 owned TP 触发价（去重用：同价已有 TP 就不重复挂）
+        existing = set()
+        try:
+            for po in (self._owned_price_orders(symbol, self._own_prefix("")) or []):
+                trig = (po.get("trigger") or {}).get("price")
+                if (po.get("initial") or {}).get("text", "").endswith("-tp") and trig:
+                    existing.add(round(float(trig), 2))
+        except Exception as e:  # noqa: BLE001
+            swallow("executor.ensure_grid_tp.existing", e, level=logging.DEBUG)
+
+        candidates, skipped = [], []
+        for lv in levels:
+            tgt = lv.get("tp_target")
+            if not tgt:
+                skipped.append({"price": lv.get("price"), "why": "no_tp_target(交回AI)"})
+                continue
+            oid = str(lv.get("order_id") or "")
+            filled = False
+            if oid:
+                try:
+                    o = self.client.get_order(oid) or {}
+                    filled = str(o.get("finish_as") or "") == "filled"
+                except Exception as e:  # noqa: BLE001
+                    swallow("executor.ensure_grid_tp.get_order", e, level=logging.DEBUG)
+                    continue
+            if not filled:
+                continue  # 还没成交（含已撤）—— 目标价此刻多半非法，交给 AI 下一轮
+            if round(float(tgt), 2) in existing:
+                skipped.append({"price": lv.get("price"), "why": "tp_already_present"})
+                continue
+            candidates.append({"level": lv, "target": float(tgt),
+                               "size": int(lv.get("size") or 0)})
+
+        out["candidates"] = [{"price": c["level"].get("price"), "tp": c["target"],
+                              "size": c["size"]} for c in candidates]
+        out["skipped"] = skipped
+        if not candidates:
+            out["skipped"] = skipped + [{"why": "no_filled_level_with_target"}]
+            return out
+        if dry:
+            return out
+
+        meta = self.client.get_contract(symbol)
+        placed, errors, done_idx = [], [], []
+        for c in candidates:
+            lv, tgt, size = c["level"], c["target"], c["size"]
+            if size <= 0:
+                errors.append({"price": lv.get("price"), "error": "zero_size"})
+                continue
+            pos_side = "long"  # 阶梯入场腿恒为多
+            intent = Intent(action="open_long", symbol=symbol, side=pos_side,
+                            tp=tgt, tp_type="limit", tp_limit_price=tgt,
+                            label=self.label_prefix or "auto")
+            intent.trigger_rule_tp = infer_trigger_rules(intent.action, True)
+            err = self._precheck_exit_triggers(intent)
+            if err:
+                errors.append({"price": lv.get("price"), "tp": tgt, "error": err})
+                continue
+            trigger_side = "short"
+            try:
+                rec, perr = self._place_exit_leg(
+                    lambda: self._place_trigger(
+                        intent, trigger_side, tgt, is_tp=True, meta=meta, size=size
+                    ),
+                    kind="tp", price_order=True,
+                )
+            except Exception as e:  # noqa: BLE001 — boundary
+                rec, perr = None, str(e)
+            if not rec:
+                errors.append({"price": lv.get("price"), "tp": tgt, "error": perr})
+                continue
+            order = rec.get("order") or {}
+            placed.append({"price": lv.get("price"), "tp": tgt, "size": size,
+                           "order_type": "limit", "id": str(order.get("id") or "")})
+            done_idx.append(lv)
+
+        # 落盘：已成功挂出的档标记 protected（重写档位表）
+        if done_idx:
+            try:
+                alllv = data.get("levels") or []
+                for lv in alllv:
+                    if lv in done_idx:
+                        lv["status"] = "protected"
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text(json.dumps({"levels": alllv}, ensure_ascii=False),
+                               encoding="utf-8")
+                tmp.replace(path)
+            except Exception as e:  # noqa: BLE001
+                swallow("executor.ensure_grid_tp.persist", e, level=logging.WARNING)
+        out["placed"] = placed
+        out["errors"] = errors
         return out
 
     # ── 峰值回撤保护（防坐电梯）──────────────────────────
