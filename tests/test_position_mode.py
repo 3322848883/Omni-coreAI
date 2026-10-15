@@ -100,5 +100,37 @@ class TestSetPositionMode(unittest.TestCase):
         self.assertFalse(cli.is_dual_position_mode())
 
 
+class TestSingleModeSideInference(unittest.TestCase):
+    """⚠️ single 模式下 position 的 `mode` 是 `"single"`（**不含方向**），
+    方向必须靠 `size` 正负兜底推导 —— 这是 `_resync_protectors` 的 `per_side`
+    分组、`_close` 的 side 校验、`_pos_is_side` 的共同前提，锁死它。
+    """
+
+    def test_side_from_size_when_mode_has_no_direction(self):
+        from omnialpha.executor import _parse_symbol_positions
+        out = _parse_symbol_positions(
+            [{"contract": "ETH_USDT", "size": 5, "mode": "single"}], "ETH_USDT")
+        self.assertEqual(1, len(out))
+        self.assertEqual("long", out[0]["side"])
+
+        out = _parse_symbol_positions(
+            [{"contract": "ETH_USDT", "size": -3, "mode": "single"}], "ETH_USDT")
+        self.assertEqual("short", out[0]["side"])
+
+    def test_dual_mode_still_uses_mode_suffix(self):
+        """dual 下 mode 带方向（dual_long/dual_short），仍优先按 mode 判。"""
+        from omnialpha.executor import _parse_symbol_positions
+        out = _parse_symbol_positions(
+            [{"contract": "ETH_USDT", "size": 2, "mode": "dual_long"}], "ETH_USDT")
+        self.assertEqual("long", out[0]["side"])
+
+    def test_zero_size_filtered(self):
+        """size=0 的记录被过滤（single 下每合约恒有 1 条零记录）。"""
+        from omnialpha.executor import _parse_symbol_positions
+        out = _parse_symbol_positions(
+            [{"contract": "ETH_USDT", "size": 0, "mode": "single"}], "ETH_USDT")
+        self.assertEqual([], out)
+
+
 if __name__ == "__main__":
     unittest.main()
