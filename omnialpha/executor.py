@@ -3594,26 +3594,40 @@ class Executor:
                     open_entry_ids.add(oid)
         except Exception as e:  # noqa: BLE001
             swallow("executor.ensure_grid_tp.open_entry", e, level=logging.DEBUG)
-        open_tp, open_ids, covered = [], set(), 0
+        # ── 在盘止盈卖单集合（普通限价单，text 后缀 -gtp）────────────────
+        # **单向模式形态（2026-10-16 用户拍板）**：止盈 = **普通限价卖单**
+        # （POST /orders），**不再是条件触发单**。实测三种形态（无持仓）：
+        #   条件触发单 reduce_only → 400 AUTO_TRIGGER_PRICE_GREATE_MARK（触发价必须>mark）
+        #   普通限价   reduce_only → 400 INCREASE_POSITION（无仓可减）
+        #   普通限价   无标记      → ✅ 成功挂上（id=63894859046511652，挂上即撤）
+        # → 只有**普通卖单**能把整个网格的止盈「完全挂完」（用户的判断，实测成立）。
+        # ⚠️ 语义（用户明确接受）：卖单是**方向性订单** —— 有持仓时成交 = 平多止盈；
+        # 无持仓时成交 = 开空。程序护栏：**只挂 target > mark 的档**（低于市价的
+        # 限价卖单会立即以市价成交 = 直接开空，显然不是任何网格想要的）。
+        open_gtp_ids: set = set()
+        existing: set = set()
         try:
-            for po in (self._owned_price_orders(symbol, self._own_prefix("")) or []):
-                ini = po.get("initial") or {}
-                text = str(ini.get("text") or po.get("text") or "")
-                if not text.endswith("-tp") or not self._order_is_reduce_only(po):
+            for o in (self._owned_open_orders(symbol, self._own_prefix("")) or []):
+                if not str(o.get("text") or "").endswith("-gtp"):
                     continue
-                pid = str(self._order_id(po) or "")
-                if pid:
-                    open_ids.add(pid)
-                covered += abs(_int_or_zero(ini.get("size") or po.get("size")))
-                open_tp.append({"id": pid, "trig": (po.get("trigger") or {}).get("price")})
+                oid = str(self._order_id(o) or "")
+                if oid:
+                    open_gtp_ids.add(oid)
+                existing.add(self._price_key(o.get("price")))
         except Exception as e:  # noqa: BLE001
-            swallow("executor.ensure_grid_tp.open_tp", e, level=logging.DEBUG)
-            out["skipped"] = "price_orders_unavailable"
+            swallow("executor.ensure_grid_tp.gtp_orders", e, level=logging.DEBUG)
+            out["skipped"] = "orders_unavailable"
             return out
-        existing = {self._price_key(x["trig"]) for x in open_tp if x.get("trig")}
+        open_ids = open_gtp_ids
         out["position"] = pos
-        out["covered"] = covered
+        out["covered"] = len(open_gtp_ids)
         state_fixes: list = []
+        # mark：候选过滤的基准（target <= mark 的档挂了会立即成交 → 开空）
+        mark = _to_float((self.client.get_ticker(symbol) or {}).get("mark_price"))
+        if mark <= 0:
+            out["skipped"] = "mark_unavailable"
+            return out
+        out["mark"] = mark
 
         # ── ⓪ 台账 ↔ 交易所对齐：pending 档的入场单是否还在盘 ────────────
         # 重铺/撤单后旧档的入场单已被撤，但表里仍标 pending（实测 5 小时从 30 涨到
@@ -3649,90 +3663,65 @@ class Executor:
             out["ladder_promoted"] = promoted
             state_fixes.append({"ladder_sync": {"pruned": pruned, "promoted": promoted}})
 
-        # ── ① 台账维护：protected 档的 TP 是否还在盘 / 是否已了结 ──────────
-        # `get_price_order` 实测语义（2026-10-15 实盘三例）：succeeded = 触发并成交；
-        # cancelled = 被撤（需重挂）；failed = 交易所侧未能执行（无仓可减 → 仓位已平）。
-        # 后两者都表示该档生命周期结束，只有 cancelled 才要退回待挂。
-        if pos <= 0:
-            # 无持仓 → filled/protected 档都闭环（该档生命周期结束，避免死档堆积）
-            for lv in levels_all:
-                if str(lv.get("status")) in ("filled", "protected"):
-                    lv["status"] = "closed"
-                    state_fixes.append({"price": lv.get("price"), "to": "closed",
-                                        "why": "flat"})
+        # ── ① 台账维护：protected 档的止盈卖单（普通限价单）是否还在盘/已成交 ──
+        # 普通单终态：`finish_as=filled` = 已成交（该档止盈落袋）→ closed；
+        # `status=open` 但不在集合（理论不该发生）→ 以单查为准不动；
+        # 其余（cancelled/未知）→ 退回 pending 重挂。
+        # ⚠️ 无持仓时**不再整体闭环**：普通卖单不依赖持仓而存在（预挂形态，
+        # 用户要求的「完全挂完」），只有卖单本身成交才闭环。
         for lv in levels_all:
             if str(lv.get("status")) != "protected":
                 continue
             tid = str(lv.get("tp_order_id") or "")
             if tid and tid in open_ids:
-                continue                      # 还在盘 → 保持 protected
+                continue                      # 卖单还在盘 → 保持 protected
             if not tid:
-                # 本次改动前落盘的老行没有 TP 单 id → 无仓可护就闭环，否则退回待挂
-                to = "closed" if pos <= 0 else "pending"
-                lv["status"] = to
-                state_fixes.append({"price": lv.get("price"), "to": to,
+                lv["status"] = "pending"
+                state_fixes.append({"price": lv.get("price"), "to": "pending",
                                     "why": "no_tp_order_id"})
                 continue
             try:
-                po = self.client.get_price_order(tid) or {}
-                fa = str(po.get("finish_as") or "")
+                o = self.client.get_order(tid) or {}
             except Exception as e:  # noqa: BLE001
-                swallow("executor.ensure_grid_tp.get_price_order", e, level=logging.DEBUG)
+                swallow("executor.ensure_grid_tp.get_order", e, level=logging.DEBUG)
                 continue                      # 查不到 → 不动（fail-closed）
-            if fa in ("succeeded", "filled"):
-                lv["status"] = "closed"       # 已止盈了结 → 该档生命周期结束
+            if str(o.get("finish_as") or "") == "filled":
+                lv["status"] = "closed"       # 卖单已成交 → 该档生命周期结束
                 state_fixes.append({"price": lv.get("price"), "to": "closed",
-                                    "finish_as": fa})
+                                    "finish_as": "filled"})
+            elif str(o.get("status") or "") == "open":
+                continue                      # 在盘（集合未抓到，以单查为准）
             else:
-                # cancelled（被撤）/ failed（交易所侧未执行）/ 未知 → 退回待挂重挂，
-                # 交给覆盖校验判断「持仓是否还需要它」（无仓时上面已整体闭环）。
                 lv["status"] = "pending"
                 lv.pop("tp_order_id", None)
                 state_fixes.append({"price": lv.get("price"), "to": "pending",
-                                    "why": f"tp_{fa or 'gone'}"})
+                                    "why": f"gtp_{str(o.get('finish_as') or o.get('status') or 'gone')}"})
         out["state_fixes"] = state_fixes
 
-        # ── ② 覆盖校验：在盘 TP 合计 < 持仓 → 从待挂档补（最新成交优先）────
+        # ── ② 候选：pending 网格档中「目标价 > mark」的**全部**档 ───────────
+        # **不再要求该档已成交**（单向净仓簿：先挂上 = 用户的「完全挂完」；
+        # 之后任何持仓的反弹卖出都由这些卖单承接）。target <= mark 跳过 ——
+        # 低于市价的限价卖单会立即以市价成交（= 直接开空）。
         candidates, skipped = [], []
-        if pos <= 0:
-            out["candidates"] = []
-            out["skipped"] = skipped + [{"why": "no_position"}]
-            if state_fixes and not dry:
-                self._persist_ladder(path, data)
-            return out
-        need = pos - covered
-        if need > 0:
-            pend = [lv for lv in levels_all
-                    if str(lv.get("status")) in ("pending", "filled")]
-            pend.sort(key=lambda x: str(x.get("ts") or ""), reverse=True)
-            for lv in pend:
-                if need <= 0:
-                    break
-                tgt = lv.get("tp_target")
-                if not tgt:
-                    skipped.append({"price": lv.get("price"), "why": "no_tp_target(交回AI)"})
-                    continue
-                oid = str(lv.get("order_id") or "")
-                if not oid:
-                    continue
-                try:
-                    o = self.client.get_order(oid) or {}
-                    filled = str(o.get("finish_as") or "") == "filled"
-                except Exception as e:  # noqa: BLE001
-                    swallow("executor.ensure_grid_tp.get_order", e, level=logging.DEBUG)
-                    continue
-                if not filled:
-                    continue  # 还没成交（含已撤）—— 目标价此刻多半非法，交给 AI 下一轮
-                if self._price_key(tgt) in existing:
-                    skipped.append({"price": lv.get("price"), "why": "tp_already_present"})
-                    continue
-                size = int(lv.get("size") or 0)
-                if size <= 0:
-                    continue
-                candidates.append({"level": lv, "target": float(tgt), "size": size})
-                need -= size
-        else:
-            skipped.append({"why": "covered_enough", "covered": covered, "position": pos})
+        for lv in levels_all:
+            if str(lv.get("status")) not in ("pending", "filled"):
+                continue
+            tgt = lv.get("tp_target")
+            if not tgt:
+                skipped.append({"price": lv.get("price"), "why": "no_tp_target(交回AI)"})
+                continue
+            tf = _to_float(tgt)
+            if tf <= 0:
+                skipped.append({"price": lv.get("price"), "why": "bad_target"})
+                continue
+            if tf <= mark:
+                skipped.append({"price": lv.get("price"), "why": f"below_mark({mark})"})
+                continue
+            if self._price_key(tgt) in existing:
+                skipped.append({"price": lv.get("price"), "why": "tp_already_present"})
+                continue
+            size = _int_or_zero(lv.get("size")) or 1
+            candidates.append({"level": lv, "target": tf, "size": size})
 
         out["candidates"] = [{"price": c["level"].get("price"), "tp": c["target"],
                               "size": c["size"]} for c in candidates]
@@ -3751,32 +3740,22 @@ class Executor:
             if size <= 0:
                 errors.append({"price": lv.get("price"), "error": "zero_size"})
                 continue
-            pos_side = "long"  # 阶梯入场腿恒为多
-            intent = Intent(action="open_long", symbol=symbol, side=pos_side,
-                            tp=tgt, tp_type="limit", tp_limit_price=tgt,
-                            label=self.label_prefix or "auto")
-            intent.trigger_rule_tp = infer_trigger_rules(intent.action, True)
-            err = self._precheck_exit_triggers(intent)
-            if err:
-                errors.append({"price": lv.get("price"), "tp": tgt, "error": err})
-                continue
-            trigger_side = "short"
+            # **普通限价卖单**（非条件单、非 reduce_only）—— 单向模式用户拍板形态
             try:
-                rec, perr = self._place_exit_leg(
-                    lambda: self._place_trigger(
-                        intent, trigger_side, tgt, is_tp=True, meta=meta, size=size
-                    ),
-                    kind="tp", price_order=True,
-                )
+                order = self.client.place_order({
+                    "contract": symbol, "size": -size,
+                    "price": str(round_price(tgt, meta)),
+                    "tif": "gtc",
+                    "text": f"t-{self._bot_tag(self.label_prefix or 'auto')}-gtp",
+                })
             except Exception as e:  # noqa: BLE001 — boundary
-                rec, perr = None, str(e)
-            if not rec:
-                errors.append({"price": lv.get("price"), "tp": tgt, "error": perr})
+                errors.append({"price": lv.get("price"), "tp": tgt,
+                               "error": str(e)[:200]})
                 continue
-            order = rec.get("order") or {}
             placed.append({"price": lv.get("price"), "tp": tgt, "size": size,
-                           "order_type": "limit", "id": str(order.get("id") or "")})
-            lv["tp_order_id"] = str(order.get("id") or "")   # 台账：TP 单 id（供后续校验）
+                           "order_type": "limit", "reduce_only": False,
+                           "id": str((order or {}).get("id") or "")})
+            lv["tp_order_id"] = str((order or {}).get("id") or "")
             lv["status"] = "protected"
             done_idx.append(lv)
 
