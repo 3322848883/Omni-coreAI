@@ -729,6 +729,13 @@ def _reconcile_sweep(bot: BotConfig, paths: ProjectPaths, *,
             log.warning("reconcile %s %s failed: %s", bot.bot_id, sym, e)
             continue
         n = len(res.get("cancelled") or [])
+        if not res.get("ok"):
+            # 原先静默 return（fail-closed 但**无日志**）—— 实测排查「11:16–11:40 为何
+            # 连续 5 个窗口没对账」时完全无据可查。取数失败是异常态，记 WARNING。
+            log.warning("reconcile %s %s: 取数失败，本轮不动（%s）",
+                        bot.bot_id, sym, res.get("error"))
+        elif res.get("skipped"):
+            log.debug("reconcile %s %s: skipped=%s", bot.bot_id, sym, res.get("skipped"))
         if n:
             log.info("reconcile %s %s: 清理重复保护单 %d 笔（保留 %d 笔，"
                      "其中多级 TP %s 条；重复 %s／超上限 %s）",

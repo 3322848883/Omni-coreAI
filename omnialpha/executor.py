@@ -253,6 +253,34 @@ _MGMT_ONLY_ACTIONS = frozenset({
     "close", "close_all", "close_long", "close_short", "flatten",
 })
 
+#: 每轮 `ensure_grid_tp` 最多做多少次「台账 ↔ 交易所对齐」的 `get_order` 查询。
+#: 为什么要限：档位表历史上只增不清（实测 5 小时涨到 110 条），若一次全查会把
+#: 一轮扫描拖死。老档优先、每轮 20 条 → 病态表约半小时收敛，之后每轮只有新增几条。
+_LADDER_PRUNE_MAX = 20
+
+
+def _int_or_zero(v: Any) -> int:
+    """容错取整：非数字/空/None → 0。
+
+    **刻意不用 try/except**：本项目审计 B12 是「裸吞异常棘轮」，为解析加 except
+    会被记成新增的吞（executor.py 基线 28）。校验式解析同样安全且不触棘轮。
+    """
+    if v is None or isinstance(v, bool):
+        return 0
+    if isinstance(v, int):
+        return v
+    s = str(v).strip()
+    if not s:
+        return 0
+    neg = s.startswith("-")
+    body = s[1:] if neg else s
+    if body.isdigit():
+        return -int(body) if neg else int(body)
+    head = body.split(".", 1)[0]
+    if head.isdigit():                     # 允许 "1.0" / "1.9" → 1
+        return -int(head) if neg else int(head)
+    return 0
+
 
 def _skip_placeholder_tp(account_risk: dict, meta: dict) -> bool:
     """网格腿是否**跳过占位 TP**（2026-10-15，见 `_open` 内详细注释）。
@@ -3483,48 +3511,179 @@ class Executor:
         except Exception:  # noqa: BLE001
             out["skipped"] = "ladder_table_corrupt"
             return out
-        levels = [lv for lv in (data.get("levels") or [])
-                  if isinstance(lv, dict) and lv.get("symbol") == symbol
-                  and lv.get("status") == "pending"]
+        levels_all = [lv for lv in (data.get("levels") or [])
+                      if isinstance(lv, dict) and lv.get("symbol") == symbol]
 
-        # 已有的 owned TP 触发价（去重用：同价已有 TP 就不重复挂）
-        existing = set()
+        # 持仓与在盘 TP —— **覆盖校验的输入**。原先只看「档位表 status==pending」，
+        # 于是 TP 被撤（对账/重铺）后那一档永久失去止盈，且没有「在盘 TP 合计 <
+        # 持仓」的兜底（实测 2026-10-15：档位 2423.7 的逐档 TP 挂出 4 分钟即被撤，
+        # 表里仍标 protected，从此不再补挂）。
+        # 用 `_positions_or_error`（而非 `_symbol_positions`）：后者「取不到就当没有」，
+        # 会把接口抖动读成空仓 → 本方法就会把 filled 档全判成闭环。宁可不动。
+        raw_pos, perr = self._positions_or_error()
+        if raw_pos is None:
+            out["skipped"] = "positions_unavailable"
+            out["error"] = f"持仓查询失败: {perr}"
+            return out
+        positions = _parse_symbol_positions(raw_pos, symbol)
+        pos = 0
+        for p in positions or []:
+            pos += abs(_int_or_zero(p.get("size")))
+        # 在盘普通挂单（入场腿）id —— 供「台账 ↔ 交易所对齐」判 pending 档死活
+        open_entry_ids: set = set()
+        try:
+            for o in (self._owned_open_orders(symbol, self._own_prefix("")) or []):
+                oid = str(self._order_id(o) or "")
+                if oid:
+                    open_entry_ids.add(oid)
+        except Exception as e:  # noqa: BLE001
+            swallow("executor.ensure_grid_tp.open_entry", e, level=logging.DEBUG)
+        open_tp, open_ids, covered = [], set(), 0
         try:
             for po in (self._owned_price_orders(symbol, self._own_prefix("")) or []):
-                trig = (po.get("trigger") or {}).get("price")
-                if (po.get("initial") or {}).get("text", "").endswith("-tp") and trig:
-                    existing.add(round(float(trig), 2))
+                ini = po.get("initial") or {}
+                text = str(ini.get("text") or po.get("text") or "")
+                if not text.endswith("-tp") or not self._order_is_reduce_only(po):
+                    continue
+                pid = str(self._order_id(po) or "")
+                if pid:
+                    open_ids.add(pid)
+                covered += abs(_int_or_zero(ini.get("size") or po.get("size")))
+                open_tp.append({"id": pid, "trig": (po.get("trigger") or {}).get("price")})
         except Exception as e:  # noqa: BLE001
-            swallow("executor.ensure_grid_tp.existing", e, level=logging.DEBUG)
+            swallow("executor.ensure_grid_tp.open_tp", e, level=logging.DEBUG)
+            out["skipped"] = "price_orders_unavailable"
+            return out
+        existing = {self._price_key(x["trig"]) for x in open_tp if x.get("trig")}
+        out["position"] = pos
+        out["covered"] = covered
+        state_fixes: list = []
 
-        candidates, skipped = [], []
-        for lv in levels:
-            tgt = lv.get("tp_target")
-            if not tgt:
-                skipped.append({"price": lv.get("price"), "why": "no_tp_target(交回AI)"})
+        # ── ⓪ 台账 ↔ 交易所对齐：pending 档的入场单是否还在盘 ────────────
+        # 重铺/撤单后旧档的入场单已被撤，但表里仍标 pending（实测 5 小时从 30 涨到
+        # 110 条）→ 表污染、LLM 快照被死档占据。以**交易所为准**纠正：
+        # 在盘 → 保持 pending；已成交 → filled；已撤/查不到 → 删除该行。
+        # 每轮限制查询条数（老档优先），避免病态表把一轮扫描拖死。
+        pruned, promoted, checked = 0, 0, 0
+        for lv in list(levels_all):
+            if checked >= _LADDER_PRUNE_MAX:
+                break
+            if str(lv.get("status")) != "pending":
                 continue
             oid = str(lv.get("order_id") or "")
-            filled = False
-            if oid:
+            if not oid or oid in open_entry_ids:
+                continue
+            checked += 1
+            try:
+                o = self.client.get_order(oid) or {}
+            except Exception as e:  # noqa: BLE001
+                swallow("executor.ensure_grid_tp.prune_get_order", e, level=logging.DEBUG)
+                continue                      # 查不到 → 不动（fail-closed）
+            if str(o.get("finish_as") or "") == "filled":
+                lv["status"] = "filled"
+                promoted += 1
+            else:
+                levels_all.remove(lv)
+                lst = data.get("levels") or []
+                if lv in lst:                 # 不用 try/except（审计 B12 裸吞棘轮）
+                    lst.remove(lv)
+                pruned += 1
+        if pruned or promoted:
+            out["ladder_pruned"] = pruned
+            out["ladder_promoted"] = promoted
+            state_fixes.append({"ladder_sync": {"pruned": pruned, "promoted": promoted}})
+
+        # ── ① 台账维护：protected 档的 TP 是否还在盘 / 是否已了结 ──────────
+        # `get_price_order` 实测语义（2026-10-15 实盘三例）：succeeded = 触发并成交；
+        # cancelled = 被撤（需重挂）；failed = 交易所侧未能执行（无仓可减 → 仓位已平）。
+        # 后两者都表示该档生命周期结束，只有 cancelled 才要退回待挂。
+        if pos <= 0:
+            # 无持仓 → filled/protected 档都闭环（该档生命周期结束，避免死档堆积）
+            for lv in levels_all:
+                if str(lv.get("status")) in ("filled", "protected"):
+                    lv["status"] = "closed"
+                    state_fixes.append({"price": lv.get("price"), "to": "closed",
+                                        "why": "flat"})
+        for lv in levels_all:
+            if str(lv.get("status")) != "protected":
+                continue
+            tid = str(lv.get("tp_order_id") or "")
+            if tid and tid in open_ids:
+                continue                      # 还在盘 → 保持 protected
+            if not tid:
+                # 本次改动前落盘的老行没有 TP 单 id → 无仓可护就闭环，否则退回待挂
+                to = "closed" if pos <= 0 else "pending"
+                lv["status"] = to
+                state_fixes.append({"price": lv.get("price"), "to": to,
+                                    "why": "no_tp_order_id"})
+                continue
+            try:
+                po = self.client.get_price_order(tid) or {}
+                fa = str(po.get("finish_as") or "")
+            except Exception as e:  # noqa: BLE001
+                swallow("executor.ensure_grid_tp.get_price_order", e, level=logging.DEBUG)
+                continue                      # 查不到 → 不动（fail-closed）
+            if fa in ("succeeded", "filled"):
+                lv["status"] = "closed"       # 已止盈了结 → 该档生命周期结束
+                state_fixes.append({"price": lv.get("price"), "to": "closed",
+                                    "finish_as": fa})
+            else:
+                # cancelled（被撤）/ failed（交易所侧未执行）/ 未知 → 退回待挂重挂，
+                # 交给覆盖校验判断「持仓是否还需要它」（无仓时上面已整体闭环）。
+                lv["status"] = "pending"
+                lv.pop("tp_order_id", None)
+                state_fixes.append({"price": lv.get("price"), "to": "pending",
+                                    "why": f"tp_{fa or 'gone'}"})
+        out["state_fixes"] = state_fixes
+
+        # ── ② 覆盖校验：在盘 TP 合计 < 持仓 → 从待挂档补（最新成交优先）────
+        candidates, skipped = [], []
+        if pos <= 0:
+            out["candidates"] = []
+            out["skipped"] = skipped + [{"why": "no_position"}]
+            if state_fixes and not dry:
+                self._persist_ladder(path, data)
+            return out
+        need = pos - covered
+        if need > 0:
+            pend = [lv for lv in levels_all
+                    if str(lv.get("status")) in ("pending", "filled")]
+            pend.sort(key=lambda x: str(x.get("ts") or ""), reverse=True)
+            for lv in pend:
+                if need <= 0:
+                    break
+                tgt = lv.get("tp_target")
+                if not tgt:
+                    skipped.append({"price": lv.get("price"), "why": "no_tp_target(交回AI)"})
+                    continue
+                oid = str(lv.get("order_id") or "")
+                if not oid:
+                    continue
                 try:
                     o = self.client.get_order(oid) or {}
                     filled = str(o.get("finish_as") or "") == "filled"
                 except Exception as e:  # noqa: BLE001
                     swallow("executor.ensure_grid_tp.get_order", e, level=logging.DEBUG)
                     continue
-            if not filled:
-                continue  # 还没成交（含已撤）—— 目标价此刻多半非法，交给 AI 下一轮
-            if round(float(tgt), 2) in existing:
-                skipped.append({"price": lv.get("price"), "why": "tp_already_present"})
-                continue
-            candidates.append({"level": lv, "target": float(tgt),
-                               "size": int(lv.get("size") or 0)})
+                if not filled:
+                    continue  # 还没成交（含已撤）—— 目标价此刻多半非法，交给 AI 下一轮
+                if self._price_key(tgt) in existing:
+                    skipped.append({"price": lv.get("price"), "why": "tp_already_present"})
+                    continue
+                size = int(lv.get("size") or 0)
+                if size <= 0:
+                    continue
+                candidates.append({"level": lv, "target": float(tgt), "size": size})
+                need -= size
+        else:
+            skipped.append({"why": "covered_enough", "covered": covered, "position": pos})
 
         out["candidates"] = [{"price": c["level"].get("price"), "tp": c["target"],
                               "size": c["size"]} for c in candidates]
         out["skipped"] = skipped
         if not candidates:
-            out["skipped"] = skipped + [{"why": "no_filled_level_with_target"}]
+            if state_fixes and not dry:
+                self._persist_ladder(path, data)
             return out
         if dry:
             return out
@@ -3561,24 +3720,37 @@ class Executor:
             order = rec.get("order") or {}
             placed.append({"price": lv.get("price"), "tp": tgt, "size": size,
                            "order_type": "limit", "id": str(order.get("id") or "")})
+            lv["tp_order_id"] = str(order.get("id") or "")   # 台账：TP 单 id（供后续校验）
+            lv["status"] = "protected"
             done_idx.append(lv)
 
-        # 落盘：已成功挂出的档标记 protected（重写档位表）
-        if done_idx:
-            try:
-                alllv = data.get("levels") or []
-                for lv in alllv:
-                    if lv in done_idx:
-                        lv["status"] = "protected"
-                tmp = path.with_suffix(".tmp")
-                tmp.write_text(json.dumps({"levels": alllv}, ensure_ascii=False),
-                               encoding="utf-8")
-                tmp.replace(path)
-            except Exception as e:  # noqa: BLE001
-                swallow("executor.ensure_grid_tp.persist", e, level=logging.WARNING)
+        # 落盘：已挂出的档标 protected（并记 TP 单 id）；台账状态变更同样落盘。
+        # `levels_all` 是 `data["levels"]` 的**引用**，上面的就地改动已生效。
+        if done_idx or state_fixes:
+            self._persist_ladder(path, data)
         out["placed"] = placed
         out["errors"] = errors
         return out
+
+    @staticmethod
+    def _price_key(v: Any) -> str:
+        """触发价归一化键（去空白/去尾零）—— 刻意不做 float()，避免为解析新增裸吞异常。"""
+        if v is None:
+            return ""
+        s = str(v).strip()
+        if "." in s:
+            s = s.rstrip("0").rstrip(".")
+        return s or ""
+
+    @staticmethod
+    def _persist_ladder(path: Path, data: dict) -> None:
+        """档位表原子落盘（失败只留痕，不拦主流程）。"""
+        try:
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(path)
+        except Exception as e:  # noqa: BLE001
+            swallow("executor._persist_ladder", e, level=logging.WARNING)
 
     # ── 峰值回撤保护（防坐电梯）──────────────────────────
     def _peak_trail_path(self) -> Path:
