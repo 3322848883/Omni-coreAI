@@ -215,7 +215,7 @@ class TestPlanSharedSl(unittest.TestCase):
 
 
 class TestResyncProtectorsMerge(unittest.TestCase):
-    """`_resync_protectors`：SL 归并 + TP 保持原逻辑。"""
+    """`_resync_protectors`：SL 按 (方向, 触发价) 归并 + TP 腿按「组」对齐。"""
 
     def _ex(self, positions, price_orders=None):
         td = tempfile.TemporaryDirectory()
@@ -268,13 +268,22 @@ class TestResyncProtectorsMerge(unittest.TestCase):
         self.assertEqual(-10, cli.placed[0]["initial"]["size"])
         self.assertEqual(sorted(["a", "b"]), sorted(cli.cancelled))
 
-    def test_tp_legs_not_merged(self):
-        """TP 腿保持原逻辑：每条各自重挂（size=total），不做归并。"""
+    def test_tp_group_aligned_not_merged(self):
+        """TP 腿按「组」对齐：合计 != 持仓 → 最大余数法分摊；不同触发价**不归并**。
+
+        旧逻辑逐腿放大到全仓（6/4 @ 持仓 17 → 17/17 = 34，2 倍超配）；
+        新逻辑 6:4 权重分 17 → [10, 7]，合计恒等于持仓。
+        """
         ex, cli = self._ex(17, [_tp("a", 2600.0, -6), _tp("b", 2650.0, -4)])
         notes = ex._resync_protectors("ETH_USDT")
         self.assertEqual([], [n for n in notes if "merged_sl" in n])
         self.assertEqual(2, len(cli.placed))
         self.assertEqual(sorted(["a", "b"]), sorted(cli.cancelled))
+        # 6:4 权重分 17 → 10 + 7（合计恒 17、绝不超配）
+        self.assertEqual([-10, -7], sorted(b["initial"]["size"] for b in cli.placed))
+        # 触发价（各档止盈位 = 策略本体）原样保留
+        self.assertEqual([2600.0, 2650.0],
+                         sorted(float(b["trigger"]["price"]) for b in cli.placed))
 
     def test_side_without_position_untouched(self):
         """某方向已无持仓 → 其遗留 SL 交给 orphan 清理，本方法不动。"""
