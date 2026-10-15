@@ -266,6 +266,39 @@ class GateClient:
             path = f"{FUTURES_API}/dual_comp/positions/cross_mode"
         return self.rest_signed_request("POST", path, "", body)
 
+    def set_position_mode(self, position_mode: str) -> Any:
+        """切换**账户级**持仓模式：`single`（单向）/ `dual`（双向）/ `dual_plus`（分仓）。
+
+        ⚠️ **参数必须走 query string**（Gate 的标量参数约定），不能放 JSON body ——
+        实测 2026-10-16：
+          `POST /dual_mode`         body `{"dual_mode": false}`       → `MISSING_REQUIRED_PARAM`
+          `POST /set_position_mode` body `{"position_mode":"single"}` → `INVALID_PARAM_VALUE`
+          `POST /dual_mode?dual_mode=false`                           → ✅ 成功（切到 single）
+        错误从「参数缺失」推进到 `ORDER_PENDING` 是参数形态正确的信号。
+
+        ⚠️ 前置条件：该保证金币种下**所有**永续合约无持仓、无挂单（比
+        `set_margin_mode` 的单合约限制更严格）—— 有挂单时报 400 `ORDER_PENDING`。
+
+        ⚠️ 切换后**必须清 `_position_mode_cache`** —— `get_position_mode()` 有 30s
+        缓存，不清会让引擎在切换后的半分钟里仍按旧模式走分支（下单 body 的
+        `auto_size` / `_close` 的 side 校验都读它）。
+
+        ⚠️ 切 `single` 后**必须同时开 `no_flip`**：单向模式下反向单不是开反向仓，
+        而是**自动平掉现有仓** —— `no_flip: false` 会让一句 `open_short` 直接平掉多头。
+        """
+        mode = str(position_mode or "").strip().lower()
+        if mode not in ("single", "dual", "dual_plus"):
+            raise GateApiError("position_mode must be single|dual|dual_plus")
+        if mode == "dual_plus":
+            # 分仓模式走 2026-04-30 新增端点（经典 dual_mode 不支持三态）
+            path, qs = f"{FUTURES_API}/set_position_mode", "position_mode=dual_plus"
+        else:
+            path = f"{FUTURES_API}/dual_mode"
+            qs = "dual_mode=" + ("true" if mode == "dual" else "false")
+        r = self.rest_signed_request("POST", path, qs, None)
+        self._position_mode_cache = (None, 0.0)
+        return r
+
     # ── orders ───────────────────────────────────────────
     def place_order(self, body: dict) -> dict:
         try:
