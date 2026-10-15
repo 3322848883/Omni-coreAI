@@ -58,6 +58,10 @@ class GateExchange(ExchangeClient):
     def get_position_mode(self) -> str:
         return self._c.get_position_mode()
 
+    def set_position_mode(self, position_mode: str):
+        """账户级持仓模式（single/dual/dual_plus）—— 无 symbol，不需要 `_s()` 映射。"""
+        return self._c.set_position_mode(position_mode)
+
     def place_order(self, body: dict) -> dict:
         b = dict(body)
         b["contract"] = self._s(b.get("contract") or b.get("symbol") or "")
