@@ -382,6 +382,51 @@ class Executor:
         # 只被 `_open` → `_resolve_sl_size` → `_sl_cover_cap` 读取，而它只在**轮内**被调用，
         # 所以即使跨轮残留也不会被别的路径读到（撤掉的旧 id 也不会再出现在挂单簿里）。
         self._round_replaced_order_ids: set = set()
+        # 保证金模式 ensure 的一次性短路标记：(symbol, mode)。
+        # Gate 只允许「该合约无持仓、无挂单」时切换（实测 2026-10-16：盘上 10 档
+        # 挂单时报 `ORDER_PENDING`），所以失败是常态而非错误 —— 成功过一次即短路，
+        # 避免每轮开仓都白跑一次 API（阶梯常态有挂单）。
+        self._mm_done: Optional[tuple] = None
+        # 节流：`_open` 每轮被调 N 次（N = 档数），而切换失败是常态
+        # （有挂单报 ORDER_PENDING）→ 不做节流就是 N 次/轮的无效 API 调用。
+        self._mm_last_key: Optional[tuple] = None
+        self._mm_last_try: float = 0.0
+
+    #: 保证金模式 ensure 的重试间隔（秒）。阶梯 15 分钟一轮，取 5 分钟 →
+    #  一轮最多试 1~2 次，空窗（重铺/清场）一到就能接住。
+    _MM_RETRY_SEC = 300.0
+
+    def _ensure_margin_mode(self, symbol: str, want: str) -> str:
+        """把合约的保证金模式 ensure 成 `want`（幂等；切不动就静默等空窗）。
+
+        与 `intent.margin_mode` 的关系：**AI 显式给了就以 AI 为准**，否则用
+        bot 配置 `account_risk.margin_mode`。配置驱动是必要的 —— 实测人格虽
+        写着 `margin_mode: cross`，但字段表与 chip 契约都没有该字段，AI 从
+        未写过 → 账户一直是逐仓（`pos_margin_mode: isolated`），
+        「配了但没人读」的典型。
+
+        返回 `"cached" | "switched" | "pending" | "throttled" | ""`
+        （空 = 值非法，不动；throttled = 距上次尝试不足 `_MM_RETRY_SEC`）。
+        """
+        want = str(want or "").strip().lower()
+        if want not in ("cross", "isolated"):
+            return ""
+        if self._mm_done == (symbol, want):
+            return "cached"
+        now = time.time()
+        if (self._mm_last_key == (symbol, want)
+                and (now - self._mm_last_try) < self._MM_RETRY_SEC):
+            return "throttled"
+        self._mm_last_key = (symbol, want)
+        self._mm_last_try = now
+        try:
+            self.client.set_margin_mode(symbol, want)
+        except Exception as e:  # noqa: BLE001
+            # ORDER_PENDING（有挂单/持仓）是预期路径，不是故障 → DEBUG 不刷屏。
+            swallow("executor.ensure_margin_mode", e, level=logging.DEBUG)
+            return "pending"
+        self._mm_done = (symbol, want)
+        return "switched"
 
     def execute_signal(self, signal: SignalFile) -> ExecReport:
         report = ExecReport()
@@ -1859,10 +1904,18 @@ class Executor:
             return StepResult(intent.action, intent.symbol, False,
                               detail={"precheck": side_err}, error=side_err)
 
-        if intent.leverage:
+        # 保证金模式：**AI 显式给 > bot 配置**（`account_risk.margin_mode`）。
+        # 幂等 + 切不动就等空窗（Gate 要求无持仓无挂单），不阻塞下单。
+        _mm = intent.margin_mode or (self.account_risk or {}).get("margin_mode")
+        _mm_res = self._ensure_margin_mode(intent.symbol, _mm) if _mm else ""
+        # ⚠️ 全仓（cross）下 `position.leverage` **恒为 0**，杠杆由 `cross_leverage_limit`
+        # 决定（实测切换后 `leverage:"0"` / `cross_leverage_limit:"50"`）。此时再调
+        # `set_leverage(50)` 会被 Gate 当成「修改杠杆」→ **有挂单时报 ORDER_PENDING**
+        # （2026-10-16 18:49 实测：阶梯第 2 档起必然失败 → 整轮 rollback，网格挂不上）。
+        # 人格写 `leverage=50` 是**逐仓语义**；全仓下无需设置（`cross_leverage_limit`
+        # 已是 50）。逐仓 / 未配 → 照旧设置（行为不变）。
+        if intent.leverage and str(_mm or "").strip().lower() != "cross":
             self.client.set_leverage(intent.symbol, int(intent.leverage))
-        if intent.margin_mode:
-            self.client.set_margin_mode(intent.symbol, intent.margin_mode)
 
         if intent.size is not None:
             contracts = int(intent.size)
@@ -1902,6 +1955,9 @@ class Executor:
         }
         if size_note:
             detail["size_align_note"] = size_note
+        # 留痕：switched（本次真的切了）/ pending（有挂单，等空窗）。cached 不记。
+        if _mm_res and _mm_res != "cached":
+            detail["margin_mode"] = _mm_res
         if entry_rec is None:
             return StepResult(
                 intent.action, intent.symbol, False, detail=detail,

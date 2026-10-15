@@ -45,6 +45,11 @@ ACCOUNT_RISK: frozenset[str] = frozenset({
     "equity_deviation_halt", "equity_deviation_halt_pct", "give_back", "halt",
     "max_leverage", "max_notional_pct", "max_notional_usd",
     "max_total_notional_pct", "max_total_notional_usd", "no_flip",
+    # 保证金模式（cross|isolated）。**live 侧唯一的配置入口** —— 此前只有
+    # `paper.margin_mode`（纸面引擎）有配置，live 只能靠 AI chip 的
+    # `intent.margin_mode`，而人格字段表/契约都没有该字段 → 从未生效。
+    # Gate 只允许「无持仓无挂单」时切换，故 executor 侧是幂等 + 失败静默。
+    "margin_mode",
     "peak_trail", "peak_trail_atr",
     "risk_pct", "risk_per_trade_pct", "safe_mode_after_failures",
     "total_risk_pct",
