@@ -417,5 +417,116 @@ class TestSkipPlaceholderTp(unittest.TestCase):
                 self.assertFalse(_skip_placeholder_tp({"grid_tp_auto": m}, {"tp_target": 2367.0}))
 
 
+class _ChainClient(_Client):
+    """可变桩：`place_price_order` 真把单挂进在盘集合（`_po`），供全链验证。
+
+    返回 `{\"id\": ...}`（Gate `/price_orders` 的顶层订单体形态）——
+    `_place_exit_leg` 会把它归一成 `{\"order\": {...}}` 并写进台账 `tp_order_id`。
+    """
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.tp_bodies = []
+        self._tp_seq = 0
+
+    def place_price_order(self, body):
+        self._tp_seq += 1
+        oid = f"tp-{self._tp_seq}"
+        self.tp_bodies.append(json.loads(json.dumps(body)))
+        self._po.append(dict(body, id=oid))
+        return {"id": oid}
+
+
+class TestSingleModeTenLayers(unittest.TestCase):
+    """⚠️ 单向（single）模式下「**每层网格 → 各自止盈**」的完整链路。
+
+    `paper.position_mode` 默认就是 single（config.py:141）—— 实盘 2026-10-16
+    切 single 后，这条链路与实盘**同构**。持仓形态用 single 真实结构：
+    一条记录、`mode="single"`（无方向后缀）、方向靠 size 推导
+    （推导本身由 tests/test_position_mode.py 锁死）。
+
+    链路：10 层全成交 → `ensure_grid_tp` 逐层挂条件限价 TP → 去重 →
+    全部触发成交 → 档位闭环。
+    """
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.addCleanup(self._td.cleanup)
+        self.tmp = Path(self._td.name)
+
+    def test_ten_layers_each_get_own_tp_then_dedup_then_close_loop(self):
+        prices = [2355, 2340, 2325, 2310, 2295, 2280, 2265, 2250, 2235, 2220]
+        _write_levels(self.tmp, [_lv(p, 1, p + 12, oid=f"o{i}")
+                                 for i, p in enumerate(prices)])
+        cli = _ChainClient(finish_as="filled", mark=2200.0,
+                           positions=[{"contract": "ETH_USDT", "size": 10,
+                                       "mode": "single"}])   # ⚠️ single 真实形态
+        ex = _new(self.tmp, cli, mode="live")
+        ex._precheck_exit_triggers = lambda intent: ""   # 预检另有专项，这里聚焦挂单链路
+
+        out = ex.ensure_grid_tp("ETH_USDT")
+
+        # 1) 10 层各挂一条（不是 1 条共用、不是占位价）
+        self.assertEqual(len(out["placed"]), 10, out)
+        # 2) 触发价 = 各层自己的目标，互不相同 —— 「每层对应止盈」的本体
+        trigs = {b["trigger"]["price"] for b in cli.tp_bodies}
+        self.assertEqual(len(trigs), 10)
+        self.assertEqual({float(t) for t in trigs}, {p + 12 for p in prices})
+        # 3) 每条：条件限价、reduce_only、gtc、限价 = 触发价、卖 1 张（平多）
+        for b in cli.tp_bodies:
+            ini, tri = b["initial"], b["trigger"]
+            self.assertTrue(ini.get("reduce_only") or ini.get("is_reduce_only"), b)
+            self.assertEqual(ini.get("tif"), "gtc")
+            self.assertEqual(float(ini["price"]), float(tri["price"]))
+            self.assertEqual(abs(int(ini["size"])), 1)
+            self.assertLess(int(ini["size"]), 0, "平多 = 负 size")
+        # 4) 合计 = 持仓（10 张，不多不少）
+        self.assertEqual(sum(int(b["initial"]["size"]) for b in cli.tp_bodies), -10)
+        # 5) 台账：全 protected 且带 tp_order_id（缺了 F1 的终态校验就失效）
+        lv = _read_levels(self.tmp)
+        self.assertTrue(all(x["status"] == "protected" for x in lv), lv)
+        self.assertTrue(all(x.get("tp_order_id") for x in lv), lv)
+        # 6) 再跑一轮 → 不重复挂（covered=10=pos → covered_enough）
+        out2 = ex.ensure_grid_tp("ETH_USDT")
+        self.assertEqual(out2["placed"], [])
+        self.assertTrue(any(s.get("why") == "covered_enough"
+                            for s in out2["skipped"]), out2["skipped"])
+        # 7) 10 条 TP 全部触发成交（succeeded）+ 持仓归 0 → 全部闭环
+        for x in cli._po:
+            cli._po_status[x["id"]] = "succeeded"
+        cli._po = []
+        cli._positions = [{"contract": "ETH_USDT", "size": 0, "mode": "single"}]
+        out3 = ex.ensure_grid_tp("ETH_USDT")
+        self.assertEqual(out3["placed"], [])
+        lv2 = _read_levels(self.tmp)
+        self.assertTrue(all(x["status"] == "closed" for x in lv2), lv2)
+
+    def test_martin_layers_without_target_left_to_ai(self):
+        """马丁层无 tp_target → 跳过交回 AI（程序绝不自己造价格）；网格层照挂。"""
+        prices = [2355, 2340, 2325]
+        levels = [_lv(p, 1, p + 12, oid=f"o{i}") for i, p in enumerate(prices)]
+        levels += [_lv(2290, 6, None, oid="m1"),      # 马丁层：无目标
+                   _lv(2250, 7, None, oid="m2")]
+        _write_levels(self.tmp, levels)
+        cli = _ChainClient(finish_as="filled", mark=2200.0,
+                           positions=[{"contract": "ETH_USDT", "size": 17,
+                                       "mode": "single"}])
+        ex = _new(self.tmp, cli, mode="live")
+        ex._precheck_exit_triggers = lambda intent: ""
+
+        out = ex.ensure_grid_tp("ETH_USDT")
+
+        # 只挂 3 个网格层；马丁层跳过并留痕（交回 AI）
+        self.assertEqual(len(out["placed"]), 3, out)
+        self.assertEqual({c["tp"] for c in out["candidates"]},
+                         {p + 12 for p in prices})
+        self.assertTrue(any("no_tp_target" in str(s) for s in out["skipped"]))
+        # 马丁层保持 filled（不被标 protected）
+        lv = _read_levels(self.tmp)
+        by_price = {x["price"]: x["status"] for x in lv}
+        self.assertEqual(by_price[2290], "filled")
+        self.assertEqual(by_price[2250], "filled")
+
+
 if __name__ == "__main__":
     unittest.main()
