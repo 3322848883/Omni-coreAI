@@ -1,21 +1,22 @@
 # -*- coding: utf-8 -*-
-"""阶梯档止盈执行器：单向模式「普通限价卖单」形态（2026-10-16 用户拍板）。
+"""阶梯档止盈执行器：单向模式「普通限价卖单 + reduce_only」形态。
 
-**语义变更（实测驱动）**：止盈不再是条件触发单（price_orders）——
-无持仓实测三种形态：条件单被 `AUTO_TRIGGER_PRICE_GREATE_MARK` 拒（触发价必须>mark）、
-reduce_only 普通单被 `INCREASE_POSITION` 拒（无仓可减）、**普通限价卖单成功挂上**
-（id=63894859046511652，挂上即撤）→ 只有普通卖单能把整个网格的止盈「完全挂完」。
+**事故与定稿（2026-10-16）**：曾经采用「普通限价卖单（无 reduce_only）+ 无持仓预挂」
+以追求「完全挂完」——实盘证明**不安全**：单向模式下卖单是方向性订单，无多头成交即开空，
+2026-10-15 22:51~10-16 05:01 累积成 **−14 张空单**，长仓人格随后被 `no_flip` 拦死
+（连续 12 轮 "持有 short 时不能直接开 long"），网格停摆 4 小时。
 
-**新语义**：
-  - 候选 = pending/filled 网格档（有 `tp_target`）且 **target > mark** ——
-    **不再要求该档已成交**（先挂上 = 用户要求的「完全挂完」）
-  - 挂单 = `POST /orders` **普通限价卖单**（text 后缀 `-gtp`、无 reduce_only）
-  - `target <= mark` 跳过（低于市价的限价卖单会立即成交 = 直接开空）—— 唯一护栏
-  - ⚠️ 语义（用户明确接受）：卖单是方向性订单 —— 有持仓时成交 = 平多止盈；
-    无持仓时成交 = 开空
-  - 无持仓**不再**整体闭环（预挂形态不依赖持仓）
-
-保留不变：⓪ 台账 ↔ 交易所对齐（filled 提升 / cancelled 删行 / 在盘保留）。
+**定稿语义（本文件锁定）**：
+  - ⛔ **硬闸**：`多头持仓 <= 0` → **一张止盈都不挂**，并**撤掉在盘 -gtp 卖单**
+    （它们此刻就是"挂着的开空单"）。空仓存在时打 WARNING。
+  - 覆盖口径 = **多头持仓**（不是 Σ|size| —— 旧口径把空仓当成"需要覆盖的敞口"，
+    于是越挂越空）
+  - 候选 = pending/filled 档（有 `tp_target`）且 `target > mark`
+  - 张数上限 = `min(该档张数, 多头持仓 − 在盘 TP 已覆盖)`（绝不超配）
+  - 挂单 = `POST /orders` **普通限价卖单 + `reduce_only=True`**（交易所保证只减多、
+    永不反手；持仓消失时交易所会自动撤该单）
+  - `target <= mark` 跳过（低于市价的限价卖单会立即成交）
+  - 程序**绝不自己造价格**（`tp_target` 缺失 → 跳过留痕，交回 AI）
 """
 from __future__ import annotations
 
@@ -43,6 +44,7 @@ class _Client:
         self._positions = list(positions if positions is not None else [])
         self._states = dict(order_states or {})
         self.placed = []
+        self.cancelled = []
 
     def list_orders(self, contract=None):
         return list(self._orders)
@@ -52,6 +54,10 @@ class _Client:
 
     def get_positions(self):
         return list(self._positions)
+
+    def cancel_order(self, oid):
+        self.cancelled.append(str(oid))
+        return {"id": oid, "status": "cancelled"}
 
     def get_order(self, oid):
         st = self._states.get(str(oid))
@@ -81,6 +87,17 @@ def _gtp(oid, price, size=1):
     """在盘止盈卖单（-gtp 后缀）。"""
     return {"id": str(oid), "text": "t-mtg-gtp", "size": -abs(size),
             "status": "open", "price": str(price)}
+
+
+def _pos(long=0, short=0, contract="ETH_USDT"):
+    """single 模式持仓：size>0 = 多、size<0 = 空。"""
+    if long:
+        return [{"contract": contract, "mode": "single", "size": long,
+                 "entry_price": "2300", "mark_price": "2300"}]
+    if short:
+        return [{"contract": contract, "mode": "single", "size": -short,
+                 "entry_price": "2300", "mark_price": "2300"}]
+    return []
 
 
 def _lv(price, size, target, oid="o1", status="pending", tp_id=None):
@@ -130,7 +147,8 @@ class TestEnsureGridTp(unittest.TestCase):
 
     def test_dry_reports_candidates_no_order(self):
         _write_levels(self.tmp, [_lv(2300, 1, 2310)])
-        ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[_buy("o1")]), mode="dry")
+        ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[_buy("o1")],
+                                    positions=_pos(long=1)), mode="dry")
         out = ex.ensure_grid_tp("ETH_USDT")
         self.assertEqual(out["grid_tp"], "dry")
         self.assertEqual(ex.client.placed, [])
@@ -142,12 +160,47 @@ class TestEnsureGridTp(unittest.TestCase):
         out = ex.ensure_grid_tp("ETH_USDT")
         self.assertEqual(out.get("skipped"), "manage_positions_off")
 
-    # ── 挂单形态：普通限价卖单 ──────────────────────────────────────
+    # ── ⛔ 事故回归：无多头持仓 → 一张都不挂 ─────────────────────────
 
-    def test_live_places_plain_limit_sell(self):
-        """**形态断言**：POST /orders 普通限价卖单 —— 无 reduce_only、text=-gtp。"""
+    def test_no_long_position_places_nothing(self):
+        """**核心安全语义**：无多头持仓 → 不挂任何止盈卖单（预挂=开空）。"""
         _write_levels(self.tmp, [_lv(2300, 1, 2310)])
-        ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[_buy("o1")]), mode="live")
+        ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[_buy("o1")],
+                                    positions=[]), mode="live")
+        out = ex.ensure_grid_tp("ETH_USDT")
+        self.assertEqual(ex.client.placed, [])
+        self.assertTrue(any("no_long_position" in str(s) for s in out["skipped"]))
+        self.assertEqual(out["position_long"], 0)
+
+    def test_short_position_blocks_and_cancels_resting_gtp(self):
+        """**事故回归**：持有空仓（−14）→ 不挂，且**撤掉在盘 -gtp 卖单**。"""
+        _write_levels(self.tmp, [_lv(2300, 1, 2310)])
+        ex = _new(self.tmp, _Client(mark=2300.0,
+                                    open_orders=[_buy("o1"), _gtp("g-old", 2310)],
+                                    positions=_pos(short=14)), mode="live")
+        out = ex.ensure_grid_tp("ETH_USDT")
+        self.assertEqual(ex.client.placed, [])
+        self.assertEqual(ex.client.cancelled, ["g-old"], "在盘 -gtp 必须撤掉")
+        self.assertEqual(out["position_short"], 14)
+        self.assertEqual(out["skipped"][0]["cancelled_gtp"], 1)
+
+    def test_dry_does_not_cancel(self):
+        """dry 模式只报告、不撤单、不下单。"""
+        _write_levels(self.tmp, [_lv(2300, 1, 2310)])
+        ex = _new(self.tmp, _Client(mark=2300.0,
+                                    open_orders=[_gtp("g-old", 2310)],
+                                    positions=_pos(short=3)), mode="dry")
+        out = ex.ensure_grid_tp("ETH_USDT")
+        self.assertEqual(ex.client.cancelled, [])
+        self.assertEqual(ex.client.placed, [])
+
+    # ── 挂单形态：普通限价卖单 + reduce_only ────────────────────────
+
+    def test_live_places_reduce_only_limit_sell(self):
+        """**形态断言**：POST /orders 普通限价卖单 + `reduce_only=True`。"""
+        _write_levels(self.tmp, [_lv(2300, 1, 2310)])
+        ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[_buy("o1")],
+                                    positions=_pos(long=1)), mode="live")
         out = ex.ensure_grid_tp("ETH_USDT")
         self.assertEqual(len(ex.client.placed), 1)
         b = ex.client.placed[0]
@@ -155,49 +208,45 @@ class TestEnsureGridTp(unittest.TestCase):
         self.assertEqual(float(b["price"]), 2310.0)        # 限价 = AI 目标价
         self.assertEqual(b["tif"], "gtc")
         self.assertTrue(b["text"].endswith("-gtp"))
-        self.assertNotIn("reduce_only", b)                 # 无 reduce_only 标记
+        self.assertIs(b["reduce_only"], True)              # **必须 reduce_only**
         self.assertNotIn("trigger", b)                     # 不是条件单
         self.assertEqual(out["placed"][0]["order_type"], "limit")
-        self.assertFalse(out["placed"][0]["reduce_only"])
+        self.assertTrue(out["placed"][0]["reduce_only"])
 
-    def test_unfilled_level_still_gets_tp(self):
-        """**核心新语义**：档位未成交（买单在盘等跌）→ 止盈也先挂上（完全挂完）。"""
-        _write_levels(self.tmp, [_lv(2300, 1, 2310)])       # 买单在盘、未成交
-        ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[_buy("o1")]), mode="live")
+    def test_unfilled_level_gets_tp_when_long_exists(self):
+        """有多头（哪怕该档买单还在盘）→ 可挂（挂在多头之后，不是无仓预挂）。"""
+        _write_levels(self.tmp, [_lv(2300, 1, 2310)])
+        ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[_buy("o1")],
+                                    positions=_pos(long=1)), mode="live")
         out = ex.ensure_grid_tp("ETH_USDT")
         self.assertEqual(len(ex.client.placed), 1)
         self.assertEqual(_read_levels(self.tmp)[0]["status"], "protected")
 
-    def test_no_position_still_places(self):
-        """无持仓也挂（预挂形态）—— 旧逻辑的 no_position 早退已删除。"""
-        _write_levels(self.tmp, [_lv(2300, 1, 2310)])
-        ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[_buy("o1")],
-                                    positions=[]), mode="live")
-        out = ex.ensure_grid_tp("ETH_USDT")
-        self.assertEqual(len(ex.client.placed), 1)
+    def test_size_capped_by_long_position(self):
+        """张数上限 = 多头持仓：档位 5 张、持仓 2 张 → 只挂 2 张。"""
+        _write_levels(self.tmp, [_lv(2300, 5, 2310)])
+        ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[_buy("o1", size=5)],
+                                    positions=_pos(long=2)), mode="live")
+        ex.ensure_grid_tp("ETH_USDT")
+        self.assertEqual(ex.client.placed[0]["size"], -2)
 
-    def test_all_grid_levels_placed_at_once(self):
-        """7 个网格档目标全在 mark 上方 → 一次全挂（用户的「完全挂完」）。"""
-        levels, buys = [], []
-        for i, (px, tg) in enumerate([(2300, 2310), (2285, 2300), (2270, 2285),
-                                      (2255, 2270), (2240, 2255), (2225, 2240),
-                                      (2210, 2225)]):
-            levels.append(_lv(px, 1, tg, oid=f"o{i}"))
-            buys.append(_buy(f"o{i}", price=px))
-        _write_levels(self.tmp, levels)
-        ex = _new(self.tmp, _Client(mark=2200.0, open_orders=buys), mode="live")
+    def test_long_fully_covered_skips(self):
+        """多头已被在盘 TP 完全覆盖 → 不再挂（remaining <= 0）。"""
+        _write_levels(self.tmp, [_lv(2300, 1, 2310)])
+        ex = _new(self.tmp, _Client(mark=2300.0,
+                                    open_orders=[_buy("o1"), _gtp("g0", 2320)],
+                                    positions=_pos(long=1)), mode="live")
         out = ex.ensure_grid_tp("ETH_USDT")
-        self.assertEqual(len(ex.client.placed), 7)
-        self.assertEqual(len(out["placed"]), 7)
-        prices = sorted(float(b["price"]) for b in ex.client.placed)
-        self.assertEqual(prices, [2225.0, 2240.0, 2255.0, 2270.0, 2285.0, 2300.0, 2310.0])
+        self.assertEqual(ex.client.placed, [])
+        self.assertTrue(any("long_fully_covered" in str(s) for s in out["skipped"]))
 
     # ── 护栏与去重 ──────────────────────────────────────────────────
 
-    def test_below_mark_skipped_never_opens_short(self):
-        """target <= mark → 跳过：低于市价的限价卖单会立即成交 = 直接开空。"""
-        _write_levels(self.tmp, [_lv(2300, 1, 2290)])   # 2290 < mark 2300
-        ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[_buy("o1")]), mode="live")
+    def test_below_mark_skipped(self):
+        """target <= mark → 跳过（低于市价的限价卖单会立即成交）。"""
+        _write_levels(self.tmp, [_lv(2300, 1, 2290)])
+        ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[_buy("o1")],
+                                    positions=_pos(long=1)), mode="live")
         out = ex.ensure_grid_tp("ETH_USDT")
         self.assertEqual(ex.client.placed, [])
         self.assertTrue(any("below_mark" in str(s) for s in out["skipped"]))
@@ -205,7 +254,8 @@ class TestEnsureGridTp(unittest.TestCase):
     def test_no_target_is_not_invented(self):
         """AI 没给目标价 → 跳过，程序绝不自己造价格。"""
         _write_levels(self.tmp, [_lv(2300, 1, None)])
-        ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[_buy("o1")]), mode="live")
+        ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[_buy("o1")],
+                                    positions=_pos(long=1)), mode="live")
         out = ex.ensure_grid_tp("ETH_USDT")
         self.assertEqual(ex.client.placed, [])
         self.assertTrue(any("no_tp_target" in str(s) for s in out["skipped"]))
@@ -214,15 +264,16 @@ class TestEnsureGridTp(unittest.TestCase):
         """同价止盈卖单已在盘 → 不重复挂。"""
         _write_levels(self.tmp, [_lv(2300, 1, 2310)])
         ex = _new(self.tmp, _Client(mark=2300.0,
-                                    open_orders=[_buy("o1"), _gtp("g0", 2310)]),
-                  mode="live")
+                                    open_orders=[_buy("o1"), _gtp("g0", 2310)],
+                                    positions=_pos(long=2)), mode="live")
         out = ex.ensure_grid_tp("ETH_USDT")
         self.assertEqual(ex.client.placed, [])
         self.assertTrue(any("tp_already_present" in str(s) for s in out["skipped"]))
 
     def test_mark_unavailable_skips(self):
         _write_levels(self.tmp, [_lv(2300, 1, 2310)])
-        ex = _new(self.tmp, _Client(mark=0.0, open_orders=[_buy("o1")]), mode="live")
+        ex = _new(self.tmp, _Client(mark=0.0, open_orders=[_buy("o1")],
+                                    positions=_pos(long=1)), mode="live")
         out = ex.ensure_grid_tp("ETH_USDT")
         self.assertEqual(ex.client.placed, [])
         self.assertEqual(out.get("skipped"), "mark_unavailable")
@@ -230,7 +281,8 @@ class TestEnsureGridTp(unittest.TestCase):
     def test_order_rejected_recorded(self):
         """交易所拒单 → errors 留痕、档位不标 protected。"""
         _write_levels(self.tmp, [_lv(2300, 1, 2310)])
-        ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[_buy("o1")]), mode="live")
+        ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[_buy("o1")],
+                                    positions=_pos(long=1)), mode="live")
 
         def boom(body):
             raise RuntimeError("INSUFFICIENT_AVAILABLE")
@@ -242,32 +294,32 @@ class TestEnsureGridTp(unittest.TestCase):
 
     def test_marks_level_protected_and_records_tp_id(self):
         p = _write_levels(self.tmp, [_lv(2300, 1, 2310)])
-        ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[_buy("o1")]), mode="live")
+        ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[_buy("o1")],
+                                    positions=_pos(long=1)), mode="live")
         out = ex.ensure_grid_tp("ETH_USDT")
         data = json.loads(p.read_text(encoding="utf-8"))
         self.assertEqual(data["levels"][0]["status"], "protected")
         self.assertEqual(data["levels"][0]["tp_order_id"], "gtp-1")
         self.assertEqual(out["placed"][0]["id"], "gtp-1")
 
-    # ── ⓪ 台账 ↔ 交易所对齐（行为不变）────────────────────────────
+    # ── ⓪ 台账 ↔ 交易所对齐 ────────────────────────────────────────
 
     def test_filled_order_promoted(self):
-        """入场单已成交 → 档位 promoted 为 filled（仍参与候选）。"""
+        """入场单已成交 → 档位 promoted 为 filled。"""
         _write_levels(self.tmp, [_lv(2300, 1, 2310)])
-        ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[],       # 不在盘
+        ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[],
+                                    positions=_pos(long=1),
                                     order_states={"o1": {"finish_as": "filled",
                                                          "status": "finished"}}),
                   mode="live")
         out = ex.ensure_grid_tp("ETH_USDT")
         self.assertEqual(out.get("ladder_promoted"), 1)
-        self.assertEqual(len(ex.client.placed), 1, "filled 档也参与候选")
-        # promoted 后立即挂上止盈 → protected（新语义：成交档优先获得止盈）
-        self.assertEqual(_read_levels(self.tmp)[0]["status"], "protected")
 
     def test_cancelled_order_pruned(self):
         """入场单已撤/不存在 → 档位删行（表不再只增不清）。"""
         _write_levels(self.tmp, [_lv(2300, 1, 2310)])
         ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[],
+                                    positions=_pos(long=1),
                                     order_states={"o1": {"finish_as": "cancelled",
                                                          "status": "finished"}}),
                   mode="live")
@@ -276,13 +328,12 @@ class TestEnsureGridTp(unittest.TestCase):
         self.assertEqual(_read_levels(self.tmp), [])
 
     def test_open_order_kept_pending(self):
-        """买单在盘 → 不被误删，且立即挂上止盈（pending → protected）。"""
+        """买单在盘 → 不被误删。"""
         _write_levels(self.tmp, [_lv(2300, 1, 2310)])
-        ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[_buy("o1")]), mode="live")
+        ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[_buy("o1")],
+                                    positions=_pos(long=1)), mode="live")
         out = ex.ensure_grid_tp("ETH_USDT")
         self.assertIsNone(out.get("ladder_pruned"))
-        self.assertEqual(len(ex.client.placed), 1)
-        self.assertEqual(_read_levels(self.tmp)[0]["status"], "protected")
 
     # ── ① protected 档的卖单簿记 ────────────────────────────────────
 
@@ -291,8 +342,8 @@ class TestEnsureGridTp(unittest.TestCase):
         _write_levels(self.tmp, [_lv(2300, 1, 2310, status="protected",
                                      tp_id="gtp-x")])
         ex = _new(self.tmp, _Client(mark=2300.0,
-                                    open_orders=[_buy("o1"), _gtp("gtp-x", 2310)]),
-                  mode="live")
+                                    open_orders=[_buy("o1"), _gtp("gtp-x", 2310)],
+                                    positions=_pos(long=1)), mode="live")
         out = ex.ensure_grid_tp("ETH_USDT")
         self.assertEqual(ex.client.placed, [])
         self.assertEqual(_read_levels(self.tmp)[0]["status"], "protected")
@@ -302,6 +353,7 @@ class TestEnsureGridTp(unittest.TestCase):
         _write_levels(self.tmp, [_lv(2300, 1, 2310, status="protected",
                                      tp_id="gtp-x")])
         ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[_buy("o1")],
+                                    positions=_pos(long=1),
                                     order_states={"gtp-x": {"finish_as": "filled",
                                                             "status": "finished"}}),
                   mode="live")
@@ -310,10 +362,11 @@ class TestEnsureGridTp(unittest.TestCase):
         self.assertEqual(_read_levels(self.tmp)[0]["status"], "closed")
 
     def test_gtp_cancelled_reverts_and_replaces(self):
-        """**核心回归**：止盈卖单被撤（重铺/对账）→ 退回 pending 并重挂。"""
+        """**核心回归**：止盈卖单被撤（重铺/对账）→ 退回 pending 并重挂（有多头时）。"""
         _write_levels(self.tmp, [_lv(2300, 1, 2310, status="protected",
                                      tp_id="gtp-x")])
         ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[_buy("o1")],
+                                    positions=_pos(long=1),
                                     order_states={"gtp-x": {"finish_as": "cancelled",
                                                             "status": "finished"}}),
                   mode="live")
@@ -321,19 +374,6 @@ class TestEnsureGridTp(unittest.TestCase):
         self.assertEqual(len(ex.client.placed), 1, "卖单被撤后必须重挂")
         self.assertEqual(float(ex.client.placed[0]["price"]), 2310.0)
         self.assertTrue(any(f.get("to") == "pending" for f in out["state_fixes"]))
-        self.assertEqual(_read_levels(self.tmp)[0]["status"], "protected")
-
-    def test_no_position_no_longer_closes_levels(self):
-        """无持仓时 protected 档**不再被强制闭环**（预挂卖单不依赖持仓）。"""
-        _write_levels(self.tmp, [_lv(2300, 1, 2310, status="protected",
-                                     tp_id="gtp-x")])
-        ex = _new(self.tmp, _Client(mark=2300.0,
-                                    open_orders=[_gtp("gtp-x", 2310)],
-                                    positions=[]), mode="live")
-        out = ex.ensure_grid_tp("ETH_USDT")
-        self.assertEqual(ex.client.placed, [])
-        self.assertEqual(_read_levels(self.tmp)[0]["status"], "protected",
-                         "无持仓不得闭环 —— 卖单是预挂形态")
 
 
 if __name__ == "__main__":

@@ -3582,9 +3582,21 @@ class Executor:
             out["error"] = f"持仓查询失败: {perr}"
             return out
         positions = _parse_symbol_positions(raw_pos, symbol)
-        pos = 0
+        # ⚠️ **2026-10-16 事故修复（严重）**：覆盖口径必须是「**多头持仓**」，
+        # 原来用 Σ|size| —— 空仓也会被算成「需要覆盖的敞口」，于是程序继续挂
+        # 卖单，越挂越空（实盘：−14 张空单，22:51~05:01 累积）。
+        # 单向模式下 size>0 = 多、size<0 = 空，方向由符号唯一决定。
+        pos_long = 0
+        pos_short = 0
         for p in positions or []:
-            pos += abs(_int_or_zero(p.get("size")))
+            n = _int_or_zero(p.get("size"))
+            if n > 0:
+                pos_long += n
+            elif n < 0:
+                pos_short += -n
+        pos = pos_long
+        out["position_long"] = pos_long
+        out["position_short"] = pos_short
         # 在盘普通挂单（入场腿）id —— 供「台账 ↔ 交易所对齐」判 pending 档死活
         open_entry_ids: set = set()
         try:
@@ -3594,18 +3606,17 @@ class Executor:
                     open_entry_ids.add(oid)
         except Exception as e:  # noqa: BLE001
             swallow("executor.ensure_grid_tp.open_entry", e, level=logging.DEBUG)
-        # ── 在盘止盈卖单集合（普通限价单，text 后缀 -gtp）────────────────
-        # **单向模式形态（2026-10-16 用户拍板）**：止盈 = **普通限价卖单**
-        # （POST /orders），**不再是条件触发单**。实测三种形态（无持仓）：
-        #   条件触发单 reduce_only → 400 AUTO_TRIGGER_PRICE_GREATE_MARK（触发价必须>mark）
-        #   普通限价   reduce_only → 400 INCREASE_POSITION（无仓可减）
-        #   普通限价   无标记      → ✅ 成功挂上（id=63894859046511652，挂上即撤）
-        # → 只有**普通卖单**能把整个网格的止盈「完全挂完」（用户的判断，实测成立）。
-        # ⚠️ 语义（用户明确接受）：卖单是**方向性订单** —— 有持仓时成交 = 平多止盈；
-        # 无持仓时成交 = 开空。程序护栏：**只挂 target > mark 的档**（低于市价的
-        # 限价卖单会立即以市价成交 = 直接开空，显然不是任何网格想要的）。
+        # ── 在盘止盈卖单集合（普通限价单 + reduce_only，text 后缀 -gtp）────
+        # **形态（2026-10-16 事故后定稿）**：止盈 = **普通限价卖单 + reduce_only=True**。
+        # 三种形态实测（无持仓）：条件触发单 reduce_only → 400 AUTO_TRIGGER_PRICE_
+        # GREATE_MARK；普通限价 reduce_only → 400 INCREASE_POSITION；普通限价**无标记**
+        # → 能挂上，但**无持仓成交即开空**（2026-10-15 22:51~10-16 05:01 实盘累积
+        # −14 张空单，长仓人格随后被 no_flip 拦死 12 轮）→ **无标记卖单形态被否决**。
+        # 定稿：**只在有多头持仓时挂**（下面 ⛔ 硬闸）+ **必须 reduce_only**
+        # （交易所保证只减多、永不反手；持仓消失时交易所会自动撤该单）。
         open_gtp_ids: set = set()
         existing: set = set()
+        covered_size = 0
         try:
             for o in (self._owned_open_orders(symbol, self._own_prefix("")) or []):
                 if not str(o.get("text") or "").endswith("-gtp"):
@@ -3614,13 +3625,14 @@ class Executor:
                 if oid:
                     open_gtp_ids.add(oid)
                 existing.add(self._price_key(o.get("price")))
+                covered_size += abs(_int_or_zero(o.get("size")))
         except Exception as e:  # noqa: BLE001
             swallow("executor.ensure_grid_tp.gtp_orders", e, level=logging.DEBUG)
             out["skipped"] = "orders_unavailable"
             return out
         open_ids = open_gtp_ids
         out["position"] = pos
-        out["covered"] = len(open_gtp_ids)
+        out["covered"] = covered_size
         state_fixes: list = []
         # mark：候选过滤的基准（target <= mark 的档挂了会立即成交 → 开空）
         mark = _to_float((self.client.get_ticker(symbol) or {}).get("mark_price"))
@@ -3698,6 +3710,36 @@ class Executor:
                                     "why": f"gtp_{str(o.get('finish_as') or o.get('status') or 'gone')}"})
         out["state_fixes"] = state_fixes
 
+        # ── ⛔ 硬闸（2026-10-16 事故修复）：**无多头持仓 → 一张止盈卖单都不挂** ──
+        # 单向模式下卖单是**方向性订单**：有持仓时成交 = 平多止盈；**无持仓时成交 = 开空**。
+        # 实测事故（2026-10-15 22:51 → 10-16 05:01）：预挂的普通限价卖单在无多头时
+        # 陆续成交 → 累积成 **−14 张空单** → 长仓人格随后被 `no_flip` 拦死，连续 12 轮
+        # 失败（"持有 short 时不能直接开 long"），网格停摆 4 小时。
+        # 结论：**「无持仓预挂止盈卖单」在单向模式下等价于「预挂开空单」，不可能安全**
+        # （reduce_only 无仓会被拒；条件单同理）。所以止盈只能在**有多头之后**挂，
+        # 并强制 `reduce_only`（双保险：即使仓位变化，卖单也永不反手）。
+        # 顺带把在盘 -gtp 卖单撤掉（它们此刻就是"挂着的开空单"）。
+        if pos_long <= 0:
+            cancelled = []
+            if not dry:
+                for oid in list(open_gtp_ids):
+                    try:
+                        self.client.cancel_order(oid)
+                        cancelled.append(oid)
+                    except Exception as e:  # noqa: BLE001
+                        swallow("executor.ensure_grid_tp.cancel_orphan_gtp", e,
+                                level=logging.DEBUG)
+            if pos_short > 0:
+                log.warning("grid tp %s: 账户持有 %d 张**空仓**（非本策略方向）→ "
+                            "不挂止盈、撤掉在盘 -gtp 卖单 %d 条；请先平掉空仓",
+                            symbol, pos_short, len(cancelled))
+            out["skipped"] = [{"why": "no_long_position(单向卖单=开空，禁止无仓预挂)",
+                               "position_long": pos_long, "position_short": pos_short,
+                               "cancelled_gtp": len(cancelled)}]
+            if (cancelled or state_fixes) and not dry:
+                self._persist_ladder(path, data)
+            return out
+
         # ── ② 候选：pending 网格档中「目标价 > mark」的**全部**档 ───────────
         # **不再要求该档已成交**（单向净仓簿：先挂上 = 用户的「完全挂完」；
         # 之后任何持仓的反弹卖出都由这些卖单承接）。target <= mark 跳过 ——
@@ -3720,7 +3762,15 @@ class Executor:
             if self._price_key(tgt) in existing:
                 skipped.append({"price": lv.get("price"), "why": "tp_already_present"})
                 continue
-            size = _int_or_zero(lv.get("size")) or 1
+            # 张数上限 = 该档张数 ∩ 「多头持仓 − 在盘 TP 已覆盖」的剩余敞口。
+            # 绝不超配：reduce_only 卖单张数超过持仓时，多余部分会被交易所拒/撤。
+            remaining = pos_long - covered_size
+            size = min(_int_or_zero(lv.get("size")) or 1, max(remaining, 0))
+            if size <= 0:
+                skipped.append({"price": lv.get("price"),
+                                "why": f"long_fully_covered({pos_long})"})
+                continue
+            covered_size += size          # 递增，防多档重复覆盖同一份持仓
             candidates.append({"level": lv, "target": tf, "size": size})
 
         out["candidates"] = [{"price": c["level"].get("price"), "tp": c["target"],
@@ -3740,12 +3790,17 @@ class Executor:
             if size <= 0:
                 errors.append({"price": lv.get("price"), "error": "zero_size"})
                 continue
-            # **普通限价卖单**（非条件单、非 reduce_only）—— 单向模式用户拍板形态
+            # **普通限价卖单 + `reduce_only=True`**（2026-10-16 事故修复）：
+            # 卖单是方向性订单 —— 无 reduce_only 时，无多头成交即开空（实盘已发生
+            # −14 张空单）。加 reduce_only 后交易所保证它**只能减少多头**，永远不会
+            # 反手开空；持仓消失时交易所会自动撤掉该单（官方文档：「reduce_only 单
+            # 系统可能自动撤单以确保持仓不增加」）。
             try:
                 order = self.client.place_order({
                     "contract": symbol, "size": -size,
                     "price": str(round_price(tgt, meta)),
                     "tif": "gtc",
+                    "reduce_only": True,
                     "text": f"t-{self._bot_tag(self.label_prefix or 'auto')}-gtp",
                 })
             except Exception as e:  # noqa: BLE001 — boundary
@@ -3753,7 +3808,7 @@ class Executor:
                                "error": str(e)[:200]})
                 continue
             placed.append({"price": lv.get("price"), "tp": tgt, "size": size,
-                           "order_type": "limit", "reduce_only": False,
+                           "order_type": "limit", "reduce_only": True,
                            "id": str((order or {}).get("id") or "")})
             lv["tp_order_id"] = str((order or {}).get("id") or "")
             lv["status"] = "protected"
