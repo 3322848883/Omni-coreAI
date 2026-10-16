@@ -66,6 +66,14 @@ class TestSetPositionMode(unittest.TestCase):
         self.assertTrue(calls[-1]["path"].endswith("/set_position_mode"))
         self.assertEqual("position_mode=dual_plus", calls[-1]["qs"])
 
+    def test_split_echo_counts_as_dual(self):
+        """官方回显三态 single/dual/**split**（FuturesAccount.position_mode，
+        in_dual_mode 已 deprecated）—— dual_plus 切过去后账户回显 `split`，
+        必须按 dual 走分支（缺 auto_size/side 校验 = 全平会出错）。"""
+        cli, _, box = _mk("split")
+        self.assertEqual("split", cli.get_position_mode())
+        self.assertTrue(cli.is_dual_position_mode())
+
     def test_case_and_space_tolerant(self):
         cli, calls, _ = _mk()
         cli.set_position_mode(" SINGLE ")

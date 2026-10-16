@@ -168,7 +168,11 @@ class GateClient:
         return mode
 
     def is_dual_position_mode(self) -> bool:
-        return self.get_position_mode() in ("dual", "dual_long_short", "dual_plus")
+        # 官方三态（FuturesAccount.position_mode）：single / dual / split（分仓，
+        # in_dual_mode 已 deprecated）。"dual_plus" 是 set_position_mode 的请求参数名，
+        # 回显是 "split" —— 两者都要算 dual；"dual_long_short" 为历史防御值保留。
+        return self.get_position_mode() in (
+            "dual", "dual_long_short", "dual_plus", "split")
 
     def get_positions(self) -> list:
         result = self.rest_signed_request("GET", f"{FUTURES_API}/positions")
