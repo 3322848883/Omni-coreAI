@@ -8,12 +8,9 @@ from typing import Any, Optional
 from .schema import CHIP_ACTIONS, CHIP_ORDER_TYPES
 
 # Fixed contract only: output format + hard rules. Role/style live in the strategy persona.
-# `symbol` 写**占位符**而不是某个具体币：契约是所有 bot 共用的，写死一个币会持续把
-# 模型往那个币引（只做 ETH 的 bot 也被示范写 BTC），而"该写哪个币"由配置层的
-# 【品种宇宙】决定 —— 契约只需要说清"这个字段必须写"。
 _SYSTEM_HEAD = (
     "只输出一个 JSON 对象，不要 Markdown 前后缀。\n"
-    '格式: {"cycle_id":"...","reasoning":"...","chips":[{"symbol":"<币种>",'
+    '格式: {"cycle_id":"...","reasoning":"...","chips":[{"symbol":"BTC_USDT",'
     '"action":"open_long|open_short|add_long|add_short|reduce_long|reduce_short|close|close_all|hold|'
     'stop_entry_long|stop_entry_short|flatten|cancel_all|cancel_price_all|modify_tp_sl",'
     '"confidence":0.0,"size_usd":50,"tp":null,"tp2":null,"tp1_share":null,"sl":null,"type":"market|limit|post_only|ioc|fok",'
@@ -37,7 +34,7 @@ _SYSTEM_HEAD = (
     "4) [代码强制] type=limit 等必须给 price。\n"
     "5) [AI 判断] 同 symbol 优先管理已有仓。\n"
     "6) [AI 判断] 不确定就 hold。\n"
-    "7) [AI 判断] reasoning 必须 ≤30 字，禁止长篇分析。\n"
+    "7) [AI 判断] reasoning 必须 ≤60 字，禁止长篇分析。\n"
     "8) [AI 判断] 移动/修改持仓的止盈止损：action=modify_tp_sl 并给 tp/sl（可只改一边）；"
     "或 action=hold 且带 tp/sl。只写 hold 不带 tp/sl = 不改任何保护单。\n"
     "9) [AI 判断] 双止盈/分批/网格若写进计划，JSON 必须落实字段（swing 开仓给 tp+tp2+tp1_share；"
@@ -67,13 +64,10 @@ _SYSTEM_HEAD = (
     "要换条件请用 trigger_ops:[{op:\"remove\",id:\"t-xxx\"}] 先删旧的，或 [{op:\"replace_all\"}] 整体替换。"
     "**参数越界同样会被拒**（如 lookback 必须 20-300，写 1 或 6 都无效）。"
     "已生效的触发器列在本轮输入的「已生效的自设触发器」段，**别重复添加同条件**。\n"
-    "14) [代码兜底] 孤儿保护单（**先确认持仓数据可用**）：先按该 chip 的 symbol 取 "
-    "`account.position_state[symbol]`（**没有这个键时回退 `account.position_state_any`**，"
-    "后者是账户级值、只代表「账户上任一币有仓」）—— **该币无持仓但存在 tp/sl 类 reduce_only 挂单**"
-    " = 前一笔仓位止盈/止损触发后遗留。"
+    "14) [代码兜底] 孤儿保护单（**先确认持仓数据可用**）：**无持仓但存在 tp/sl 类 reduce_only 挂单** = 前一笔仓位止盈/止损触发后遗留。"
     "本轮必须撤销（action=cancel_price_all 或 cancel_*），reasoning 写明「孤儿保护单已撤」。"
     "禁止对孤儿单只 hold 不管。"
-    "**例外**：若**该币**的状态是 `unknown`（账户取数失败），"
+    "**例外**：若 `account.position_state == \"unknown\"`（账户取数失败），"
     "「无持仓」根本无法确认 —— **本条不适用**，此时禁止撤销任何 tp/sl 保护单，只 hold 并说明。\n"
     # 这里只列**一定可用**的行情工具。不要列 aux 族（trades_flow/liquidations/
     # market_stats/…）—— 它们依赖 pa-data-source 的 aux_cache.db，数据源不在时
@@ -82,24 +76,19 @@ _SYSTEM_HEAD = (
     "15) [AI 判断] **禁止偷懒不查数据**：决策前**必须调用行情工具**（klines/indicators/ticker/orderbook/"
     "smc_map/smc_events/sqzmom 至少 1 个）获取当前市场数据。"
     "工具返回不足可继续查；**从未调用任何工具就直接输出 Plan = 违规**，视为猜测不是分析。\n"
-    "16) [代码兜底] **每个 symbol 的持仓状态以 `account.position_state[symbol]` 为准**"
-    "（按**该 chip 的 symbol** 取值；缺这个键时回退账户级 `account.position_state_any`），"
-    "不要从 positions/protections 的有无去猜："
-    "`position_open`=该币有持仓（可用 modify_tp_sl 调 TP/SL）；"
-    "`entry_pending`=**该币无持仓**，只有未成交的入场委托 —— protections 里的单是随入场单"
+    "16) [代码兜底] **持仓状态以 account.position_state 为准**，不要从 positions/protections 的有无去猜："
+    "`position_open`=有持仓（可用 modify_tp_sl 调 TP/SL）；"
+    "`entry_pending`=**无持仓**，只有未成交的入场委托 —— protections 里的单是随入场单"
     "**预挂**的、成交后才归该持仓，**此时禁止发 modify_tp_sl / close_* / reduce_***"
-    "（会 NO_POSITION 白烧一轮）；`flat`=该币无持仓无挂单；"
+    "（会 NO_POSITION 白烧一轮）；`flat`=无持仓无挂单；"
     "`unknown`=**账户取数失败**，持仓状况无从确认 —— 此时禁止发 modify_tp_sl / close_* / "
     "reduce_*，也**禁止撤销任何 tp/sl 保护单**（规则 14 不适用），只 hold 并说明。"
-    "**账户级值 ≠ 该币有仓**：`position_state_any` 说的是账户（可能是共享账户、含别的 bot 的仓），"
-    "对某个币发管理动作前必须看**该币**那一条 —— 否则就是拿 A 币的仓当 B 币的仓用。"
-    "account.position_state_note[symbol] 有对应的完整说明。\n"
+    "account.position_state_note 有对应的完整说明。\n"
     # 规则 17：补上原规则集的两个空白 ——（a）`position_open` 时允许/禁止的动作集
     # 从未写明（规则 14 只管 flat、规则 16 只管状态语义）；（b）「保护单张数远超持仓」
     # 这个状态无规则覆盖，AI 只能靠推断，实测推成「protections 属于持仓」而不敢清理。
     # 关键：把可程序化的部分**明确归给引擎**，AI 只需知道 —— 而不是让 AI 去做机械活。
-    "17) [代码兜底] **状态与动作集**：按**该 chip 的 symbol** 取 `account.position_state[symbol]`"
-    "决定能做什么（缺这个键时回退账户级 `account.position_state_any`）—— "
+    "17) [代码兜底] **状态与动作集**：按 `account.position_state` 决定能做什么 —— "
     "`flat`=只能开仓（open_*/stop_entry_*）；"
     "`entry_pending`=只能 hold 或撤单（**禁止** modify_tp_sl / close_* / reduce_*）；"
     "`position_open`=可管理（modify_tp_sl / close_* / reduce_* / add_*）；"
@@ -143,7 +132,6 @@ _SYSTEM_HEAD = (
     # 这条是 `[AI 判断]`（行为约束），代码层没有对应闸门。
     "19) [AI 判断] **只管理自己的品种**：`【品种宇宙】` 里列出的是你**唯一**该管的 symbol。"
     "账户里其它 symbol 的持仓与挂单**不是你的** —— 它们可能属于同一账户上的另一个 bot 或人工操作。"
-    "快照里每行持仓/挂单/保护单都带 `in_universe` 字段：`false` 的那些**不是你的**，只忽略。"
     "**禁止**对宇宙外的 symbol 发 `cancel_*` / `close_*` / `reduce_*` / `modify_tp_sl` / `flatten`，"
     "也**不要**把它们当作「脱离宇宙的遗留单」清理。"
     "看到它们时**只忽略、不写进决策**，更不要因此判断「账户状态异常」。\n"
@@ -156,54 +144,17 @@ PLAN_SCHEMA_HINT = (
     + ",".join(sorted(CHIP_ORDER_TYPES))
 )
 
-# 固定系统契约：**所有 bot 逐字共用**，不随人格/品种/技能变化。
-# 不变量（由 tests/test_prompt_isolation.py + 审计 C 段锁定）：
-#   任何 bot 组装出的 system prompt 都以 `SYSTEM_CONTRACT` 为**严格前缀**开头。
-SYSTEM_CONTRACT = _SYSTEM_HEAD + PLAN_SCHEMA_HINT
-# 兼容别名：既有测试与调用方按 `SYSTEM_PROMPT` 引用（指向同一对象）。
-SYSTEM_PROMPT = SYSTEM_CONTRACT
-
-# 系统层与人格层的**唯一**分界标记。`build_system_prompt` 只在此处拼一次；
-# `split_system_prompt()` 与隔离测试/审计都靠它把
-# 「所有 bot 一致的系统区」与「bot 级人格区」切开。
-PERSONA_MARKER = "\n\n【策略人格】\n"
+SYSTEM_PROMPT = _SYSTEM_HEAD + PLAN_SCHEMA_HINT
 
 
 def build_system_prompt(strategy_prompt: str, tools_guide: str = "", skill_catalog: str = "") -> str:
-    """组装 system prompt：**固定契约在前、策略人格在后**，顺序不可颠倒。
-
-    分层（自前向后，不可换序）：
-      ① 系统契约 `SYSTEM_CONTRACT` —— 所有 bot 逐字一致，**不因人格而变**
-      ② 工具指南 `tools_guide`   —— 全局文本（bot 开关只控制有无）
-      ③ 技能目录 `skill_catalog` —— 全局技能库渲染（可见性按 bot 的 skills 白名单）
-      ④ 策略人格 `strategy_prompt` —— **bot 级**，唯一随 bot 变化的一段
-
-    不变量：①②③ 拼出的「系统区」对所有 bot 逐字一致；人格**只能追加在后**，
-    既无法前置、也无法改写契约（契约是纯字符串前缀，人格是拼接后缀）。
-    需要切分时用 `split_system_prompt()`。
-    """
-    head = SYSTEM_CONTRACT
+    """Fixed contract + optional tool guide (system layer) + skill catalog + strategy persona."""
+    head = SYSTEM_PROMPT
     if tools_guide:
         head = head + "\n\n" + tools_guide
     if skill_catalog:
         head = head + "\n\n" + skill_catalog
-    return head + PERSONA_MARKER + strategy_prompt
-
-
-def split_system_prompt(system: str) -> tuple[str, str]:
-    """把组装好的 system prompt 切成 `(系统区, 人格区)`。
-
-    系统区 = 契约 + 工具指南 + 技能目录（对所有 bot 逐字一致的那部分）；
-    人格区 = bot 级策略文本。
-
-    用 `find` 取**第一处**标记 —— 契约永远在最前，人格正文里即便出现同名字样也
-    不会影响切分（那只是人格区里的一段普通文本）。没有标记时视作纯系统区，
-    人格区返回空串（`build_system_prompt` 之外的裸契约也应能安全切分）。
-    """
-    idx = system.find(PERSONA_MARKER)
-    if idx < 0:
-        return system, ""
-    return system[:idx], system[idx + len(PERSONA_MARKER):]
+    return head + "\n\n【策略人格】\n" + strategy_prompt
 
 
 def load_strategy_prompt(
@@ -276,16 +227,7 @@ def build_messages(
     chart_base64: Optional[str] = None,
     skill_catalog: str = "",
 ):
-    """构建 messages 列表。chart_base64 非空时附 K 线图（vision 模式）。
-
-    **public API（供测试与工具脚本用）**：生产链路（`strategist/loop.py`）走
-    `build_system_prompt` + `build_user_prompt` + `memory.build_context` 手工拼装 ——
-    因为要按缓存优化顺序插入订单上下文/近况/触发器，本函数不参与那条路径。
-    保留它是为了给外部调用方一个**不需要 memory 依赖**的轻量入口。
-
-    分层不变量与生产路径一致：`system` 仍由 `build_system_prompt` 产出
-    （契约在前、人格殿后），本函数不会绕过它自己拼 system。
-    """
+    """构建消息列表。chart_base64 非空时附 K 线图（vision 模式）。"""
     system = build_system_prompt(strategy_prompt, skill_catalog=skill_catalog)
     text = build_user_prompt(snapshot, risk, symbols)
 

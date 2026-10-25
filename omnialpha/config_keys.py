@@ -50,9 +50,15 @@ ACCOUNT_RISK: frozenset[str] = frozenset({
     # `intent.margin_mode`，而人格字段表/契约都没有该字段 → 从未生效。
     # Gate 只允许「无持仓无挂单」时切换，故 executor 侧是幂等 + 失败静默。
     "margin_mode",
+    # SL 上移策略（ladder = 阶梯档各自管理，peak_trail 联动关闭时使用）。
+    "sl_move_policy",
     "peak_trail", "peak_trail_atr",
     "risk_pct", "risk_per_trade_pct", "safe_mode_after_failures",
     "total_risk_pct",
+    # 「与策略方向相反的持仓」处置策略：warn（默认，只告警）| flatten（程序平掉）。
+    # 单向模式下空仓会让 no_flip 拦死所有 open_long → 网格停摆（实盘 2026-10-16
+    # 停摆 4 小时），本键是那条程序侧自愈路径（Executor.flatten_stray）。
+    "stray_position",
 })
 
 # ── ③ strategist 段 ──────────────────────────────────────────

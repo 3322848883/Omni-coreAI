@@ -20,6 +20,7 @@ from omnialpha.strategist.schema import (  # noqa: E402
     Chip,
     PlanError,
     extract_kline_reads,
+    extract_stop_width_checks,
     parse_plan,
 )
 
@@ -80,6 +81,21 @@ class TestTier1Fields(unittest.TestCase):
         with self.assertRaises(PlanError) as cm:
             parse_plan({"chips": [_chip(region="up")]})
         self.assertIn("region", str(cm.exception))
+
+    def test_trend_range_accepted(self):
+        """2026-10-22：趋势中的旗形/深度回调 = trend_range。
+
+        没有这个值时模型只能二选一：写 `trend` 会被要求给尾仓，写 `range` 又必须
+        放弃双止盈 —— 实测因此把判定倒推成"我想只做 scalp，所以它是 range"。
+        """
+        plan = parse_plan({"chips": [_chip(region="trend_range", tp=86150.0, sl=85560.0)]})
+        self.assertEqual(plan.chips[0].region, "trend_range")
+
+    def test_trend_range_allows_multi_tp(self):
+        """trend_range 是趋势里的旗形 → 允许 swing（双止盈合法）。"""
+        plan = parse_plan({"chips": [_chip(
+            region="trend_range", tp=86150.0, tp2=86600.0)]})
+        self.assertEqual(plan.chips[0].tp2, 86600.0)
 
 
 class TestRangeForbidsTp2(unittest.TestCase):
@@ -163,7 +179,7 @@ class TestKlineRead(unittest.TestCase):
     每轮约 1.2KB，进了订单上下文就会随下一轮注入，污染 prompt 与缓存前缀。
 
     背景（2026-10-07 实测）：人格里「逐K分析最近20根（强制）」与契约规则 7
-    「reasoning 必须 ≤30 字」直接冲突，而 schema 里没有承载它的字段 —— 150 轮
+    「reasoning 必须 ≤60 字」直接冲突，而 schema 里没有承载它的字段 —— 150 轮
     里 11.3% 声称做过、0% 真逐根列举。给它一个字段后，本地 8/8 轮填满 20 条。
     """
 
@@ -259,36 +275,77 @@ class TestSaveThinkingKline(unittest.TestCase):
                 reasoning=["cot"])
             self.assertNotIn("kline", self._read(td))
 
-    def test_symbol_recorded_and_multi_becomes_array(self):
-        """D-27：审计体要能回答「这轮给模型发了哪几个币的逐K读」。
 
-        原先只留**首个**有内容的 chip → 其余币的逐K读凭空消失，且不带 symbol，
-        按币审计根本无从下手。
-        """
+
+class TestStopWidthCheckAudit(unittest.TestCase):
+    """`meta.stop_width_check` 必须可审计落盘，但**不进订单上下文**。
+
+    背景（2026-10-22 四币实测）：模型四币都认真写了三校验
+    （`类型=回撤|ATR 4.99 / 20根极值 2412.72(距 4.72) / 费率下限 3.72 → 取 10.5`），
+    但 `Chip` 没有 `meta` 字段 → 全部静默丢失，事后无法核对「它到底按最宽取了吗」。
+    修法与 `kline_read` 同一策略：解析进 Chip 供落盘，`to_signal_dict` **不放行**
+    （每轮 ~100 字符，进订单上下文会随下一轮注入，污染缓存前缀）。
+    """
+
+    def test_extract_from_meta(self):
+        text = ('{"chips":[{"symbol":"ETH_USDT","action":"hold",'
+                '"meta":{"stop_width_check":"类型=回撤|ATR 4.99 → 取 10.5"}}]}')
+        got = extract_stop_width_checks(text)
+        self.assertEqual(got, ["类型=回撤|ATR 4.99 → 取 10.5"])
+
+    def test_extract_empty_when_absent(self):
+        for bad in ('{"chips":[{"symbol":"ETH_USDT"}]}', "not json", "", "   "):
+            with self.subTest(bad=bad[:20]):
+                self.assertEqual(extract_stop_width_checks(bad), [])
+
+    def test_parsed_into_chip(self):
+        plan = parse_plan({"chips": [_chip(
+            **{"meta": {"stop_width_check": "类型=突破|ATR 105 → 取 190"}})]})
+        self.assertEqual(plan.chips[0].stop_width_check,
+                         "类型=突破|ATR 105 → 取 190")
+
+    def test_not_in_signal_dict(self):
+        """**关键**：审计字段不得进订单上下文。"""
+        plan = parse_plan({"chips": [_chip(
+            **{"meta": {"stop_width_check": "类型=回撤|ATR 4.99 → 取 10.5"}})]})
+        sig = plan.chips[0].to_signal_dict()
+        self.assertNotIn("stop_width_check", json.dumps(sig, ensure_ascii=False))
+        self.assertEqual(sig.get("meta", {}).get("stop_width_check"), None)
+
+    def test_saved_into_thinking(self):
         with tempfile.TemporaryDirectory() as t:
             td = Path(t)
-            self._runner(td)._save_thinking(
-                cycle_id="c1", trigger="t",
-                content=('{"chips":['
-                         '{"symbol":"BTC_USDT","kline_tf":"5m","kline_read":["b1"]},'
-                         '{"symbol":"ETH_USDT","kline_tf":"15m","kline_read":["e1","e2"]}]}'),
-                reasoning=["cot"])
-            k = self._read(td)["kline"]
-            self.assertEqual(k["symbol"], "BTC_USDT", "旧字段仍要能读到（向后兼容）")
-            self.assertEqual(k["kline_read"], ["b1"])
-            self.assertEqual([e["symbol"] for e in k["kline_reads"]],
-                             ["BTC_USDT", "ETH_USDT"], "多币必须落数组")
-            self.assertEqual(k["kline_reads"][1]["kline_read"], ["e1", "e2"])
+            from omnialpha.strategist.loop import PlanRunner, StrategistConfig
 
-    def test_single_chip_keeps_flat_shape(self):
-        """单 chip 不加数组 —— 单币 bot 的 thinking.json 形状不变（I11）。"""
+            runner = PlanRunner(
+                client=object(),
+                cfg=StrategistConfig(symbols=["ETH_USDT"]),
+                inbox=td / "inbox", history_dir=td / "hist", llm=object(),
+            )
+            runner._save_thinking(
+                cycle_id="c1", trigger="t",
+                content='{"chips":[{"meta":{"stop_width_check":"类型=回撤|ATR 4.99 → 取 10.5"}}]}',
+                reasoning=["cot"])
+            payload = json.loads(
+                next((td / "hist").glob("*.thinking.json")).read_text(encoding="utf-8"))
+            self.assertEqual(payload["stop_width"], ["类型=回撤|ATR 4.99 → 取 10.5"])
+
+    def test_absent_key_when_not_emitted(self):
         with tempfile.TemporaryDirectory() as t:
             td = Path(t)
-            self._runner(td)._save_thinking(
-                cycle_id="c1", trigger="t",
-                content='{"chips":[{"symbol":"BTC_USDT","kline_tf":"5m","kline_read":["b1"]}]}',
-                reasoning=["cot"])
-            self.assertNotIn("kline_reads", self._read(td)["kline"])
+            from omnialpha.strategist.loop import PlanRunner, StrategistConfig
+
+            runner = PlanRunner(
+                client=object(),
+                cfg=StrategistConfig(symbols=["ETH_USDT"]),
+                inbox=td / "inbox", history_dir=td / "hist", llm=object(),
+            )
+            runner._save_thinking(cycle_id="c1", trigger="t",
+                                  content='{"chips":[{"symbol":"ETH_USDT"}]}',
+                                  reasoning=["cot"])
+            payload = json.loads(
+                next((td / "hist").glob("*.thinking.json")).read_text(encoding="utf-8"))
+            self.assertNotIn("stop_width", payload)
 
 
 if __name__ == "__main__":

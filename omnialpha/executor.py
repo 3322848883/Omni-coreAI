@@ -221,6 +221,26 @@ def _parse_symbol_positions(positions: list, symbol: str) -> list[dict]:
     return out
 
 
+def _is_order_gone(e: Exception) -> bool:
+    """订单在交易所**确实已经不存在**（已撤 / 已成交被清理 / 超过保留期）。
+
+    为什么要跟「接口抖动」分开：`ensure_grid_tp` 的两处 `get_order` 原先把**所有**
+    异常都当「查不到 → 不动（fail-closed）」，而 Gate 对已死订单回的就是
+    `404 ORDER_NOT_FOUND`（实测 2026-10-16：死档查回来全是 404）—— 于是死档永远清不掉：
+      · ⓪ pending 档：`最老优先 + 每轮预算` → 同一批死档每轮吃满预算，**表只增不减**
+        （实盘：200 档 / 177 pending，而盘上只有 10 张单）；
+      · ① protected 档：永久卡在 protected，而候选只取 pending/filled
+        → **该档永远不再补挂止盈**。
+
+    `status` 缺失/为 0（非 HTTP 错误）或 5xx/超时 → 返回 False，仍走 fail-closed
+    （宁可漏清，不可误删）。
+    """
+    if getattr(e, "status", 0) == 404:
+        return True
+    msg = str(e).upper()
+    return "ORDER_NOT_FOUND" in msg or "ORDER_NOT_EXIST" in msg
+
+
 # 触发单终态：撤旧/统计时这些状态不再操作（同 gateway price_orders 的 status 枚举）。
 _TERMINAL_PO_STATUS = frozenset({
     "cancelled", "finished", "filled", "triggered", "failed", "closed",
@@ -1771,6 +1791,118 @@ class Executor:
         except Exception:  # noqa: BLE001
             return False
 
+    def _effective_no_flip(self) -> bool:
+        """反手闸门的**生效值** —— 由交易所持仓模式推导，显式配置优先。
+
+        为什么不能只做手工开关：闸门必须与持仓模式一致，**两侧都会出事** ——
+          · single + `no_flip: false` → 单向簿里反向单**不是开反向仓而是净平现有仓**，
+            AI 一句 `open_short` 就把整个多头仓平掉；
+          · dual + `no_flip: true` → 反向意图本可安全地开成**独立腿**却被拦死；
+            更糟的是账户上真出现一条反向腿（误挂 / 手动 / 历史遗留）时，
+            **所有 `open_long` 都会被拦** → 网格停摆（实盘 2026-10-16：停摆 4 小时）。
+
+        推导规则：single → True（拦）；dual / split / dual_plus → False（不拦，
+        反向 = 独立腿，不会污染本方向）。
+        显式写 `no_flip` 就**尊重配置**，但与模式不符会打 WARNING
+        ——「配了但不生效 / 生效了但不是想要的」是本仓最贵的失败形态，必须能看出来。
+        持仓模式取不到 → fail-safe 取 True（保守一侧，与历史默认一致）。
+        """
+        explicit = (self.account_risk or {}).get("no_flip", None)
+        probe = getattr(self.client, "is_dual_position_mode", None)
+        dual: Optional[bool] = None
+        if callable(probe):
+            try:
+                dual = bool(probe())
+            except Exception as e:  # noqa: BLE001 — 探测失败按「模式未知」处理
+                swallow("executor._effective_no_flip", e, level=logging.DEBUG)
+        if explicit is None:
+            return True if dual is None else (not dual)
+        explicit_b = bool(explicit)
+        if dual is not None and explicit_b == dual:
+            log.warning(
+                "no_flip=%s 与持仓模式(%s)不符 → 闸门语义会错位（单向反向单=净平仓，"
+                "双向反向单=独立腿）；建议删掉该键交给模式推导",
+                explicit_b, "dual" if dual else "single")
+        return explicit_b
+
+    #: 「与策略方向相反的持仓」处置策略白名单
+    _STRAY_POLICIES = ("warn", "flatten")
+
+    def _stray_policy(self) -> str:
+        """`account_risk.stray_position` 的生效值（非法值回落 `warn`）。"""
+        v = str((self.account_risk or {}).get("stray_position", "warn")
+                or "warn").strip().lower()
+        return v if v in self._STRAY_POLICIES else "warn"
+
+    def flatten_stray(self, symbol: str, pos_short: int, *,
+                      owned: Optional[bool] = None) -> dict:
+        """处理「与策略方向相反」的持仓 —— 本策略只做多，反向 = 空。
+
+        ⛔ **本能力属于「程序层减仓」，默认关闭（`warn`）且不建议开启。**
+
+        理由（用户 2026-10-16 拍板）：**程序没有识别仓位意图的能力** —— 它只观察到
+        「方向 ≠ 策略方向」，而这**不等于**「这条仓是误开的」；`_symbol_owned` 也只证明
+        「本 bot 在该合约有挂单」，不证明这条仓的意图。反例：
+          · 手动留一条对冲空腿 → 会被程序在 ≤60s 内静默平掉；
+          · 将来若做双向网格（如官方「上卖下买」）→ 空腿是**正常仓位**，本方法会与策略打架；
+          · 平仓是市价 IOC，**错了不可撤销**。
+        分层原则：程序只做「客观可判定」的事（口径 / 硬闸 / 归属 fail-closed / 告警留痕）；
+        「这条仓该不该留」是**决策**，归 AI 或人 —— 正确路径是 AI 发 `close_short` /
+        `reduce_short`（AI 每轮快照里本来就有 `positions`；这两个动作不受 `no_flip` 拦）。
+        本方法仅作为**显式的运维逃生口**保留（`account_risk.stray_position: flatten`
+        才启用）—— **不要把它当成默认安全网**。
+
+        两种模式**同一套判据、不同落点**（`close_position` 自己分支）：
+          · single：反向 = **净空仓** → `side=None` → `size=0 + close=true` 整簿平；
+          · dual  ：反向 = **独立空腿** → 平 `side="short"` 那条腿。
+
+        归属 **fail-closed**：无本 bot 归属证据就不碰（降级 `warn` + WARNING），
+        与 `close_all` 的 `_symbol_owned` 判据同源 —— 别人的仓不能平。
+        `owned` 可由调用方注入（`ensure_grid_tp` 已经读过档位表，档位表存在本身
+        就是归属证据；否则 `-gtp` 卖单被硬闸撤掉后归属会「消失」）。
+
+        注意：平/减仓**不在** `_check_no_flip` 的管辖内（它只拦 `open_*`/`add_*`），
+        所以本方法不需要动反手闸门。
+        """
+        out = {"policy": self._stray_policy(), "position_short": int(pos_short),
+               "action": "none"}
+        if pos_short <= 0:
+            return out
+        if out["policy"] != "flatten":
+            out["action"] = "warn"
+            return out
+        if not self.manage_positions:
+            out["action"] = "skip_manage_off"
+            return out
+        if owned is None:
+            owned = self._symbol_owned(symbol)
+        if not owned:
+            out["action"] = "skip_unowned"
+            log.warning("stray flatten %s: 有 %d 张空仓但**无本 bot 归属证据** → "
+                        "不碰（fail-closed，请人工确认）", symbol, pos_short)
+            return out
+        dual = False
+        probe = getattr(self.client, "is_dual_position_mode", None)
+        if callable(probe):
+            try:
+                dual = bool(probe())
+            except Exception as e:  # noqa: BLE001 — 探测失败按 single 处理（side 被忽略）
+                swallow("executor.flatten_stray.mode", e, level=logging.DEBUG)
+        try:
+            # dual 必须给 side（否则 close_position 直接拒）；single 走
+            # size=0 + close=true 整簿平，side 会被忽略。
+            order = self.client.close_position(symbol, side="short" if dual else None)
+        except Exception as e:  # noqa: BLE001 — boundary
+            out["action"] = "error"
+            out["error"] = str(e)[:200]
+            log.warning("stray flatten %s 失败: %s", symbol, e)
+            return out
+        out["action"] = "flattened"
+        out["order_id"] = str((order or {}).get("id") or "")
+        log.warning("stray flatten %s: 平掉 %d 张**空仓**（与策略方向相反）→ order=%s；"
+                    "下一轮以交易所持仓为准复核", symbol, pos_short, out["order_id"])
+        return out
+
     def _check_no_flip(self, intent: Intent) -> None:
         """禁止同轮反手：持多时不能直接 `open_short`（必须先平）。
 
@@ -1778,11 +1910,14 @@ class Executor:
         反手在同一轮里会先开反向仓、再平旧仓（或反之），保证金占用翻倍，
         且两笔的先后顺序不确定 —— 拆成两轮（先平、下一轮再开）更安全。
 
-        开关 `account_risk.no_flip`，**默认开启**（这是更安全的一侧）。
-        想保留反手能力就在 bot 配置里写 `account_risk: {no_flip: false}`。
+        闸门**只拦开仓**（`open_*` / `add_*` / `stop_entry_*`）—— 平仓与减仓
+        （`close` / `reduce` / `close_short` / `reduce_short` …）**不在管辖内**，
+        所以「持有反向仓时的净平单」本来就走得通，不需要关闸门。
+
+        生效值见 `_effective_no_flip()`：按持仓模式推导（single → 拦；dual → 不拦），
+        显式写 `account_risk.no_flip` 时以配置为准。
         """
-        ar = self.account_risk or {}
-        if ar.get("no_flip") is False:
+        if not self._effective_no_flip():
             return
         action = str(intent.action or "").lower()
         if action in ("open_long", "add_long", "stop_entry_long"):
@@ -3597,6 +3732,20 @@ class Executor:
         pos = pos_long
         out["position_long"] = pos_long
         out["position_short"] = pos_short
+        # ── 反向仓处置（模式自适应，默认只告警）────────────────────────────
+        # 本策略只做多 → 反向 = 空。single 下是**净空仓**、dual 下是**独立空腿**，
+        # 但 `close_position` 自己按模式分支，这里**同一套判据**。
+        # 为什么放在这里：单向模式下空仓会让 `no_flip` 拦死所有 `open_long`，
+        # 而人格只做多、不会自己发 `close_short` → 网格永久停摆（实盘 2026-10-16
+        # 停摆 4 小时）。`stray_position: flatten` 时由程序平掉，形成自愈路径。
+        # 归属证据：档位表存在即算（`-gtp` 卖单会被下面的硬闸撤掉，单靠订单判归属
+        # 会「撤完就没证据」）。
+        out["stray"] = self.flatten_stray(symbol, pos_short,
+                                          owned=bool(levels_all) or None)
+        if out["stray"].get("action") == "flattened":
+            # IOC 市价平仓 → 本次扫描按「已无反向仓」继续（下一轮以交易所为准复核）
+            pos_short = 0
+            out["position_short"] = 0
         # 在盘普通挂单（入场腿）id —— 供「台账 ↔ 交易所对齐」判 pending 档死活
         open_entry_ids: set = set()
         try:
@@ -3617,6 +3766,10 @@ class Executor:
         open_gtp_ids: set = set()
         existing: set = set()
         covered_size = 0
+        covered_long = 0     # -gtp 卖单合计（平多 TP 覆盖口径）
+        covered_short = 0    # -gtp 买单合计（平空 TP 覆盖口径）
+        gtp_sell_ids: set = set()
+        gtp_buy_ids: set = set()
         try:
             for o in (self._owned_open_orders(symbol, self._own_prefix("")) or []):
                 if not str(o.get("text") or "").endswith("-gtp"):
@@ -3625,7 +3778,14 @@ class Executor:
                 if oid:
                     open_gtp_ids.add(oid)
                 existing.add(self._price_key(o.get("price")))
-                covered_size += abs(_int_or_zero(o.get("size")))
+                n = _int_or_zero(o.get("size"))
+                covered_size += abs(n)
+                if n > 0:
+                    gtp_buy_ids.add(oid)      # 平空 TP（买单）
+                    covered_short += n
+                else:
+                    gtp_sell_ids.add(oid)     # 平多 TP（卖单）
+                    covered_long += -n
         except Exception as e:  # noqa: BLE001
             swallow("executor.ensure_grid_tp.gtp_orders", e, level=logging.DEBUG)
             out["skipped"] = "orders_unavailable"
@@ -3659,8 +3819,17 @@ class Executor:
             try:
                 o = self.client.get_order(oid) or {}
             except Exception as e:  # noqa: BLE001
+                if _is_order_gone(e):
+                    # 交易所侧已无此单 → 该档已死，**删行**。原先统一按「查不到 → 不动」
+                    # 处理，于是死档只增不减（见 `_is_order_gone` docstring）。
+                    levels_all.remove(lv)
+                    lst = data.get("levels") or []
+                    if lv in lst:                 # 不用 try/except（审计 B12 裸吞棘轮）
+                        lst.remove(lv)
+                    pruned += 1
+                    continue
                 swallow("executor.ensure_grid_tp.prune_get_order", e, level=logging.DEBUG)
-                continue                      # 查不到 → 不动（fail-closed）
+                continue                      # 真·抖动 → 不动（fail-closed）
             if str(o.get("finish_as") or "") == "filled":
                 lv["status"] = "filled"
                 promoted += 1
@@ -3695,8 +3864,17 @@ class Executor:
             try:
                 o = self.client.get_order(tid) or {}
             except Exception as e:  # noqa: BLE001
+                if _is_order_gone(e):
+                    # 止盈单已不存在（撤单/被清理）→ 退回 pending 并清 `tp_order_id`，
+                    # 让本轮候选循环**立刻重挂**。原先卡在 protected 不动，而候选只取
+                    # pending/filled → 这一档从此没有止盈（见 `_is_order_gone`）。
+                    lv["status"] = "pending"
+                    lv.pop("tp_order_id", None)
+                    state_fixes.append({"price": lv.get("price"), "to": "pending",
+                                        "why": "gtp_order_gone"})
+                    continue
                 swallow("executor.ensure_grid_tp.get_order", e, level=logging.DEBUG)
-                continue                      # 查不到 → 不动（fail-closed）
+                continue                      # 真·抖动 → 不动（fail-closed）
             if str(o.get("finish_as") or "") == "filled":
                 lv["status"] = "closed"       # 卖单已成交 → 该档生命周期结束
                 state_fixes.append({"price": lv.get("price"), "to": "closed",
@@ -3710,16 +3888,14 @@ class Executor:
                                     "why": f"gtp_{str(o.get('finish_as') or o.get('status') or 'gone')}"})
         out["state_fixes"] = state_fixes
 
-        # ── ⛔ 硬闸（2026-10-16 事故修复）：**无多头持仓 → 一张止盈卖单都不挂** ──
-        # 单向模式下卖单是**方向性订单**：有持仓时成交 = 平多止盈；**无持仓时成交 = 开空**。
-        # 实测事故（2026-10-15 22:51 → 10-16 05:01）：预挂的普通限价卖单在无多头时
-        # 陆续成交 → 累积成 **−14 张空单** → 长仓人格随后被 `no_flip` 拦死，连续 12 轮
-        # 失败（"持有 short 时不能直接开 long"），网格停摆 4 小时。
-        # 结论：**「无持仓预挂止盈卖单」在单向模式下等价于「预挂开空单」，不可能安全**
-        # （reduce_only 无仓会被拒；条件单同理）。所以止盈只能在**有多头之后**挂，
-        # 并强制 `reduce_only`（双保险：即使仓位变化，卖单也永不反手）。
-        # 顺带把在盘 -gtp 卖单撤掉（它们此刻就是"挂着的开空单"）。
-        if pos_long <= 0:
+        # ── ⛔ 硬闸（2026-10-16 事故修复；2026-10-17 双向扩展）──────────────
+        # 限价单是**方向性订单**：无对应持仓时，止盈单成交 = 开反向仓。
+        #   · 多头路径：无多头 → 撤在盘 -gtp 卖单、不挂（原事故：无仓卖单累积 −14 空单）
+        #   · 空头镜像：无空头 → 撤在盘 -gtp 买单、不挂
+        #   · 双空    ：两边都撤（它们此刻就是两把挂着的方向性刀）
+        direction = "long" if pos_long > 0 else ("short" if pos_short > 0 else "flat")
+        out["direction"] = direction
+        if direction == "flat":
             cancelled = []
             if not dry:
                 for oid in list(open_gtp_ids):
@@ -3729,18 +3905,93 @@ class Executor:
                     except Exception as e:  # noqa: BLE001
                         swallow("executor.ensure_grid_tp.cancel_orphan_gtp", e,
                                 level=logging.DEBUG)
-            if pos_short > 0:
-                log.warning("grid tp %s: 账户持有 %d 张**空仓**（非本策略方向）→ "
-                            "不挂止盈、撤掉在盘 -gtp 卖单 %d 条；请先平掉空仓",
-                            symbol, pos_short, len(cancelled))
-            out["skipped"] = [{"why": "no_long_position(单向卖单=开空，禁止无仓预挂)",
-                               "position_long": pos_long, "position_short": pos_short,
+            out["skipped"] = [{"why": "no_position(裸-gtp=方向性订单，禁止无仓预挂)",
                                "cancelled_gtp": len(cancelled)}]
             if (cancelled or state_fixes) and not dry:
                 self._persist_ladder(path, data)
             return out
 
+        # ── ②空 空头镜像（2026-10-17 双向人格配套）────────────────────────
+        # 空头止盈 = **普通限价买单 + `reduce_only=True`**（size>0，价格 < mark）。
+        # 镜像不变式：多头「target > mark、size=-n」↔ 空头「target < mark、size=+n」；
+        # 其余（候选过滤、覆盖口径、台账状态机、text=-gtp）完全同构。
+        if direction == "short":
+            # 对侧遗留（-gtp 卖单 = 平多 TP，而无多头）→ 孤儿，撤（fail-open 于 dry）。
+            out["cancelled_opposite_gtp"] = self._cancel_gtp_side(gtp_sell_ids, dry)
+            candidates, skipped = [], []
+            for lv in levels_all:
+                if str(lv.get("status")) not in ("pending", "filled"):
+                    continue
+                tgt = lv.get("tp_target")
+                if not tgt:
+                    skipped.append({"price": lv.get("price"), "why": "no_tp_target(交回AI)"})
+                    continue
+                tf = _to_float(tgt)
+                if tf <= 0:
+                    skipped.append({"price": lv.get("price"), "why": "bad_target"})
+                    continue
+                if tf >= mark:
+                    skipped.append({"price": lv.get("price"),
+                                    "why": f"above_mark({mark})"})   # 买单价 ≥ mark 会立即成交
+                    continue
+                if self._price_key(tgt) in existing:
+                    skipped.append({"price": lv.get("price"), "why": "tp_already_present"})
+                    continue
+                # 张数上限 = 该档张数 ∩ 「空头持仓 − 在盘 TP（买单）已覆盖」的剩余敞口。
+                remaining = pos_short - covered_short
+                size = min(_int_or_zero(lv.get("size")) or 1, max(remaining, 0))
+                if size <= 0:
+                    skipped.append({"price": lv.get("price"),
+                                    "why": f"short_fully_covered({pos_short})"})
+                    continue
+                covered_short += size          # 递增，防多档重复覆盖同一份持仓
+                candidates.append({"level": lv, "target": tf, "size": size})
+            out["candidates"] = [{"price": c["level"].get("price"), "tp": c["target"],
+                                  "size": c["size"]} for c in candidates]
+            out["skipped"] = skipped
+            if not candidates:
+                if state_fixes and not dry:
+                    self._persist_ladder(path, data)
+                return out
+            if dry:
+                return out
+            meta = self.client.get_contract(symbol)
+            placed, errors, done_idx = [], [], []
+            for c in candidates:
+                lv, tgt, size = c["level"], c["target"], c["size"]
+                if size <= 0:
+                    errors.append({"price": lv.get("price"), "error": "zero_size"})
+                    continue
+                # **普通限价买单 + `reduce_only=True`**：交易所保证它只能减少空头，
+                # 永不反手开多；空头持仓消失时交易所自动撤单（与多头侧同源语义）。
+                try:
+                    order = self.client.place_order({
+                        "contract": symbol, "size": size,
+                        "price": str(round_price(tgt, meta)),
+                        "tif": "gtc",
+                        "reduce_only": True,
+                        "text": f"t-{self._bot_tag(self.label_prefix or 'auto')}-gtp",
+                    })
+                except Exception as e:  # noqa: BLE001 — boundary
+                    errors.append({"price": lv.get("price"), "tp": tgt,
+                                   "error": str(e)[:200]})
+                    continue
+                placed.append({"price": lv.get("price"), "tp": tgt, "size": size,
+                               "order_type": "limit", "reduce_only": True,
+                               "side": "short",
+                               "id": str((order or {}).get("id") or "")})
+                lv["tp_order_id"] = str((order or {}).get("id") or "")
+                lv["status"] = "protected"
+                done_idx.append(lv)
+            if done_idx or state_fixes:
+                self._persist_ladder(path, data)
+            out["placed"] = placed
+            out["errors"] = errors
+            return out
+
         # ── ② 候选：pending 网格档中「目标价 > mark」的**全部**档 ───────────
+        # 对侧遗留（-gtp 买单 = 平空 TP，而无空头）→ 孤儿，撤。
+        out["cancelled_opposite_gtp"] = self._cancel_gtp_side(gtp_buy_ids, dry)
         # **不再要求该档已成交**（单向净仓簿：先挂上 = 用户的「完全挂完」；
         # 之后任何持仓的反弹卖出都由这些卖单承接）。target <= mark 跳过 ——
         # 低于市价的限价卖单会立即以市价成交（= 直接开空）。
@@ -3764,7 +4015,7 @@ class Executor:
                 continue
             # 张数上限 = 该档张数 ∩ 「多头持仓 − 在盘 TP 已覆盖」的剩余敞口。
             # 绝不超配：reduce_only 卖单张数超过持仓时，多余部分会被交易所拒/撤。
-            remaining = pos_long - covered_size
+            remaining = pos_long - covered_long
             size = min(_int_or_zero(lv.get("size")) or 1, max(remaining, 0))
             if size <= 0:
                 skipped.append({"price": lv.get("price"),
@@ -4508,6 +4759,25 @@ class Executor:
             symbols = self._wide_symbols(scope, [o.get("contract") for o in orders])
             result = {sym: self.client.cancel_all_orders(sym) for sym in symbols}
         return StepResult("cancel_all", symbol, True, detail={"result": result})
+
+    def _cancel_gtp_side(self, ids: set, dry: bool) -> list:
+        """撤掉**对侧**遗留的 -gtp 单（如：持空头时遗留的平多 TP 卖单）。
+
+        这些单是 `reduce_only`、无对应持仓 → 交易所语义上无害（不会反手），
+        但留着会污染覆盖口径、也让对账多出噪声，所以按「对侧孤儿」回收。
+        dry 模式只报告不撤。fail-open：单条失败 swallow 继续下一张。
+        """
+        cancelled = []
+        if not ids or dry:
+            return cancelled
+        for oid in list(ids):
+            try:
+                self.client.cancel_order(oid)
+                cancelled.append(oid)
+            except Exception as e:  # noqa: BLE001
+                swallow("executor.ensure_grid_tp.cancel_opposite_gtp", e,
+                        level=logging.DEBUG)
+        return cancelled
 
     def _positions_or_error(self) -> tuple[Optional[list], str]:
         """取 `/positions` 原始记录；**取数失败返回 `(None, 原因)`**。

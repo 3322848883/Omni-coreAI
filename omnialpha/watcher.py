@@ -223,8 +223,10 @@ def record_guard_coverage(paths: "ProjectPaths", bot_id: str, sweep: str,
 
     回答的是**事后**才问得出的那个问题：「这个仓到底有没有被守护」——
     只看日志回答不了（sweep 正常跑完是不打日志的），所以必须落一份可读状态。
-    文件按 sweep 名分节（`round` = 300s 那五步、`give_back` = 60s 那一步），
-    每节覆盖上一轮同名节，节内带 `ts` 便于判断新鲜度。
+    文件按 sweep 名分节（`round` = 300s 那四步、`give_back` = 60s 快扫描；
+    `grid_tp` 同样跑在 60s 快扫描上，但它自行取扫描集合、**不落**覆盖记录，
+    别把这里的节名当成「快扫描全都在册」），每节覆盖上一轮同名节，节内带
+    `ts` 便于判断新鲜度。
     """
     try:
         p = guard_coverage_path(paths, bot_id)
@@ -937,6 +939,10 @@ def _grid_tp_sweep(bot: BotConfig, paths: ProjectPaths, *,
 
     逐 bot 由 `account_risk.grid_tp_auto` 开启（默认 off）：
       false/"off"（默认）→ 不动作 ｜ "dry" → 只记录「本来会挂什么」 ｜ true/"live" → 真挂
+
+    **扫描节奏（2026-10-16 起）**：挂在 `pnl_sweep_sec=60` 快扫描上（与 pnl /
+    give_back 同节奏），不再跟 300s do_sweep —— 成交 → 补 TP 时延 ≤1min。
+    开关关闭时本函数在创建 client 之前返回，快扫描零 REST 成本。
     """
     mode = (getattr(bot, "account_risk", None) or {}).get("grid_tp_auto", "off")
     if not mode or str(mode).lower() in ("off", "false", "none"):
@@ -980,6 +986,15 @@ def _grid_tp_sweep(bot: BotConfig, paths: ProjectPaths, *,
             )
         if out.get("errors"):
             log.warning("grid tp %s %s 未挂成的腿: %s", bot.bot_id, sym, out["errors"])
+        # 反向仓处置留痕（`account_risk.stray_position`）：flatten 会**真下单**，
+        # 必须落程序动作（`source=watcher*`），不能只留一行日志。
+        stray = out.get("stray") or {}
+        if stray.get("action") in ("flattened", "skip_unowned", "error"):
+            log.warning("grid tp %s %s 反向仓处置: %s", bot.bot_id, sym, stray)
+            _log_program_action(
+                paths, bot, source="watcher:grid_tp", action="stray_position",
+                symbol=sym, detail=stray,
+            )
 
 
 def _peak_trail_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict, *,
@@ -1332,6 +1347,15 @@ def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[
                     except Exception as e:  # noqa: BLE001
                         log.warning("give back sweep %s failed: %s", bot.bot_id, e)
                     record_guard_coverage(paths, bot.bot_id, "give_back", scan)
+                try:
+                    # 阶梯档条件限价 TP（AI 写目标价、程序成交后执行）；默认 off。
+                    # **挂在 60s 快扫描而不是 300s do_sweep（2026-10-16）**：
+                    # 档位成交 → 补 TP 的时延从 ≤5min 压到 ≤1min —— 做 T 场景里
+                    # 延迟窗口内价格冲过目标又回落会错过一轮。开关关闭时本函数
+                    # 第一行就返回（在创建 client 之前），零 REST 成本。
+                    _grid_tp_sweep(bot, paths, symbols=None)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("grid tp sweep %s failed: %s", bot.bot_id, e)
             if do_sweep:
                 # 顺序固定：**先对齐张数（有持仓）→ 再撤孤儿（无持仓）→ 补缺失（裸仓）
                 # → 最后上移已有保护（防坐电梯）**。
@@ -1352,11 +1376,6 @@ def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[
                                         client=client, symbols=syms)
                 except Exception as e:  # noqa: BLE001
                     log.warning("auto protect sweep %s failed: %s", bot.bot_id, e)
-                try:
-                    # 阶梯档条件限价 TP（AI 写目标价、程序成交后执行）；默认 off
-                    _grid_tp_sweep(bot, paths, client=client, symbols=syms)
-                except Exception as e:  # noqa: BLE001
-                    log.warning("grid tp sweep %s failed: %s", bot.bot_id, e)
                 try:
                     _peak_trail_sweep(bot, paths, peak_trail_alerted,
                                       client=client, symbols=syms)

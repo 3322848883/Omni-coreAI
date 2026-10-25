@@ -55,7 +55,7 @@ Bot 配置文件顶层（`config/bots/<id>.yaml`；启用走 `config/bots.local/
 
 风控闸门（可与 `config/accounts.yaml` 的账户级值合并，上限取更严）
 
-共 **21** 个键：
+共 **23** 个键：
 
 - `auto_protect`
 - `auto_protect_sl_pct`
@@ -77,6 +77,8 @@ Bot 配置文件顶层（`config/bots/<id>.yaml`；启用走 `config/bots.local/
 - `risk_pct`
 - `risk_per_trade_pct`
 - `safe_mode_after_failures`
+- `sl_move_policy`
+- `stray_position`
 - `total_risk_pct`
 
 ## `paper`

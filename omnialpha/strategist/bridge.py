@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .regime import regime_from_reasoning
 from .risk import RiskResult
 from .schema import Plan
 
@@ -22,11 +23,71 @@ _ENTRY_ACTIONS = frozenset({
 # ⚠️ 两处必须一致：`tests/test_plan_cancel_needs_entry.py::TestCancelSetInSync` 守这条。
 _CANCEL_ACTIONS = frozenset({"cancel_all", "cancel_price_all", "cancel_trail_all"})
 
+# 多空各自的「开新仓」动作 —— regime 闸门按方向拦截。
+_BUY_ENTRY = frozenset({"open_long", "add_long", "stop_entry_long"})
+_SELL_ENTRY = frozenset({"open_short", "add_short", "stop_entry_short"})
+
+
+def _apply_regime(accepted: list, regime) -> tuple[list, list[str]]:
+    """按模型自报的 `regime` 做硬性收口（plan → signal 的最后一关）。
+
+    规则（全部可选，未写则不动）：
+      · `allow_new_long is False`  → 丢弃 open/add/stop_entry_long
+      · `allow_new_short is False` → 丢弃 open/add/stop_entry_short
+      · `max_layers = N`           → 同方向入场腿最多保留 N 条（按计划里的先后顺序）
+    只拦「开新仓」，`close_* / reduce_* / cancel_* / modify_tp_sl` 一律不动 ——
+    闸门管的是「要不要新开」，不是「能不能退出」。
+    """
+    if regime is None:
+        return list(accepted), []
+    blocked: set[str] = set()
+    if getattr(regime, "allow_new_long", None) is False:
+        blocked |= _BUY_ENTRY
+    if getattr(regime, "allow_new_short", None) is False:
+        blocked |= _SELL_ENTRY
+    max_layers = getattr(regime, "max_layers", None)
+    kept, notes = [], []
+    buy_n = sell_n = 0
+    for chip in accepted:
+        action = str(chip.action or "").lower()
+        if action in blocked:
+            notes.append(f"regime 拦截 {chip.symbol}/{action}")
+            continue
+        if action in _BUY_ENTRY:
+            if max_layers is not None and buy_n >= max_layers:
+                notes.append(f"regime 层数上限 {max_layers}，丢弃 {chip.symbol}/{action}")
+                continue
+            buy_n += 1
+        elif action in _SELL_ENTRY:
+            if max_layers is not None and sell_n >= max_layers:
+                notes.append(f"regime 层数上限 {max_layers}，丢弃 {chip.symbol}/{action}")
+                continue
+            sell_n += 1
+        kept.append(chip)
+    return kept, notes
+
+
+def _regime_audit(plan: Plan) -> dict | None:
+    """**审计通道**：把本轮的方向结论落盘，供事后核对（不参与下单）。
+
+    优先用模型自己输出的 `regime` 块；模型不写时（实测 3/3 都没写），从 `reasoning`
+    里抽取（149 份真实计划覆盖 54%、与决策一致 91%）。
+    ⚠️ 抽取结果**不做执行依据** —— 覆盖率不到 100%，fail-open 没约束力、fail-closed 会误停。
+    执行层只认 `plan.regime`（见 `_apply_regime`）。
+    """
+    if plan.regime is not None:
+        return {**plan.regime.to_dict(), "source": "plan"}
+    guess = regime_from_reasoning(plan.reasoning)
+    if guess:
+        return {**guess, "source": "reasoning"}
+    return None
+
 
 def chips_to_signal(plan: Plan, risk_result: RiskResult, bot_id: str = "") -> dict[str, Any]:
     """Map accepted chips to one SignalFile payload (orders[] + replace)."""
+    accepted, regime_notes = _apply_regime(list(risk_result.accepted), plan.regime)
     orders = []
-    for chip in risk_result.accepted:
+    for chip in accepted:
         action = chip.action
         # hold + tp/sl = move existing protections (was silently dropped)
         if action == "hold":
@@ -104,7 +165,7 @@ def chips_to_signal(plan: Plan, risk_result: RiskResult, bot_id: str = "") -> di
     has_entry = any(
         str(o.get("action") or "").lower() in _ENTRY_ACTIONS for o in orders
     )
-    notes = list(risk_result.notes)
+    notes = list(risk_result.notes) + regime_notes
     if dropped_cancels:
         notes.append(
             "剥掉撤单腿（计划里的入场腿一条都没通过风控 → 撤单失去承接物，"
@@ -121,6 +182,7 @@ def chips_to_signal(plan: Plan, risk_result: RiskResult, bot_id: str = "") -> di
             "bot_id": bot_id,
             "risk_notes": notes,
             "dropped_cancels": dropped_cancels,
+            "regime": _regime_audit(plan),
             "rejected": [
                 {"symbol": c.symbol, "action": c.action, "confidence": c.confidence}
                 for c in risk_result.rejected

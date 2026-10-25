@@ -163,26 +163,30 @@ class TestEnsureGridTp(unittest.TestCase):
     # ── ⛔ 事故回归：无多头持仓 → 一张都不挂 ─────────────────────────
 
     def test_no_long_position_places_nothing(self):
-        """**核心安全语义**：无多头持仓 → 不挂任何止盈卖单（预挂=开空）。"""
+        """**核心安全语义**：无任何持仓 → 撤掉全部在盘 -gtp、不挂新单（预挂=反向开仓）。"""
         _write_levels(self.tmp, [_lv(2300, 1, 2310)])
         ex = _new(self.tmp, _Client(mark=2300.0, open_orders=[_buy("o1")],
                                     positions=[]), mode="live")
         out = ex.ensure_grid_tp("ETH_USDT")
         self.assertEqual(ex.client.placed, [])
-        self.assertTrue(any("no_long_position" in str(s) for s in out["skipped"]))
+        self.assertTrue(any("no_position" in str(s) for s in out["skipped"]))
         self.assertEqual(out["position_long"], 0)
 
     def test_short_position_blocks_and_cancels_resting_gtp(self):
-        """**事故回归**：持有空仓（−14）→ 不挂，且**撤掉在盘 -gtp 卖单**。"""
+        """**2026-10-17 双向契约**：持有空仓 → 撤对侧遗留 -gtp 卖单；
+        多头目标（2310 ≥ mark 2300）在空头路径被判 above_mark，不挂买单。"""
         _write_levels(self.tmp, [_lv(2300, 1, 2310)])
         ex = _new(self.tmp, _Client(mark=2300.0,
                                     open_orders=[_buy("o1"), _gtp("g-old", 2310)],
                                     positions=_pos(short=14)), mode="live")
         out = ex.ensure_grid_tp("ETH_USDT")
         self.assertEqual(ex.client.placed, [])
-        self.assertEqual(ex.client.cancelled, ["g-old"], "在盘 -gtp 必须撤掉")
+        self.assertEqual(ex.client.cancelled, ["g-old"], "对侧遗留 -gtp 卖单必须撤掉")
+        self.assertEqual(out["direction"], "short")
+        self.assertEqual(out["cancelled_opposite_gtp"], ["g-old"])
         self.assertEqual(out["position_short"], 14)
-        self.assertEqual(out["skipped"][0]["cancelled_gtp"], 1)
+        self.assertTrue(any("above_mark" in str(s.get("why", ""))
+                            for s in out["skipped"]), out["skipped"])
 
     def test_dry_does_not_cancel(self):
         """dry 模式只报告、不撤单、不下单。"""

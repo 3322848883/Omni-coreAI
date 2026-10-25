@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -25,7 +24,6 @@ def build_context(
     n_recent: int = 3,
     n_index: int = 20,
     extra_suffix: str = "",
-    account_equity: Optional[float] = None,
 ) -> dict:
     """组装每轮主上下文。
 
@@ -41,25 +39,31 @@ def build_context(
     profile = MemoryProfile(root, bot_id)
 
     # ── 固定前缀（缓存命中区）─────────────────────────
-    # 画像**不放在这里**：它每平一笔就变（`record_trade` / 账本投影），放进 system
-    # 会让整段缓存前缀失效 —— 而 system 是最长的一段（人设+契约+工具）。
-    # 实测缓存命中率 0.04–0.75、单轮 70–331k token，前缀稳定性是成本的第一杠杆。
-    system = system_prompt
+    profile_summary = profile.prompt_summary()
+    system_parts = [system_prompt]
+    if profile_summary:
+        system_parts.append(f"\n[画像] {profile_summary}")
+    system = "\n".join(system_parts)
 
     # ── 动态后缀（缓存未命中区）───────────────────────
-    profile_summary = profile.prompt_summary()
     order_block = _format_order_context(order_context)
     # 只读一次 journal：原先 `read_recent_summaries` 与 `read_recent(1)` 各做一次
     # `read_text()`，每轮多读一遍整个文件（独立评审指出）。
     # 一次读够索引层需要的条数，再切片 —— 摘要层与索引层共用这一份。
     rows = journal.read_recent(max(n_recent, n_index))
+    # 降级/故障行不是「决策」，一律不进 prompt —— 必须在切片**之前**过滤，
+    # 否则 3 个 recent 槽位会被故障占掉 1 个，有效记忆白少一条。
+    #
+    # 2026-10-22 实测事故：`region` 校验失败后 `_hold_plan` 写入
+    # `[降级] parse_failed: chips[0].region must be one of range|reversal|trend`，
+    # 下一轮 `n_recent=3` 把它当成「上轮决策」注入 → 模型据此认定新值 `trend_range`
+    # 非法，主动回避，把真实判定（trend_range）改写成 `range`。
+    # 一次故障就这样变成了后续每一轮的错误前提。
+    rows = [r for r in rows if not _is_failure_row(r)]
     # `n_recent=0` 时 `rows[-0:]` 会返回**全部**行（不是 0 行）—— 显式挡掉这个 -0 陷阱
     recent_rows = rows[-n_recent:] if (rows and n_recent > 0) else []
     recent_summaries = [
         {"cycle_id": r.get("cycle_id", ""), "decision": r.get("decision", ""),
-         # 按币（多币下 `decision` 只是不带币名的动作串，渲染层要看这两个：
-         # `_decision_text` 靠它们才能说出「哪个币做了什么」）
-         "symbols": r.get("symbols"), "decisions": r.get("decisions"),
          # **不再 [:30] 截断**：模型每轮写 6K–76K 字符的推理，而 `[近况]` 原先只
          # 回看到 30 字（实测整段 171 字符）。journal 写入侧已截到 `[:200]`，
          # 是这里又砍了一刀。
@@ -73,16 +77,8 @@ def build_context(
     last_state = _format_last_plan_state(recent_rows[-1:])
     last_state_block = f"\n[上轮方案状态]\n{last_state}\n" if last_state else ""
     snapshot_block = snapshot_text or _format_snapshot(snapshot or {})
-    # 画像段：无成交时不写（别让模型看到「历史表现: 0笔」这种噪音）
-    profile_block = f"[画像] {profile_summary}\n\n" if profile_summary else ""
-    # 盈亏段：画像只给**累计**统计，这里补模型每轮都该看到的**近期事实**——
-    # 最近几笔平仓、连亏计数、当日已实现。没有这一段，连亏条款（HC-09 类）
-    # 与当日亏损闸门（HC-08 类）就是死条文：模型连亏 5 笔也浑然不觉，
-    # 只能靠模式化合理化继续开仓（2026-10-12 AI 层复盘的定论）。
-    pnl_block = _pnl_block(root, bot_id, account_equity)
-    pnl_seg = f"{pnl_block}\n\n" if pnl_block else ""
 
-    user = f"""{profile_block}{pnl_seg}[订单上下文]
+    user = f"""[订单上下文]
 {order_block}
 
 [近况]
@@ -118,6 +114,15 @@ def build_context(
     }
 
 
+def _is_failure_row(row: dict) -> bool:
+    """这条 journal 记录是「故障降级」而不是一次真实决策？
+
+    识别依据是 `_hold_plan` 写入的固定前缀 `[降级]`（见 `strategist/loop.py`）。
+    故障原因里常带 schema 的合法值列表，一旦被模型当成契约读，比没有记忆更糟。
+    """
+    return str(row.get("reasoning") or "").startswith("[降级]")
+
+
 def _est_tokens(text: str) -> int:
     """粗估 token 数：CJK 一字≈1 token，其余≈4 字符/token。
 
@@ -129,97 +134,9 @@ def _est_tokens(text: str) -> int:
     return cjk + (len(text) - cjk + 3) // 4
 
 
-# 订单记忆为空时的文案。**不能说「当前无持仓」** —— 那是关于**持仓**的断言，而这一段
-# 只知道「有没有订单记录」。实测 brooks-btc 持 -56 BTC 时，prompt 里照样写着
-# 「[订单上下文]（当前无持仓）」：一句错话，而模型只能靠契约规则 16 去仲裁。
-# 现在改成如实说明，并顺手指向权威来源（快照的 position_state）。
-def _fill_ts(f: dict) -> int:
-    """fill 的时间戳（秒）。缺失/损坏返回 0 —— 排在序列最旧端，且不进当日统计。"""
-    try:
-        return int(float(f.get("time") or 0))
-    except (TypeError, ValueError):
-        return 0
-
-
-def _pnl_block(root: Path, bot_id: str, equity: Optional[float]) -> str:
-    """渲染 `[盈亏·已实现]` 段 —— 模型每轮的盈亏事实来源。
-
-    数据源是 `exchange_pnl.json`（`exchange_pnl.sync` 幂等投影：SL/TP 交易所触发 +
-    bot 主动平仓，全部归属本 bot）。画像只给**累计**统计，这里补**近期事实**：
-
-    - 最近 5 笔平仓（新→旧）—— 连亏场景的「上一笔亏了多少钱」
-    - 连亏计数 —— 连亏减仓条款（如 HC-09）的唯一触发依据
-    - 当日(UTC)已实现 —— 当日亏损闸门（如 HC-08）的触发依据
-
-    `equity` 用于把当日盈亏换算成权益占比。任何一步取不到都**降级不渲染**，
-    绝不渲染假数据 —— 模型对着编造的数字做风控比没有数据更糟。
-    """
-    try:
-        from .exchange_pnl import load as _pnl_load
-        rec = _pnl_load(root, bot_id)
-    except Exception:  # noqa: BLE001
-        return ""
-    fills = [f for f in (rec.get("fills") or []) if isinstance(f, dict)]
-    # 与写侧口径一致（`exchange_pnl._pnl_of`）：pnl==0 不是平仓，剔除 —— 否则
-    # 序列里挂一笔 +0.00u、连亏被它打断，模型读到的是噪音。
-    fills = [f for f in fills if f.get("pnl") not in (None, 0, 0.0, "0", "0.0")]
-    if not fills:
-        return ""
-    fills = sorted(fills, key=_fill_ts)
-    pnls: list[float] = []
-    for f in fills:
-        try:
-            pnls.append(float(f.get("pnl") or 0.0))
-        except (TypeError, ValueError):
-            pnls.append(0.0)
-
-    # 连亏：从最新一笔往回数连续 pnl<0（0 视为打断 —— 「不亏」不是「连亏」）
-    loss_streak = 0
-    for p in reversed(pnls):
-        if p < 0:
-            loss_streak += 1
-        else:
-            break
-
-    lines = ["[盈亏·已实现]"]
-    tail = list(zip(fills[-5:], pnls[-5:]))[::-1]
-    seq = " / ".join(
-        f"{p:+.2f}u" + (f" {f.get('contract')}" if f.get("contract") else "")
-        for f, p in tail
-    )
-    lines.append(f"最近平仓(新→旧): {seq}")
-    if loss_streak >= 2:
-        lines.append(f"连亏: {loss_streak} 笔")
-    # 当日（UTC 0 点起）：time 缺失（=0）的 fill 不参与，宁缺勿假
-    now = int(time.time())
-    day0 = now - (now % 86400)
-    day_pairs = [(f, p) for f, p in zip(fills, pnls) if _fill_ts(f) >= day0]
-    if day_pairs:
-        day_pnl = sum(p for _, p in day_pairs)
-        seg = f"当日(UTC)已实现: {day_pnl:+.2f}u（{len(day_pairs)} 笔）"
-        if equity and float(equity) > 0:
-            seg += f"，占权益 {abs(day_pnl) / float(equity) * 100:.1f}%"
-        lines.append(seg)
-    return "\n".join(lines)
-
-
-_NO_ORDER_CTX = "（无订单记录 —— 持仓状态以快照 account.position_state 为准）"
-
-
 def _format_order_context(ctx: Optional[dict]) -> str:
     if not ctx:
-        return _NO_ORDER_CTX
-    # 多币：按币各一张（`_order_context_for` 的容器形态）。合并成一张会让模型以为
-    # 只有一笔持仓，其余币的前提失效价/理由全看不到（D-19）—— 而「上一轮我给 ETH
-    # 定的失效价是多少」正是这一轮该照着判断的东西。
-    many = ctx.get("orders") if isinstance(ctx, dict) else None
-    if isinstance(many, list):
-        parts = [_format_one_order(c) for c in many if isinstance(c, dict)]
-        return "\n\n".join(parts) if parts else _NO_ORDER_CTX
-    return _format_one_order(ctx)
-
-
-def _format_one_order(ctx: dict) -> str:
+        return "（当前无持仓）"
     lines = [
         f"订单: {ctx.get('order_id', '')}",
         f"标的: {ctx.get('symbol', '')}  方向: {ctx.get('side', '')}",
@@ -264,56 +181,14 @@ def _exec_tag(row: dict) -> str:
         n = int(ex.get("orders") or 0)
     except (TypeError, ValueError):
         n = 0
-    tag = f" [orders={n}]" if n else ""
-    # 自上一轮以来的新归属平仓合计（journal `exec_result.realized_pnl`，loop 每轮
-    # sync 交易所投影后写入）。[盈亏] 段给的是**独立序列**，这个标记让 [近况] 行
-    # 本身就能回答「上一轮决策之后平仓结果如何」—— 两者互补，不是重复。
-    rp = ex.get("realized_pnl")
-    if rp is not None:
-        try:
-            tag += f" [realized={float(rp):+.2f}]"
-        except (TypeError, ValueError):
-            pass
-    return tag
-
-
-def _decision_text(r: dict) -> str:
-    """决策的渲染文本。
-
-    单币（或老 journal 没有 `symbols` 那些键时）**原样返回 `decision`** —— 单币 prompt
-    必须逐字不变（I11）。多币下 `decision` 只是不带币名的动作串
-    （`"hold,open_long"` 看不出哪个币做了什么），所以按 `symbols`/`decisions` 渲染成
-    `BTC_USDT:hold ETH_USDT:open_long`。
-    """
-    symbols = r.get("symbols")
-    decisions = r.get("decisions")
-    if (isinstance(symbols, list) and isinstance(decisions, list)
-            and len(symbols) > 1 and len(symbols) == len(decisions)):
-        pairs = [f"{s}:{d}" for s, d in zip(symbols, decisions) if s]
-        if pairs:
-            return " ".join(pairs)
-    return str(r.get("decision") or "")
-
-
-def _tier1_bits(d: dict) -> list:
-    """Tier 1 片段（单币读顶层字段、多币读 `tier1[symbol]` —— 同一套字段名）。"""
-    bits = []
-    if d.get("region"):
-        bits.append(f"区域={d['region']}")
-    if d.get("invalidation_price") is not None:
-        bits.append(f"前提失效={d['invalidation_price']}（触及即视为结构破坏，须撤单或离场）")
-    if d.get("time_stop_bars") is not None:
-        bits.append(f"最大持仓={d['time_stop_bars']} 轮")
-    if d.get("give_back_pct") is not None:
-        bits.append(f"浮盈回撤阈值={d['give_back_pct']}%")
-    return bits
+    return f" [orders={n}]" if n else ""
 
 
 def _format_recent(summaries: list[dict]) -> str:
     if not summaries:
         return "（无近期决策）"
     return "\n".join(
-        f"{s.get('cycle_id', '')}: {_decision_text(s)}{_exec_tag(s)}"
+        f"{s.get('cycle_id', '')}: {s.get('decision', '')}{_exec_tag(s)}"
         f" — {s.get('reasoning', '')}"
         for s in summaries
     )
@@ -331,7 +206,7 @@ def _format_index(rows: list[dict]) -> str:
     if not rows:
         return ""
     lines = "\n".join(
-        f"  {r.get('cycle_id', '')} {_decision_text(r)}{_exec_tag(r)}" for r in rows
+        f"  {r.get('cycle_id', '')} {r.get('decision', '')}{_exec_tag(r)}" for r in rows
     )
     return (f"\n[近期决策索引·最近 {len(rows)} 轮"
             f"（要看某轮细节用 journal_lookup(cycle_id)）]\n{lines}")
@@ -350,17 +225,16 @@ def _format_last_plan_state(rows: list[dict]) -> str:
     if not rows:
         return ""
     r = rows[-1]
-    # 多币：每枚币各有自己的前提失效价/最大持仓 —— 合并成一句会让模型以为那些值是
-    # 全局的（审计 D-22）。单币（tier1 只有一条或没有）走下面同一套顶层字段，逐字不变。
-    tier1 = r.get("tier1")
-    if isinstance(tier1, dict) and len(tier1) > 1:
-        chunks = []
-        for sym, one in tier1.items():
-            bits = _tier1_bits(one if isinstance(one, dict) else {})
-            if bits:
-                chunks.append(f"{sym}: " + "；".join(bits))
-        return "；".join(chunks)
-    return "；".join(_tier1_bits(r))
+    bits = []
+    if r.get("region"):
+        bits.append(f"区域={r['region']}")
+    if r.get("invalidation_price") is not None:
+        bits.append(f"前提失效={r['invalidation_price']}（触及即视为结构破坏，须撤单或离场）")
+    if r.get("time_stop_bars") is not None:
+        bits.append(f"最大持仓={r['time_stop_bars']} 轮")
+    if r.get("give_back_pct") is not None:
+        bits.append(f"浮盈回撤阈值={r['give_back_pct']}%")
+    return "；".join(bits)
 
 
 def _format_snapshot(snapshot: dict) -> str:

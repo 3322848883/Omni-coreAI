@@ -22,18 +22,11 @@ from .llm_client import LLMClient, LLMConfig, LLMError
 from .market import MarketConfig
 from .prompt import build_system_prompt, build_user_prompt, load_strategy_prompt
 from .risk import RiskConfig, apply_risk
-from .schema import PlanError, extract_kline_reads, normalize_chip_type, parse_plan_text
+from .schema import (PlanError, extract_kline_reads, extract_stop_width_checks,
+                       normalize_chip_type, parse_plan_text)
 from .snapshot import collect_snapshot
-from .symbols import (
-    AMBIGUOUS_MULTI,
-    AUTO_SINGLE,
-    NO_UNIVERSE,
-    OUT_OF_UNIVERSE,
-    UNIVERSE_EMPTY,
-    resolve_symbol_arg,
-)
 from .tools import NATIVE_TOOLS, TOOL_GUIDE, available_native_tools, extract_tool_calls, filter_tool_schemas, run_tool
-from .triggers import ConditionState, check_conditions, parse_conditions
+from .triggers import check_conditions, parse_conditions
 from .trigger_store import AITriggerPolicy, AITriggerStore, TriggerPolicyError, validate_trigger_payload
 
 log = logging.getLogger("omnialpha.strategist")
@@ -50,10 +43,6 @@ class StrategistConfig:
     # 条件事件：EMA/ATR/RSI/price_break 等（见 triggers.py）
     conditions: list = field(default_factory=list)
     check_interval_sec: float = 1.0
-    # 条件事件轮与上一轮的最小间隔（秒）。None = 用 interval_sec/2；0 = 关掉这道闸。
-    # 见 PlanRunner._cond_gap_sec() 的说明：没有这道闸，一个 interval 周期里会
-    # 叠出「定时轮 + 事件轮」两轮，15 分钟节拍被打散。
-    cond_gap_sec: Optional[float] = None
     ai_triggers: dict = field(default_factory=dict)
     symbols: list[str] = field(default_factory=list)
     prompt_file: str = "prompts/vergex_default.md"
@@ -71,18 +60,11 @@ class StrategistConfig:
     bot_id: str = ""
     # SkillKit：None=默认可见全部；[]=无 skill；[id,...]=白名单
     skills: Optional[list] = None
-    # 必载模式：true 时 catalog hint 升级为「每轮决策前必须先调 skill 加载强制清单」。
-    # 背景：按需语义下实测 brooks-eth 152 轮仅 13% 主动加载（2026-10-12 审计）。
-    # 默认 False = 行为与改动前一致；建议与 skills 白名单（单一方法论技能）配套使用。
-    skills_required: bool = False
     # K 线图视觉识别（需模型支持 vision/image input）
     vision: bool = True
     # 发送哪些周期图（多选）；省略 = 只发主周期 timeframe
     # 例: ["5m","15m","1h","4h"]
     vision_timeframes: Optional[list] = None
-    # 持仓管理总闸（与 BotConfig.manage_positions 同源，由 _build_plan_runner 注入）：
-    # false = 只开仓不管仓 —— 快照/account 工具不注入持仓与保护单。
-    manage_positions: bool = True
 
     def __post_init__(self) -> None:
         if not self.event_timeframe:
@@ -108,13 +90,9 @@ class PlanRunner:
             bot_root=cfg.bot_root,
         )
         self._last_kline_t: Optional[int] = None
-        # 逐币基线（多币才用；单币仍走 `_last_kline_t` 以保持历史行为逐字不变）
-        self._last_kline_t_by_symbol: dict[str, int] = {}
-        # 上一次 _kline_closed() 判定为"收盘"的币（供触发标签取用）
-        self._kline_close_symbols: list[str] = []
         self._last_cycle_id: Optional[str] = None
         self._busy = threading.Lock()
-        self._conditions = parse_conditions(cfg.conditions, cfg.symbols)
+        self._conditions = parse_conditions(cfg.conditions)
         self._cond_states: dict[str, Any] = {}
         self._last_trigger: str = ""
         self._cycle_file = history_dir / "last_cycle.json"
@@ -128,72 +106,28 @@ class PlanRunner:
             allow_modify=bool((cfg.ai_triggers or {}).get("allow_modify", True)),
         )
         self._ai_store = AITriggerStore(self.history_dir / "ai_triggers.json", self._ai_policy)
-        # 冷却/边沿状态**跨进程**：把落盘的 last_fire / last_true 种回内存 `_cond_states`。
-        # 不种的话进程一重启（部署、崩溃、看门狗拉起）冷却就归零 —— 而 `last_fire`
-        # 此前根本没落过盘（`mark_fired` 是死代码，见 `_persist_trigger_state`）。
-        self._seed_cond_states()
         # 工具使用统计（每轮累计，随 thinking 落盘）——防 AI 偷懒不查数据
         self.tool_usage: list[dict] = []
-        # 本轮发出的 K 线图**元数据**（symbol/周期/成功与否/字节数）——
-        # 图片本体（base64）只发给模型，不落 thinking.json。
-        self._last_chart_meta: list[dict] = []
         # 本轮快照摘要（设计 S2.4 的 journal `snapshot_digest`）；
         # persona 侧写 journal 时从这里取。
         self.last_snapshot_digest: str = ""
-        # 自上一轮以来新归属的平仓摘要（`{"closed": n, "realized_pnl": x}`）。
-        # 每轮 run_once 开头 sync 交易所盈亏投影得到，journal `exec_result` 带走 ——
-        # 否则 journal 链路里没有 pnl，[近况] 看不到亏损（LLM 金鱼记忆的根因之一，
-        # 2026-10-12 AI 层复盘定论）。
-        self._closed_summary: Optional[dict] = None
 
-    def _audit_symbol(self, name: str, args: Optional[dict]) -> tuple[str, Optional[str]]:
-        """工具调用审计里的 symbol 归因 → `(symbol, note)`；`note=None` = 该工具与币无关。
-
-        **为什么要在审计体里落 symbol**：多币下事后核对「模型是不是拿错币了」，
-        只能靠逐条调用记录 —— 工具名 + 参数摘要回答不了「这条 `klines` 查的是哪个币」，
-        而 `args` 里的 symbol 在单币宇宙下是**自动补全**的（模型自己没写）。
-        所以这里用 `resolve_symbol_arg` 的 note 区分三种情形：显式给了、自动补全、
-        越界/漏写。判据与工具层同源（`strategist/symbols.py`）。
-        """
-        try:
-            from .tools import SYMBOL_TOOLS
-
-            if name not in SYMBOL_TOOLS:
-                return "", None
-            universe = list(getattr(getattr(self, "cfg", None), "symbols", None) or [])
-            sym, note = resolve_symbol_arg(args, universe, tool=name)
-            return sym, note
-        except Exception:  # noqa: BLE001 — 纯观测，异常只意味着「这条没归因」
-            return "", None
-
-    def _record_tool_use(self, name: str, args: dict, result: Any,
-                         *, raw_args: Optional[dict] = None) -> None:
+    def _record_tool_use(self, name: str, args: dict, result: Any) -> None:
         """记录一次工具调用：工具名、参数摘要、结果规模，以及完整返回。
 
         `result_full` 是排查「模型到底拿到了什么」的唯一依据。只存 preview 时，
         核对工具数值（如 SMC 的 structure_scale.atr）只能靠复现，无法判断模型
         是**引用了真实值**还是**自己估算**。
-
-        `raw_args` = **模型原样给出的参数**。`run_tool` 进来就 `args = dict(args or {})`
-        （`tools.py:1524`）—— 它对入参做的是**拷贝**，补全后的 symbol **不会**回写调用方。
-        但调用方自己不持有那份副本，所以「模型自己写了 symbol 没有」仍然只能靠
-        显式传进来的 `raw_args` 回答 —— 缺 symbol 率就是靠它算的。
         """
         try:
             text = str(result) if result is not None else ""
-            entry = {
+            self.tool_usage.append({
                 "tool": str(name or ""),
                 "args": {k: str(v)[:40] for k, v in (args or {}).items()},
                 "result_preview": text[:200],
                 "result_full": text[:20000],
                 "result_len": len(text),
-            }
-            sym, note = self._audit_symbol(
-                name, raw_args if raw_args is not None else args)
-            if note is not None:
-                entry["symbol"] = sym
-                entry["symbol_note"] = note
-            self.tool_usage.append(entry)
+            })
         except Exception:  # noqa: BLE001
             pass
 
@@ -216,24 +150,7 @@ class PlanRunner:
         except Exception:  # noqa: BLE001
             pass
 
-    def _per_symbol_risk(self, base: dict, universe: list, overrides: Optional[dict]) -> dict:
-        """每币预算：以全局值为底，再套用**宇宙内**的覆盖（宇宙外一律忽略）。
-
-        宇宙外的覆盖静默忽略而不是报错 —— 它是**调用方**的输入，不是模型的输出；
-        真正的越界拒绝在 `risk.apply_risk` 与 plan 闸门（T5）上，那才是硬闸门。
-        """
-        out = {sym: {"min_confidence": base["min_confidence"],
-                     "max_notional_usd": base["max_notional_usd"],
-                     "max_chips": base["max_chips"]} for sym in universe}
-        for sym, ov in (overrides or {}).items():
-            if sym not in out or not isinstance(ov, dict):
-                continue
-            for k in ("min_confidence", "max_notional_usd", "max_chips"):
-                if k in ov:
-                    out[sym][k] = ov[k]
-        return out
-
-    def _prompt_risk(self, snapshot: dict, per_symbol: Optional[dict] = None) -> dict:
+    def _prompt_risk(self, snapshot: dict) -> dict:
         """给 AI 的预算取「配置值」与「权益 × max_notional_pct」的较小值。
 
         执行器的硬闸门是 equity×max_notional_pct（见 executor._check_notional）。
@@ -256,23 +173,14 @@ class PlanRunner:
         if equity > 0 and pct > 0:
             cap = equity * pct
             limit = cap if limit is None else min(float(limit), cap)
-        risk = {
+        return {
             "min_confidence": self.cfg.risk.min_confidence,
             "max_notional_usd": round(limit, 2) if limit is not None else None,
             "max_chips": self.cfg.risk.max_chips,
+            "allow_actions": sorted(self.cfg.risk.allow_actions)
+            if self.cfg.risk.allow_actions
+            else None,
         }
-        # 品种宇宙与每币名额**只在多币时**注入：名额是按币给的（T8/D8），不告诉模型配额，
-        # 它会以为"几条 chip 都能落在同一个币上"，于是把别的币饿死。
-        # 单币标的唯一、名额无从谈起 —— 多注入两个键只会改 prompt 文本、让缓存前缀失效，
-        # 违反 I11（单币逐字不变）。
-        universe = list(self.cfg.symbols or [])
-        if len(universe) > 1:
-            risk["symbols"] = universe
-            risk["max_chips_per_symbol"] = getattr(self.cfg.risk, "max_chips_per_symbol", 1)
-            risk["per_symbol"] = self._per_symbol_risk(risk, universe, per_symbol)
-        risk["allow_actions"] = (sorted(self.cfg.risk.allow_actions)
-                                 if self.cfg.risk.allow_actions else None)
-        return risk
 
     def _active_triggers_block(self) -> str:
         """把已生效的自设触发器列给 AI（空则返回 ""）。
@@ -308,9 +216,7 @@ class PlanRunner:
           （实测：`smc-paper` 是 `disc-trio` 的分析成员，独立跑 plan 时被注入了
           `pa-a` 账户上的空单，而它自己账户是平的）。
 
-        有多个 open 单时**按币各取一张**（≤3）：单币正常只有一张；多币下每枚币各有
-        自己的理由与前提失效价，只取 `updated_at` 最新那张会让其余币的上下文凭空
-        消失（D-19）。单币（或订单记录里没有 symbol）时返回**单张**，形态同改动前。
+        有多个 open 单时取 `updated_at` 最新的（设计是单币单计划，正常只有一个）。
         """
         try:
             from ..persona.orders import SharedOrderStore
@@ -325,24 +231,7 @@ class PlanRunner:
             if not mine:
                 return None
             mine.sort(key=lambda r: int(r.get("updated_at") or 0), reverse=True)
-            # 按**币**各取一张（≤3）。原先只取 `updated_at` 最新的一张 —— 多币下一轮
-            # 可能同时有 2–3 张单，其余币的理由/前提失效价/最近事件在 prompt 里**凭空
-            # 消失**（D-19：模型看不到自己上一轮给另一个币定的失效价）。
-            # 单币时返回**单张**（形态与改动前逐字一致），多币才包一层容器。
-            by_sym: dict[str, dict] = {}
-            for r in mine:
-                s = str(r.get("symbol") or "").strip()
-                if s and s not in by_sym:
-                    by_sym[s] = r
-                if len(by_sym) >= 3:
-                    break
-            if len(by_sym) <= 1:
-                # 单币，或记录里没有 symbol（老订单库）→ 退回「最新一张」
-                pick = next(iter(by_sym.values())) if by_sym else mine[0]
-                return store.get_order_context(pick["order_id"])
-            many = [store.get_order_context(r["order_id"]) for r in by_sym.values()]
-            many = [c for c in many if c]
-            return {"orders": many} if many else store.get_order_context(mine[0]["order_id"])
+            return store.get_order_context(mine[0]["order_id"])
         except Exception as e:  # noqa: BLE001
             log.warning("order context lookup failed: %s", e)
             return None
@@ -360,175 +249,9 @@ class PlanRunner:
             self.last_snapshot_digest = ""
         return self.last_snapshot_digest
 
-    # 单 bot 的订单记忆：动作 → (lifecycle 事件名, 方向)。与 persona 侧同源口径。
-    _ORDER_MEMORY_EVENT = {
-        "open_long": ("open", "long"),
-        "open_short": ("open", "short"),
-        "stop_entry_long": ("open", "long"),
-        "stop_entry_short": ("open", "short"),
-        "reduce_long": ("reduce", "long"),
-        "reduce_short": ("reduce", "short"),
-        "modify_tp_sl": ("modify_sl", ""),
-        "close": ("close", ""),
-        "close_all": ("close", ""),
-        "flatten": ("close", ""),
-    }
-
-    def _sync_order_memory(self, root: Path, bid: str, plan: Any, orders: list,
-                           snapshot: Optional[dict] = None) -> None:
-        """单 bot 也写共享订单库（T14 / D-7）。**尽力而为**：失败只告警，绝不影响下单。
-
-        为什么必须写：`[订单上下文]` 读的是 `data/shared/orders/`，而此前**只有 persona 组
-        会写** —— 于是 `plan-loop` 的 `_order_context_for` 恒为 `None`，prompt 里那一节
-        永远是「无订单记录」，**即使这个 bot 真的持仓**（实测 brooks-btc 持 -56 BTC 时就是
-        这样）。缺的是**订单级**记忆：`lifecycle` / `recent_events`(加权 top-5) / 模型自己
-        声明的前提失效价。（轮级记忆走 journal，不受影响：`[近况]` / `[近期决策索引]` /
-        `[上轮方案状态]` 照旧。）
-
-        口径与 persona 侧一致：按 symbol 复用本 bot 的 open 记录；**方向反转另起一张**
-        （旧单关闭）—— 否则注入的持仓方向会与账户相反，比没有记忆更危险。
-
-        `snapshot` 给了还会**回收过期记录**（见下 `_retire` 的判据）：交易所侧的 SL/TP 触发
-        平仓**没有信号**，记录不会因此关闭；留着它，模型会以为还有一个不存在的仓位。
-        """
-        if not orders and snapshot is None:
-            return
-        try:
-            from ..persona.orders import SharedOrderStore, new_order_id
-
-            store = SharedOrderStore(root)
-            mine = {str(r.get("symbol") or "").strip().upper(): r
-                    for r in store.list_open()
-                    if r.get("target_account") == bid}
-            chips = {str(getattr(c, "symbol", "") or "").strip().upper(): c
-                     for c in (getattr(plan, "chips", None) or [])}
-            pos_rows = ((snapshot or {}).get("account") or {}).get("positions") or []
-
-            def _pos_of(k: str) -> dict:
-                for p in pos_rows:
-                    if (isinstance(p, dict)
-                            and str(p.get("contract") or "").strip().upper() == k):
-                        return p
-                return {}
-
-            def _side_from_position(k: str) -> str:
-                """从快照的持仓推方向 —— 管理动作本身不带方向（`modify_tp_sl` 没有 side）。"""
-                try:
-                    sz = float(_pos_of(k).get("size") or 0)
-                except (TypeError, ValueError):
-                    return ""
-                return "long" if sz > 0 else ("short" if sz < 0 else "")
-
-            for o in orders or []:
-                if not isinstance(o, dict):
-                    continue
-                sym = str(o.get("symbol") or "").strip()
-                key = sym.upper()
-                act = str(o.get("action") or "")
-                ev, side = self._ORDER_MEMORY_EVENT.get(act, ("", ""))
-                if not key or not ev:
-                    continue
-                rec = mine.get(key)
-                if (ev == "open" and rec is not None
-                        and str(rec.get("side") or "") not in ("", side)):
-                    # 方向反转 → 旧单关闭，下面另起一张
-                    store.add_lifecycle(rec["order_id"], "close", "reversed", by=bid)
-                    store.update(rec["order_id"], status="closed")
-                    store.refresh_recent_events(rec["order_id"])
-                    rec = None
-                if rec is None:
-                    if ev == "close":
-                        continue            # 本来就没记录，不必为一次平仓造一条
-                    # **管理动作也要建**：持仓中的 bot（实盘 brooks-btc 就是）只发
-                    # `hold`→`modify_tp_sl`，没有 open 动作 —— 只在 open 时建记录的话，
-                    # 这类 bot 的订单记忆会**永远为空**（2026-10-10 部署到实盘后实测踩到：
-                    # 每轮 exec=True orders=1，而订单库一条都没有）。
-                    # 方向只能从快照的持仓推；推不出（无仓/取数失败）就**不建**，不猜。
-                    guess = side or _side_from_position(key)
-                    if not guess:
-                        continue
-                    pos = _pos_of(key)
-                    rec = store.create({
-                        "order_id": new_order_id(),
-                        "symbol": sym,
-                        "target_account": bid,
-                        "side": guess,
-                        "status": "open",
-                        "entry_price": (o.get("price") or o.get("trigger_price")
-                                        or pos.get("entry_price")),
-                        "size_usd": o.get("size_usd"),
-                        "tp": o.get("tp"),
-                        "sl": o.get("sl"),
-                    }, universe=self.cfg.symbols or None)
-                    mine[key] = rec
-                if ev == "open":
-                    store.add_lifecycle(rec["order_id"], "open", act, by=bid)
-                elif ev == "close":
-                    store.add_lifecycle(rec["order_id"], "close", act, by=bid)
-                    store.update(rec["order_id"], status="closed")
-                    store.refresh_recent_events(rec["order_id"])
-                    mine.pop(key, None)     # 已关掉，别在下面的回收里再关一次
-                    continue
-                else:                       # modify / reduce
-                    prices = {k2: o.get(k2) for k2 in ("tp", "sl") if o.get(k2) is not None}
-                    if prices:
-                        store.update(rec["order_id"], **prices)
-                    store.add_lifecycle(rec["order_id"], ev, act, by=bid)
-                # 模型声明的东西：理由 / memory_refs / 前提失效价（每轮刷新）
-                oid = rec["order_id"]
-                store.set_reason(oid, getattr(plan, "reasoning", "") or "")
-                for ref in (getattr(plan, "memory_refs", None) or []):
-                    store.add_memory_ref(oid, str(ref))
-                chip = chips.get(key)
-                inv = getattr(chip, "invalidation", None) if chip is not None else None
-                if isinstance(inv, (int, float)):
-                    store.set_premise_invalidation(
-                        oid, float(inv),
-                        str(getattr(chip, "reasoning", "") or "")[:120])
-                store.refresh_recent_events(oid)
-            self._retire_flat_orders(store, bid, mine, snapshot)
-        except Exception as e:  # noqa: BLE001 — 记忆是增益，不该拖垮下单
-            log.warning("订单记忆同步失败（不影响下单）：%s", e)
-
-    def _retire_flat_orders(self, store: Any, bid: str, mine: dict,
-                            snapshot: Optional[dict]) -> None:
-        """把「快照说这个币是 `flat`」却还 open 的记录关掉。
-
-        为什么需要：交易所侧的 SL/TP 触发平仓**没有信号**（`run` 的对账能看到，`plan-loop`
-        看不到），记录于是永远 open —— 模型下一轮会看到一个**已经不存在的仓位**。
-
-        **只信 `flat`**（`snapshot.py` 的定义是「无持仓**且**无待成交入场单」）：
-        `entry_pending` 恰恰是记录的正常来源（预挂/待成交的突破单，实测 ab-multi-new
-        那张 `stop_entry_long` 就是），`position_open` 有仓，`unknown`（持仓取数失败）与
-        缺键一律**不动** —— 宁可留一条过期记录，也不要因为读不到就抹掉证据
-        （与规则 14/16 对 `unknown` 的处理同源）。
-
-        **还有一道时序闸**：plan-loop 只写信号，真正挂单的是另一个进程（`run`，轮询 ~2s）。
-        在它消费之前，账户上当然什么都还没有 —— 若不看这一点，就会把**刚挂出去、还没落地的
-        订单**当成过期回收（本地实测：没有 `run` 进程时，第一轮就被误回收）。
-        判据取「inbox 里还有未消费的信号」：有 → 说明执行进程还没跟上，本轮不回收。
-        """
-        inbox = getattr(self, "inbox", None)
-        try:
-            if inbox is not None and any(Path(inbox).glob("*.json")):
-                return
-        except Exception:  # noqa: BLE001 — 判不了就当"没有堆积"，不因此放弃回收
-            pass
-        ps = ((snapshot or {}).get("account") or {}).get("position_state")
-        if not isinstance(ps, dict):
-            return
-        norm = {str(k).strip().upper(): str(v or "").strip() for k, v in ps.items()}
-        for key, rec in list((mine or {}).items()):
-            if norm.get(key) != "flat":
-                continue
-            store.add_lifecycle(rec["order_id"], "close", "stale_flat", by=bid)
-            store.update(rec["order_id"], status="closed")
-            store.refresh_recent_events(rec["order_id"])
-
     def _assemble_prompt(self, root: Path, bid: str,
                          system: str, user: str, *,
-                         via_group: bool = True,
-                         account_equity: Optional[float] = None) -> tuple[str, str]:
+                         via_group: bool = True) -> tuple[str, str]:
         """按缓存优化顺序组装 system/user（订单上下文 → 近况 → 快照 → 触发器）。
 
         **单 bot（`run_once`）与多人格（`analyze_once`）共用这一个入口** —— 两条路径
@@ -536,8 +259,6 @@ class PlanRunner:
 
         `via_group` 决定订单上下文的匹配范围（见 `_order_context_for`）：
         单 bot 只看自己账户，人格路径看全组。
-
-        `account_equity` 只用于 [盈亏] 段的当日亏损权益占比（HC-08 类条款）。
 
         失败不影响本轮：退回未加工的 system/user（少记忆，但不缺席）。
         """
@@ -550,57 +271,11 @@ class PlanRunner:
                 snapshot_text=user,
                 n_recent=3,
                 extra_suffix=self._active_triggers_block(),
-                account_equity=account_equity,
             )
             return ctx["system"], ctx["user"]
         except Exception as e:  # noqa: BLE001
             log.warning("memory context assembly failed, using plain prompts: %s", e)
             return system, user + self._active_triggers_block()
-
-    @staticmethod
-    def _account_equity(snapshot: Any) -> Optional[float]:
-        """快照里的账户权益（total/balance），取不到给 None。
-
-        与 `_decay_equity` 不同：这里**持仓中也给** —— HC-08 的当日亏损占比
-        恰恰要在持仓浮亏、连亏期间算，空仓才给会让闸门在最需要时失明。
-        """
-        try:
-            acct = (snapshot or {}).get("account") or {}
-            if acct.get("error"):
-                return None
-            v = acct.get("total")
-            if v is None:
-                v = acct.get("balance")
-            return float(v) if v is not None else None
-        except (TypeError, ValueError):
-            return None
-
-    def _sync_exchange_pnl(self, root: Path, bid: str) -> Optional[dict]:
-        """同步交易所侧已实现盈亏投影，返回自上轮以来的新平仓摘要。
-
-        SL/TP 触发平仓发生在交易所、没有本地信号 —— watcher 的 sweep 有自己的周期，
-        这里每轮再同步一次（幂等，游标控制），保证 [盈亏] 段与 journal `exec_result`
-        拿到的是最新值。失败只告警不阻断：盈亏记忆是增强，不该让整轮决策打掉。
-        """
-        try:
-            from ..memory.exchange_pnl import sync as _sync
-            r = _sync(root, bid, self.client,
-                      contracts=list(self.cfg.symbols or []))
-            if not r.get("ok"):
-                return None
-            closed = [f for f in (r.get("closed") or []) if isinstance(f, dict)]
-            if not closed:
-                return None
-            total = 0.0
-            for f in closed:
-                try:
-                    total += float(f.get("pnl") or 0.0)
-                except (TypeError, ValueError):
-                    pass
-            return {"closed": len(closed), "realized_pnl": round(total, 2)}
-        except Exception as e:  # noqa: BLE001
-            log.warning("exchange pnl sync failed: %s", e)
-            return None
 
     def _record_cache_usage(self, root: Path, bid: str, system: str) -> tuple[int, str]:
         """记录本轮 prompt 缓存命中 + 前缀稳定性，返回 (命中token, 模型名)。
@@ -627,12 +302,6 @@ class PlanRunner:
         return hit, model
 
     def run_once(self, trigger: str = "manual") -> dict[str, Any]:
-        # 每轮开始清零。原先只有 `analyze_once` 清 —— plan-loop 走的是 run_once，
-        # 于是 `tool_usage` **跨轮累加**，`tool_usage_summary` 的 counts 越跑越大，
-        # 「这轮调了几次工具」根本读不出来（D-26）。
-        self.tool_usage = []
-        # 图元数据同理：vision 关掉时必须清空，否则 thinking.json 会挂着上一轮的图。
-        self._last_chart_meta = []
         cycle_id = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         snapshot = collect_snapshot(
             self.client,
@@ -642,8 +311,6 @@ class PlanRunner:
             market_cfg=self.cfg.market,
             env=self.cfg.env,
             bot_root=self.cfg.bot_root,
-            vision_timeframes=self.cfg.vision_timeframes,
-            manage_positions=self.cfg.manage_positions,
         )
         self._remember_snapshot_digest(snapshot)
         account = snapshot.get("account") or {}
@@ -665,11 +332,7 @@ class PlanRunner:
         # 单 bot 路径 → 只看自己账户的仓位（via_group=False）
         root = self.cfg.bot_root or Path.cwd()
         bid = self.cfg.bot_id or self.inbox.name
-        # 轮间平仓同步要在**拼装之前**：[盈亏] 段与 journal `exec_result` 都从这里取
-        self._closed_summary = self._sync_exchange_pnl(root, bid)
-        system, user = self._assemble_prompt(
-            root, bid, system, user, via_group=False,
-            account_equity=self._account_equity(snapshot))
+        system, user = self._assemble_prompt(root, bid, system, user, via_group=False)
         # vision：多周期 K 线图（可选配置）
         charts: list = []
         if self.cfg.vision:
@@ -715,8 +378,7 @@ class PlanRunner:
             plan = self._hold_plan(cycle_id, degraded)
         else:
             try:
-                plan = parse_plan_text(text, symbols=self.cfg.symbols)
-                self._fill_kline_tf(plan)
+                plan = parse_plan_text(text)
             except PlanError as e:
                 log.error("plan parse failed: %s", e)
                 degraded = f"parse_failed: {e}"
@@ -745,9 +407,6 @@ class PlanRunner:
         self._save_last_cycle(plan.cycle_id)
         rejected_triggers = self._apply_ai_triggers(plan)
         risk_result = apply_risk(plan, self.cfg.risk)
-        # 解析期的**宽容告警**（如 `scenarios` 非对象被丢弃，D9/T12）此前只落 `log.warning`，
-        # run 结果与 ledger 里都看不到 —— 等于告警没有出口。这里并进 notes。
-        run_notes = risk_result.notes + rejected_triggers + list(plan.notes or [])
         payload = chips_to_signal(plan, risk_result, bot_id=self.cfg.bot_id or self.inbox.name)
         orders = payload.get("orders") or []
         # agent-memory：每轮决策入 journal（含快照摘要/模型/缓存命中，设计 S2.4）
@@ -765,11 +424,7 @@ class PlanRunner:
                 llm_model=llm_model,
                 prompt_cache_hit_tokens=cache_hit,
                 executed=bool(orders),
-                # 自上一轮以来的新归属平仓（SL/TP 触发等轮间事件）。渲染端把它标成
-                # `[realized=±x]` 挂在 [近况] 行上 —— 模型这才看得到「上一轮之后
-                # 亏了多少钱」，连亏条款才有着落。
-                exec_result={"orders": len(orders), "trigger": trigger,
-                             **(getattr(self, "_closed_summary", None) or {})},
+                exec_result={"orders": len(orders), "trigger": trigger},
                 **self._tier1_journal_fields(plan),
             )
         except Exception:  # noqa: BLE001
@@ -788,27 +443,22 @@ class PlanRunner:
             if self.cfg.write_hold:
                 write_hold_audit(self.history_dir, plan, cycle_id=plan.cycle_id)
             self._record_plan(cycle_id=plan.cycle_id, trigger=trigger, orders=0,
-                              notes=run_notes,
+                              notes=risk_result.notes + rejected_triggers,
                               reasoning=plan.reasoning)
-            # 没下单的一轮**也要**维护订单记忆：交易所侧 SL/TP 触发平仓就发生在这种轮次里
-            # （那种成交没有信号），不跑这一步，过期记录会一直留着。
-            self._sync_order_memory(root, bid, plan, [], snapshot)
             # monitoring: decay（hold 不计盈亏）
             self._record_decay(plan, executed=False, equity=self._decay_equity(snapshot))
             return {
                 "ok": True,
                 "cycle_id": plan.cycle_id,
                 "orders": 0,
-                "notes": run_notes,
+                "notes": risk_result.notes + rejected_triggers,
                 "rejected": len(risk_result.rejected),
                 "trigger": trigger,
                 **tail_extra,
             }
         path = write_signal_file(self.inbox, payload, cycle_id=plan.cycle_id)
-        # 单 bot 也写订单记忆（T14/D-7）——否则 [订单上下文] 那一节永远是空的
-        self._sync_order_memory(root, bid, plan, orders, snapshot)
         self._record_plan(cycle_id=plan.cycle_id, trigger=trigger, orders=len(orders),
-                          notes=run_notes, reasoning=plan.reasoning)
+                          notes=risk_result.notes + rejected_triggers, reasoning=plan.reasoning)
         # monitoring: decay（执行后按方向记 PnL）
         self._record_decay(plan, executed=True, equity=self._decay_equity(snapshot))
         return {
@@ -816,7 +466,7 @@ class PlanRunner:
             "cycle_id": plan.cycle_id,
             "orders": len(orders),
             "file": str(path),
-            "notes": run_notes,
+            "notes": risk_result.notes + rejected_triggers,
             "rejected": len(risk_result.rejected),
             "trigger": trigger,
         }
@@ -824,15 +474,31 @@ class PlanRunner:
 
     @staticmethod
     def _tier1_journal_fields(plan: Any) -> dict:
-        """契约 Tier 1 字段进 journal —— **按币**形态（见 `memory/journal.py`）。
+        """契约 Tier 1 字段进 journal（docs/compose/spec/pa-skills-upgrade.md [S2]）。
 
-        多币下每枚币各有自己的 region/invalidation/risk_pct，只取 `chips[0]` 会让
-        其余币的判定凭空消失（审计 D-21）。实现只有一处（`tier1_journal_fields`），
-        与 persona 路径共用 —— 此前两边各写一份、已经漂移过一次。
+        取首个 chip 的判定值 —— 单 bot 路径 `max_chips=1`，取到的就是本轮的方案。
+        全部可选：没填就不写键，**老 journal 的形态不变**（下游按 `.get()` 读，
+        不会因为多了键而改变行为）。
         """
-        from ..memory.journal import tier1_journal_fields
+        chips = getattr(plan, "chips", None) or []
+        if not chips:
+            return {}
+        c = chips[0]
+        out: dict[str, Any] = {}
+        if getattr(c, "region", ""):
+            out["region"] = c.region
+        if getattr(c, "rule_ids", None):
+            out["rule_ids"] = list(c.rule_ids)
+        if getattr(c, "risk_pct", None) is not None:
+            out["risk_pct"] = c.risk_pct
+        if getattr(c, "invalidation", None) is not None:
+            out["invalidation_price"] = c.invalidation
+        if getattr(c, "time_stop_bars", None) is not None:
+            out["time_stop_bars"] = c.time_stop_bars
+        if getattr(c, "give_back_pct", None) is not None:
+            out["give_back_pct"] = c.give_back_pct
+        return out
 
-        return tier1_journal_fields(getattr(plan, "chips", None) or [])
     def _skill_catalog(self) -> str:
         """SkillKit L1 catalog：仅 name+description，空则不渲染。"""
         try:
@@ -843,30 +509,24 @@ class PlanRunner:
             reg.scan([root / ".mimocode" / "skills", root / "skills"])
             enabled = getattr(self.cfg, "skills", None)
             metas = reg.visible_for(self.cfg.bot_id or "", enabled)
-            required = bool(getattr(self.cfg, "skills_required", False))
-            return render_catalog(metas, required=required)
+            return render_catalog(metas)
         except Exception:  # noqa: BLE001
             return ""
 
     def _hold_plan(self, cycle_id: str, reason: str) -> Plan:
-        """降级用的 hold Plan：让本轮照常走完风控/记录链路，不留下空周期。
-
-        **逐币**而不是只给首币：多币宇宙里"只给首币一条 hold"会让其余币在
-        journal/近况里**完全缺席**，模型下一轮看不到它们（等于那几枚币被静默丢出决策）。
-        宇宙为空时不再兜底 `BTC_USDT` —— 那是在猜一个本 bot 根本没配的标的。
-        """
+        """降级用的 hold Plan：让本轮照常走完风控/记录链路，不留下空周期。"""
         from .schema import Chip, Plan
 
-        syms = list(self.cfg.symbols or [])
-        chips = [Chip(symbol=s, action="hold", confidence=0.0,
-                      reasoning="数据/模型异常，降级观望") for s in syms]
-        # 宇宙为空（本 bot 未配置 symbols）时**不产出 chip**：一条 `symbol=""` 的 hold
-        # 会让下游以为「本轮对某个币表了态」，而那个币根本不存在。留痕走 `raw.degraded`。
+        sym = (self.cfg.symbols or ["BTC_USDT"])[0]
         return Plan(
             cycle_id=cycle_id,
             reasoning=f"[降级] {reason[:60]}",
-            chips=chips,
-            raw={"degraded": reason},
+            chips=[Chip(
+                symbol=sym,
+                action="hold",
+                confidence=0.0,
+                reasoning="数据/模型异常，降级观望",
+            )],
         )
 
     def _record_cycle_failure(self, root: Path, bid: str, detail: str) -> None:
@@ -901,10 +561,6 @@ class PlanRunner:
         稳定优先：一个成员失败不应让它整轮缺席（否则融合只剩少数人）。
         """
         log.warning("degrade to hold: %s", reason)
-        # 与 `_hold_plan` 同源：多币逐币一条 hold；宇宙为空时不产出 chip（留痕走 meta）
-        syms = list(self.cfg.symbols or [])
-        chips = [{"symbol": s, "action": "hold", "confidence": 0.0,
-                  "reasoning": "数据/模型异常，降级观望"} for s in syms]
         return {
             "ok": True,
             "degraded": reason,
@@ -913,15 +569,18 @@ class PlanRunner:
             "plan": {
                 "cycle_id": cycle_id,
                 "reasoning": f"[降级] {reason[:40]}",
-                "chips": chips,
-                "meta": {"degraded": reason},
+                "chips": [{
+                    "symbol": (self.cfg.symbols or ["BTC_USDT"])[0],
+                    "action": "hold",
+                    "confidence": 0.0,
+                    "reasoning": "数据/模型异常，降级观望",
+                }],
             },
         }
 
     def analyze_once(self, trigger: str = "manual") -> dict[str, Any]:
         """各人格独立分析：LLM → Plan，不写 inbox、不执行（供多人格融合）。"""
         self.tool_usage = []  # 每轮开始时清零
-        self._last_chart_meta = []  # 图元数据同理（否则挂上一轮的图）
         cycle_id = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         snapshot = collect_snapshot(
             self.client,
@@ -931,8 +590,6 @@ class PlanRunner:
             market_cfg=self.cfg.market,
             env=self.cfg.env,
             bot_root=self.cfg.bot_root,
-            vision_timeframes=self.cfg.vision_timeframes,
-            manage_positions=self.cfg.manage_positions,
         )
         self._remember_snapshot_digest(snapshot)
         account = snapshot.get("account") or {}
@@ -954,9 +611,7 @@ class PlanRunner:
         # 没记忆的人格」，而画像/近况本来就为持仓管理而设计。
         root = self.cfg.bot_root or Path.cwd()
         bid = self.cfg.bot_id or self.inbox.name
-        system, user = self._assemble_prompt(
-            root, bid, system, user,
-            account_equity=self._account_equity(snapshot))
+        system, user = self._assemble_prompt(root, bid, system, user)
         # vision：从 snapshot 生成 K 线图（可配置多周期）
         charts: list = []
         if self.cfg.vision:
@@ -989,8 +644,7 @@ class PlanRunner:
             log.error("analyze llm failed: %s", e)
             return self._hold_fallback(cycle_id, trigger, f"llm_failed: {e}")
         try:
-            plan = parse_plan_text(text, symbols=self.cfg.symbols)
-            self._fill_kline_tf(plan)
+            plan = parse_plan_text(text)
         except PlanError as e:
             log.error("analyze plan parse failed: %s", e)
             return self._hold_fallback(cycle_id, trigger, f"parse_failed: {e}")
@@ -1061,16 +715,10 @@ class PlanRunner:
             bid = self.cfg.bot_id or self.inbox.name
             det = DecayDetector(root, bid)
             acts = [c.action for c in (plan.chips or [])]
-            # 本轮只涉及**一个**币时记下它（多币时留空）：权益差是账户级口径，
-            # 归不到某个币头上 —— 硬塞一个币名会让衰减告警指错人。
-            # 单币时带上它，多币场景下的按币衰减才有数据可用（T13）。
-            _syms = {str(getattr(c, "symbol", "") or "") for c in (plan.chips or [])}
-            _syms.discard("")
             det.record_cycle(
                 cycle_id=plan.cycle_id or '',
                 decision=','.join(acts) or 'hold',
                 executed=executed, equity=equity,
-                symbol=next(iter(_syms)) if len(_syms) == 1 else "",
             )
             alert = det.check()
             if alert:
@@ -1128,31 +776,18 @@ class PlanRunner:
 
         my_decision = plan.get("decision") or "hold"
         my_reasoning = str(plan.get("reasoning") or "")[:200]
-        # 单币宇宙：契约**逐字不变**（I11）—— 标的唯一，凭空加个 `symbol` 字段只会
-        # 让缓存前缀无谓变化。多币宇宙：必须写 `symbol` 并把可选值列出来，否则讨论
-        # 结论归不到任何一个币上（补错标的比少一条结论更危险）。
-        universe = [str(x) for x in (self.cfg.symbols or [])]
-        multi = len(universe) > 1
-        sym_field = ('"symbol":"%s",' % "|".join(universe)) if multi else ""
-        sym_rule = (
-            "；6) **symbol 必须写、且必须是【品种宇宙】里的那个**（%s）—— "
-            "讨论结论是针对哪个币的，缺了或写错整条就作废"
-            "（系统不会替你补，补错标的比少一条更危险）" % "、".join(universe)
-            if multi else ""
-        )
         sys_prompt = (
             "你是交易策略人格，参与多空讨论。只输出一个 JSON 对象，不要 Markdown 前后缀。\n"
-            f'{{{sym_field}"decision":"open_long|open_short|close|reduce_long|reduce_short|hold|'
+            '{"decision":"open_long|open_short|close|reduce_long|reduce_short|hold|'
             'stop_entry_long|stop_entry_short",'
-            '"confidence":0.0,"reasoning":"≤30字",'
+            '"confidence":0.0,"reasoning":"≤60字",'
             '"type":"limit|market|post_only|ioc|fok","price":0.0,"trigger_price":0.0,'
             '"sl":0.0,"tp":0.0,"size_usd":0.0}\n'
             f"{stage_hint}\n"
-            "规则：1) decision 用英文枚举；2) confidence 0~1；3) reasoning ≤30 字；"
+            "规则：1) decision 用英文枚举；2) confidence 0~1；3) reasoning ≤60 字；"
             "4) **入场类（open_*/stop_entry_*）必须给出 sl 与可执行价位**"
             "（限价给 price，突破进场给 trigger_price）；"
-            "5) 给不出可执行价位就选 hold —— 讨论的结论要能直接执行，不是只表个态"
-            f"{sym_rule}。"
+            "5) 给不出可执行价位就选 hold —— 讨论的结论要能直接执行，不是只表个态。"
         )
         user_prompt = (
             f"我的当前决策：{my_decision}\n我的理由：{my_reasoning}\n\n"
@@ -1165,7 +800,7 @@ class PlanRunner:
             return None
         if not raw:
             return None
-        # 讨论轮的 LLM 调用**落盘**。原先完全不落 —— 只有截断到 30 字的
+        # 讨论轮的 LLM 调用**落盘**。原先完全不落 —— 只有截断到 60 字的
         # reasoning 进 `discussion_log`，事后无法核对「模型当时看到什么同伴
         # 观点、回了什么」。这与「LLM 理由文本不是审计证据」直接冲突。
         self._log_discussion_call(round_num, sys_prompt, user_prompt, raw)
@@ -1187,36 +822,18 @@ class PlanRunner:
                 conf = max(0.0, min(1.0, float(conf))) if conf is not None else plan.get("confidence")
             except (TypeError, ValueError):
                 conf = plan.get("confidence")
-            reasoning = str(data.get("reasoning") or my_reasoning)[:30]
+            reasoning = str(data.get("reasoning") or my_reasoning)[:60]
             # 讨论必须产出**可执行**的结论。只改 decision 而不改 chips 的话，
             # fuse_plans._norm_dir 与 _execute 都优先读 chips[0].action ——
             # 讨论结果根本进不了融合（线上实测：三人讨论后都改成 stop_entry_long，
             # 融合票却仍是讨论前的 hold/long/hold，讨论成了纯日志表演）。
-            # 标的先独立判（不能只看 `_discussion_chip` 的返回值：**越界**与"缺 sl"
-            # 都表现为 None，而留痕需要区分原因）。取值链与 `_discussion_chip` 一致：
-            # 原 chip → 模型这次写的 → 无。缺或越界都退回 hold，不替它挑。
-            base_chips = plan.get("chips") or []
-            base_sym = (str((base_chips[0] or {}).get("symbol") or "")
-                        if base_chips and isinstance(base_chips[0], dict) else "")
-            given = str(data.get("symbol") or base_sym or "").strip().upper()
-            meta: Optional[dict] = None
-            if not given:
-                meta = {"reason": "symbol_missing"}
-            elif universe and given not in universe:
-                meta = {"reason": "symbol_not_in_universe", "corrected_from": given}
-            chip = None if meta else self._discussion_chip(
-                data, decision, plan, default_symbol=self._default_symbol(),
-                allowed=self.cfg.symbols)
-            if meta is not None:
-                decision = "hold"
-            elif decision in ("open_long", "open_short", "stop_entry_long", "stop_entry_short") \
+            chip = self._discussion_chip(data, decision, plan,
+                                         default_symbol=self._default_symbol())
+            if decision in ("open_long", "open_short", "stop_entry_long", "stop_entry_short") \
                     and chip is None:
                 decision = "hold"   # 入场却给不出可执行价位 → 退回 hold，不假装能执行
-            out = {"decision": decision, "confidence": conf,
-                   "reasoning": reasoning, "chip": chip}
-            if meta:
-                out["meta"] = meta
-            return out
+            return {"decision": decision, "confidence": conf,
+                    "reasoning": reasoning, "chip": chip}
         except Exception:  # noqa: BLE001
             return None
 
@@ -1226,12 +843,9 @@ class PlanRunner:
         原先这条兜底是 `_discussion_chip` 里的硬编码 `"BTC_USDT"`，对只做 ETH 的组
         会把标的写错（实测 eth-disc 三人格只做 ETH，产出的信号却带 `BTC_USDT`，
         而价位是 ETH 的 2694/2706）。
-
-        **多币宇宙返回空串**：那时"首币"不是唯一解，补上去就是张冠李戴
-        （结论可能针对别的币），让调用方拒绝该 chip 比猜一个更安全。
         """
         syms = getattr(self.cfg, "symbols", None) or []
-        return str(syms[0]) if len(syms) == 1 else ""
+        return str(syms[0]) if syms else ""
 
     def _log_discussion_call(self, round_num: int, sys_prompt: str,
                              user_prompt: str, raw: str) -> None:
@@ -1257,16 +871,10 @@ class PlanRunner:
 
     @staticmethod
     def _discussion_chip(data: dict, decision: str, plan: dict,
-                         default_symbol: str = "",
-                         allowed: Optional[list] = None) -> Optional[dict]:
+                         default_symbol: str = "") -> Optional[dict]:
         """把讨论结论拼成可执行 chip；入场类缺 sl / 价位则返回 None（调用方退回 hold）。
 
-        `default_symbol` 由调用方传 bot 自己的 `symbols[0]`（见 `_default_symbol`）；
-        `allowed` = 品种宇宙，**越界一律拒绝**该 chip。
-
-        为什么越界要拒而不是改成首币：讨论结论可能是针对**另一个币**的，补成首币
-        等于把结论张冠李戴地执行（原实现就是 `or "BTC_USDT"`，实测 eth-disc 只做 ETH
-        却产出带 `BTC_USDT` 的信号）。宁可少一条 chip，也不要下错标的的单。
+        `default_symbol` 由调用方传 bot 自己的 `symbols[0]`（见 `_default_symbol`）。
         """
         chips = plan.get("chips") or []
         base = dict(chips[0]) if chips and isinstance(chips[0], dict) else {}
@@ -1282,17 +890,7 @@ class PlanRunner:
 
         chip = dict(base)
         chip["action"] = decision
-        # 标的取值链：**原 chip**（已有持仓/计划的标的）→ 模型这次写的 `data.symbol`
-        # → 调用方给的 default_symbol。漏掉中间这一环，模型在讨论里明确写的币会被
-        # 静默丢掉，再被 default_symbol 覆盖 —— 那正是"改口成别的币却没生效"。
-        chip["symbol"] = str(
-            chip.get("symbol") or data.get("symbol") or default_symbol or ""
-        ).strip().upper()
-        universe = [str(x) for x in (allowed or [])]
-        if universe and chip["symbol"] and chip["symbol"] not in universe:
-            return None          # 越界 → 拒绝，不做纠正（结论可能本来就是别的币的）
-        # 缺 symbol **不在这里拒**：本函数看不到调用方上下文，留空交调用方判定
-        # （`discuss` 会记 `symbol_missing` 并退回 hold）—— 补一个首币等于张冠李戴。
+        chip["symbol"] = chip.get("symbol") or default_symbol or "BTC_USDT"
         if decision not in ("open_long", "open_short", "stop_entry_long", "stop_entry_short"):
             return chip          # close/reduce/modify 沿用原 chip 的执行字段
         sl = num("sl")
@@ -1310,49 +908,17 @@ class PlanRunner:
         return chip
 
     def _tool_usage_summary(self) -> dict:
-        """工具使用摘要：按工具名 + **按币**（设计 S2.4⑨ / D-25）。
-
-        旧字段（`counts`/`total_calls`/`data_checked`）语义与取值逐字不变；
-        新增三个只在多币下才有意义的观测：
-
-        - `by_symbol`        按**解析后**的 symbol 归因：每个币调了多少次、用了哪些工具
-                             （含单币自动补全 —— 它描述的是「数据取自哪个币」）
-        - `missing_symbol`   模型**没显式写 symbol** 的次数（`auto_single` 也算：
-                             单币下无歧义，但币一多这些调用就会变成拒绝 —— 最早的预警）
-        - `out_of_universe`  写了 symbol 但**不在宇宙内**（错币/幻觉币）的次数
-
-        没有这三个数，多币下「模型拿错币」只能靠翻 `result_full` 逐条看。
-        """
+        """工具使用摘要：{工具名: 次数} + 是否查过数据。"""
         counts: dict[str, int] = {}
-        by_symbol: dict[str, dict] = {}
-        missing = 0
-        out_of_universe = 0
         for u in self.tool_usage:
             t = u.get("tool") or "?"
             counts[t] = counts.get(t, 0) + 1
-            note = u.get("symbol_note")
-            if note is None:  # 与币无关的工具（skill / journal_lookup / …）
-                continue
-            sym = str(u.get("symbol") or "")
-            if note == OUT_OF_UNIVERSE:
-                out_of_universe += 1
-            elif note in (AUTO_SINGLE, AMBIGUOUS_MULTI, UNIVERSE_EMPTY, NO_UNIVERSE):
-                missing += 1
-            if not sym:
-                continue
-            rec = by_symbol.setdefault(sym, {"calls": 0, "tools": []})
-            rec["calls"] += 1
-            if t not in rec["tools"]:
-                rec["tools"].append(t)
         data_tools = {"klines", "indicators", "ticker", "orderbook", "contract",
                       "stats", "account", "smc_map", "smc_events", "sqzmom"}
         return {
             "counts": counts,
             "total_calls": len(self.tool_usage),
             "data_checked": bool(data_tools.intersection(counts.keys())),
-            "by_symbol": by_symbol,
-            "missing_symbol": missing,
-            "out_of_universe": out_of_universe,
         }
 
     def _save_thinking(self, **kw: Any) -> None:
@@ -1375,11 +941,6 @@ class PlanRunner:
             "content_head": (kw.get("content") or "")[:65536],
             "tool_usage": list(self.tool_usage),  # 本轮工具使用明细（防偷懒）
             "tool_usage_summary": self._tool_usage_summary(),
-            # 本轮发给模型的 K 线图**元数据**（symbol/周期/是否生成成功/字节数）。
-            # 只写元数据：图片本体是 base64（每张几十到几百 KB），写进来会把
-            # thinking.json 撑爆。此前 payload 里完全没有 charts 字段 →
-            # 「这轮到底给模型发了哪几个币哪些周期的图」事后无从核对（D-24）。
-            "charts": [dict(c) for c in (getattr(self, "_last_chart_meta", None) or [])],
         }
         # 逐K形态读（人格可选产出，见 prompts/brooks_btc_pa.md）：**非空才落**。
         # 没被要求这个字段的 bot 不会填，于是它们的 thinking.json 与改动前逐字节一致
@@ -1387,6 +948,12 @@ class PlanRunner:
         kline = extract_kline_reads(kw.get("content") or "")
         if kline:
             payload["kline"] = kline
+        # 止损宽度三校验留痕（模型写 `meta.stop_width_check`）：**非空才落**。
+        # `Chip` 原先没有承载它的字段 → 四币实测全部静默丢失，事后无法核对
+        # 「它到底按最宽的那一列取了吗」。审计专用，不进订单上下文。
+        swc = extract_stop_width_checks(kw.get("content") or "")
+        if swc:
+            payload["stop_width"] = swc
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         # also into sqlite ledger
         try:
@@ -1404,8 +971,6 @@ class PlanRunner:
                 raw={"thinking_file": path.name,
                      "reasoning_chain": kw.get("reasoning") or [],
                      "content_head": (kw.get("content") or "")[:200]},
-                # 按币维度必须真的写进去（否则这一列恒 NULL，按币查询形同虚设）
-                symbols=self._plan_symbols(),
             )
             led.close()
         except Exception:  # noqa: BLE001
@@ -1417,21 +982,10 @@ class PlanRunner:
 
             root = self.cfg.bot_root or Path.cwd()
             led = Ledger(default_ledger_path(root))
-            kw.setdefault("symbols", self._plan_symbols())
             led.insert_plan(self.inbox.name, **kw)
             led.close()
         except Exception:  # noqa: BLE001
             pass
-
-    def _plan_symbols(self) -> list:
-        """本 bot 的币集 —— 写进 ledger 的 `plans.symbols_json`。
-
-        用**宇宙**而不是「本轮 chips 的币」：`_record_plan` 拿不到 plan 对象，
-        而 `plans` 表的用途是「按币查这个 bot 的计划记录」—— 宇宙足够且稳定。
-        不接线的话这一列在生产里**恒为 NULL**，`recent_plans(symbol=...)` 永远筛不到
-        （T15 就在修这个形态，别把它复刻一遍）。
-        """
-        return [str(s) for s in (getattr(self.cfg, "symbols", None) or []) if s]
 
     def _llm_send(self, messages: list) -> str:
         if hasattr(self.llm, "chat_messages"):
@@ -1444,17 +998,9 @@ class PlanRunner:
         return self.llm.chat(system, user)
 
     def _generate_charts(self, snapshot: dict) -> list:
-        """按 vision_timeframes 生成多周期 K 线图 base64 列表（**逐 symbol**）。
+        """按 vision_timeframes 生成多周期 K 线图 base64 列表。
 
         省略 vision_timeframes → 只发主周期。
-
-        **必须逐 symbol**：原先只给 `symbols[0]` 出图，多币种 bot 的第 2..N 个币
-        一张图都没有 —— 模型只能靠数值快照判断它们，等于「多币配置、单币视野」。
-        图内自带 symbol 与周期标注（`vision.generate_and_encode(symbol=…, timeframe=…)`），
-        所以顺序只决定发送次序、不决定归属。
-
-        每张图（含**没生成成功**的）都会记一条元数据到 `self._last_chart_meta`，
-        由 `_save_thinking` 落进 thinking.json —— 只写元数据，不写 base64 本体。
         """
         try:
             from .vision import generate_and_encode
@@ -1464,59 +1010,42 @@ class PlanRunner:
         symbols = self.cfg.symbols or []
         if not symbols:
             return []
+        sym = symbols[0]
         market = snapshot.get("market") or {}
+        m = market.get(sym) or {}
+        if not isinstance(m, dict):
+            m = {}
         tfs = list(self.cfg.vision_timeframes or []) or [self.cfg.timeframe]
         # 去重保序
         seen = set()
         tfs = [t for t in tfs if t and not (t in seen or seen.add(t))]
         out: list = []
-        meta: list[dict] = []
-        for sym in symbols:
-            m = market.get(sym) or {}
-            if not isinstance(m, dict):
-                m = {}
-            made = 0
-            for tf in tfs:
-                try:
-                    if tf == self.cfg.timeframe:
-                        klines = m.get("candles") or m.get("klines") or []
-                        ind = m.get("indicators") or {}
-                    else:
-                        block = (m.get("tf") or {}).get(tf) or {}
-                        klines = block.get("candles") or block.get("klines") or []
-                        ind = block.get("indicators") or {}
-                    if isinstance(klines, dict):
-                        klines = klines.get("candles") or klines.get("klines") or []
-                    if not klines or len(klines) < 10:
-                        meta.append({"symbol": sym, "timeframe": tf, "ok": False,
-                                     "reason": "no_candles"})
-                        continue
-                    merged = []
-                    for i, k in enumerate(klines):
-                        row = dict(k) if isinstance(k, dict) else {"c": k}
-                        for name, series in (ind or {}).items():
-                            if isinstance(series, (list, tuple)) and i < len(series):
-                                row.setdefault(name, series[i])
-                        merged.append(row)
-                    b64 = generate_and_encode(merged, symbol=sym, timeframe=tf)
-                    if b64:
-                        out.append(b64)
-                        made += 1
-                        # 只记长度，不记 base64 本体
-                        meta.append({"symbol": sym, "timeframe": tf, "ok": True,
-                                     "bytes": len(str(b64))})
-                    else:
-                        meta.append({"symbol": sym, "timeframe": tf, "ok": False,
-                                     "reason": "empty"})
-                except Exception as e:  # noqa: BLE001
-                    meta.append({"symbol": sym, "timeframe": tf, "ok": False,
-                                 "reason": str(e)[:200]})
-                    log.warning("生成 %s/%s 周期 K 线图失败，该图本轮缺失: %s", sym, tf, e)
+        for tf in tfs:
+            try:
+                if tf == self.cfg.timeframe:
+                    klines = m.get("candles") or m.get("klines") or []
+                    ind = m.get("indicators") or {}
+                else:
+                    block = (m.get("tf") or {}).get(tf) or {}
+                    klines = block.get("candles") or block.get("klines") or []
+                    ind = block.get("indicators") or {}
+                if isinstance(klines, dict):
+                    klines = klines.get("candles") or klines.get("klines") or []
+                if not klines or len(klines) < 10:
                     continue
-            if not made:
-                # 某个币一张图都没有 —— 多币时尤其要能看见「哪个币没图」
-                log.warning("vision: %s 一张图都没生成（请求周期 %s）", sym, tfs)
-        self._last_chart_meta = meta
+                merged = []
+                for i, k in enumerate(klines):
+                    row = dict(k) if isinstance(k, dict) else {"c": k}
+                    for name, series in (ind or {}).items():
+                        if isinstance(series, (list, tuple)) and i < len(series):
+                            row.setdefault(name, series[i])
+                    merged.append(row)
+                b64 = generate_and_encode(merged, symbol=sym, timeframe=tf)
+                if b64:
+                    out.append(b64)
+            except Exception as e:  # noqa: BLE001
+                log.warning("生成 %s 周期 K 线图失败，该周期本轮无图: %s", tf, e)
+                continue
         if not out and tfs:
             # vision 开着却一张图都没生成 —— 此前是彻底静默的，等于「不发图但没人知道」
             log.warning("vision 已开启但一张图都没生成（请求周期 %s），本轮将无图发给模型", tfs)
@@ -1526,6 +1055,43 @@ class PlanRunner:
         """单图（主周期）；多周期请用 _generate_charts。"""
         charts = self._generate_charts(snapshot)
         return charts[0] if charts else None
+        """从 snapshot 的 candles/indicators 生成 K 线图 base64（vision 模式）。"""
+        try:
+            from .vision import generate_and_encode
+            symbols = self.cfg.symbols or []
+            if not symbols:
+                return None
+            sym = symbols[0]
+            market = snapshot.get("market") or {}
+            # snapshot: market[sym] = {candles, indicators, ...}
+            m = market.get(sym) or {}
+            if not isinstance(m, dict):
+                m = {}
+            klines = (
+                m.get("candles")
+                or m.get("klines")
+                or m.get("kline")
+                or market.get("klines")
+                or []
+            )
+            if isinstance(klines, dict):
+                klines = klines.get("candles") or klines.get("klines") or []
+            if not klines or len(klines) < 10:
+                return None
+            # 指标：snapshot.indicators → 合并进 kline 字段（vision 自算兜底）
+            ind = m.get("indicators") or {}
+            merged = []
+            for i, k in enumerate(klines):
+                row = dict(k) if isinstance(k, dict) else {"c": k}
+                for name, series in (ind or {}).items():
+                    if isinstance(series, (list, tuple)) and i < len(series):
+                        row.setdefault(name, series[i])
+                merged.append(row)
+            return generate_and_encode(
+                merged, symbol=sym, timeframe=self.cfg.timeframe,
+            )
+        except Exception:  # noqa: BLE001
+            return None
 
     def _chat_with_tools(self, system: str, user: str, chart_base64=None) -> str:
         """工具循环 + **防偷懒**：若全程未调用任何工具，强制重试一次。"""
@@ -1581,16 +1147,13 @@ class PlanRunner:
             for c in calls[:8]:
                 name = c.get("tool") or c.get("name") or ""
                 args = c.get("args") or c.get("arguments") or {}
-                raw_args = dict(args)  # run_tool 会就地补 symbol，审计要的是模型原样
                 res = run_tool(
                     self.client, name, args,
                     env=self.cfg.env, bot_root=self.cfg.bot_root, market_cfg=self.cfg.market,
                     bot_id=self.cfg.bot_id, skill_ids=self.cfg.skills,
                     allow=self.cfg.tools.get("allow"), deny=self.cfg.tools.get("deny"),
-                    symbols=self.cfg.symbols,
-                    manage_positions=self.cfg.manage_positions,
                 )
-                self._record_tool_use(name, args, res, raw_args=raw_args)
+                self._record_tool_use(name, args, res)
                 results.append({"tool": name, "result": res})
             messages.append({"role": "assistant", "content": text})
             messages.append({
@@ -1616,27 +1179,6 @@ class PlanRunner:
             pass
         return None
 
-    @staticmethod
-    def _forced_skill_choice(tools: list, *, skills_required: bool = False,
-                             skill_ids=None) -> Optional[dict]:
-        """`skills_required` + native 模式下的首轮 tool_choice 硬制。
-
-        实测（10-12 brooks-eth 5 轮 + A/B 60 次）：catalog hint 升级到「每轮必载」
-        文案在实盘多工具竞争下 0/5 生效 —— native 模式 tool_choice=auto 时模型
-        自己选，提示词层约束不构成强制。真正强制只有一条路：首轮把 tool_choice
-        钉死到 skill 函数（OpenAI 兼容 named function choice），技能加载后
-        后续轮恢复 auto。
-
-        返回 None = 不硬制（默认关闭 / 无技能白名单 / skill 工具不在工具面），
-        行为与改动前逐字一致。
-        """
-        if not skills_required or not skill_ids:
-            return None
-        for t in tools:
-            if (t.get("function") or {}).get("name") == "skill":
-                return {"type": "function", "function": {"name": "skill"}}
-        return None
-
     def _chat_native_tools(self, messages: list, max_rounds: int) -> str:
         """DeepSeek function calling + thinking: must echo reasoning_content on tool turns.
 
@@ -1648,33 +1190,15 @@ class PlanRunner:
         # tools.available_native_tools 的说明。
         # 再按 bot 配置收窄（`strategist.tools.allow` / `.deny`，支持通配）——
         # 这是**程序强制**的：模型看不到就调不到，不依赖它自觉遵守提示词。
-        # `symbols=` 把【品种宇宙】注入 `account.symbols` 的 enum：多币下模型一眼就能
-        # 看到合法标的，不必靠一次「越界被拒」的往返去猜（T6）。不传 = 行为与改动前一致。
         base_tools = filter_tool_schemas(
-            available_native_tools(self.cfg.bot_root, symbols=self.cfg.symbols),
+            available_native_tools(self.cfg.bot_root),
             allow=self.cfg.tools.get("allow"),
             deny=self.cfg.tools.get("deny"),
         )
         active_tools: Optional[list] = None
-        # skills_required 硬制：首轮钉死调 skill（网关拒绝 named choice 则回退 auto）
-        force_choice = self._forced_skill_choice(
-            base_tools,
-            skills_required=bool(getattr(self.cfg, "skills_required", False)),
-            skill_ids=self.cfg.skills,
-        )
         for _round in range(max(1, max_rounds) + 1):
             tools = active_tools if active_tools is not None else base_tools
-            choice = force_choice if (_round == 0 and active_tools is None) else None
-            try:
-                msg = self.llm.chat_message_full(messages, tools=tools,
-                                                 tool_choice=choice or "auto")
-            except Exception as e:  # noqa: BLE001
-                if choice is None:
-                    raise
-                log.warning("forced skill tool_choice rejected by provider (%s); "
-                            "falling back to auto", e)
-                msg = self.llm.chat_message_full(messages, tools=tools,
-                                                 tool_choice="auto")
+            msg = self.llm.chat_message_full(messages, tools=tools, tool_choice="auto")
             calls = msg.get("tool_calls") or []
             if not calls:
                 return msg.get("content") or ""
@@ -1692,16 +1216,13 @@ class PlanRunner:
                     args = json.loads(fn.get("arguments") or "{}")
                 except Exception:  # noqa: BLE001
                     args = {}
-                raw_args = dict(args)  # run_tool 会就地补 symbol，审计要的是模型原样
                 result = run_tool(
                     self.client, name, args,
                     env=self.cfg.env, bot_root=self.cfg.bot_root, market_cfg=self.cfg.market,
                     bot_id=self.cfg.bot_id, skill_ids=self.cfg.skills,
                     allow=self.cfg.tools.get("allow"), deny=self.cfg.tools.get("deny"),
-                    symbols=self.cfg.symbols,
-                    manage_positions=self.cfg.manage_positions,
                 )
-                self._record_tool_use(name, args, result, raw_args=raw_args)
+                self._record_tool_use(name, args, result)
                 # 收窄：skill 成功加载且声明 allowed-tools → 限定后续工具面
                 if name == "skill" and isinstance(result, dict) and result.get("content"):
                     allowed = self._skill_allowed_tools(str(args.get("name") or ""))
@@ -1725,82 +1246,28 @@ class PlanRunner:
         return msg.get("content") or ""
 
     def _kline_closed(self) -> bool:
-        """宇宙内**任一币**的最新 K 线前进即唤醒；单币路径与旧实现逐字一致。
+        """True when latest candle timestamp for first symbol advances.
 
         取数走 fetch_rest_candles（新旧客户端都兼容）。此前直接调
         client.public_get，而客户端重构成 ExchangeClient 后没有该方法 →
         异常被吞、永远返回 False → kline_close 事件从未触发过。
-
-        **为什么必须遍历整个宇宙**：旧实现只取宇宙里的**第一个**币，多币 bot 的第 2..N 个币
-        的收盘事件**永远唤不醒**（而 `docs/compose/spec/llm-strategist.md:119` 还把这个
-        行为写成了"规格"，于是既没被测试拦住、也没被标成缺陷）。
-        某个币取数失败只跳过它自己：不唤醒、也**不把它当成"已观测"** —— 基线记 `0`
-        （= 未知），它恢复后的第一根 K 线因此仍能唤醒。若失败那轮干脆不写，恢复时会与
-        "全新未观测"混淆，那笔收盘事件就永久丢了。
         """
         if not self.cfg.symbols:
             return False
+        sym = self.cfg.symbols[0]
         interval = self.cfg.event_timeframe or self.cfg.timeframe
         try:
             from .market import fetch_rest_candles
+
+            rows = fetch_rest_candles(self.client, sym, interval, 2)
+            if not rows:
+                return False
+            ts = int((rows[-1] or {}).get("t") or 0)
+            closed = self._last_kline_t is not None and ts > self._last_kline_t
+            self._last_kline_t = ts
+            return closed
         except Exception:  # noqa: BLE001
             return False
-        # 单币沿用历史属性 `_last_kline_t`（既有调用方与测试按 int 读写它）；
-        # 多币才需要逐币基线。
-        single = len(self.cfg.symbols) == 1
-        by_sym = getattr(self, "_last_kline_t_by_symbol", None)
-        if by_sym is None:
-            by_sym = self._last_kline_t_by_symbol = {}
-        closed: list[str] = []
-
-        def _mark_unknown(sym: str) -> None:
-            """该币本轮没读到 → 基线记「未知」（0）。
-
-            为什么要写而不是不写：不写的话，它下次成功读取会与"全新未观测"（键不存在）
-            混为一谈，于是**这笔收盘事件永久丢失**。记 0 则保证它恢复后仍会唤醒一次。
-            单币路径**不动** `_last_kline_t` —— 那是历史行为（I11 逐字不变）。
-            """
-            if not single:
-                by_sym[sym] = 0
-
-        for sym in self.cfg.symbols:
-            try:
-                rows = fetch_rest_candles(self.client, sym, interval, 2)
-            except Exception:  # noqa: BLE001 — 一个币取不到不该拖住其他币
-                log.warning("kline_close: %s 取数失败，本轮跳过该币（不影响其他币）", sym)
-                _mark_unknown(sym)
-                continue
-            if not rows:
-                _mark_unknown(sym)
-                continue
-            ts = int((rows[-1] or {}).get("t") or 0)
-            if not ts:
-                _mark_unknown(sym)
-                continue
-            if single:
-                prev = self._last_kline_t
-                self._last_kline_t = ts
-            else:
-                prev = by_sym.get(sym)
-                by_sym[sym] = ts
-            if prev is not None and ts > prev:
-                closed.append(sym)
-        if closed:
-            # 保留"上一次唤醒是谁收盘"——`_kline_close_trigger()` 在唤醒后立即被调用，
-            # 中途的空判定不该把它抹掉（同一分钟多币收盘只唤醒一次）。
-            self._kline_close_symbols = closed
-        return bool(closed)
-
-    def _kline_close_trigger(self) -> str:
-        """kline_close 的触发标签：单币保持 `kline_close`（逐字不变），多币带出收盘的币。
-
-        带上币名是为了让日志与 cycle 元数据能回答"这轮是谁收盘唤醒的"——
-        多币下 `plan[kline_close]` 无法区分，排查时看不出是哪条腿在驱动节奏。
-        """
-        syms = list(getattr(self, "_kline_close_symbols", None) or [])
-        if len(self.cfg.symbols or []) <= 1 or not syms:
-            return "kline_close"
-        return "kline_close:" + ",".join(syms)
 
     def _apply_ai_triggers(self, plan) -> list:
         """Apply Plan.triggers / trigger_ops under ai_triggers policy."""
@@ -1833,87 +1300,6 @@ class PlanRunner:
                     notes.append(f"trigger_rejected: {e}")
         return notes
 
-    def _seed_cond_states(self) -> None:
-        """把 AI 触发器落盘的 `last_fire` / `last_true` 种进内存冷却状态。
-
-        场景：部署 / 崩溃 / 看门狗拉起后进程重建，`_cond_states` 是空的 →
-        冷却归零，同一条触发器下一次求值就再次命中。产线实测 margtin-grid 上线
-        8 小时内 `cond[...]` 触发 5 次，每次都紧跟一次进程事件（重启 / 部署）。
-
-        只处理 AI 触发器（yaml `conditions[]` 是静态配置、且 key 是下标，重建本就无害）。
-        """
-        store = getattr(self, "_ai_store", None)
-        if store is None:
-            return
-        try:
-            items = store.active()
-        except Exception:  # noqa: BLE001
-            return
-        for t in items:
-            last_fire = float(getattr(t, "last_fire", 0.0) or 0.0)
-            last_true = bool(getattr(t, "last_true", False))
-            if last_fire > 0 or last_true:
-                self._cond_states[t.id] = ConditionState(
-                    last_fire=last_fire, last_true=last_true
-                )
-
-    def _persist_trigger_state(self) -> None:
-        """把内存冷却状态回写 `ai_triggers.json`（只动 AI 触发器）。
-
-        `AITriggerStore.mark_fired()` 此前**全仓无调用点**（死代码）→ `last_fire`
-        恒为 0、`updated_at` 停在最后一次 add/remove。后果两条：
-          ① 观测失真 —— 看不出哪条触发器在响、响了几次（产线文件里 3 条 last_fire 全 0，
-             而同时段日志里 cond 命中 5 次）；
-          ② 重启后冷却归零 → 同一条触发器立刻重触发（配合 `_seed_cond_states` 修掉）。
-        落盘的是**全部**活着的 AI 触发器的状态（含本轮没命中的），这样 `last_true`
-        （边沿判据）也一起跨进程存活。只在真的变了才写盘，避免每轮无谓 IO。
-        """
-        store = getattr(self, "_ai_store", None)
-        if store is None:
-            return
-        try:
-            items = store.active()
-        except Exception:  # noqa: BLE001
-            return
-        changed = False
-        for t in items:
-            st = self._cond_states.get(t.id)
-            if st is None:
-                continue
-            lf = float(getattr(st, "last_fire", 0.0) or 0.0)
-            lt = bool(getattr(st, "last_true", False))
-            if lf != float(getattr(t, "last_fire", 0.0) or 0.0) or lt != bool(getattr(t, "last_true", False)):
-                t.last_fire = lf
-                t.last_true = lt
-                changed = True
-        if changed:
-            try:
-                store.save()
-            except Exception:  # noqa: BLE001
-                log.warning("ai_triggers 状态回写失败（不影响本轮）", exc_info=True)
-
-    def _cond_gap_sec(self) -> float:
-        """条件事件轮距上一轮的最小间隔（秒）。
-
-        为什么要有这道闸：`interval_sec` 是「**至少**每 N 秒分析一次」的节拍承诺。
-        此前事件轮不推进定时器（`last_interval` 只在 interval 分支里更新）→ 事件命中时
-        （产线上常见于定时轮之后 3~5 分钟）会在同一个周期里**再插一轮**，实测轮间隔
-        出现 212 / 261 / 290 / 349 / 610 / 645 秒 —— 15 分钟节拍名不副实，每多一轮
-        就是一次完整 LLM 调用。
-
-        现在 `run_forever` 里**任何一轮都推进定时器**，并且事件轮还要额外满足
-        `now - last_round >= cond_gap_sec`。默认取 `interval_sec / 2`（保留「破位提前
-        叫醒」的能力，又挡住贴着定时轮的那一次重复）。`strategist.cond_gap_sec` 覆盖。
-        """
-        raw = getattr(self.cfg, "cond_gap_sec", None)
-        if raw is not None:
-            try:
-                return max(0.0, float(raw))
-            except (TypeError, ValueError):
-                pass
-        iv = float(self.cfg.interval_sec or 0)
-        return iv / 2.0 if iv > 0 else 0.0
-
     def _check_condition_events(self) -> Optional[str]:
         ai_conds = []
         try:
@@ -1927,9 +1313,6 @@ class PlanRunner:
         fired = check_conditions(
             self.client, all_conds, interval, states=self._cond_states
         )
-        # 无论有没有命中都把状态落盘：`last_true`（边沿判据）也必须跨进程存活，
-        # 否则重启后一个「当前仍为真」的状态型条件会立刻补报一次。
-        self._persist_trigger_state()
         if not fired:
             return None
         reasons = "; ".join(f"{f['type']}:{f['symbol']}:{f['reason']}" for f in fired)
@@ -1937,61 +1320,30 @@ class PlanRunner:
         return f"cond[{reasons}]"
 
     def run_forever(self) -> None:
-        last_round = 0.0
+        last_interval = 0.0
         while True:
-            # 触发评估**整体**在锁内。旧版先在锁外消费事件（`_kline_closed()` 会推进
-            # kline 基线、`_check_condition_events()` 会更新边沿状态），抢锁失败又
-            # `continue` 跳过 `sleep` 忙等——事件被消费却没人处理，该次唤醒永久丢失
-            # （实测 kline_close 丢 11%），且空转打满 CPU。现在忙时什么都不评估、
-            # 直接落回 `sleep`：锁释放后的下一次循环按原有节拍补跑，事件只迟到、不丢。
-            if self._busy.acquire(blocking=False):
+            now = time.time()
+            fire = False
+            trigger = ""
+            if self.cfg.interval_sec and now - last_interval >= self.cfg.interval_sec:
+                fire, trigger = True, "interval"
+                last_interval = now
+            elif self.cfg.event_on_kline_close and self._kline_closed():
+                fire, trigger = True, "kline_close"
+            else:
+                cond = self._check_condition_events()
+                if cond:
+                    fire, trigger = True, cond
+            if fire:
+                if not self._busy.acquire(blocking=False):
+                    continue
                 try:
-                    now = time.time()
-                    fire = False
-                    trigger = ""
-                    # 节拍：**任何**一轮（定时 / 收盘 / 事件）都把下一轮推到 `last_round + interval`。
-                    # 事件轮不是"额外加一轮"，而是"把这一轮提前到现在"—— 见 `_cond_gap_sec()`。
-                    if self.cfg.interval_sec and now - last_round >= self.cfg.interval_sec:
-                        fire, trigger = True, "interval"
-                    elif self.cfg.event_on_kline_close and self._kline_closed():
-                        fire, trigger = True, self._kline_close_trigger()
-                    elif now - last_round >= self._cond_gap_sec():
-                        cond = self._check_condition_events()
-                        if cond:
-                            fire, trigger = True, cond
-                    if fire:
-                        try:
-                            result = self.run_once(trigger=trigger)
-                            log.info("plan[%s] %s", trigger, result)
-                        except LLMError as e:
-                            log.warning("plan[%s] llm error: %s", trigger, e)
-                        except Exception as e:  # noqa: BLE001
-                            log.exception("plan[%s] failed: %s", trigger, e)
-                        last_round = time.time()
+                    result = self.run_once(trigger=trigger)
+                    log.info("plan[%s] %s", trigger, result)
+                except LLMError as e:
+                    log.warning("plan[%s] llm error: %s", trigger, e)
+                except Exception as e:  # noqa: BLE001
+                    log.exception("plan[%s] failed: %s", trigger, e)
                 finally:
                     self._busy.release()
             time.sleep(self.cfg.check_interval_sec or 1.0)
-
-    def _fill_kline_tf(self, plan) -> None:
-        """kline_tf 为空的 chips 用策略主周期兜底。
-
-        模型经常不填该字段（多版本实测恒 None），而审计 / 回放靠它回答"读的是
-        哪个周期"。主周期本来就在 `cfg.timeframe` 里，没必要靠加提示词行去求。
-        已填的值（含 klines 工具读出的周期）一律保留，不覆盖。
-
-        填充结果只走**审计出口**：`plan.notes` → run_notes → plan.err 日志 /
-        `_record_plan`。刻意不进 `to_signal_dict`（Tier1 契约：kline_tf 不进
-        订单上下文，避免污染下一轮 prompt 缓存前缀）。
-        """
-        tf = (getattr(self.cfg, "timeframe", "") or "").strip()
-        if not tf:
-            return
-        filled = 0
-        for c in getattr(plan, "chips", None) or []:
-            if not (getattr(c, "kline_tf", "") or "").strip():
-                c.kline_tf = tf
-                filled += 1
-        if filled:
-            notes = getattr(plan, "notes", None)
-            if notes is not None:
-                notes.append(f"kline_tf 兜底: {filled} 个 chip 空值→{tf}")

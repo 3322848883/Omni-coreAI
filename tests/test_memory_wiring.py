@@ -964,5 +964,52 @@ class TestHoldCyclesAreJournaled(unittest.TestCase):
                       "hold 分支又绕过 journal 了（每轮都该记，设计 S2.4）")
 
 
+class TestDegradedRowNotInjected(unittest.TestCase):
+    """降级记录不是「决策」，不能作为历史决策注入下一轮 prompt。
+
+    2026-10-22 实测事故：`region` 校验失败后，`_hold_plan` 把
+    `[降级] parse_failed: chips[0].region must be one of range|reversal|trend`
+    写进 journal；下一轮 `n_recent=3` 把它当「上轮决策」注入，模型据此认为
+    `trend_range` 非法，主动回避新值，把真实判定（trend_range）改写成 `range`。
+    ——**一次故障变成了后续所有轮次的错误前提**。
+    """
+
+    def _ctx(self, root, bot):
+        from omnialpha.memory import build_context
+        return build_context(root, bot, system_prompt="SYS", n_recent=3)
+
+    def test_failed_cycle_not_rendered(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, bot = Path(d), "degrade-bot"
+            j = MemoryJournal(root, bot)
+            j.append(cycle_id="c-ok-1", decision="open_long", reasoning="正常决策一")
+            j.append(
+                cycle_id="c-bad", decision="hold",
+                reasoning="[降级] parse_failed: chips[0].region must be one of "
+                          "range|reversal|trend, got 'trend_range'",
+            )
+            j.append(cycle_id="c-ok-2", decision="hold", reasoning="正常决策二")
+            user = self._ctx(root, bot)["user"]
+            self.assertNotIn("parse_failed", user, "降级原因被当成历史决策注入了")
+            self.assertNotIn("must be one of", user, "schema 合法值列表泄漏进了 prompt")
+            self.assertIn("正常决策一", user)
+            self.assertIn("正常决策二", user)
+
+    def test_failure_row_does_not_eat_recent_slot(self):
+        """过滤要发生在切片之前 —— 否则 3 条里被故障占掉 1 条，有效记忆变少。"""
+        with tempfile.TemporaryDirectory() as d:
+            root, bot = Path(d), "degrade-bot2"
+            j = MemoryJournal(root, bot)
+            for i in range(3):
+                j.append(cycle_id=f"ok{i}", decision="hold", reasoning=f"有效决策{i}")
+            j.append(cycle_id="bad", decision="hold", reasoning="[降级] parse_failed: xx")
+            ctx = self._ctx(root, bot)
+            self.assertEqual(
+                len(ctx["recent_summaries"]), 3,
+                "故障行占掉了 recent 槽位（应过滤后再取 3 条）")
+            self.assertTrue(all("有效决策" in s["reasoning"]
+                                for s in ctx["recent_summaries"]))
+
+
 if __name__ == "__main__":
     unittest.main()

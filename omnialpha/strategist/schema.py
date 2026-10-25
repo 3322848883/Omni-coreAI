@@ -1,13 +1,10 @@
 """Plan / chips schema for LLM strategist (multi-symbol decisions)."""
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from ..schema import SchemaError, tp_fields
-
-log = logging.getLogger("omnialpha.strategist")
 
 CHIP_ACTIONS = {
     "open_long",
@@ -29,8 +26,12 @@ CHIP_ACTIONS = {
 
 CHIP_ORDER_TYPES = {"market", "limit", "post_only", "ioc", "fok"}
 
-# 契约 Tier 1：区域三选一（见 docs/compose/spec/pa-skills-upgrade.md [S2]）
-REGIONS = {"trend", "range", "reversal"}
+# 契约 Tier 1：区域四选一（见 docs/compose/spec/pa-skills-upgrade.md [S2]）
+# `trend_range`（2026-10-22 新增）= 趋势中的旗形 / 深度回调：高周期趋势成立 +
+# 本周期出现 ≥2 腿回调且边界反复。没有这个值时模型只能在 `trend`（要给尾仓）与
+# `range`（必须放弃双止盈）之间二选一，实测因此把判定倒推成「我想只做 scalp，
+# 所以它是 range」—— 判定被字段需求反向驱动。它**不受** range 的多档 TP 限制。
+REGIONS = {"trend", "trend_range", "range", "reversal"}
 
 # 模型常把「触发后按市价/限价成交」写成 stop_market / stop_limit，或把
 # tp_mode/sl_mode 的值（trigger）误写进 type。schema 用 `trigger_price` + `type`
@@ -59,31 +60,14 @@ class PlanError(Exception):
     pass
 
 
-def _safe_symbol(symbol: str, universe: Optional[list[str]] = None) -> str:
-    """归一 symbol 并（可选）校验它属于**品种宇宙**。
-
-    宇宙由调用方传入（`parse_plan(..., symbols=)`）：只有程序层知道这个 bot 到底管哪些币。
-    越界必须在 plan 层就拒（证据 B-5：原先只查字符集，越界 chip 静默进 inbox，
-    靠 executor 白名单兜底 → 白烧一轮）。
-
-    **异常统一成 `PlanError`**：调用方只捕 `PlanError`（`loop.py` 的 `except PlanError`、
-    `__main__.cmd_plan` 连 try 都没有），`resolve_symbol` 抛的 `GateApiError` 漏出去会让
-    `plan` 直接 traceback、`plan-loop` 绕过 `degraded` 与 `_record_cycle_failure`。
-    """
+def _safe_symbol(symbol: str) -> str:
     import re
     from ..gate_client import resolve_symbol
-    try:
-        s = resolve_symbol(str(symbol or ''))
-    except Exception as e:  # noqa: BLE001 — 见 docstring：一律收口成 PlanError
-        raise PlanError(f'symbol invalid: {symbol!r}') from e
+    s = resolve_symbol(str(symbol or ''))
     if not re.fullmatch(r'[A-Z0-9_]{2,20}', s or ''):
         raise PlanError(f'symbol invalid: {symbol!r}')
-    if universe is not None:
-        uni = {str(x or '').strip().upper() for x in universe if str(x or '').strip()}
-        if s not in uni:
-            raise PlanError(
-                f'symbol not in universe: {s!r} (allowed: {",".join(sorted(uni)) or "未配置"})')
     return s
+    pass
 
 
 @dataclass
@@ -120,6 +104,14 @@ class Chip:
     time_stop_bars: Optional[int] = None   # 最大持仓轮数
     give_back_pct: Optional[float] = None  # 浮盈回撤阈值(%)
     risk_pct: Optional[float] = None       # 本单实际风险占权益比例
+    # 网格档目标止盈（= 本档与上一档的中值）。挂单时 `tp` 只能写占位价 ——
+    # 交易所要求多单 tp > mark，而中值必在现价下方，写了会整笔中止；
+    # 所以真值放这里，成交后由下一轮 `modify_tp_sl` 把 tp 改过去。
+    tp_target: Optional[float] = None
+    # 止损宽度三校验的留痕（模型写在 `meta.stop_width_check`）。
+    # **不进 `to_signal_dict`**：每轮 ~100 字符，进订单上下文会随下一轮注入，污染缓存前缀；
+    # 它只为审计落盘（`thinking.json` 的 `stop_width` 段）。
+    stop_width_check: str = ""
     rule_ids: list[str] = field(default_factory=list)
     scenarios: dict = field(default_factory=dict)
     # ── 逐K形态读（人格可选产出，见 prompts/brooks_btc_pa.md）──
@@ -185,6 +177,8 @@ class Chip:
             d["scenarios"] = dict(self.scenarios)
         if self.reasoning:
             d.setdefault("meta", {})["reasoning"] = self.reasoning
+        if self.tp_target is not None:
+            d.setdefault("meta", {})["tp_target"] = self.tp_target
         return d
 
 
@@ -200,10 +194,6 @@ class Plan:
     # 这个字段、`parse_plan` 也不取 —— 于是它进了 `raw` 就再没人看，实测 896 条
     # journal 里非空 0 条。是「要求了但不消费」的那类缺陷。
     memory_refs: list = field(default_factory=list)
-    # 解析期的**宽容告警**（如 `scenarios` 非对象被丢弃）。为什么不抛 PlanError：
-    # 契约里早已写明「不要写 scenarios、无消费方」，一个无人消费的字段不该杀死整轮决策
-    # （实测 18% 的轮次因格式抖动整轮产出归零）。
-    notes: list[str] = field(default_factory=list)
     raw: dict = field(default_factory=dict)
 
 
@@ -285,10 +275,7 @@ def extract_kline_reads(text: str) -> dict:
     这个审计字段去调整落盘顺序，会把「解析失败也要留下 CoT」这条现有行为改掉。
 
     不抛异常：正文坏掉、没有该字段、chips 为空都返回 `{}`（调用方据此跳过落盘）。
-
-    返回 `{"symbol", "kline_tf", "kline_read"}`；**多币时**额外带 `"kline_reads"`
-    数组（每个有内容的 chip 一条）—— 原先只留首个 chip，其余币的逐K读凭空消失，
-    而"这轮给模型发了哪几个币的逐K读"正是按币审计要回答的问题（D-27）。
+    返回 `{"kline_tf": str, "kline_read": [str]}`，两者皆空时返回 `{}`。
     """
     try:
         data = _extract_json_object(text or "")
@@ -296,34 +283,51 @@ def extract_kline_reads(text: str) -> dict:
         return {}
     if not isinstance(data, dict):
         return {}
-    tf, bars, sym = "", [], ""
-    per: list = []
+    tf, bars = "", []
     for c in (data.get("chips") or []):
         if not isinstance(c, dict):
             continue
-        ctf = str(c.get("kline_tf") or "").strip()[:16]
+        if not tf:
+            tf = str(c.get("kline_tf") or "").strip()[:16]
         got = _kline_read(c.get("kline_read"))
-        if not got and not ctf:
-            continue          # 该 chip 什么都没写，不算一条
-        per.append({"symbol": str(c.get("symbol") or "").strip(),
-                    "kline_tf": ctf, "kline_read": got})
-        if not bars and got:  # 兼容旧形状：首个**有内容**的 chip 顶上去
-            tf, bars, sym = ctf, got, str(c.get("symbol") or "").strip()
-    if not per:
+        if got:
+            bars = got
+            break
+    if not bars and not tf:
         return {}
-    out = {"symbol": sym or per[0]["symbol"],
-           "kline_tf": tf or per[0]["kline_tf"],
-           "kline_read": bars or per[0]["kline_read"]}
-    if len(per) > 1:
-        out["kline_reads"] = per
+    return {"kline_tf": tf, "kline_read": bars}
+
+
+def extract_stop_width_checks(text: str) -> list[str]:
+    """从模型正文里抽出每个 chip 的 `meta.stop_width_check`，供审计落盘。
+
+    与 `extract_kline_reads` 同一理由：`_save_thinking` 在 `parse_plan_text` 之前，
+    不能为了审计字段去改落盘顺序。不抛异常 —— 正文坏掉/没写/为空都返回 `[]`。
+    """
+    try:
+        data = _extract_json_object(text or "")
+    except Exception:  # noqa: BLE001 — 纯观测
+        return []
+    if not isinstance(data, dict):
+        return []
+    out: list[str] = []
+    for c in (data.get("chips") or []):
+        if not isinstance(c, dict):
+            continue
+        raw = None
+        if isinstance(c.get("meta"), dict):
+            raw = (c.get("meta") or {}).get("stop_width_check")
+        if raw is None:
+            raw = c.get("stop_width_check")
+        s = str(raw or "").strip()
+        if s:
+            out.append(s[:400])
     return out
 
 
-def parse_plan(data: Any, symbols: Optional[list[str]] = None) -> Plan:
-    """解析 Plan。`symbols` 非 None 时校验每个 chip 的 symbol 属于该宇宙。"""
+def parse_plan(data: Any) -> Plan:
     if not isinstance(data, dict):
         raise PlanError("plan must be a JSON object")
-    notes: list[str] = []
     chips_raw = data.get("chips") or []
     if not isinstance(chips_raw, list):
         raise PlanError("chips must be an array")
@@ -394,17 +398,26 @@ def parse_plan(data: Any, symbols: Optional[list[str]] = None) -> Plan:
             raise PlanError(f"chips[{i}].rule_ids must be an array")
         scenarios_raw = raw.get("scenarios") or {}
         if not isinstance(scenarios_raw, dict):
-            # 丢弃 + 告警，**不再整轮作废**（D9）：scenarios 全仓无消费方，
-            # 而嵌套对象正是 JSON 解析失败的头号来源。
-            notes.append(
-                f"chips[{i}].scenarios 非对象已丢弃（got {type(scenarios_raw).__name__}）")
-            log.warning("plan chips[%d].scenarios 非对象已丢弃：%r", i, scenarios_raw)
-            scenarios_raw = {}
+            raise PlanError(f"chips[{i}].scenarios must be an object")
+        # 目标止盈：模型写在 `meta.tp_target`（网格档成交后要改成的中值价）。
+        # 执行辅助字段 —— 一律**宽松解析**，非法/缺失置 None，绝不因此拒掉整轮。
+        swc_raw = None
+        if isinstance(raw.get("meta"), dict):
+            swc_raw = (raw.get("meta") or {}).get("stop_width_check")
+        if swc_raw is None:
+            swc_raw = raw.get("stop_width_check")
+        tp_target_raw = raw.get("tp_target")
+        if tp_target_raw is None and isinstance(raw.get("meta"), dict):
+            tp_target_raw = (raw.get("meta") or {}).get("tp_target")
+        try:
+            tp_target = float(tp_target_raw) if tp_target_raw not in (None, "") else None
+        except (TypeError, ValueError):
+            tp_target = None
         # 逐K读是观测性字段，一律宽松处理（不抛 PlanError，见 _kline_read 说明）
         kline_tf_raw = str(raw.get("kline_tf") or "").strip()[:16]
         chips.append(
             Chip(
-                symbol=_safe_symbol(symbol, symbols),
+                symbol=_safe_symbol(symbol),
                 action=action,
                 confidence=conf,
                 size_usd=_f(raw.get("size_usd"), "size_usd", i),
@@ -424,8 +437,10 @@ def parse_plan(data: Any, symbols: Optional[list[str]] = None) -> Plan:
                 time_stop_bars=_int(raw.get("time_stop_bars"), "time_stop_bars", i),
                 give_back_pct=_f(raw.get("give_back_pct"), "give_back_pct", i),
                 risk_pct=_f(raw.get("risk_pct"), "risk_pct", i),
+                tp_target=tp_target,
                 rule_ids=[str(x) for x in rule_ids_raw],
                 scenarios=dict(scenarios_raw),
+                stop_width_check=str(swc_raw or "").strip()[:400],
                 kline_tf=kline_tf_raw,
                 kline_read=_kline_read(raw.get("kline_read")),
             )
@@ -443,45 +458,12 @@ def parse_plan(data: Any, symbols: Optional[list[str]] = None) -> Plan:
         triggers=triggers,
         trigger_ops=trigger_ops,
         memory_refs=_memory_refs(data.get("memory_refs")),
-        notes=notes,
         raw=data,
     )
 
 
-def _close_unbalanced(s: str) -> str:
-    """按栈补齐未闭合的 `{` / `[`（跳过字符串内的括号）。
-
-    **实测动因（T12）**：18% 的轮次因「JSON 少一个 `}`」整轮产出归零 ——
-    `{"chips":[{...},{...}` 这种（`{`×3 vs `}`×2）会让 `json.loads` 报
-    `Expecting ',' delimiter`，而模型的意思其实完整无误。
-    只补**结构**（括号），不改语义：多余或错配的右括号一律留给 `json.loads` 去报错。
-    """
-    stack: list[str] = []
-    in_str = False
-    esc = False
-    for ch in s:
-        if in_str:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == '"':
-                in_str = False
-            continue
-        if ch == '"':
-            in_str = True
-        elif ch in "{[":
-            stack.append(ch)
-        elif ch in "}]":
-            if stack and ((ch == "}" and stack[-1] == "{") or (ch == "]" and stack[-1] == "[")):
-                stack.pop()
-    if not stack:
-        return s
-    return s + "".join("}" if c == "{" else "]" for c in reversed(stack))
-
-
 def _repair_json(t: str) -> str:
-    """修复 LLM 输出的常见 JSON 病：Markdown 围栏、注释、尾逗号、单引号、裸键名、括号不全。"""
+    """修复 LLM 输出的常见 JSON 病：Markdown 围栏、注释、尾逗号、单引号、裸键名。"""
     import re
 
     s = t.strip()
@@ -505,10 +487,6 @@ def _repair_json(t: str) -> str:
     s = re.sub(r"\bTrue\b", "true", s)
     s = re.sub(r"\bFalse\b", "false", s)
     s = re.sub(r"\bNone\b", "null", s)
-    # 7) 按栈补齐未闭合的 { / [（截断/漏括号的常见形态）
-    s = _close_unbalanced(s)
-    # 8) 补括号可能把「末尾逗号」暴露成 `,}` —— 再清一次，否则仍然是非法 JSON
-    s = re.sub(r",\s*([}\]])", r"\1", s)
     return s
 
 
@@ -554,9 +532,8 @@ def _looks_like_plan(obj) -> bool:
 def _extract_json_object(text: str):
     """从 LLM 输出提取 Plan JSON。
 
-    容错：Markdown 围栏 / 尾逗号 / 单引号 / 注释 / 截断 / **括号不全**（`_repair_json`
-    按栈补齐未闭合的 `{`/`[`）/ **多个 JSON 对象**（模型有时先吐一个 triggers 片段
-    再吐主 Plan——优先选像 Plan 的那个）。
+    容错：Markdown 围栏 / 尾逗号 / 单引号 / 注释 / 截断 / **多个 JSON 对象**
+    （模型有时先吐一个 triggers 片段再吐主 Plan——优先选像 Plan 的那个）。
     """
     import json
 
@@ -633,7 +610,8 @@ def _extract_json_object(text: str):
     raise PlanError("LLM output has no valid JSON object")
 
 
-def parse_plan_text(text: str, symbols: Optional[list[str]] = None) -> Plan:
-    """解析模型正文。解析失败前会先用 `_repair_json` 修一次（去围栏/尾逗号/补括号）。"""
+def parse_plan_text(text: str) -> Plan:
+    import json
+
     data = _extract_json_object(text)
-    return parse_plan(data, symbols)
+    return parse_plan(data)

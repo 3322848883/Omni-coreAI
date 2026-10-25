@@ -111,5 +111,29 @@ class TestOnlyManageOwnSymbols(unittest.TestCase):
         self.assertIn("只忽略", SYSTEM_PROMPT)
 
 
+class TestReasoningLengthBudget(unittest.TestCase):
+    """reasoning 字数预算必须全链路统一 60 字。
+
+    背景（2026-10-22 实测）：契约写「≤30 字」、人格 v4 写「≤60 字」，
+    CoT 里模型自己发现冲突并花一段推理消解（"persona says ≤60 … I'll keep
+    chip reasoning short ~30"）—— 字数口径打架浪费推理预算，还可能让模型
+    为迁就 30 字丢掉 E/SL/TP/净R 四要素。源头统一为 60：
+    `prompt.py` 契约规则 7 / `loop.py` 讨论轮 JSON 示例与规则文字 /
+    `loop.py` 讨论轮 reasoning 截断兜底（原 `[:30]`，同步 `[:60]`）。
+    """
+
+    def test_contract_rule7_is_60(self):
+        self.assertNotIn("≤30", SYSTEM_PROMPT, "契约还留着 30 字口径")
+        self.assertIn("≤60 字", SYSTEM_PROMPT)
+
+    def test_discussion_round_budget_is_60(self):
+        src = (ROOT / "omnialpha" / "strategist" / "loop.py").read_text(
+            encoding="utf-8")
+        self.assertNotIn("≤30", src, "讨论轮提示词还留着 30 字口径")
+        self.assertNotIn("[:30]", src, "讨论轮 reasoning 截断还停在 30 字")
+        self.assertIn('≤60字', src)             # JSON 示例 "reasoning":"≤60字"
+        self.assertIn("reasoning ≤60 字", src)  # 讨论轮规则文字
+
+
 if __name__ == "__main__":
     unittest.main()
