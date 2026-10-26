@@ -24,7 +24,6 @@ account_risk:
   max_total_notional_usd: 60
 
 strategist:
-  enabled: true
   prompt_file: prompts/scalper_btc_eth.md
   interval_sec: 60
   timeframe: 5m

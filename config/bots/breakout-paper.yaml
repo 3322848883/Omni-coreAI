@@ -25,7 +25,7 @@ paper:
   initial_capital: 10000
   leverage: 20
   fee_rate: 0.0005
-  maker_fee_rate: 0.0
+  maker_fee_rate: 0.0002
   funding_enabled: false
   position_mode: single
   margin_mode: isolated
@@ -35,7 +35,9 @@ paper:
   tick_interval_sec: 2
 
 strategist:
-  enabled: false
+  runtime:
+    plan_loop: false
+    run: false
   prompt_file: prompts/multi_breakout.md
   interval_sec: 900
   timeframe: 15m

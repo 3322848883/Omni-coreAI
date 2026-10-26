@@ -1,0 +1,85 @@
+# 马丁机器人 v1.0 · ETH 阶梯 10 层 + 底仓 · 服务器实盘
+#
+# 与 martin-grid 共用 GATE_GRID 账户。隔离靠三点：
+#   ① label_prefix 独立（lv1），order_scope: own → 撤单只撤自己的
+#   ② 名义额度单独卡（400U 阶梯 + 240U 底仓，见 account_risk）
+#   ③ 人格独立（ladder_v5_pa_srv.md）
+#
+# 400U 而不是本地测试的 1000U：账户权益 67.87U、martin-grid 已占 14x≈950U，
+# 两个都满配 = 32x、保证金占 87% 可用，反向 1% 就接近强平。
+bot_id: ladder-v1
+enabled: false
+env: live
+
+api_key_env: GATE_GRID_API_KEY
+api_secret_env: GATE_GRID_API_SECRET
+
+symbols:
+  - ETH_USDT
+
+max_notional_usd: 900
+max_orders_per_file: 32
+max_files_per_run: 20
+poll_interval_sec: 2
+label_prefix: lv1
+position_policy: free
+default_replace: none
+place_before_cancel: true
+order_scope: own
+require_sl: true
+
+account_risk:
+  grid_tp_auto: live
+  halt: false
+  max_leverage: 50
+  margin_mode: cross
+  max_total_notional_usd: 900
+  risk_pct: 0.12
+  total_risk_pct: 0.35
+  max_notional_pct: 2.3
+  max_total_notional_pct: 10.5
+  daily_loss_limit_usd: 12
+  no_flip: false
+  stray_position: warn
+  peak_trail: false
+  peak_trail_atr: 2.0
+  sl_move_policy: ladder
+
+strategist:
+  prompt_file: prompts/ladder_v5_pa_srv.md
+  interval_sec: 900
+  timeframe: 15m
+  event_on_kline_close: false
+  event_timeframe: 15m
+  candles: 200
+  write_hold: true
+  vision: false
+  tools:
+    enabled: true
+    native: true
+    max_rounds: 14
+    allow:
+      - klines
+      - ticker
+      - contract
+      - smc_map
+      - smc_events
+      - indicators
+  market:
+    mode: rest_only
+    indicators: [atr14, ema20, ema200]
+    timeframes: ["5m", "15m", "1h", "4h", "1d"]
+    extra_candles: 60
+  ai_triggers:
+    enabled: false
+    max_active: 5
+    default_cooldown_sec: 900
+  risk:
+    min_confidence: 0.55
+    max_chips: 32
+    max_notional_usd: 900
+  skills: []
+  llm:
+    provider: gw-flash
+    reasoning_effort: high
+    max_tokens: 32768

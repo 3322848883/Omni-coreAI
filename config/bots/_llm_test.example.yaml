@@ -16,7 +16,6 @@ position_policy: free
 default_replace: none
 
 strategist:
-  enabled: true
   interval_sec: 300              # 定时：5 分钟策略用 300，10 分钟用 600
   timeframe: 5m                  # 快照 K 周期
   event_on_kline_close: true

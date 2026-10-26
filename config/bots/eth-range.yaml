@@ -23,7 +23,9 @@ account_risk:
   max_total_notional_usd: 50
 
 strategist:
-  enabled: false
+  runtime:
+    plan_loop: false
+    run: false
   prompt_file: prompts/eth_range_mid.md
   interval_sec: 900          # 15m 节奏
   timeframe: 15m

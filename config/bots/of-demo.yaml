@@ -1,0 +1,90 @@
+# 订单流演示 bot —— 四周期 vision（5m/15m/1h/4h）+ 三币种 + 全订单流工具
+#
+# 用途：一次完整的真实行情分析，让模型同时看到
+#   ① 四周期 K 线图（vision）
+#   ② 全部订单流工具（实测逐笔 / 真 footprint / 盘口状态 / 长寿挂单）
+#   ③ 四象限与几何估算工具（对照）
+# 不启动、不参与实盘，仅用于 plan 演示与验证。
+bot_id: of-demo
+enabled: false
+env: paper
+symbols:
+  - BTC_USDT
+  - ETH_USDT
+  - SOL_USDT
+max_notional_usd: 50000
+max_orders_per_file: 10
+max_files_per_run: 20
+poll_interval_sec: 2
+label_prefix: ofd
+position_policy: manage_only
+default_replace: none
+order_scope: own
+require_sl: true
+account_risk:
+  halt: false
+  max_leverage: 50
+  max_total_notional_usd: 150000
+  daily_loss_limit_usd: 1000
+
+paper:
+  feed_exchange: gate
+  initial_capital: 10000
+  leverage: 20
+  fee_rate: 0.0005
+  maker_fee_rate: 0.0002
+  funding_enabled: true
+  position_mode: single
+  margin_mode: isolated
+  price_band_pct: 5.0
+  maintenance_margin_rate: 0.005
+  trigger_price_type: latest
+  tick_interval_sec: 2
+
+strategist:
+  prompt_file: prompts/orderflow_pa.md
+  interval_sec: 900
+  timeframe: 5m
+  event_on_kline_close: true
+  event_timeframe: 5m
+  candles: 120
+  write_hold: true
+  # 四周期 K 线图（供模型视觉识别）
+  vision: true
+  vision_timeframes: ["5m", "15m", "1h", "4h"]
+  tools:
+    enabled: true
+    native: true
+    max_rounds: 6
+    allow:
+      - klines
+      - ticker
+      - orderbook
+      - market_stats
+      - stats
+      - taker_delta
+      - liquidations
+      - tv_delta_flow_profile
+      - tv_oi_visible_range
+      - tv_vol_oi_footprint
+      - tv_cdv
+      - orderflow_tape
+      - orderflow_footprint
+      - orderbook_state
+      - orderbook_walls
+  skills: []
+  market:
+    mode: rest_only
+    indicators: []
+    extra_timeframes: ["1m", "15m", "1h", "4h"]
+    extra_candles: 80
+    refresh: [ticker, stats, orderbook]
+  ai_triggers:
+    enabled: false
+  risk:
+    min_confidence: 0.55
+    max_chips: 3
+    max_notional_usd: 50000
+  llm:
+    provider: gw-flash
+    reasoning_effort: high

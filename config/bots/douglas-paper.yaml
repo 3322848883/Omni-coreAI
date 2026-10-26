@@ -25,7 +25,7 @@ paper:
   initial_capital: 10000
   leverage: 1
   fee_rate: 0.0005
-  maker_fee_rate: 0.0
+  maker_fee_rate: 0.0002
   funding_enabled: true
   position_mode: single
   margin_mode: isolated
@@ -35,7 +35,6 @@ paper:
   tick_interval_sec: 30
 
 strategist:
-  enabled: true
   prompt_file: prompts/mark_douglas_pa.md
   interval_sec: 3600
   timeframe: 4h

@@ -5,6 +5,9 @@
 # enabled: false —— 不会被 watchdog 拉起；跑 plan 不需要 enabled。
 
 bot_id: ladder-eth
+account: gate-grid
+# ↑ 声明所属账户 → 与 config/accounts.yaml 的账户级风控**合并**（上限取更严、
+#   日初权益账户共享）。不声明则不参与合并。见 `config/accounts.yaml` 头注释。
 enabled: false
 env: live
 # 独立账户：与老账户（brooks-btc 用的 GATE_API_KEY）隔离。
@@ -30,7 +33,7 @@ require_sl: true
 account_risk:
   halt: false
   # 50：双向网格两侧都占保证金，杠杆低了保证金先撞墙（风险由名义×止损距离决定，与杠杆无关）
-  max_leverage: 50
+  max_leverage: 100
   max_total_notional_usd: 600
   # 单档名义上限（权益倍数）；多档合计靠 max_total_notional_* 兜
   max_notional_pct: 6.0
@@ -43,11 +46,15 @@ account_risk:
   # 浮盈回撤保护：某腿浮盈后，价格从峰值回撤 peak_trail_atr×ATR(1h) 就把该腿 SL 上移
   # （只上移不下移）。双向持仓下两条腿各自跟踪，状态按 bot 隔离。
   # 这是「防坐电梯」唯一的程序化手段 —— 交易所侧 trail 单搁置、权益熔断只挡新开仓。
-  peak_trail: true
+  # ⚠️ 2026-10-13 关闭（阶梯网格通用，同 martin-grid「没跑满 10 层就止损」事故）：
+  #   阶梯的 SL 是「全梯共用的一条最后防线」（锚在最深档之外），对该线**只上移**
+  #   等于把最后防线一路推浅 → 价格回落就整梯提前止损。做 T 靠 TP 锁盈，不需要
+  #   移动止损。brooks 类单腿策略**未配此键**（引擎 `ar.get("peak_trail", False)`
+  #   默认关），要开只应在单腿 bot 上显式开。
+  peak_trail: false
   peak_trail_atr: 2.0
 
 strategist:
-  enabled: true
   prompt_file: prompts/ladder_t_pa.md
   # 15m 一轮：作业尺度也是 15m（实测 15m ATR ≈0.39% ÷ 往返成本 0.1% = 3.9，往返空间充裕）。
   # 1m 是 0.47 —— 每轮往返净亏，人格里已明令不碰。

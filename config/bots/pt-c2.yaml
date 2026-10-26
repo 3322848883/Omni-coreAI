@@ -12,7 +12,9 @@ paper:
   initial_capital: 5000
   leverage: 20
 strategist:
-  enabled: false
+  runtime:
+    plan_loop: false
+    run: false
   prompt_file: prompts/ict_pa.md
   timeframe: 15m
   candles: 30

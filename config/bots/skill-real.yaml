@@ -14,7 +14,6 @@ default_replace: none
 require_sl: true
 
 strategist:
-  enabled: true
   interval_sec: 300
   timeframe: 1h
   event_on_kline_close: false

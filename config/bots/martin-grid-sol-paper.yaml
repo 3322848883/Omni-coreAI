@@ -1,0 +1,111 @@
+# 20 层阶梯网格 · SOL · **本地模拟盘**（与 ETH 版共用同一份模拟账户）
+#
+# 来源：config/bots/martin-grid.yaml（实盘基线）→ 只改 3 处：
+#   ① env: live → paper，② 去掉 api_key_env（模拟盘不需要），③ 加 paper 段
+# 其余风控/策略参数**逐项对齐实盘**，否则测不出真实的风控削张行为。
+#
+# 用途：`plan --bot martin-grid-paper` → `once --bot martin-grid-paper`
+# 人格：prompts/ladder_sol.md（20 层 = 14 网 + 6 马；点数为 SOL 口径，按现价缩放）
+
+bot_id: martin-grid-sol-paper
+account: gate-grid-paper
+# ↑ 声明所属账户 → 与 config/accounts.yaml 的账户级风控**合并**（上限取更严、
+#   日初权益账户共享）。不声明则不参与合并。见 `config/accounts.yaml` 头注释。
+# 本地 paper bot，与实盘 martin-grid 完全独立（不同 label_prefix / 不同账户）。
+# 按项目约定：基线 `enabled` 一律 false，启用走 config/bots.local/ overlay
+#   → config/bots.local/martin-grid-paper.yaml 里写 enabled: true
+enabled: false
+env: paper
+
+symbols:
+  - SOL_USDT
+
+max_notional_usd: 1200
+max_orders_per_file: 32
+max_files_per_run: 20
+poll_interval_sec: 2
+label_prefix: mgs
+position_policy: free
+default_replace: none
+place_before_cancel: true
+order_scope: own
+require_sl: true
+
+account_risk:
+  # ---- 以下与实盘 martin-grid.yaml 逐项一致 ----
+  grid_tp_auto: live
+  halt: false
+  max_leverage: 25
+  margin_mode: cross
+  max_total_notional_usd: 1200
+  risk_pct: 0.12
+  # ⚠️ 本次实验变量：0.35 → 0.80（2026-10-16 22:20）
+  #    起因：20 层在 0.35 下被削 ×0.39（计划 44 张 → 实际 24 张、马丁被压平）。
+  #    实盘 martin-grid.yaml 仍是 0.35 —— 本键只在本 paper 配置里改，作单变量对照。
+  total_risk_pct: 0.80
+  max_notional_pct: 4.0
+  max_total_notional_pct: 14.0
+  daily_loss_limit_usd: 15
+  no_flip: false
+  stray_position: warn
+  peak_trail: false
+  peak_trail_atr: 2.0
+  sl_move_policy: ladder
+
+strategist:
+  prompt_file: prompts/ladder_sol.md
+  interval_sec: 900
+  timeframe: 15m
+  event_on_kline_close: false
+  event_timeframe: 15m
+  candles: 200
+  write_hold: true
+  vision: false
+  tools:
+    enabled: true
+    native: true
+    max_rounds: 14
+    allow:
+      - klines
+      - ticker
+      - contract
+      - smc_map
+      - smc_events
+  market:
+    mode: rest_only
+    indicators: [atr14]
+    timeframes: ["5m", "15m", "1h", "4h", "1d"]
+    extra_candles: 60
+  ai_triggers:
+    enabled: false
+    max_active: 5
+    default_cooldown_sec: 900
+  risk:
+    min_confidence: 0.55
+    max_chips: 32
+    max_notional_usd: 1200
+  skills: []
+  llm:
+    provider: gw-flash
+    reasoning_effort: high
+    max_tokens: 32768
+
+paper:
+  # ⚠️ 故意与 SOL 版指向**同一份**模拟账户（共账户测试）
+  store_path: data/accounts/gate-grid-paper/account.db
+  # 用真实 Gate 行情喂模拟撮合；权益按实盘量级（65U），否则风控闸门测不出来
+  feed_exchange: gate
+  initial_capital: 65
+  leverage: 25
+  fee_rate: 0.0005
+  maker_fee_rate: 0.0002
+  funding_enabled: true
+  # 与实盘一致：dual 双向 + cross 全仓
+  position_mode: dual
+  margin_mode: cross
+  # ⚠️ 20 层最深档在 −12%，若价格带 < 12% 会被模拟盘拒单。
+  #    实盘能挂到多远**尚未实测**（今日实测最深 −6.7% 成功）——这是本次测试的观察点之一。
+  price_band_pct: 20.0
+  maintenance_margin_rate: 0.01
+  trigger_price_type: latest
+  tick_interval_sec: 2

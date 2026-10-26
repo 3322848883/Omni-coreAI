@@ -1,0 +1,70 @@
+# Brooks 三部曲技能驱动人格 v2 验证载体 #10
+#
+# 目的：验证人格 v2（prompts/_pa_slim_test_eth_15m_v2.md）在 brooks-bar-by-bar 技能下
+#       的表现。与 test9 的唯一变量 = 人格文件：
+#         test9  → _pa_slim_test_eth_15m.md     （旧人格，写死 skill(price-action-trading)，方法论与技能重复）
+#         test10 → _pa_slim_test_eth_15m_v2.md  （新人格，方法论点名交给技能，只留参数/取数/输出/禁令）
+#       test9 保留不动，可直接 A/B 对照两版人格的 rule_ids 与工具链。
+bot_id: pa-eth-test10
+enabled: false          # 基线禁用；本机启用走 config/bots.local/ overlay
+env: paper
+exchange: gate
+symbols:
+  - ETH_USDT
+max_notional_usd: 50000
+max_orders_per_file: 10
+max_files_per_run: 20
+poll_interval_sec: 2
+label_prefix: pet10
+position_policy: manage_only
+default_replace: none
+order_scope: own
+require_sl: true
+account_risk:
+  halt: false
+  risk_pct: 0.02        # 人格要求 2%；不写引擎默认 1%（实测砍半）
+  max_leverage: 50
+  max_total_notional_usd: 150000
+  daily_loss_limit_usd: 1000
+
+paper:
+  feed_exchange: gate
+  initial_capital: 10000
+  leverage: 50
+  fee_rate: 0.0005
+  maker_fee_rate: 0.0002
+  funding_enabled: true
+  position_mode: single
+  margin_mode: isolated
+  price_band_pct: 10.0
+  maintenance_margin_rate: 0.01
+  trigger_price_type: latest
+  tick_interval_sec: 2
+
+strategist:
+  prompt_file: prompts/_pa_slim_test_eth_15m_v2.md
+  skills: [brooks-bar-by-bar]
+  interval_sec: 900
+  timeframe: 15m
+  event_on_kline_close: true
+  event_timeframe: 15m
+  candles: 200
+  write_hold: true
+  tools:
+    enabled: true
+    native: true
+    max_rounds: 6
+  market:
+    mode: rest_only
+    indicators: [ema20, atr14]
+    extra_candles: 15
+  ai_triggers:
+    enabled: true
+    max_active: 5
+  risk:
+    min_confidence: 0.55
+    max_chips: 2
+    max_notional_usd: 50000
+  llm:
+    provider: gw-flash
+    reasoning_effort: high
