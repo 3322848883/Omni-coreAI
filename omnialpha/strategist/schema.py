@@ -1,11 +1,14 @@
 """Plan / chips schema for LLM strategist (multi-symbol decisions)."""
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from ..schema import SchemaError, tp_fields
+
+log = logging.getLogger(__name__)
 
 CHIP_ACTIONS = {
     "open_long",
@@ -65,14 +68,35 @@ class PlanError(Exception):
     pass
 
 
-def _safe_symbol(symbol: str) -> str:
+def _safe_symbol(symbol: str, universe: Optional[list[str]] = None) -> str:
+    """归一 symbol 并（可选）校验它属于**品种宇宙**。
+
+    2026-10-26 回归修复：08:xx 之后这个函数与 `parse_plan`/`parse_plan_text` 的
+    `symbols` 参数被一起删掉了，而 `loop.py` 仍在传 `symbols=` →
+    每一轮 `TypeError: parse_plan_text() got an unexpected keyword argument 'symbols'`
+    （martin-grid 102 次 / pa-eth-v5 194 次，两个实盘 bot 全程 0 计划）。
+
+    宇宙由调用方传入（`parse_plan(..., symbols=)`）：只有程序层知道这个 bot 管哪些币。
+    越界必须在 plan 层就拒（证据 B-5：原先只查字符集，越界 chip 静默进 inbox）。
+
+    **异常统一成 `PlanError`**：调用方只捕 `PlanError`（`loop.py` 的 `except PlanError`、
+    `__main__.cmd_plan` 连 try 都没有），`resolve_symbol` 抛的 `GateApiError` 漏出去会让
+    `plan` 直接 traceback、`plan-loop` 绕过 `degraded` 与 `_record_cycle_failure`。
+    """
     import re
     from ..gate_client import resolve_symbol
-    s = resolve_symbol(str(symbol or ''))
+    try:
+        s = resolve_symbol(str(symbol or ''))
+    except Exception as e:  # noqa: BLE001 — 见 docstring：一律收口成 PlanError
+        raise PlanError(f'symbol invalid: {symbol!r}') from e
     if not re.fullmatch(r'[A-Z0-9_]{2,20}', s or ''):
         raise PlanError(f'symbol invalid: {symbol!r}')
+    if universe is not None:
+        uni = {str(x or '').strip().upper() for x in universe if str(x or '').strip()}
+        if s not in uni:
+            raise PlanError(
+                f'symbol not in universe: {s!r} (allowed: {",".join(sorted(uni)) or "未配置"})')
     return s
-    pass
 
 
 @dataclass
@@ -200,6 +224,10 @@ class Plan:
     # 这个字段、`parse_plan` 也不取 —— 于是它进了 `raw` 就再没人看，实测 896 条
     # journal 里非空 0 条。是「要求了但不消费」的那类缺陷。
     memory_refs: list = field(default_factory=list)
+    # 解析期的**宽容告警**（如 `scenarios` 非对象被丢弃）。为什么不抛 PlanError：
+    # 契约里早已写明「不要写 scenarios、无消费方」，一个无人消费的字段不该杀死整轮决策
+    # （旧实现实测：18% 的轮次因格式抖动整轮产出归零）。
+    notes: list[str] = field(default_factory=list)
     raw: dict = field(default_factory=dict)
 
 
@@ -501,9 +529,11 @@ def extract_regions(text: str) -> list[dict]:
     return out
 
 
-def parse_plan(data: Any) -> Plan:
+def parse_plan(data: Any, symbols: Optional[list[str]] = None) -> Plan:
+    """解析 Plan。`symbols` 非 None 时校验每个 chip 的 symbol 属于该宇宙。"""
     if not isinstance(data, dict):
         raise PlanError("plan must be a JSON object")
+    notes: list[str] = []
     chips_raw = data.get("chips") or []
     if not isinstance(chips_raw, list):
         raise PlanError("chips must be an array")
@@ -574,7 +604,12 @@ def parse_plan(data: Any) -> Plan:
             raise PlanError(f"chips[{i}].rule_ids must be an array")
         scenarios_raw = raw.get("scenarios") or {}
         if not isinstance(scenarios_raw, dict):
-            raise PlanError(f"chips[{i}].scenarios must be an object")
+            # 丢弃 + 告警，**不整轮作废**：scenarios 全仓无消费方，
+            # 而嵌套对象正是 JSON 解析失败的头号来源。
+            notes.append(
+                f"chips[{i}].scenarios 非对象已丢弃（got {type(scenarios_raw).__name__}）")
+            log.warning("plan chips[%d].scenarios 非对象已丢弃：%r", i, scenarios_raw)
+            scenarios_raw = {}
         # 目标止盈：模型写在 `meta.tp_target`（网格档成交后要改成的中值价）。
         # 执行辅助字段 —— 一律**宽松解析**，非法/缺失置 None，绝不因此拒掉整轮。
         # 通用自证检查：宽松解析（缺失/非法 → 空表，绝不因此拒整轮；
@@ -610,7 +645,7 @@ def parse_plan(data: Any) -> Plan:
         kline_tf_raw = str(raw.get("kline_tf") or "").strip()[:16]
         chips.append(
             Chip(
-                symbol=_safe_symbol(symbol),
+                symbol=_safe_symbol(symbol, symbols),
                 action=action,
                 confidence=conf,
                 size_usd=_f(raw.get("size_usd"), "size_usd", i),
@@ -659,6 +694,7 @@ def parse_plan(data: Any) -> Plan:
         triggers=triggers,
         trigger_ops=trigger_ops,
         memory_refs=_memory_refs(data.get("memory_refs")),
+        notes=notes,
         raw=data,
     )
 
@@ -688,6 +724,10 @@ def _repair_json(t: str) -> str:
     s = re.sub(r"\bTrue\b", "true", s)
     s = re.sub(r"\bFalse\b", "false", s)
     s = re.sub(r"\bNone\b", "null", s)
+    # 7) 按栈补齐未闭合的 { / [（截断/漏括号的常见形态）
+    s = _close_tail(s)
+    # 8) 补括号可能把「末尾逗号」暴露成 `,}` —— 再清一次，否则仍然是非法 JSON
+    s = re.sub(r",\s*([}\]])", r"\1", s)
     return s
 
 
@@ -880,8 +920,8 @@ def _extract_json_object(text: str):
     raise PlanError("LLM output has no valid JSON object")
 
 
-def parse_plan_text(text: str) -> Plan:
+def parse_plan_text(text: str, symbols: Optional[list[str]] = None) -> Plan:
     import json
 
     data = _extract_json_object(text)
-    return parse_plan(data)
+    return parse_plan(data, symbols)
