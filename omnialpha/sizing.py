@@ -45,8 +45,11 @@ def usd_to_contracts(
     size_usd: float,
     entry_price: float,
     meta: ContractMeta,
-) -> int:
-    """contracts = size_usd / (price * quanto_multiplier), rounded down to lot size."""
+) -> float:
+    """contracts = size_usd / (price * quanto_multiplier)，按**交易所步长**向下取整。
+
+    返回 **float**：小数张合约（ETH `order_size_min=0.1`）下整数无法表达 0.7 张。
+    """
     if size_usd is None or size_usd <= 0:
         raise GateApiError("size_usd must be positive")
     if entry_price is None or entry_price <= 0:
@@ -63,25 +66,31 @@ def usd_to_contracts(
         )
     multiplier = float(multiplier)
     raw = size_usd / (entry_price * multiplier)
-    lot = meta.order_size_round or 1.0
-    if lot <= 0:
-        lot = 1.0
-    # Gate futures size is an integer contract count; floor to lot when lot >= 1
-    contracts = int(math.floor(raw + 1e-12))
-    if lot > 1:
-        contracts = (contracts // int(lot)) * int(lot)
-    if contracts < 1:
-        # **兜底：抬到最小可下量，不抛错**。
+    # 步长**必须**取交易所真实值（`size_step`：enable_decimal → 0.1，否则 1）。
+    # 原来用 `meta.order_size_round` —— 交易所根本不提供这个字段（1061 个合约
+    # 0 命中），恒为假值 1 → ETH 的 0.1 步长对代码不可见，永远只能下整数张。
+    step = safe_step(meta)
+    contracts = math.floor(raw / step + 1e-9) * step
+    contracts = round(contracts, 8)
+    size_min = float(getattr(meta, "size_min", 0) or 0) or step
+    if contracts < size_min:
+        # **兜底：抬到「最小可下量」，不抛错**。
         # `size_usd` 是模型按「风险预算 ÷ 止损距离」反推的，小账户配远止损时
-        # 会算出小于 1 张的名义（实测 16.15 < 25.76）—— 抛错会让**整轮计划作废**
-        # 并回滚已挂的腿。抬到 1 张后风险略高于模型预期，但远小于「整轮不成交」
-        # 的代价；真正的风险闸门是 yaml 风控 + 账户级上限，不靠这一条拦。
-        floor_contracts = int(lot) if lot > 1 else 1
+        # 会算出小于最小可下量的名义（实测 16.15 < 25.76）—— 抛错会让**整轮计划
+        # 作废**并回滚已挂的腿。风险闸门是 yaml 风控 + 账户级上限，不靠这一条拦。
+        # ⚠️ 抬到 `size_min` 而**不是 1 张**：ETH 上抬到 1 张 = 23.25U，
+        # 而模型原本只想要 ~16U（+41%）；抬到 0.1 张 = 2.3U 才是真「最小」。
         log.warning(
-            "size_usd=%.4f 不足 1 张（价 %.2f 需 >= %.4f），已抬到 %d 张",
-            size_usd, entry_price, entry_price * multiplier, floor_contracts,
+            "size_usd=%.4f 不足最小可下量（价 %.2f × 乘数 %.6g → %.4f 张 < %.4f），已抬到 %.4f 张",
+            size_usd, entry_price, multiplier, raw, size_min, size_min,
         )
-        return floor_contracts
+        return round(size_min, 8)
+    size_max = float(getattr(meta, "size_max", 0) or 0)
+    if size_max > 0 and contracts > size_max:
+        contracts = math.floor(size_max / step + 1e-9) * step
+        log.warning("size_usd=%.4f 超过 size_max=%.4g，已夹到 %.4f 张",
+                    size_usd, size_max, contracts)
+        return round(contracts, 8)
     return contracts
 
 

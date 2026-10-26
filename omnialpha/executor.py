@@ -21,7 +21,9 @@ from .schema import (
 from .sizing import (
     default_trigger_limit_price,
     pct_to_size_usd,
+    quantize_size,
     round_price,
+    safe_step,
     usd_to_contracts,
     vol_adjust_size,
 )
@@ -49,6 +51,16 @@ def _num(v: Any) -> float:
         return float(v)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _fmt_qty(x: float) -> str:
+    """张数的字符串形态：整数 → `"3"`，小数 → `"0.7"`。
+
+    Gate 的 `amount` / `size` 是字符串字段。`str(3.0)` = `"3.0"` 能过但格式不规范，
+    而且日志/对账里与 `"3"` 不相等会引出假差异。
+    """
+    v = round(float(x or 0), 8)
+    return str(int(v)) if v == int(v) else f"{v:g}"
 
 
 def qty(v: Any) -> float:
@@ -1494,6 +1506,73 @@ class Executor:
             return current_total
         return current_total
 
+    # ── 尺寸四口径：唯一入口 ──────────────────────────────────────────────
+    # 模型只可能给这四种之一（`schema.py` 的 `_SIZE_FIELDS`）：
+    #   size       张数      —— 精确意图，不可执行就出声（绝不静默放大）
+    #   size_usd   名义 USDT —— 系统换算
+    #   size_pct   可用权益比例（0..1）
+    #   margin_pct 保证金比例（0..1，× 杠杆得名义）
+    # 同时给多个 = 模型自相矛盾 → 拒单（此前是静默「size 优先」，另一个口径白写）。
+    _SIZE_BASES = ("size", "size_usd", "size_pct", "margin_pct")
+
+    def _resolve_order_size(
+        self,
+        intent: Intent,
+        meta,
+        entry_hint: Optional[float] = None,
+    ) -> tuple[float, float, str]:
+        """把意图解析成 **(张数, 名义 USDT, 口径)**，张数恒为正（方向由 action 决定）。
+
+        价格来源优先级：`entry_hint` > `intent.price` > 最新成交价。只有名义口径
+        需要价格；显式张数路径**不打网络**（此前 `_open` 也只在 else 分支取价，保持）。
+        """
+        given = [b for b in self._SIZE_BASES if getattr(intent, b, None) is not None]
+        if not given:
+            raise GateApiError(
+                "SIZE_REQUIRED: 未给 size / size_usd / size_pct / margin_pct 任一口径")
+        if len(given) > 1:
+            raise GateApiError(
+                f"SIZE_CONFLICT: 同时给了 {given} —— 只允许一个口径，"
+                "否则其中一个会被静默忽略")
+        basis = given[0]
+        symbol = getattr(intent, "symbol", "")
+        mult = float(getattr(meta, "quanto_multiplier", 0) or 0)
+
+        if basis == "size":
+            raw = abs(float(intent.size))
+            if raw <= 0:
+                raise GateApiError(f"SIZE_INVALID: {symbol} size=0 无法下单")
+            step = safe_step(meta)
+            q = quantize_size(raw, meta, mode="floor", at_least_step=False)
+            if q <= 0:
+                size_min = float(getattr(meta, "size_min", 0) or 0) or step
+                raise GateApiError(
+                    f"SIZE_TOO_SMALL: {symbol} size={raw:g} 小于最小可下量 {size_min:g}"
+                    f"（步长 {step:g}）—— 拒绝静默放大")
+            notional = q * (entry_hint or intent.price or 0) * mult if mult > 0 else 0.0
+            if not notional:
+                px = intent.price or self.client.get_last_price(symbol)
+                notional = q * float(px or 0) * mult
+            return q, notional, basis
+
+        entry = entry_hint or intent.price
+        if entry is None:
+            entry = self.client.get_last_price(symbol)
+        if not entry or float(entry) <= 0:
+            raise GateApiError(f"SIZE_INVALID: {symbol} 无可用入场价，无法按名义换算张数")
+        entry = float(entry)
+
+        if basis == "size_usd":
+            size_usd = float(intent.size_usd)
+        elif basis == "size_pct":
+            size_usd = pct_to_size_usd(float(intent.size_pct), self.client.get_available_usdt())
+        else:
+            size_usd = (pct_to_size_usd(float(intent.margin_pct),
+                                        self.client.get_available_usdt())
+                        * int(intent.leverage or 1))
+        q = usd_to_contracts(size_usd, entry, meta)
+        return float(q), float(q) * entry * mult, basis
+
     def _check_notional(self, size_usd: Optional[float], symbol: str = "") -> None:
         if size_usd is None:
             return
@@ -2083,16 +2162,14 @@ class Executor:
         if intent.leverage and str(_mm or "").strip().lower() != "cross":
             self.client.set_leverage(intent.symbol, int(intent.leverage))
 
-        if intent.size is not None:
-            contracts = int(intent.size)
-        else:
-            size_usd = intent.size_usd
-            if size_usd is None and intent.size_pct is not None:
-                size_usd = pct_to_size_usd(intent.size_pct, self.client.get_available_usdt())
-            elif size_usd is None and intent.margin_pct is not None:
-                size_usd = pct_to_size_usd(intent.margin_pct, self.client.get_available_usdt()) * int(intent.leverage or 1)
-            entry = intent.price if intent.price is not None else self.client.get_last_price(intent.symbol)
-            contracts = usd_to_contracts(float(size_usd), float(entry), meta)
+        # 尺寸解析唯一入口（四口径 + 冲突拒单 + 步长量化）。此前这里是
+        # `int(intent.size)` —— 0.7 张被截成 0，再被「抬到 1 张」兜底放大 41%。
+        try:
+            contracts, size_notional, size_basis = self._resolve_order_size(intent, meta)
+        except GateApiError as e:
+            return StepResult(intent.action, intent.symbol, False,
+                              detail={"size_error": str(e)}, error=str(e))
+        detail_size = {"size_basis": size_basis, "size_notional": round(size_notional, 4)}
 
         # Gate: positive size = buy/long, negative = sell/short
         order_size = contracts if intent.action == "open_long" else -contracts
@@ -2107,6 +2184,7 @@ class Executor:
             "order_check": (entry_rec or {}).get("check") or {},
             "contracts": contracts,
             "size_usd": intent.size_usd,
+            **detail_size,
             "order_type": intent.order_type,
             "price": intent.price,
             # 通知卡片用：明确暴露入场/止损/止盈价位
@@ -2140,14 +2218,14 @@ class Executor:
         pos_side = "long" if intent.action == "open_long" else "short"
         trigger_side = "short" if pos_side == "long" else "long"
         entry_order = (entry_rec or {}).get("order") or {}
-        filled = abs(int(entry_order.get("size") or 0)) - abs(int(entry_order.get("left") or 0))
+        filled = abs(_num(entry_order.get("size"))) - abs(_num(entry_order.get("left")))
         if entry_order.get("finish_as") == "filled":
-            filled = abs(int(entry_order.get("size") or 0))
+            filled = abs(_num(entry_order.get("size")))
         # simultaneous hang: exit legs use the SAME size as entry plan
-        exit_size = int(contracts)
+        exit_size = round(float(contracts), 8)
         # grid shared TP/SL: one exit leg sized to total planned contracts
         if intent.tp_size_override and intent.tp is not None:
-            exit_size = int(intent.tp_size_override)
+            exit_size = round(float(intent.tp_size_override), 8)
         detail["exit_size"] = exit_size
         detail["filled_size"] = filled
         detail["hang_mode"] = "simultaneous"
@@ -2167,7 +2245,7 @@ class Executor:
         # **马丁腿（无 `meta.tp_target`）照挂共用 TP** —— 设计需求，不动。
         # 只在 live 时跳过：dry/off 下若也跳过，档位就彻底没有止盈了。
         skip_placeholder_tp = _skip_placeholder_tp(self.account_risk, intent.meta or {})
-        legs = [] if skip_placeholder_tp else self._tp_legs(intent, exit_size)
+        legs = [] if skip_placeholder_tp else self._tp_legs(intent, exit_size, meta)
         if skip_placeholder_tp:
             detail["tp_placeholder_skipped"] = "grid_tp_auto=live（改由 ensure_grid_tp 成交后挂）"
         if legs:
@@ -2248,8 +2326,10 @@ class Executor:
         原因拒绝。
         """
         oid = str(entry_order.get("id") or "")
-        size = abs(int(entry_order.get("size") or 0))
-        left = abs(int(entry_order.get("left") or 0))
+        # 小数张：Gate 返回字符串 `"0.7"` → `int()` 抛 ValueError，而这里是
+        # **「入场单已挂、保护单挂不上」的紧急回滚路径** —— 回滚自己崩掉 = 裸仓挂单留着。
+        size = abs(_num(entry_order.get("size")))
+        left = abs(_num(entry_order.get("left")))
         filled = size if entry_order.get("finish_as") == "filled" else size - left
         if not oid:
             return "skip: 入场单无 id"
@@ -2274,8 +2354,13 @@ class Executor:
                 pass
         return f"alert_only: 已成交 {filled}/{size} 但保护单未挂上（未自动平仓）"
 
-    def _tp_legs(self, intent: Intent, exit_size: int) -> list[tuple[float, int]]:
+    def _tp_legs(self, intent: Intent, exit_size: float,
+                 meta=None) -> list[tuple[float, float]]:
         """多级止盈腿：任意档位 → `[(price, size)]`，尺寸合计 = `exit_size`。
+
+        **按交易所步长拆**（2026-10-26）：原先全程整数张，ETH 持仓 0.7 张时
+        `int(exit_size)` → 0 张（挂出一条 0 张 TP），或按 `round(share)` 补到 1 张
+        （reduce-only 超平被拒）。`meta` 缺省按步长 1 处理 = 旧行为逐字一致。
 
         档位来自 `schema.tp_levels_of()`（唯一来源），**不在这里重写一遍**：
         这条路径原先只认 `tp/tp2/tp3` 三档，档位清单散落 5 处，多一档就少挂一腿。
@@ -2284,13 +2369,17 @@ class Executor:
         一律归一化（不做「最后一档兜底吃掉全部」这种静默兜底）。
         """
         pairs = tp_levels_of(intent)
+        exit_size = round(float(exit_size or 0), 8)
         if not pairs or exit_size <= 0:
             return []
+        step = safe_step(meta) if meta is not None else 1.0
+        # 全部按「一个步长」的整数单位运算，最后乘回 step
+        total_u = int(round(exit_size / step))
         n = len(pairs)
-        if n == 1 or exit_size < n:
+        if n == 1 or total_u < n:
             # 拆不出「每腿 ≥1 张」时退回单腿（第一档全平）：宁可少一档，
             # 也不要挂出合计超过持仓量的 reduce-only 单。
-            return [(pairs[0][0], int(exit_size))]
+            return [(pairs[0][0], exit_size)]
         given = {i: min(1.0, max(0.0, float(s)))
                  for i, (_, s) in enumerate(pairs) if s is not None}
         if not given:
@@ -2303,18 +2392,18 @@ class Executor:
             else:
                 each = ((1.0 - total) / len(free)) if free else 0.0
                 share = [given.get(i, each) for i in range(n)]
-        legs: list[tuple[float, int]] = []
-        remaining = int(exit_size)
+        legs: list[tuple[float, float]] = []
+        remaining = total_u
         for i, (px, _) in enumerate(pairs):
             left = n - i
             if left == 1:
-                sz = remaining
+                u = remaining
             else:
-                sz = int(round(exit_size * share[i]))
-                # 给后面的腿各留 ≥1 张，避免前腿四舍五入把总额撑爆
-                sz = max(1, min(sz, remaining - (left - 1)))
-            remaining -= sz
-            legs.append((float(px), int(sz)))
+                u = int(round(total_u * share[i]))
+                # 给后面的腿各留 ≥1 个单位，避免前腿四舍五入把总额撑爆
+                u = max(1, min(u, remaining - (left - 1)))
+            remaining -= u
+            legs.append((float(px), round(u * step, 8)))
         return legs
 
     def _modify_tp_sl(self, intent: Intent) -> StepResult:
@@ -2410,7 +2499,7 @@ class Executor:
                 # TP+SL 同改：丢 SL 腿、TP 照改（撤旧逻辑见 intent.sl is None 跳过旧 SL）
                 log.info("SL_REJECT(modify) %s: SL 腿丢弃，TP 照改", intent.symbol)
                 intent.sl = None
-        size = abs(int(pos["size"]))
+        size = abs(_num(pos["size"]))
         meta = self.client.get_contract(intent.symbol)
         pos_side = side
         trigger_side = "short" if pos_side == "long" else "long"
@@ -2484,13 +2573,13 @@ class Executor:
         # 原先这里只挂 `intent.tp` 一条，却在下面对**所有**旧 TP 执行撤单，
         # 于是双止盈结构在第一次 modify 之后就塌成单腿（TP2 永久消失）。
         # 实测：brooks-btc 372 次改单、**0 次**挂出 ≥2 条 TP（而开仓 169 次里 140 次双止盈）。
-        tp_legs = self._tp_legs(intent, size) if intent.tp is not None else []
-        planned: list[tuple[str, float, int, str]] = [
-            (f"tp{i + 1}" if len(tp_legs) > 1 else "tp", px, int(sz), intent.tp_mode)
+        tp_legs = self._tp_legs(intent, size, meta) if intent.tp is not None else []
+        planned: list[tuple[str, float, float, str]] = [
+            (f"tp{i + 1}" if len(tp_legs) > 1 else "tp", px, round(sz, 8), intent.tp_mode)
             for i, (px, sz) in enumerate(tp_legs)
         ]
         if intent.sl is not None:
-            planned.append(("sl", float(intent.sl), int(size), intent.sl_mode))
+            planned.append(("sl", float(intent.sl), round(float(size), 8), intent.sl_mode))
 
         # `tp_orders` / `sl_orders` 与 `_open` / `_stop_entry` **同字段同形状** ——
         # 通知卡片（`notify._exit_levels`）、`exchange_pnl` 归属、上线前脚本都按这两个
@@ -2763,12 +2852,13 @@ class Executor:
 
     def _trail(self, intent: Intent) -> StepResult:
         self._check_symbol(intent.symbol)
-        amount = abs(int(intent.size or 0))
+        amount = abs(_num(intent.size))
         if intent.side != "long":
             amount = -amount
         body = {
             "contract": intent.symbol,
-            "amount": str(amount),
+            # 张数走字符串：整数张必须仍是 "3"（不能变 "3.0"），小数张是 "0.7"
+            "amount": _fmt_qty(amount),
             "activation_price": str(intent.activation_price or "0"),
             "price_offset": str(intent.price_offset),
         }
@@ -2831,16 +2921,12 @@ class Executor:
         if side_err:
             return StepResult(intent.action, intent.symbol, False,
                               detail={"precheck": side_err}, error=side_err)
-        if intent.size is not None:
-            contracts = int(intent.size)
-        else:
-            size_usd = intent.size_usd
-            if size_usd is None and intent.size_pct is not None:
-                size_usd = pct_to_size_usd(intent.size_pct, self.client.get_available_usdt())
-            elif size_usd is None and intent.margin_pct is not None:
-                size_usd = pct_to_size_usd(intent.margin_pct, self.client.get_available_usdt()) * int(intent.leverage or 1)
-            entry = intent.price if intent.price is not None else self.client.get_last_price(intent.symbol)
-            contracts = usd_to_contracts(float(size_usd), float(entry), meta)
+        # 与 `_open` **同源**（此前两处各自抄了一份同样的 int 截断）
+        try:
+            contracts, size_notional, size_basis = self._resolve_order_size(intent, meta)
+        except GateApiError as e:
+            return StepResult(intent.action, intent.symbol, False,
+                              detail={"size_error": str(e)}, error=str(e))
         signed = contracts if intent.action == "stop_entry_long" else -contracts
         if intent.order_type == "market":
             initial = {"contract": intent.symbol, "size": signed, "price": "0", "tif": "ioc"}
@@ -2877,7 +2963,7 @@ class Executor:
                               error=f"stop_entry not confirmed id={order.get('id')}")
         # 突破入场也要预挂保护（含双止盈），成交即生效
         if intent.sl is not None or intent.tp is not None:
-            contracts_abs = abs(int(contracts))
+            contracts_abs = abs(float(contracts))
             pos_side = "long" if intent.action == "stop_entry_long" else "short"
             trigger_side = "short" if pos_side == "long" else "long"
             # stop_entry 用 trigger_price 作入场参考算 SL 规则方向
@@ -2896,7 +2982,7 @@ class Executor:
             tps = []
             sls = []
             errs = []
-            legs = self._tp_legs(intent, contracts_abs)
+            legs = self._tp_legs(intent, contracts_abs, meta)
             for tp_px, tp_sz, idx in [(p, s, i) for i, (p, s) in enumerate(legs)]:
                 rec_, err_ = self._place_exit_leg(
                     lambda p=tp_px, s=tp_sz: self._place_trigger(
@@ -3445,7 +3531,7 @@ class Executor:
         非 override 路径（`sl_scope: per_level` 与所有普通开仓）**逐字不变**：
         第 ③ 步只在 ① 生效时执行。
         """
-        override = int(intent.sl_size_override) if intent.sl_size_override else 0
+        override = float(intent.sl_size_override) if intent.sl_size_override else 0.0
         sl_size = override or int(exit_size)
         merge_ids: list[str] = []
         if intent.sl_mode != "limit_order":
@@ -3614,7 +3700,7 @@ class Executor:
 
         pos = positions[0]
         pos_side = pos["side"]
-        size = abs(int(pos["size"]))
+        size = abs(_num(pos["size"]))
         covered = self._owned_sl_size(symbol, self._own_prefix(""))
         if covered >= size:
             out["skipped"] = "sl_present"
@@ -3767,7 +3853,8 @@ class Executor:
         pos_long = 0
         pos_short = 0
         for p in positions or []:
-            n = _int_or_zero(p.get("size"))
+            # 小数张（ETH 0.7）：`_int_or_zero` 会截成 0 → 误判「无多头持仓」
+            n = _num(p.get("size"))
             if n > 0:
                 pos_long += n
             elif n < 0:
@@ -3817,7 +3904,7 @@ class Executor:
                 if oid:
                     open_gtp_ids.add(oid)
                 existing.add(self._price_key(o.get("price")))
-                covered_size += abs(_int_or_zero(o.get("size")))
+                covered_size += abs(_num(o.get("size")))
         except Exception as e:  # noqa: BLE001
             swallow("executor.ensure_grid_tp.gtp_orders", e, level=logging.DEBUG)
             out["skipped"] = "orders_unavailable"
@@ -3940,7 +4027,7 @@ class Executor:
                         swallow("executor.ensure_grid_tp.cancel_orphan_gtp", e,
                                 level=logging.DEBUG)
             if pos_short > 0:
-                log.warning("grid tp %s: 账户持有 %d 张**空仓**（非本策略方向）→ "
+                log.warning("grid tp %s: 账户持有 %g 张**空仓**（非本策略方向）→ "
                             "不挂止盈、撤掉在盘 -gtp 卖单 %d 条；请先平掉空仓",
                             symbol, pos_short, len(cancelled))
             out["skipped"] = [{"why": "no_long_position(单向卖单=开空，禁止无仓预挂)",
@@ -3955,6 +4042,8 @@ class Executor:
         # 之后任何持仓的反弹卖出都由这些卖单承接）。target <= mark 跳过 ——
         # 低于市价的限价卖单会立即以市价成交（= 直接开空）。
         candidates, skipped = [], []
+        # 档位张数是小数张时不许按整数取（0.7 → 0 会整档挂不上）
+        _gtp_step = safe_step(self.client.get_contract(symbol))
         for lv in levels_all:
             if str(lv.get("status")) not in ("pending", "filled"):
                 continue
@@ -3975,7 +4064,7 @@ class Executor:
             # 张数上限 = 该档张数 ∩ 「多头持仓 − 在盘 TP 已覆盖」的剩余敞口。
             # 绝不超配：reduce_only 卖单张数超过持仓时，多余部分会被交易所拒/撤。
             remaining = pos_long - covered_size
-            size = min(_int_or_zero(lv.get("size")) or 1, max(remaining, 0))
+            size = min(qty(lv.get("size")) or _gtp_step, max(remaining, 0))
             if size <= 0:
                 skipped.append({"price": lv.get("price"),
                                 "why": f"long_fully_covered({pos_long})"})
@@ -4395,7 +4484,7 @@ class Executor:
         `state` 由调用方持有并统一落盘（逐腿只改自己那个 `symbol|side` 键）。
         """
         side = pos["side"]
-        size = abs(int(pos["size"]))
+        size = abs(_num(pos["size"]))
         entry = float(pos.get("entry_price") or 0)
         key = f"{symbol}|{side}"
         out: dict[str, Any] = {"position_side": side, "position_size": size}
@@ -4894,7 +4983,7 @@ class Executor:
         trigger_price: float,
         is_tp: bool,
         meta,
-        size: int,
+        size: float,
     ) -> dict:
         """Place a close price-trigger (TP/SL). trigger_side is the order side to close position."""
         if is_tp:
@@ -4915,7 +5004,8 @@ class Executor:
         # vs 4 张持仓）。参照 NautilusTrader 把这类单白名单化、跳过数量检查的做法。
         #
         # **默认关闭**：需先在目标交易所实测 `price_orders` 是否接受这些字段。
-        close_size = int(size)
+        # 小数张必须保留：`int(0.7)` = 0 → 挂出一条 0 张的「保护单」（等于裸仓）
+        close_size = round(float(size), 8)
         # API: buy to close short (positive), sell to close long (negative)
         api_size = -close_size if (intent.side or "long") == "long" else close_size
         use_venue_close = bool((self.account_risk or {}).get("use_venue_close"))
