@@ -55,12 +55,17 @@ def account_truth(executor: Any, symbol: str = "") -> dict:
     return out
 
 
-def _protector_size(p: dict) -> int:
+def _protector_size(p: dict) -> float:
+    """保护单张数（绝对值，**可为小数** —— ETH 步长 0.1）。
+
+    原来 `abs(int(float(...)))`：0.7 张会被截成 0 → 这条保护单在对账里等于不存在
+    → 「SL 覆盖不足」每轮都成立，反复补挂；`gap` 也会算错。
+    """
     init = p.get("initial") or {}
     try:
-        return abs(int(float(init.get("size") or p.get("size") or 0)))
+        return abs(float(init.get("size") or p.get("size") or 0))
     except (TypeError, ValueError):
-        return 0
+        return 0.0
 
 
 def _protector_side(p: dict) -> str:
@@ -131,7 +136,7 @@ def _pending_entry_size(executor: Any, symbol: str) -> int:
     这个坑在本项目里出现过三次（见 AGENTS.md 关于 `_has_pending_entry`
     的两条记录），所以这里两类都扫，并有测试钉住。
     """
-    total = 0
+    total = 0.0
     # 1) 普通挂单（limit 未成交的入场单）
     try:
         rows = executor._owned_open_orders(symbol, executor.label_prefix) or []
@@ -144,7 +149,7 @@ def _pending_entry_size(executor: Any, symbol: str) -> int:
         if left is not None and int(left) == 0:
             continue
         try:
-            total += abs(int(float(o.get("size") or 0)))
+            total += abs(float(o.get("size") or 0))
         except (TypeError, ValueError):
             continue
     # 2) 条件单里的入场类（stop_entry_*，非 reduce_only、未终结）
@@ -163,7 +168,7 @@ def _pending_entry_size(executor: Any, symbol: str) -> int:
             continue
         init = p.get("initial") or {}
         try:
-            total += abs(int(float(init.get("size") or p.get("size") or 0)))
+            total += abs(float(init.get("size") or p.get("size") or 0))
         except (TypeError, ValueError):
             continue
     return total
@@ -219,10 +224,10 @@ def reconcile_protectors(executor: Any, symbol: str) -> dict:
     if not truth["ok"]:
         return {"ok": False, "error": truth["error"], "cancelled": []}
 
-    pos_size = 0
+    pos_size = 0.0
     for p in truth["positions"]:
         try:
-            pos_size += abs(int(float(p.get("size") or 0)))
+            pos_size += abs(float(p.get("size") or 0))
         except (TypeError, ValueError):
             continue
     pending_size = _pending_entry_size(executor, symbol)

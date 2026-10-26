@@ -1969,7 +1969,8 @@ def run_tool(
             for p in ((client.get_positions() or []) if manage_positions else []):
 
 
-                if int(p.get("size") or 0) == 0:
+                # 小数张合约下 int("0.7") 抛 ValueError → 整个持仓工具调用失败
+                if float(p.get("size") or 0) == 0:
 
 
                     continue

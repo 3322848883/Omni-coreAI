@@ -480,7 +480,8 @@ def collect_snapshot(
                     "leverage": p.get("leverage"),
                 }
                 for p in (client.get_positions() or [])
-                if int(p.get("size") or 0) != 0
+                # 小数张（ETH 0.1 步长）：`int("0.7")` 会抛 ValueError → 整段 positions 丢失
+                if float(p.get("size") or 0) != 0
             ]
         except Exception as e:  # noqa: BLE001
             account["error"] = f"positions: {e}"

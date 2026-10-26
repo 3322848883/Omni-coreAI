@@ -33,6 +33,28 @@ def _is_flat_error(e: Exception) -> bool:
     msg = str(e).lower()
     return "no position" in msg or "position_empty" in msg
 
+
+def _num(v: Any) -> float:
+    """把「张数」解析成**带符号** float，取不到返回 0.0。
+
+    **不能用 `int()`**（2026-10-26 实测）：
+      - 小数张合约（`enable_decimal`，ETH/SOL/XRP/PEPE… 共 15 个，`order_size_min=0.1`）
+        下 Gate 返回的是字符串 `"-0.7"`，`int("-0.7")` 直接抛 ValueError；
+      - 即使拿到的是 float，`int(0.7)` 也会截成 0 —— 那会让「有 0.7 张持仓」
+        被读成「空仓」，平仓/保护单/对账全部失效。
+    """
+    if v is None or isinstance(v, bool):
+        return 0.0
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def qty(v: Any) -> float:
+    """张数绝对值（小数张安全）。见 `_num` 的说明。"""
+    return abs(_num(v))
+
 PRICE_TYPE_MAP = {"latest": 0, "mark": 1, "index": 2}
 
 # 权益比例上限（`account_risk.max_notional_pct`）的**微越界容差**。
@@ -205,7 +227,7 @@ def _parse_symbol_positions(positions: list, symbol: str) -> list[dict]:
     for p in positions or []:
         if p.get("contract") != symbol:
             continue
-        size = int(p.get("size") or 0)
+        size = _num(p.get("size"))
         if size == 0:
             continue
         mode = str(p.get("mode") or "")
@@ -1391,16 +1413,17 @@ class Executor:
                 try:
                     pos_notional = 0.0
                     for p in self.client.get_positions() or []:
-                        if int(p.get("size") or 0) == 0:
+                        # 局部量不能叫 qty（会遮蔽模块级 qty() → UnboundLocalError）
+                        pos_q = _num(p.get("size"))
+                        if pos_q == 0:
                             continue
                         mark = float(p.get("mark_price") or p.get("entry_price") or 0)
-                        qty = abs(float(p.get("size") or 0))
                         mult = 1.0
                         try:
                             mult = float(self.client.get_contract(p.get("contract")).quanto_multiplier or 1)
                         except Exception:  # noqa: BLE001
                             mult = 1.0
-                        pos_notional += mark * qty * mult
+                        pos_notional += mark * abs(pos_q) * mult
                     this_usd = intent.size_usd
                     if this_usd is None and intent.size is not None:
                         px = intent.price or self.client.get_last_price(intent.symbol)
@@ -3100,11 +3123,11 @@ class Executor:
         if total <= 0:
             return notes
         # 逐方向持仓量：SL 归并的目标张数按**该方向**算（双向持仓下不能拿 total）
-        per_side: dict[str, int] = {}
+        per_side: dict[str, float] = {}
         for p in positions:
             _s = str(p.get("side") or "")
             if _s:
-                per_side[_s] = per_side.get(_s, 0) + abs(int(float(p.get("size") or 0)))
+                per_side[_s] = per_side.get(_s, 0) + qty(p.get("size"))
         try:
             rows = self.client.list_price_orders(symbol) or []
         except Exception:  # noqa: BLE001
@@ -3310,7 +3333,7 @@ class Executor:
                 pass
         return notes
 
-    def _owned_sl_size(self, symbol: str, prefix: str) -> int:
+    def _owned_sl_size(self, symbol: str, prefix: str) -> float:
         """本 bot **未终结 SL 覆盖的张数合计**（绝对值）。
 
         只看 SL、不看 TP —— `watcher.reconcile_protection()` 的判据是
@@ -3323,7 +3346,7 @@ class Executor:
         **`add_*` 让持仓变大后没有任何地方会把 SL 放大** —— 而 `open_*`→`add_*`
         映射恰恰让持仓可以单调增长。
         """
-        total = 0
+        total = 0.0
         for po in self._owned_price_orders(symbol, prefix):
             text = str((po.get("initial") or {}).get("text") or po.get("text") or "")
             tail = text.rsplit("-", 1)[-1].lower() if text else ""
@@ -3335,12 +3358,12 @@ class Executor:
                 continue
             init = po.get("initial") or {}
             try:
-                total += abs(int(init.get("size") or po.get("size") or 0))
+                total += qty(init.get("size") or po.get("size"))
             except (TypeError, ValueError):
                 continue
         return total
 
-    def _owned_sl_orders(self, symbol: str) -> list[tuple[str, float, int]]:
+    def _owned_sl_orders(self, symbol: str) -> list[tuple[str, float, float]]:
         """本 bot 未终结的 SL 价格单 → `[(order_id, trigger_price, 张数), ...]`。
 
         与 `_owned_sl_size` **同源**（都走 `_owned_price_orders` + `-sl/-ls` 后缀
@@ -3349,7 +3372,7 @@ class Executor:
         """
         return [(pid, px, sz) for pid, px, sz, _s in self._owned_sl_orders_sided(symbol)]
 
-    def _owned_sl_orders_sided(self, symbol: str) -> list[tuple[str, float, int, str]]:
+    def _owned_sl_orders_sided(self, symbol: str) -> list[tuple[str, float, float, str]]:
         """同 `_owned_sl_orders`，但多带一个 `side`（这条 SL 保护的是哪个方向）。
 
         **双向持仓必须靠它分腿**：保护单是 reduce-only，平多的 size 为负、平空为正，
@@ -3377,7 +3400,7 @@ class Executor:
             if not pid or px <= 0:
                 continue
             try:
-                raw_sz = int(init.get("size") or po.get("size") or 0)
+                raw_sz = _num(init.get("size") or po.get("size"))
             except (TypeError, ValueError):
                 raw_sz = 0
             if raw_sz == 0:
@@ -3487,7 +3510,7 @@ class Executor:
         pos = 0
         for p in self._symbol_positions(symbol):
             if str(p.get("side") or "") == pos_side:
-                pos += abs(int(p.get("size") or 0))
+                pos += qty(p.get("size"))
         replaced = getattr(self, "_round_replaced_order_ids", None) or set()
         pend = 0
         for o in self._owned_open_orders(symbol, self._own_prefix("")):
@@ -4169,7 +4192,7 @@ class Executor:
     def _give_back_side(self, pos: dict, symbol: str, state: dict,
                         dry: bool) -> dict:
         side = str(pos.get("side") or "")
-        size = abs(int(pos.get("size") or 0))
+        size = qty(pos.get("size"))
         entry = float(pos.get("entry_price") or 0)
         key = f"{symbol}|{side}"
         out: dict[str, Any] = {"position_side": side, "position_size": size}
@@ -4825,7 +4848,7 @@ class Executor:
         symbols = []
         for p in positions:
             sym = p.get("contract")
-            if sym and int(p.get("size") or 0) != 0 and sym not in symbols:
+            if sym and qty(p.get("size")) != 0 and sym not in symbols:
                 symbols.append(sym)
         return symbols
 
