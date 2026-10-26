@@ -156,11 +156,11 @@ class LLMClient:
         raise last_err or LLMError("LLM request failed: unknown")
 
     def chat_messages(self, messages: list, tools: Optional[list] = None,
-                      tool_choice: Optional[str] = None) -> str:
+                      tool_choice: Optional["str | dict"] = None) -> str:
         return self.chat_message_full(messages, tools=tools, tool_choice=tool_choice).get("content") or ""
 
     def chat_message_full(self, messages: list, tools: Optional[list] = None,
-                          tool_choice: Optional[str] = None) -> dict:
+                          tool_choice: Optional["str | dict"] = None) -> dict:
         """Return assistant message dict: content, reasoning_content, tool_calls.
 
         **主供应商失败会按 `cfg.fallbacks` 顺序切备用。** 这是「一个模型不可用
@@ -193,7 +193,7 @@ class LLMClient:
         raise last_err or LLMError("LLM request failed: unknown")
 
     def _chat_once(self, cfg: LLMConfig, messages: list, tools: Optional[list] = None,
-                   tool_choice: Optional[str] = None) -> dict:
+                   tool_choice: Optional["str | dict"] = None) -> dict:
         """对**单个**供应商发一次请求（含其自身的重试）。"""
         url = f"{cfg.base_url()}/chat/completions"
         body: dict = {

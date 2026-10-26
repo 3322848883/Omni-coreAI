@@ -17,7 +17,8 @@
 
 ## 本模块目前覆盖
 
-- `reconcile_protectors`：**保护单张数对齐持仓**（保护单堆积的引擎侧兜底）
+- `reconcile_protectors`：**保护单去重**（只裁同向同价的重复腿，保留不同触发价的
+  多级 TP）—— 保护单堆积的引擎侧兜底
 - `account_truth`：拉一份「交易所真相」快照供调用方比对
 """
 from __future__ import annotations
@@ -79,6 +80,43 @@ def _is_tp_sl(p: dict) -> bool:
     return tail in ("tp", "sl", "lp", "ls")
 
 
+def _text(p: dict) -> str:
+    init = p.get("initial") or {}
+    return str(init.get("text") or p.get("text") or "")
+
+
+def _tail(p: dict) -> str:
+    t = _text(p)
+    return t.rsplit("-", 1)[-1].lower() if t else ""
+
+
+def _trigger_key(p: dict) -> Optional[str]:
+    """触发价归一化后的键（「同价才算重复」判据）；缺字段 → None（互为重复）。
+
+    刻意**不做 float() 转换**（那要 try/except，会给本模块加一条「裸吞异常」，
+    撞审计 B12 棘轮）：只用字符串归一 —— 去空白、去尾零，
+    于是 `"2408.5"` / `"2408.50"` / `2408.5` 归一到同一个键。
+    """
+    tri = p.get("trigger") or {}
+    init = p.get("initial") or {}
+    raw = tri.get("price") or init.get("trigger_price") or p.get("trigger_price")
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return s or None
+
+
+#: TP 族「不同触发价」腿的保留上限（安全阀）。
+#: 为什么需要：改判据后不同触发价的腿**一律保留**（多级止盈是策略本体），但若某个
+#: bot 的目标价随行情漂移、每轮都在**新价位**挂一条，就会重新长成堆积。上限给到
+#: 12 条 —— 阶梯类最多 10 档 + 马丁共用 1 条，留出余量；超出从**最旧**撤并留痕。
+_MAX_DISTINCT_TP_LEGS = 12
+
+
 def _pending_entry_size(executor: Any, symbol: str) -> int:
     """待成交入场单的**张数合计**（保护单也该覆盖它们）。
 
@@ -132,7 +170,7 @@ def _pending_entry_size(executor: Any, symbol: str) -> int:
 
 
 def reconcile_protectors(executor: Any, symbol: str) -> dict:
-    """把该 symbol 的保护单**张数对齐到「持仓 + 待成交入场单」**（保留最新一组）。
+    """保护单**去重**：保留不同触发价的多级结构，只裁「同向+同价+同文本」的重复腿。
 
     ## 为什么需要
 
@@ -143,14 +181,31 @@ def reconcile_protectors(executor: Any, symbol: str) -> dict:
     另一个能对齐张数的函数 `_resync_protectors` **只在平/减仓路径被调用**，
     加仓路径不调 —— 所以这条路径完全没人管。
 
-    ## 判据
+    ## 判据（2026-10-15 重写：不再按张数裁剪多级 TP）
 
-    同方向保护单按 `create_time` **倒序**累加，凑够目标张数即停：
-    已累加的那几笔保留（它们覆盖当前敞口），其余撤掉。
+    1. **SL（`sl`/`ls`）**：单层风控意图 —— 每方向只留**最新一条**，旧的撤掉
+       （多价并存 = 提前平仓；与旧实现一致，零行为变化）。
+    2. **TP（`tp`/`lp`）**：**按触发价保留** —— 不同触发价的多级止盈是策略本体，
+       一律保留；只裁「同方向 + 同触发价 + 同文本」的**重复腿**，保留其中
+       `|size|` 最大的一条（并列取最新）。张数**不做合并/重算**（覆盖对齐属于
+       `_align_tp_group`；本函数只清重复，不改覆盖）。
+    3. **安全阀**：不同触发价的 TP 腿条数上限 `_MAX_DISTINCT_TP_LEGS`，超出从
+       **最旧**撤（防「目标价随行情漂移」时每轮在新价位攒一条）。
 
-    **目标张数 = 持仓张数 + 待成交入场单张数**。后者不能漏：入场单挂出后
+    ### 为什么改（实测根因，2026-10-15 11:40:55）
+
+    旧判据是「同方向保护单按 `create_time` 倒序累加，凑够目标张数即停」，目标
+    张数 = 持仓 + 待成交入场单。但 **SL 单张就覆盖整个目标**（`_sl_cover_cap`
+    让 SL = 持仓 + 待成交），于是**只有与最新 SL 同 30 秒窗口的那条 TP 能活下来**：
+    实测把马丁共用 TP 的三条腿（6/7/9 张）裁成一条（−9），并且会**周期性吃掉逐档
+    止盈腿**（`ensure_grid_tp` 的做 T 腿）。根子是它**只按张数判超额、不看触发价**，
+    与 `_align_tp_group` / `_resync_protectors` 的「**绝不归并不同触发价**」纪律
+    直接冲突 —— 而逐档 TP 的全部价值就在「不同触发价」。
+
+    **目标张数仍要算**（持仓 + 待成交入场单），但它只用于「既无持仓也无待成交
+    → 不动」这条 fail-closed 闸门，不再用于裁剪多级结构。后者不能漏：入场单挂出后
     保护单就一起挂上了（那时还没持仓），只按持仓算会把预挂的保护单误判成
-    超额撤掉 —— 委托一成交就是裸仓。
+    孤儿撤掉 —— 委托一成交就是裸仓。
 
     ## fail-closed
 
@@ -189,34 +244,46 @@ def reconcile_protectors(executor: Any, symbol: str) -> dict:
         except (TypeError, ValueError):
             return 0.0
 
-    # **按「组」保留，不按「单」** —— 一次 `_open`/`_stop_entry` 会连续挂出
-    # 一整组（TP 先、SL 后）。若按单倒序累加，最先被选中的是最新的那张 SL，
-    # 凑够张数就停 → **把同组的 TP 撤掉**，保护不完整。
-    #
-    # 聚类用**时间窗**而不是「同一秒」：挂 TP 与 SL 是两次 API 调用，实测跨
-    # 1-2 秒；同秒判据会把一组拆成两组，照样只留 SL 撤掉 TP（实测：账户上
-    # 只剩 SL @2686，TP @2758 被自己的对账撤了）。
-    #
-    # 窗口取 **30 秒** —— 量级由两侧夹定：远大于「挂一组 TP+SL 的耗时」（秒级），
-    # 远小于「两轮之间的间隔」（讨论组 17 分钟、单 bot 15 分钟）。
-    _GROUP_WINDOW_SEC = 30.0
-    ordered = sorted(rows, key=_created, reverse=True)
-    ordered_groups: list[list[dict]] = []
-    for p in ordered:
-        if ordered_groups and abs(_created(p) - _created(ordered_groups[-1][0])) <= _GROUP_WINDOW_SEC:
-            ordered_groups[-1].append(p)
-        else:
-            ordered_groups.append([p])
-
+    # 判据见 docstring「## 判据」：① SL 每方向只留最新一条；② TP 按**触发价**
+    # 保留、只裁同（方向+触发价+文本）的重复腿；③ 触发价种类超上限从最旧撤。
     kept: list[dict] = []
     dropped: list[dict] = []
-    acc = 0
-    for grp in ordered_groups:
-        if acc < target_size:
-            kept.extend(grp)
-            acc += sum(_protector_size(p) for p in grp)
-        else:
-            dropped.extend(grp)
+    dedup = 0     # 同（方向+触发价+文本）的重复腿
+    capped = 0    # 触发价种类超上限被撤（安全阀）
+
+    sl_rows = [p for p in rows if _tail(p) in ("sl", "ls")]
+    tp_rows = [p for p in rows if _tail(p) in ("tp", "lp")]
+
+    # ① SL：单层风控意图 —— 每方向只留最新一条（多价并存 = 提前平仓）
+    sl_by_side: dict[str, list[dict]] = {}
+    for p in sl_rows:
+        sl_by_side.setdefault(_protector_side(p) or "-", []).append(p)
+    for grp in sl_by_side.values():
+        grp.sort(key=_created, reverse=True)
+        kept.append(grp[0])
+        dropped.extend(grp[1:])
+        dedup += max(0, len(grp) - 1)
+
+    # ② TP：**不同触发价一律保留**；同价同文本的多条 = 重复挂单 → 只留覆盖最大
+    #    的那条（并列取最新）。张数不做合并/重算（覆盖对齐是 `_align_tp_group` 的活）。
+    tp_by_key: dict[tuple, list[dict]] = {}
+    for p in tp_rows:
+        tp_by_key.setdefault(
+            (_protector_side(p) or "-", _trigger_key(p), _text(p)), []).append(p)
+    for grp in tp_by_key.values():
+        grp.sort(key=lambda q: (_protector_size(q), _created(q)), reverse=True)
+        kept.append(grp[0])
+        dropped.extend(grp[1:])
+        dedup += max(0, len(grp) - 1)
+
+    # ③ 安全阀：不同触发价的 TP 腿条数上限（防「目标价随行情漂移」时每轮攒一条）
+    tp_kept = [p for p in kept if _tail(p) in ("tp", "lp")]
+    if len(tp_kept) > _MAX_DISTINCT_TP_LEGS:
+        tp_kept.sort(key=_created)                              # 最旧在前
+        for p in tp_kept[:len(tp_kept) - _MAX_DISTINCT_TP_LEGS]:
+            kept.remove(p)
+            dropped.append(p)
+            capped += 1
 
     cancelled: list[str] = []
     for p in dropped:
@@ -229,14 +296,17 @@ def reconcile_protectors(executor: Any, symbol: str) -> dict:
         except Exception as e:  # noqa: BLE001
             log.warning("reconcile: cancel %s failed: %s", pid, e)
 
+    tp_legs = len([p for p in kept if _tail(p) in ("tp", "lp")])
     if cancelled and getattr(executor, "alert_store", None) is not None:
         try:
             executor.alert_store.raise_alert(
                 "orphan_protector",
-                f"{symbol} 保护单张数超额已对齐：保留 {len(kept)} 笔覆盖 {target_size} 张"
-                f"（持仓 {pos_size} + 待成交 {pending_size}），撤掉 {len(cancelled)} 笔",
+                f"{symbol} 保护单重复腿已清理：保留 {len(kept)} 笔"
+                f"（多级 TP 保留 {tp_legs} 条；撤重复 {dedup} 笔／超上限 {capped} 笔）"
+                f"（持仓 {pos_size} + 待成交 {pending_size}）",
                 symbol=symbol, kept=len(kept), cancelled=len(cancelled),
                 position_size=pos_size, pending_size=pending_size,
+                dedup=dedup, capped=capped, tp_legs=tp_legs,
             )
         except Exception:  # noqa: BLE001
             pass
@@ -245,17 +315,6 @@ def reconcile_protectors(executor: Any, symbol: str) -> dict:
         "ok": True, "symbol": symbol, "position_size": pos_size,
         "pending_size": pending_size, "target_size": target_size,
         "kept": len(kept), "cancelled": cancelled,
+        "dedup": dedup, "capped": capped, "tp_legs": tp_legs,
     }
 
-
-def reconcile_bot(executor: Any, symbols: list[str]) -> dict:
-    """对一组 symbol 跑保护单对账，返回汇总。"""
-    out: dict = {"symbols": {}, "cancelled_total": 0}
-    for sym in symbols or []:
-        try:
-            res = reconcile_protectors(executor, sym)
-        except Exception as e:  # noqa: BLE001
-            res = {"ok": False, "error": str(e), "cancelled": []}
-        out["symbols"][sym] = res
-        out["cancelled_total"] += len(res.get("cancelled") or [])
-    return out

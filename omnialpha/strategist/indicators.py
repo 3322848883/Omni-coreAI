@@ -1159,6 +1159,37 @@ def _resolve_wanted(wanted) -> list[str]:
     return list(DEFAULT_INDICATORS if wanted is None else wanted)
 
 
+# K 线表 v1 契约**强制带**这两列（见 `contracts/kline_schema.py` 的 REQUIRED_COLUMNS）：
+# 只要把 `rows` 交出去（快照 `entry["candles"]` / 行情工具），它们就会一路带进 prompt。
+# 谁交出去，谁就得先按 `wanted` 剥一遍 —— 否则 `indicators: []` 只是「不额外挂」，
+# 关不掉自带的这两列（T180，2026-10-26 实测：`orderflow-paper` 配了 `[]`，
+# 真实 user prompt 里 `ema20` / `atr14` 各出现 280 次，而人格明令禁止用指标）。
+CARRIED_INDICATOR_KEYS = ("ema20", "atr14")
+
+
+def strip_carried_indicators(rows: list[dict[str, Any]], wanted) -> list[dict[str, Any]]:
+    """剥掉 K 线自带的那几列，除非 `wanted` 明确要它。
+
+    **必须在 `attach_indicators` 之后调用**：`_fill_*_from` 是「已有值就沿用」，
+    所以先 attach 再剥 —— 配置**要**的指标保留库里那份（长历史算的，比用几十根重算准），
+    配置**不要**的才被拿走。
+
+    `wanted` 语义与 `attach_indicators` 一致（都走 `_resolve_wanted`）：
+    **`None` = 没配 → 默认集**（默认集含 `ema20`/`atr14`，不配就是留着它们）；
+    **`[]` = 显式关掉 → 一个都不留**。
+    不能写 `wanted or ()` —— 那会让「没配」比「显式配」剥得更狠，与工具路径语义相反。
+    """
+    allow = set(_resolve_wanted(wanted))
+    out: list[dict[str, Any]] = []
+    for r in (rows or []):
+        if not isinstance(r, dict):
+            out.append(r)
+            continue
+        out.append({k: v for k, v in r.items()
+                    if k not in CARRIED_INDICATOR_KEYS or k in allow})
+    return out
+
+
 def attach_indicators(rows: list[dict[str, Any]], wanted: list[str] | None = None) -> list[dict[str, Any]]:
     """Attach indicator columns; raises IndicatorNameError on unknown names.
 

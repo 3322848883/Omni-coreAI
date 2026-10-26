@@ -10,7 +10,8 @@ import os
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Optional
 
 log = logging.getLogger(__name__)
@@ -168,16 +169,87 @@ class GateClient:
         return mode
 
     def is_dual_position_mode(self) -> bool:
-        return self.get_position_mode() in ("dual", "dual_long_short", "dual_plus")
+        # 官方三态（FuturesAccount.position_mode）：single / dual / split（分仓，
+        # in_dual_mode 已 deprecated）。"dual_plus" 是 set_position_mode 的请求参数名，
+        # 回显是 "split" —— 两者都要算 dual；"dual_long_short" 为历史防御值保留。
+        return self.get_position_mode() in (
+            "dual", "dual_long_short", "dual_plus", "split")
 
     def get_positions(self) -> list:
         result = self.rest_signed_request("GET", f"{FUTURES_API}/positions")
         return result or []
 
+    # ── 合约元数据磁盘缓存（跨进程）──────────────────────────
+    #
+    # 进程内 `_contract_cache` 只对常驻进程有效；`once` / `process` / `plan` 每次都是
+    # 新进程，冷启动必拉一次 `/contracts`（约 1.37 MB），抖动链路上极易超时
+    # （实测 2026-10-25：单条纸面信号 200s 跑不完；有缓存后 93s 完成）。
+    def _contract_cache_file(self) -> Path:
+        """按 `env + base` 区分：testnet 与 live 的合约表不同。"""
+        root = Path(os.environ.get("OMNIALPHA_ROOT") or Path.cwd())
+        tag = hashlib.sha1(f"{self.env}|{self.base}".encode()).hexdigest()[:8]
+        return root / "data" / "cache" / f"contracts_{self.env}_{tag}.json"
+
+    def _contract_cache_disabled(self) -> bool:
+        return str(os.environ.get("OMNIALPHA_CONTRACT_CACHE") or "").strip().lower() in (
+            "off", "0", "false", "no")
+
+    def _read_contract_disk(self, max_age_sec):
+        """读磁盘缓存。`max_age_sec=None` = 不看 TTL（只给「网络失败兜底」用）。"""
+        if self._contract_cache_disabled():
+            return {}
+        try:
+            f = self._contract_cache_file()
+            if not f.is_file():
+                return {}
+            if max_age_sec is not None and (time.time() - f.stat().st_mtime) > max_age_sec:
+                return {}
+            data = json.loads(f.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or data.get("env") != self.env:
+                return {}
+            out: dict[str, ContractMeta] = {}
+            for name, v in (data.get("contracts") or {}).items():
+                if not isinstance(v, dict):
+                    continue
+                qm = v.get("quanto_multiplier")
+                out[name] = ContractMeta(
+                    name=name,
+                    quanto_multiplier=float(qm) if qm is not None else None,
+                    order_size_round=float(v.get("order_size_round") or 1),
+                    order_price_round=float(v.get("order_price_round") or 0.1),
+                    leverage_max=int(v.get("leverage_max") or 100),
+                )
+            return out
+        except Exception:  # noqa: BLE001 — 缓存坏了就当没有，绝不能因此让下单失败
+            return {}
+
+    def _write_contract_disk(self, cache: dict) -> None:
+        """原子写（tmp + replace）。**只写成功拉到的结果**。"""
+        if self._contract_cache_disabled() or not cache:
+            return
+        try:
+            f = self._contract_cache_file()
+            f.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "env": self.env,
+                "saved_at": int(time.time()),
+                "contracts": {k: asdict(v) for k, v in cache.items()},
+            }
+            tmp = f.with_name(f.name + ".tmp")
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            os.replace(tmp, f)
+        except Exception:  # noqa: BLE001
+            log.debug("write contract disk cache failed", exc_info=True)
+
     def get_contracts(self, max_age_sec: int = 3600) -> dict[str, ContractMeta]:
         now = time.time()
         if self._contract_cache and (now - self._contract_cache_ts) < max_age_sec:
             return self._contract_cache
+        # 跨进程缓存：命中就不碰网络（CLI 冷启动省掉一次 1.37 MB 请求）
+        disk = self._read_contract_disk(max_age_sec)
+        if disk:
+            self._contract_cache, self._contract_cache_ts = disk, now
+            return disk
         try:
             raw = self.public_get(f"{FUTURES_API}/contracts") or []
         except GateApiError:
@@ -188,6 +260,11 @@ class GateClient:
             # 首次调用（无缓存）时仍然抛出，不掩盖真正的不可用。
             if self._contract_cache:
                 return self._contract_cache
+            stale_cache = self._read_contract_disk(None)
+            if stale_cache:
+                log.warning("合约元数据拉取失败，回退**过期**磁盘缓存（%d 个合约）",
+                            len(stale_cache))
+                return stale_cache
             raise
         cache: dict[str, ContractMeta] = {}
         for item in raw:
@@ -208,6 +285,7 @@ class GateClient:
             )
         self._contract_cache = cache
         self._contract_cache_ts = now
+        self._write_contract_disk(cache)
         return cache
 
     def get_contract(self, symbol: str) -> ContractMeta:
@@ -265,6 +343,39 @@ class GateClient:
         if self.is_dual_position_mode():
             path = f"{FUTURES_API}/dual_comp/positions/cross_mode"
         return self.rest_signed_request("POST", path, "", body)
+
+    def set_position_mode(self, position_mode: str) -> Any:
+        """切换**账户级**持仓模式：`single`（单向）/ `dual`（双向）/ `dual_plus`（分仓）。
+
+        ⚠️ **参数必须走 query string**（Gate 的标量参数约定），不能放 JSON body ——
+        实测 2026-10-16：
+          `POST /dual_mode`         body `{"dual_mode": false}`       → `MISSING_REQUIRED_PARAM`
+          `POST /set_position_mode` body `{"position_mode":"single"}` → `INVALID_PARAM_VALUE`
+          `POST /dual_mode?dual_mode=false`                           → ✅ 成功（切到 single）
+        错误从「参数缺失」推进到 `ORDER_PENDING` 是参数形态正确的信号。
+
+        ⚠️ 前置条件：该保证金币种下**所有**永续合约无持仓、无挂单（比
+        `set_margin_mode` 的单合约限制更严格）—— 有挂单时报 400 `ORDER_PENDING`。
+
+        ⚠️ 切换后**必须清 `_position_mode_cache`** —— `get_position_mode()` 有 30s
+        缓存，不清会让引擎在切换后的半分钟里仍按旧模式走分支（下单 body 的
+        `auto_size` / `_close` 的 side 校验都读它）。
+
+        ⚠️ 切 `single` 后**必须同时开 `no_flip`**：单向模式下反向单不是开反向仓，
+        而是**自动平掉现有仓** —— `no_flip: false` 会让一句 `open_short` 直接平掉多头。
+        """
+        mode = str(position_mode or "").strip().lower()
+        if mode not in ("single", "dual", "dual_plus"):
+            raise GateApiError("position_mode must be single|dual|dual_plus")
+        if mode == "dual_plus":
+            # 分仓模式走 2026-04-30 新增端点（经典 dual_mode 不支持三态）
+            path, qs = f"{FUTURES_API}/set_position_mode", "position_mode=dual_plus"
+        else:
+            path = f"{FUTURES_API}/dual_mode"
+            qs = "dual_mode=" + ("true" if mode == "dual" else "false")
+        r = self.rest_signed_request("POST", path, qs, None)
+        self._position_mode_cache = (None, 0.0)
+        return r
 
     # ── orders ───────────────────────────────────────────
     def place_order(self, body: dict) -> dict:

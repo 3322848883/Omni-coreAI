@@ -349,7 +349,13 @@ def generate_and_encode(
     klines: list[dict], *, symbol: str = "", timeframe: str = "",
     output_path: Optional[Path] = None,
 ) -> Optional[str]:
-    """一步生成图并返回 base64 data URI（失败返回 None）。"""
+    """一步生成图并返回 base64 data URI（失败返回 None）。
+
+    失败必须留痕：此前 except 后静默 return None，调用方只能看到
+    reason="empty"，根因（如运行环境缺 Pillow）完全不可见 —— 2026-10-13
+    排查「一张图都没生成」时被迫逐层猜。现在 warning 打出异常后原样向上
+    抛出，由 loop._generate_charts 的逐 tf try 捕获并记进 chart meta。
+    """
     try:
         png = generate_candlestick_chart(
             klines, symbol=symbol, timeframe=timeframe, output_path=output_path,
@@ -357,5 +363,10 @@ def generate_and_encode(
         if not png:
             return None
         return chart_to_base64(png)
-    except Exception:  # noqa: BLE001
-        return None
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).warning(
+            "vision: 生成 %s/%s K 线图异常: %s: %s",
+            symbol, timeframe, type(e).__name__, e,
+        )
+        raise

@@ -327,6 +327,7 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
     # 基线里的 enabled 一律忽略（防误改基线把 bot 带上生产）。
     # 想启用 → 在 config/bots.local/<同名>.yaml 写 enabled: true
     baseline_enabled = bool(data.get("enabled", False))
+    baseline_has_enabled = "enabled" in data
     if baseline_enabled:
         log.warning(
             "baseline %s has enabled: true — IGNORED (enable via %s/%s instead)",
@@ -334,6 +335,18 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
         )
     data = deep_merge(data, ov_data)
     enabled = bool(ov_data.get("enabled", False))
+    # ── 反向陷阱：基线显式关、overlay 又开 ──
+    # 「在 git 基线里把 bot 关掉」是直觉操作，但按上面的规则它**完全不生效**，
+    # 于是出现「我明明关了，它还在下单」——2026-10-13 brooks-eth 线上事故复盘：
+    # 基线 enabled:false + overlay enabled:true，bot 全程在管用户的手动仓。
+    # 静默放行等于把这个陷阱留着；这里必须显式喊出来，且写明真正的关闭方式。
+    if enabled and baseline_has_enabled and not baseline_enabled:
+        log.warning(
+            "%s: baseline enabled: false but overlay %s/%s sets enabled: true — "
+            "BOT IS ENABLED（基线里的 enabled 不生效）。要停 bot：改 overlay 的 "
+            "enabled: false，或直接停 systemd 服务；只改基线无效。",
+            path.name, ov_dir.name, path.name,
+        )
     env = str(data.get("env") or "live").lower()
     if env not in ("live", "testnet", "paper"):
         raise GateApiError(f"env must be live|testnet in {path}")
