@@ -103,6 +103,61 @@ class TestWireIntSize(unittest.TestCase):
         self.assertIsInstance(body["initial"]["size"], float)
 
 
+class TestPriceOrderIntSize(unittest.TestCase):
+    """`/price_orders`（auto orders）的 `initial.size` 是 int64 —— **不接受小数**。
+
+    实测 2026-10-27（pa-eth-v5 实盘）：入场 `size_usd` 换算出 21.4 张，
+    `/orders` 接受并 floor 成 21（Gate 回报 size=-21），但同一个 21.4 去挂
+    TP/SL 触发单 → `AUTO_INVALID_REQUEST_BODY`；小数 0.7 同样 400。
+    → 触发单必须按**整数张**下（与交易所 floor 后的真实持仓一致：21.4 → 21）。
+    """
+
+    def _place(self, body):
+        cap = _Captured()
+        client = GateClient(api_key="k", api_secret="s", env="live")
+        with mock.patch("urllib.request.urlopen", cap):
+            client.place_price_order(body)
+        return cap.req
+
+    def test_fractional_truncated_to_whole_contracts(self):
+        req = self._place({"initial": {"contract": "ETH_USDT", "size": -21.4,
+                                       "price": "0", "tif": "ioc",
+                                       "reduce_only": True, "text": "t-pev5-tp"},
+                           "trigger": {"strategy_type": 0, "price_type": 1,
+                                       "price": "2310.5", "rule": 2}})
+        d = json.loads(req.data.decode())
+        self.assertEqual(d["initial"]["size"], -21)
+        self.assertIsInstance(d["initial"]["size"], int)
+
+    def test_positive_fractional_truncated(self):
+        req = self._place({"initial": {"contract": "ETH_USDT", "size": 21.4,
+                                       "price": "0", "tif": "ioc",
+                                       "reduce_only": True, "text": "t-pev5-sl"},
+                           "trigger": {"strategy_type": 0, "price_type": 1,
+                                       "price": "2332.3", "rule": 1}})
+        self.assertEqual(json.loads(req.data.decode())["initial"]["size"], 21)
+
+    def test_below_one_contract_refused(self):
+        """0.7 张 → 0 张：挂 0 张保护单 = 裸仓，必须拒（让调用方回滚入场）。"""
+        from omnialpha.gate_client import GateApiError
+        with self.assertRaises(GateApiError):
+            self._place({"initial": {"contract": "ETH_USDT", "size": -0.7,
+                                     "price": "0", "tif": "ioc",
+                                     "reduce_only": True, "text": "t-pev5-tp"},
+                         "trigger": {"strategy_type": 0, "price_type": 1,
+                                     "price": "2310.5", "rule": 2}})
+
+    def test_venue_close_size_zero_untouched(self):
+        """`close=true`（venue-computed close）的 size=0 是合法语义，不能拒。"""
+        req = self._place({"initial": {"contract": "ETH_USDT", "size": 0,
+                                       "price": "0", "tif": "ioc",
+                                       "reduce_only": True, "close": True,
+                                       "auto_size": "close_short", "text": "t-pev5-tp"},
+                           "trigger": {"strategy_type": 0, "price_type": 1,
+                                       "price": "2310.5", "rule": 2}})
+        self.assertEqual(json.loads(req.data.decode())["initial"]["size"], 0)
+
+
 class TestWireBodyHelper(unittest.TestCase):
     def test_nested_list_and_tuple(self):
         out = _wire_body({"legs": [1.0, 0.7], "t": (2.0,)})

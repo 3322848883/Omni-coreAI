@@ -57,6 +57,41 @@ SYMBOL_MAP = {
 }
 
 
+def _int_price_order_size(body: Any) -> Any:
+    """`/price_orders`（auto orders）的 `initial.size` 必须是**整数张**。
+
+    与 `/orders` 不同：`/orders` 接受小数 size 并在交易所侧 floor（实测 21.4 →
+    持仓 21），但**触发单端点对小数字面量直接 400** `AUTO_INVALID_REQUEST_BODY`
+    （实测 2026-10-27：pa-eth-v5 入场 21.4 张挂成功，同一 21.4 张挂 TP/SL 全灭）。
+
+    因此触发单张数向零取整到整数（= 交易所 floor 后持仓的真实张数）。
+    不足 1 张 → **抛错**：挂 0 张保护单等于裸仓，比拒单危险，让调用方回滚入场。
+    `close=true`（venue-computed close）语义上 size 必须为 0，跳过本检查。
+    """
+    if not isinstance(body, dict):
+        return body
+    init = body.get("initial")
+    if not isinstance(init, dict) or init.get("close"):
+        return body
+    raw = init.get("size")
+    if raw is None or isinstance(raw, bool):
+        return body
+    try:
+        size = float(raw)
+    except (TypeError, ValueError):
+        return body
+    whole = int(size)  # 向零取整：-21.4 → -21，21.4 → 21（与交易所 floor 一致）
+    if whole == 0:
+        raise GateApiError(
+            f"price_orders 只接受整数张：{size:g} 张不足 1 张 —— 拒绝挂 0 张保护单"
+            f"（等于裸仓）")
+    out = dict(body)
+    new_init = dict(init)
+    new_init["size"] = whole
+    out["initial"] = new_init
+    return out
+
+
 class GateApiError(Exception):
     def __init__(self, message: str, status: int = 0, label: str = ""):
         super().__init__(message)
@@ -541,6 +576,9 @@ class GateClient:
         return result
 
     def place_price_order(self, body: dict) -> dict:
+        # 触发单张数必须是整数（见 `_int_price_order_size`）—— 所有 price_orders
+        # 调用点（stop_entry 保护 / 阶梯 SL / _place_trigger）都从这里过一道。
+        body = _int_price_order_size(body)
         result = self.rest_signed_request("POST", f"{FUTURES_API}/price_orders", "", body)
         if not isinstance(result, dict):
             raise GateApiError(f"unexpected place_price_order response: {result!r}")
