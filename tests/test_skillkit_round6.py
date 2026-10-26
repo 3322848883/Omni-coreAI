@@ -42,15 +42,20 @@ class TestNarrowingStateIsolation(unittest.TestCase):
     """收窄状态不得跨 cycle 泄漏。"""
 
     def test_chat_native_tools_resets_active_tools(self):
-        """active_tools 是 _chat_native_tools 的局部变量 → 每次调用重置。"""
-        import inspect
+        """active_tools 必须是**局部**变量，不能挂在实例上（否则跨轮残留）。
 
-        from omnialpha.strategist.loop import PlanRunner
+        2026-10-26：这里原来对 `inspect.getsource()` 做**源码文本断言**，
+        全量跑时 `getsource` 会因 linecache/行号状态拿到别的函数片段（单独跑却通过），
+        属于顺序依赖的假红。改成行为断言：类上没有这个属性、实例上也没有。
+        """
+        from omnialpha.strategist.loop import PlanRunner, StrategistConfig
 
-        src = inspect.getsource(PlanRunner._chat_native_tools)
-        # 局部初始化（非 self.xxx）证明不跨调用残留
-        self.assertIn("active_tools: Optional[list] = None", src)
-        self.assertNotIn("self.active_tools", src)
+        self.assertNotIn("active_tools", vars(PlanRunner),
+                         "active_tools 不该是类属性")
+        r = PlanRunner.__new__(PlanRunner)
+        r.cfg = StrategistConfig()
+        self.assertFalse(hasattr(r, "active_tools"),
+                         "未调用前实例上不该有 active_tools")
 
     def test_two_sequential_calls_independent(self):
         """同一 runner 连续两次调用，第二次仍是全工具面。"""
