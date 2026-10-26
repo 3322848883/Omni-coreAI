@@ -49,7 +49,7 @@ strategist:
   llm:
     base_url_env: OPENAI_BASE_URL
     api_key_env: OPENAI_API_KEY
-    model: global:deepseek-v4.1-flash
+    model: cn:deepseek-v4.1-flash
     temperature: 0.1
     timeout_sec: 90
     max_tokens: 4096

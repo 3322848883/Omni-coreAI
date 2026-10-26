@@ -22,4 +22,4 @@ strategist:
   write_hold: false
   tools: {enabled: true, native: true, max_rounds: 3}
   risk: {min_confidence: 0.3, max_chips: 1, max_notional_usd: 3000}
-  llm: {provider: gw-flash, model: global:deepseek-v4.1-flash-sg, reasoning_effort: medium}
+  llm: {provider: gw-flash, model: cn:deepseek-v4.1-flash, reasoning_effort: medium}
