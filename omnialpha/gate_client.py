@@ -50,13 +50,40 @@ def _f(v: Any, default: float = 0.0) -> float:
         return float(default)
 
 
+#: 合约磁盘缓存的 schema 版本。
+#: v2（2026-10-26）：补 `size_min / size_max / enable_decimal / price_deviate /
+#: maintenance_rate / maker_fee_rate / taker_fee_rate`，并把拉取端点改成带
+#: `X-Gate-Size-Decimal: 1`（否则 `order_size_min` 会被 Gate 按 int 截断：0.1 → 0）。
+#: v1 缓存必须丢弃 —— 否则 ETH 的 `size_step` 会从 0.1 退化成 1（缓存值盖住真实值）。
+_CONTRACT_CACHE_SCHEMA = 2
+
+
 @dataclass
 class ContractMeta:
     name: str
     quanto_multiplier: float
+    # ⚠️ 交易所**没有** `order_size_round` 这个字段（1061 个合约 0 命中，2026-10-26 实测），
+    # 恒为 1 是假值。真实步长见 `size_step`。
     order_size_round: float
     order_price_round: float
     leverage_max: int
+    # ── 2026-10-26 实盘挂单实测后补充 ──────────────────────
+    size_min: float = 1.0          # 交易所 order_size_min：0.1（enable_decimal）或 1
+    size_max: float = 0.0          # 0 = 未知/未读
+    enable_decimal: bool = False   # True 时张数可到 0.1
+    price_deviate: float = 0.0     # order_price_deviate（仅约束 taker 单，maker 不受限）
+    maintenance_rate: float = 0.0  # 维持保证金率（ETH 0.003；paper 曾硬编码 0.01）
+    maker_fee_rate: float = 0.0    # 负值 = 返佣
+    taker_fee_rate: float = 0.0
+
+    @property
+    def size_step(self) -> float:
+        """张数步长。实测：`enable_decimal=True` 的合约 `order_size_min=0.1`，其余 `=1`；
+        且交易所对非步长倍数**静默 floor**（0.15→0.1），所以必须自己按此取整。
+        """
+        if self.size_min and self.size_min > 0:
+            return float(self.size_min)
+        return 0.1 if self.enable_decimal else 1.0
 
 
 @dataclass
@@ -129,7 +156,8 @@ class GateClient:
         except Exception as e:
             raise GateApiError(f"request failed {path}: {e}") from e
 
-    def public_get(self, path: str, query_string: str = "", attempts: int = 3) -> Any:
+    def public_get(self, path: str, query_string: str = "", attempts: int = 3,
+                   extra_headers: Optional[dict] = None) -> Any:
         """GET 公开端点。**对瞬时网络故障做有界重试**。
 
         本地直连交易所 API 的链路会抖（实测底层错误全是 TLS 层：
@@ -142,7 +170,9 @@ class GateClient:
             url += f"?{query_string}"
         last: Optional[Exception] = None
         for i in range(max(1, int(attempts))):
-            req = urllib.request.Request(url, method="GET")
+            # `extra_headers`：`X-Gate-Size-Decimal: 1` 让 Gate 把 `order_size_min`
+            # 按真实小数返回（不带则 int 截断：ETH 0.1 → 0，15 个小数张合约全变 0）。
+            req = urllib.request.Request(url, method="GET", headers=dict(extra_headers or {}))
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     raw = resp.read().decode("utf8")
@@ -219,6 +249,13 @@ class GateClient:
             data = json.loads(f.read_text(encoding="utf-8"))
             if not isinstance(data, dict) or data.get("env") != self.env:
                 return {}
+            # 🔴 schema 闸门：v1 缓存只有 5 个字段，缺 size_min / enable_decimal。
+            # 照旧读回会让 `size_step` 从 0.1 退化成 1（张数一直按整数算），
+            # 所以旧版本缓存**直接判无效**，让它回源一次重写。
+            if int(data.get("schema") or 1) < _CONTRACT_CACHE_SCHEMA:
+                log.info("合约缓存 schema 过旧（v%s < v%s），忽略并回源",
+                         data.get("schema"), _CONTRACT_CACHE_SCHEMA)
+                return {}
             out: dict[str, ContractMeta] = {}
             for name, v in (data.get("contracts") or {}).items():
                 if not isinstance(v, dict):
@@ -230,6 +267,13 @@ class GateClient:
                     order_size_round=float(v.get("order_size_round") or 1),
                     order_price_round=float(v.get("order_price_round") or 0.1),
                     leverage_max=int(v.get("leverage_max") or 100),
+                    size_min=_f(v.get("size_min"), 1.0),
+                    size_max=_f(v.get("size_max"), 0.0),
+                    enable_decimal=bool(v.get("enable_decimal")),
+                    price_deviate=_f(v.get("price_deviate"), 0.0),
+                    maintenance_rate=_f(v.get("maintenance_rate"), 0.0),
+                    maker_fee_rate=_f(v.get("maker_fee_rate"), 0.0),
+                    taker_fee_rate=_f(v.get("taker_fee_rate"), 0.0),
                 )
             return out
         except Exception:  # noqa: BLE001 — 缓存坏了就当没有，绝不能因此让下单失败
@@ -244,6 +288,7 @@ class GateClient:
             f.parent.mkdir(parents=True, exist_ok=True)
             payload = {
                 "env": self.env,
+                "schema": _CONTRACT_CACHE_SCHEMA,
                 "saved_at": int(time.time()),
                 "contracts": {k: asdict(v) for k, v in cache.items()},
             }
@@ -263,7 +308,10 @@ class GateClient:
             self._contract_cache, self._contract_cache_ts = disk, now
             return disk
         try:
-            raw = self.public_get(f"{FUTURES_API}/contracts") or []
+            raw = self.public_get(
+                f"{FUTURES_API}/contracts",
+                extra_headers={"X-Gate-Size-Decimal": "1"},
+            ) or []
         except GateApiError:
             # 合约元数据（quanto_multiplier / tick / lot / 杠杆上限）几乎不变，所以拉取失败时
             # **回退到上一份缓存**，而不是让整笔操作失败。实测 /contracts 返回约 1.1 MB，
@@ -294,6 +342,15 @@ class GateClient:
                 order_size_round=float(item.get("order_size_round") or 1),
                 order_price_round=float(item.get("order_price_round") or 0.1),
                 leverage_max=int(item.get("leverage_max") or 100),
+                # 用 `_f` 而不是 `x or 默认`：`order_size_min=0` 是**真值**，
+                # `or` 会把它换成 1，张数边界就一直读错。
+                size_min=_f(item.get("order_size_min"), 1.0),
+                size_max=_f(item.get("order_size_max"), 0.0),
+                enable_decimal=bool(item.get("enable_decimal")),
+                price_deviate=_f(item.get("order_price_deviate"), 0.0),
+                maintenance_rate=_f(item.get("maintenance_rate"), 0.0),
+                maker_fee_rate=_f(item.get("maker_fee_rate"), 0.0),
+                taker_fee_rate=_f(item.get("taker_fee_rate"), 0.0),
             )
         self._contract_cache = cache
         self._contract_cache_ts = now
