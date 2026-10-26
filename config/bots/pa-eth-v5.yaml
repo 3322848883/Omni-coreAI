@@ -12,8 +12,10 @@
 #   账户与 brooks-btc / brooks-eth 相同，靠 label_prefix=pev5 隔离，**三者不得同时 enabled**。
 bot_id: pa-eth-v5
 enabled: false          # 服务器部署后仍保持禁用：启动需显式 run/plan-loop
-env: paper
+env: live
 exchange: gate
+api_key_env: GATE_API_KEY
+api_secret_env: GATE_API_SECRET
 symbols:
   - ETH_USDT
 max_notional_usd: 200000
@@ -33,6 +35,8 @@ account_risk:
   max_notional_pct: 20.0
   max_total_notional_usd: 300000
   daily_loss_limit_usd: 1000
+  # 2026-10-27 切实盘（账户 GATE_API_KEY，权益 ~77 USDT）：总名义 ≤10×权益
+  max_total_notional_pct: 10.0
 
 paper:
   feed_exchange: gate
