@@ -801,12 +801,14 @@ class PlanRunner:
         self._save_last_cycle(plan.cycle_id)
         stale_notes = self._gate_stale_snapshot(plan, snapshot)
         check_notes = self._gate_checks_declared(plan)
+        tp_target_notes = self._gate_tp_target(plan)
         rejected_triggers = self._apply_ai_triggers(plan)
         risk_result = apply_risk(plan, self.cfg.risk)
         # 解析期的**宽容告警**（如 `scenarios` 非对象被丢弃，D9/T12）此前只落 `log.warning`，
         # run 结果与 ledger 里都看不到 —— 等于告警没有出口。这里并进 notes。
         run_notes = (risk_result.notes + rejected_triggers
-                     + list(plan.notes or []) + stale_notes + check_notes)
+                     + list(plan.notes or []) + stale_notes + check_notes
+                     + tp_target_notes)
         payload = chips_to_signal(plan, risk_result, bot_id=self.cfg.bot_id or self.inbox.name)
         orders = payload.get("orders") or []
         # agent-memory：每轮决策入 journal（含快照摘要/模型/缓存命中，设计 S2.4）
@@ -1773,6 +1775,46 @@ class PlanRunner:
             len(dropped), dropped, len(kept))
         plan.chips = kept
         return ["require_checks: 缺自证检查，已拒绝腿 %s" % ",".join(dropped)]
+
+    def _gate_tp_target(self, plan) -> list[str]:
+        """网格腿必须有 `meta.tp_target` —— 它是 `ensure_grid_tp` 的**唯一输入**。
+
+        人格规定：网格 7 层的 `tp` 只能写占位价（多单 `tp` 必须 > mark，而目标在
+        现价下方 → 写了非法），真目标写进 `meta.tp_target`，成交后由
+        `ensure_grid_tp` 改挂；马丁 3 层共用结构位，**不需要** tp_target。
+
+        为什么需要引擎闸门：人格第十节第 6 条明写「缺任何一档 = 本轮自检失败，
+        回去补齐」，但 2026-10-26 实测同一 bot 连跑 6 轮 —— r5/r6 各 7/7 档带了，
+        **r7 一条都没带（0/7）**。软约束覆盖率不是 100%，而缺了它
+        `ensure_grid_tp` 就没有目标可挂 → 网格成交后只能等马丁共用 TP 全平
+        = **假网格**（这正是 10-15 那次改造要根除的东西）。
+
+        判据刻意保守：**只在「带 tp 的入场腿 ≥3 条、且一条 tp_target 都没有」时
+        才报**。单个/两个档可能是马丁腿，也可能就是「交回 AI」的正常情形
+        （`ensure_grid_tp` 对缺 target 的档会 skip 并留痕），不该误报。
+
+        默认**只记 note**（进 `orders`/notes，可见但不拦单：整轮作废的代价更大）；
+        配 `strategist.require_tp_target: true` 才丢腿。
+        """
+        acts = {"open_long", "open_short", "add_long", "add_short"}
+        legs = [c for c in plan.chips
+                if str(getattr(c, "action", "") or "").lower() in acts
+                and getattr(c, "tp", None) is not None]
+        if len(legs) < 3:
+            return []
+        if any(getattr(c, "tp_target", None) is not None for c in legs):
+            return []
+        if getattr(getattr(self, "cfg", None), "require_tp_target", False):
+            drop = {id(c) for c in legs}
+            kept = [c for c in plan.chips if id(c) not in drop]
+            log.warning("require_tp_target: %d 条入场腿全缺 meta.tp_target —— 丢弃它们，保留 %d 条",
+                        len(legs), len(kept))
+            plan.chips = kept
+            return ["require_tp_target: %d 条入场腿全缺 meta.tp_target，已丢弃" % len(legs)]
+        log.warning("tp_target_all_missing: %d 条入场腿都没写 meta.tp_target —— "
+                    "ensure_grid_tp 将无目标可挂（网格成交后没有逐档止盈）", len(legs))
+        return ["tp_target_all_missing: %d/%d 条入场腿缺 meta.tp_target（网格止盈无从挂起）"
+                % (len(legs), len(legs))]
 
     def _has_data_call(self) -> bool:
         """本轮是否**真的取了行情数据**（`skill`/`skill_ref` 不算）。"""
