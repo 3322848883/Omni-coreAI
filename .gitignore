@@ -87,3 +87,18 @@ config/.bots-backup/
 # 远程部署凭据（含密码，绝不入库）
 scripts/.deploy.env
 .gate-deploy.env
+
+# ── S1-20261026：一次性备份/探针不入库 ───────────────────────────
+# 注意：只忽略**仓库根级**的 _*.py；scripts/_*.py 有 125 个是在版本库里的
+# （含 scripts/_mutcheck.py 变异检查工具），不能用全局 `_*.py`。
+/_bak_*/
+/*.py
+/_pack_*.json
+/_probe_*.json
+/_tmp_*.json
+*.bak-*
+*.bak_*
+*._bak*
+*_bak_hot_*
+
+prompts/_bak_*
