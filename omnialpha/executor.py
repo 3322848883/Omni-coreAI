@@ -3515,8 +3515,8 @@ class Executor:
             out.append((str(pid), px, abs(raw_sz), side))
         return out
 
-    def _resolve_sl_size(self, intent, pos_side: str, exit_size: int,
-                         meta) -> tuple[int, list[str]]:
+    def _resolve_sl_size(self, intent, pos_side: str, exit_size: float,
+                         meta) -> tuple[float, list[str]]:
         """算出 SL 该挂多少张 + 要撤掉的同价旧单（F1）。
 
         三步：
@@ -3532,26 +3532,29 @@ class Executor:
         第 ③ 步只在 ① 生效时执行。
         """
         override = float(intent.sl_size_override) if intent.sl_size_override else 0.0
-        sl_size = override or int(exit_size)
+        # 小数张（ETH 0.1 步长）：`int(0.7)` = 0 → 首档挂出一条 **0 张 SL**
+        # → paper 引擎 `0.0 or None` → float(None) → ExchangeError('invalid size')，
+        # 且交易所侧也是一条无意义 0 张单。全程 float，步长交给 paper/validate 落。
+        sl_size = override or round(float(exit_size), 8)
         merge_ids: list[str] = []
         if intent.sl_mode != "limit_order":
             try:
                 sl_size, merge_ids = self._plan_shared_sl(
-                    intent.symbol, pos_side, float(intent.sl), sl_size, meta)
+                    intent.symbol, pos_side, float(intent.sl), float(sl_size), meta)
             except Exception as e:  # noqa: BLE001 — 归并只是优化，失败不该阻断挂 SL
                 log.warning("shared-SL merge probe failed %s: %s", intent.symbol, e)
                 merge_ids = []
         if override:
             try:
-                cap = int(self._sl_cover_cap(intent.symbol, pos_side))
+                cap = self._sl_cover_cap(intent.symbol, pos_side)
                 if cap > 0:
-                    sl_size = min(int(sl_size), cap)
+                    sl_size = min(float(sl_size), float(cap))
             except Exception as e:  # noqa: BLE001
                 swallow("executor._resolve_sl_size.cap", e, level=logging.WARNING)
-        return int(sl_size), merge_ids
+        return round(float(sl_size), 8), merge_ids
 
     def _plan_shared_sl(self, symbol: str, pos_side: str, new_sl: float,
-                        add_size: int, meta) -> tuple[int, list[str]]:
+                        add_size: float, meta) -> tuple[float, list[str]]:
         """为「全梯共用一条 SL」算出新 SL 应挂的张数，以及要撤掉的同价旧单。
 
         阶梯网格是**逐档**调 `_open` 建仓的（每档一张或几张），每档都带自己的
@@ -3574,9 +3577,10 @@ class Executor:
           钳制 —— 那时按真实敞口重挂才是对的。**永不挂出超过敞口的 protect 单**：
           Gate 若因 reduce_only 超配而拒，`_open` 会走 rollback 把入场单也撤了。
         """
-        add_size = int(add_size)
+        # 小数张：`int(0.7)`=0 会把「本档 + 同价旧单归并」算成 0 张 SL（裸仓）
+        add_size = round(float(add_size), 8)
         ids: list[str] = []
-        old_total = 0
+        old_total = 0.0
         try:
             tol = abs(float(getattr(meta, "order_price_round", 0) or 0))
         except (TypeError, ValueError):
@@ -3588,7 +3592,7 @@ class Executor:
             if abs(round_price(px, meta) - target) > tol + 1e-9:
                 continue
             ids.append(pid)
-            old_total += int(sz)
+            old_total += _num(sz)
         if not ids:
             return add_size, []          # 没有同价旧单 → 本档单挂（原行为）
         out_size = min(old_total + add_size, self._sl_cover_cap(symbol, pos_side))
@@ -3596,7 +3600,7 @@ class Executor:
             return add_size, []
         return out_size, ids
 
-    def _sl_cover_cap(self, symbol: str, pos_side: str) -> int:
+    def _sl_cover_cap(self, symbol: str, pos_side: str) -> float:
         """该方向「SL 应当覆盖」的张数上限 = 已成交持仓 + 已挂未成交入场单。
 
         给同价归并定一个不越界的上限（见 `_plan_shared_sl`）。入场单只算
@@ -3613,7 +3617,7 @@ class Executor:
         查不到（API 抖动）时 `_owned_open_orders` 返回空 → 上限退化成持仓量 →
         归并被削到「只覆盖已成交」= 安全侧（少并、不多挂）。
         """
-        pos = 0
+        pos = 0.0
         for p in self._symbol_positions(symbol):
             if str(p.get("side") or "") == pos_side:
                 pos += qty(p.get("size"))
@@ -3623,8 +3627,8 @@ class Executor:
             if str(o.get("status") or "").lower() not in ("open", ""):
                 continue
             try:
-                size = int(float(o.get("size") or 0))
-                left = int(float(o.get("left") or 0))
+                size = _num(o.get("size"))
+                left = _num(o.get("left"))
             except (TypeError, ValueError):
                 continue
             if size == 0 or left <= 0:
