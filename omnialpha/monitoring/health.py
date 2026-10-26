@@ -130,6 +130,14 @@ class HealthMonitor:
         except Exception:  # noqa: BLE001
             pass
 
+    def current_error_streak(self) -> int:
+        """只看 plan 侧的连续失败次数（不含 run 侧 `exec_fail_streak`）。
+
+        `current_fail_streak()` 取两者最大值，用来判断「这轮失败是否已达阈值」会把
+        执行层的陈旧 streak 混进来（两个进程各写自己的 role 文件）。恢复通知必须只看 plan 侧。
+        """
+        return int(self._load().get("error_streak") or 0)
+
     def current_fail_streak(self) -> int:
         """当前连续失败次数（plan 侧 error_streak 与 run 侧 exec_fail_streak 取大）。
 
