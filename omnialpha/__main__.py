@@ -59,6 +59,7 @@ def _build_plan_runner(bot, paths: ProjectPaths):
     cfg = StrategistConfig(
         enabled=bool(s.get("enabled", True)),
         require_checks=bool(s.get("require_checks", False)),
+        alert_fail_streak=int(s.get("alert_fail_streak") or 2),
         interval_sec=int(s.get("interval_sec") or 300),
         timeframe=str(s.get("timeframe") or "15m"),
         vision=bool(s.get("vision", True)),

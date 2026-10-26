@@ -7,6 +7,7 @@
   - dup_fill          同一 order_id 成交入账重复
   - orphan_protector  平仓后遗留 reduce-only SL/TP
   - plan_fail         plan 周期连续失败（LLM/解析），每 error_warn 次记一条
+  - plan_recovered    plan 连续失败后恢复（连续次数归零；此前已达阈值才发）
 
 数据文件：data/bots/<id>/state/alerts.json
 结构：{"alerts": [{ts, type, detail, ...}, ...]}  最多保留 200 条。
@@ -27,6 +28,7 @@ TYPE_PEAK_TRAIL = "peak_trail_error"
 TYPE_DUP_FILL = "dup_fill"
 TYPE_ORPHAN = "orphan_protector"
 TYPE_PLAN_FAIL = "plan_fail"
+TYPE_PLAN_RECOVERED = "plan_recovered"
 
 
 class AlertStore:

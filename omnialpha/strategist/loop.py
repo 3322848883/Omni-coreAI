@@ -81,6 +81,9 @@ class StrategistConfig:
     # 默认 False（不改任何现有 bot 行为）。**系统层不认识检查内容** —— 只判「有没有」；
     # 检查项叫什么、阈值多少、结论怎么叫，全由人格决定。
     require_checks: bool = False
+    # 连续失败多少次开始告警。默认 2：martin-grid interval=900s → 30 分钟内必响；
+    # 原先 `HealthMonitor` 默认 5（=75 分钟）对「静默停摆」这个故障太慢。
+    alert_fail_streak: int = 2
     candles: int = 100
     market: MarketConfig = field(default_factory=MarketConfig)
     env: str = "live"
@@ -647,6 +650,26 @@ class PlanRunner:
         return hit, model
 
     def run_once(self, trigger: str = "manual") -> dict[str, Any]:
+        """轮入口兜底：**任何未捕获异常都算一次周期失败**（连续 N 次告警）。
+
+        2026-10-26 事故：`schema.py` 被整文件覆盖丢了 `symbols`，`parse_plan_text()`
+        抛的是 `TypeError` 而非 `PlanError`；而 `_record_cycle_failure` 只在 `degraded`
+        分支被调用 → `error_streak` 恒为 0 → `plan_fail` 告警与飞书**一次没响**，
+        martin-grid / pa-eth-v5 静默停摆 15 小时（57 + 195 轮全失败）。
+        这里兜住所有异常：先记一次失败（落盘+告警），再**原样抛出**——不改变原有失败语义。
+        """
+        try:
+            return self._run_once_impl(trigger)
+        except Exception as e:  # noqa: BLE001
+            try:
+                root = self.cfg.bot_root or Path.cwd()
+                bid = self.cfg.bot_id or self.inbox.name
+                self._record_cycle_failure(root, bid, f"crash: {type(e).__name__}: {e}")
+            except Exception:  # noqa: BLE001 — 告警失败绝不能掩盖原始异常
+                log.exception("record cycle failure failed")
+            raise
+
+    def _run_once_impl(self, trigger: str = "manual") -> dict[str, Any]:
         # 每轮开始清零。原先只有 `analyze_once` 清 —— plan-loop 走的是 run_once，
         # 于是 `tool_usage` **跨轮累加**，`tool_usage_summary` 的 counts 越跑越大，
         # 「这轮调了几次工具」根本读不出来（D-26）。
@@ -745,8 +768,7 @@ class PlanRunner:
             self._record_cycle_failure(root, bid, degraded)
         else:
             try:
-                from ..monitoring import HealthMonitor
-                HealthMonitor(root, bid).record_success()
+                self._record_cycle_success(root, bid)
             except Exception:  # noqa: BLE001
                 pass
         tail_extra = {"degraded": degraded} if degraded else {}
@@ -892,12 +914,62 @@ class PlanRunner:
             raw={"degraded": reason},
         )
 
+    def _alert_threshold(self) -> int:
+        """连续失败告警阈值（配置 `strategist.alert_fail_streak`，最小 1）。
+
+        注意别写 `raw or 2`：`0` 是 falsy，会被当成「未配置」而回退成 2 ——
+        `tests/test_plan_fail_alert.py::test_threshold_floor` 守着这条。
+        """
+        raw = getattr(self.cfg, "alert_fail_streak", 2)
+        if raw is None:
+            return 2
+        try:
+            return max(1, int(raw))
+        except (TypeError, ValueError):
+            return 2
+
+    def _record_cycle_success(self, root: Path, bid: str) -> None:
+        """清零连续失败；若此前已达阈值，补一条「已恢复」。
+
+        事故里恢复同样没人知道（进程自己拉起、日志正常，但没人核对 ok 计数），
+        所以恢复必须发**正向**事件，否则「停了 15 小时」和「一直正常」在通知层面没区别。
+        """
+        from ..monitoring import HealthMonitor
+
+        th = self._alert_threshold()
+        hm = HealthMonitor(root, bid, error_warn=th)
+        prev = hm.current_error_streak()
+        hm.record_success()
+        if prev < th:
+            return
+        try:
+            from ..monitoring.alerts import TYPE_PLAN_RECOVERED, AlertStore
+
+            AlertStore(root, bid).raise_alert(
+                TYPE_PLAN_RECOVERED,
+                f"plan 恢复（此前连续失败 {prev} 次）", streak=prev)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from ..monitoring import notify_process_event, should_notify
+
+            if not should_notify(root, self.cfg.env):
+                return
+            notify_process_event(
+                root=root, kind="plan_recovered",
+                title=f"plan 已恢复（此前连续失败 {prev} 次）",
+                fields=[("Bot", bid), ("此前连续失败", str(prev))],
+                color="green",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     def _record_cycle_failure(self, root: Path, bid: str, detail: str) -> None:
         """记一次周期失败（落盘 + 连续失败告警）；实盘额外推飞书。"""
         try:
             from ..monitoring import HealthMonitor
 
-            hm = HealthMonitor(root, bid)
+            hm = HealthMonitor(root, bid, error_warn=self._alert_threshold())
             streak = hm.record_error(detail=detail)
         except Exception:  # noqa: BLE001
             return
