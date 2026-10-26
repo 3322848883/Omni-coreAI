@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -80,6 +81,14 @@ _NOTIONAL_DRIFT_TOL = 0.01
 # 浮盈回撤保护的观测过期时间：超过这么久没观测过，历史峰值不可信（进程停过 /
 # 扫描没跑到），重新起算。与 `_PEAK_TRAIL_STALE_SEC` 同口径。
 _GIVE_BACK_STALE_SEC = 900.0
+
+# 锁盈触发单的 text 后缀。单独一个 tail 是**刻意的**：tp/sl/lp/ls 那套归属过滤
+# （`_owned_sl_orders_sided` / `_cleanup_orphan_protectors` / `_resync_protectors`）
+# 会把它当成保护腿去归并、改张数，而它由本文件自己按峰值 ratchet 管理。
+_GIVE_BACK_TAIL = "gb"
+
+# 触发单的终结状态（列表接口已按 status=open 过滤，这里是对 paper 全量台账的兜底）
+_DEAD_PO_STATUS = ("cancelled", "finished", "filled", "triggered", "failed", "closed")
 
 
 @dataclass
@@ -4286,6 +4295,8 @@ class Executor:
         # AI 平仓却顺带关掉了它早已授权的回调锁盈」）。
         if not self.manage_positions:
             out["skipped"] = "manage_positions_off"
+            # 不管仓 = 也不该留一张会自己平仓的常驻触发单（关功能后的回收）
+            out["cleared"] = self.clear_give_back(symbol)
             return out
 
         positions = self._symbol_positions(symbol)
@@ -4298,6 +4309,9 @@ class Executor:
                     state.pop(k, None)
                 self._write_give_back(state)
             out["skipped"] = "no_position"
+            # 仓没了 → 常驻锁盈单必须一并撤掉：reduce-only 单在无仓时触发会被交易所
+            # 拒绝，但留在盘上会挡住归属判断（且持仓再回来时价位已无意义）
+            out["cancelled"] = self.cancel_give_back_orders(symbol)
             return out
 
         for pos in positions:
@@ -4308,7 +4322,8 @@ class Executor:
         self._write_give_back(state)
         if out["sides"]:
             for f in ("position_side", "position_size", "peak_pnl", "cur_pnl",
-                      "r_usd", "armed", "closed", "skipped", "error"):
+                      "r_usd", "armed", "closed", "skipped", "error",
+                      "trigger_pnl", "gb_level", "gb"):
                 if f in out["sides"][0]:
                     out[f] = out["sides"][0][f]
         return out
@@ -4328,6 +4343,8 @@ class Executor:
             pct = 0.0
         if pct <= 0 or pct >= 100:
             out["skipped"] = "no_pct"
+            # 没有授权阈值 → 不该有常驻锁盈单（关功能 / 换策略后的残留要清掉）
+            self.cancel_give_back_orders(symbol, side=side)
             return out
 
         try:
@@ -4384,17 +4401,28 @@ class Executor:
             return out
         trigger = peak * (1 - pct / 100.0)
         out["trigger_pnl"] = round(trigger, 4)
+        # 锁盈价位：空单在入场价下方、多单在上方，随峰值单向收紧
+        level = self._gb_level(entry, trigger, size, quanto, side, meta)
+        out["gb_level"] = round(level, 8)
         if cur_pnl > trigger:
+            # 还没回撤到阈值 → 把锁盈价挂成**交易所常驻触发单**（方案 3）：
+            # 60s 轮询间隙与进程死亡期都不再失明 —— 触发由交易所执行，零延迟。
             out["skipped"] = "no_retrace"
+            out["gb"] = self._ensure_give_back_trigger(
+                symbol, side, level, size, meta, dry, entry=entry)
             return out
         if cur_pnl <= 0:
             # 已回撤到盈亏平衡以下 —— 此时平仓是「止损」，那是 SL 的职责。
-            # 这条路径只做「保本平仓」，不越权当止损用。
+            # 这条路径只做「保本平仓」，不越权当止损用。常驻锁盈单同样要撤：
+            # 它一旦触发就是在盈亏线下方成交，违背「绝不亏着平」。
             out["skipped"] = "not_profitable"
+            self.cancel_give_back_orders(symbol, side=side)
             return out
         if dry:
             out["skipped"] = "dry"
             return out
+        # 本路径要自己市价平 → 先撤常驻单，避免同一仓位被两条路径重复平
+        self.cancel_give_back_orders(symbol, side=side)
         try:
             order = self.client.close_position(symbol, side=side, size=0) or {}
         except GateApiError as e:
@@ -4414,6 +4442,201 @@ class Executor:
                          "peak_pnl": round(peak, 4), "size": size,
                          "pnl_source": pnl_source}
         return out
+
+    # ── 方案 3：把锁盈位挂成交易所常驻触发单 ────────────────────────
+    def _give_back_text(self) -> str:
+        """本 bot 的锁盈触发单 text（同一命名空间，`gb` 尾巴与 tp/sl 区分）。"""
+        return f"t-{self._bot_tag(self.label_prefix or 'auto')}-{_GIVE_BACK_TAIL}"
+
+    @staticmethod
+    def _gb_row_view(po: dict) -> dict:
+        """触发单的两种返回形态统一成一个视图。
+
+        Gate 是嵌套 `{initial:{size,text}, trigger:{price}}`，paper 引擎是平铺
+        （`size`/`text`/`trigger_price`）—— 两个都要认，否则纸面验证看不出问题，
+        一上实盘全部读空。
+        """
+        init = po.get("initial") or {}
+        trig = po.get("trigger") or {}
+        text = str(init.get("text") or po.get("text") or "")
+        px = trig.get("price") or init.get("trigger_price") or po.get("trigger_price") or 0
+        try:
+            px = float(px)
+        except (TypeError, ValueError):
+            px = 0.0
+        raw_sz = init.get("size")
+        if raw_sz is None:
+            raw_sz = po.get("size")
+        try:
+            sz = float(raw_sz or 0)
+        except (TypeError, ValueError):
+            sz = 0.0
+        return {
+            "id": str(po.get("id") or po.get("order_id") or ""),
+            "text": text, "px": px, "size": sz,
+            "status": str(po.get("status") or "").lower(),
+        }
+
+    def _give_back_orders(self, symbol: str = "", side: str = "") -> list[dict]:
+        """本 bot 在盘上的锁盈触发单（`gb` 尾巴）。
+
+        `symbol` 为空 = 全账户（用于关功能时的一次性回收）；`side` 用于双向持仓
+        分腿（触发单带符号：负=卖平多、正=买平空，与 SL 同口径）。
+        """
+        prefix = self._own_prefix("")
+        if not prefix:
+            return []
+        label = prefix[2:] if prefix.startswith("t-") else prefix
+        try:
+            if symbol:
+                rows = self.client.list_price_orders(symbol) or []
+            else:
+                rows = self.client.list_price_orders() or []
+        except Exception as e:  # noqa: BLE001 — 查不到就当没有，不阻塞平仓主路径
+            swallow("executor._give_back_orders", e, level=logging.DEBUG)
+            return []
+        out: list[dict] = []
+        for po in rows:
+            v = self._gb_row_view(po)
+            if v["status"] in _DEAD_PO_STATUS:
+                continue
+            if v["text"].rsplit("-", 1)[-1].lower() != _GIVE_BACK_TAIL:
+                continue
+            if not self._text_owned(v["text"], label):
+                continue
+            if side and ((v["size"] < 0) != (side == "long")):
+                continue
+            out.append(v)
+        return out
+
+    def cancel_give_back_orders(self, symbol: str = "", side: str = "") -> list[str]:
+        """撤掉本 bot 的锁盈触发单（幂等）。返回实际撤掉的 id。"""
+        cancelled: list[str] = []
+        for o in self._give_back_orders(symbol, side):
+            if not o["id"]:
+                continue
+            try:
+                self.client.cancel_price_order(o["id"])
+                cancelled.append(o["id"])
+            except Exception:  # noqa: BLE001 — 已被触发/撤掉的单撤不动是正常结局
+                pass
+        return cancelled
+
+    def clear_give_back(self, symbol: str = "") -> dict:
+        """撤单 + 清峰值状态（关功能 / 平仓 / 无阈值时用）。"""
+        ids = self.cancel_give_back_orders(symbol)
+        state = self._read_give_back()
+        drop = [k for k in state
+                if not symbol or k.split("|", 1)[0] == symbol]
+        for k in drop:
+            state.pop(k, None)
+        if drop:
+            self._write_give_back(state)
+        return {"cancelled": ids, "cleared": len(drop)}
+
+    @staticmethod
+    def _gb_level(entry: float, trigger_pnl: float, size: float, quanto: float,
+                  side: str, meta: Any) -> float:
+        """锁盈触发价 = 入场价 ∓ 触发浮盈/(张数×乘数)，并对齐到价格步长。
+
+        对齐方向刻意取**保守侧**（空单向上取整、多单向下取整）：宁可少锁一点利润，
+        也不能让触发价落进现价内侧 —— 那会在挂上去的瞬间就成交，等于乱平仓。
+        """
+        per_pt = size * quanto
+        if per_pt <= 0:
+            return 0.0
+        delta = trigger_pnl / per_pt
+        raw = (entry - delta) if side == "short" else (entry + delta)
+        tick = abs(float(getattr(meta, "order_price_round", 0) or 0))
+        if tick <= 0:
+            return raw
+        px = (math.ceil(raw / tick) if side == "short" else math.floor(raw / tick)) * tick
+        precision = max(0, int(round(-math.log10(tick))) if tick < 1 else 0)
+        return float(f"{px:.{precision}f}")
+
+    def _ensure_give_back_trigger(self, symbol: str, side: str, level: float,
+                                  size: float, meta: Any, dry: bool,
+                                  entry: float = 0.0) -> dict:
+        """确保交易所上挂着「价格到 `level` 就减仓离场」的 reduce-only 触发单。
+
+        为什么（方案 3）：60s 扫描间隙和进程死亡期，`give_back` 都是盲的 —— 价格
+        在窗口里穿过锁盈位没人动作。触发单驻留在交易所，**触发不依赖本进程**，
+        等于把锁盈从「软件轮询」升级成「交易所执行」，延迟归零。
+
+        **幂等 + 单向棘轮**：
+          - 已有一条价位相同、张数正确的 → 什么都不做（零 churn）
+          - 已有单比目标**锁得更多**（空单更低 / 多单更高）→ 保留它，绝不为了对齐
+            一个更松的目标去「放宽」已锁住的利润（峰值 900s 过期重置后会算出更松的
+            目标价，这条是那处的兜底闸门）
+          - 峰值创新高 → 价位往更有利方向挪：**先挂新、后撤旧**（挂失败时旧单仍在，
+            保护不退化 —— 与 SL 归并 `_resync_protectors` 同序）
+
+        **price_type 必须是 mark(1)**：本方法的算术用的是 `mark_price`，若触发基准
+        用最新成交价，两个基准不同源会在插针/价差时提前或推迟触发。
+        """
+        signed = int(-size if side == "long" else size)   # 负=卖平多，正=买平空
+        info: dict[str, Any] = {"level": round(float(level), 8), "size": signed}
+        if signed == 0:
+            # price_orders 只收整数张：不足 1 张挂 0 张单等于没有保护，直说
+            return {"action": "skip", "reason": "size_below_1", **info}
+
+        rows = self._give_back_orders(symbol, side=side)
+        tick = abs(float(getattr(meta, "order_price_round", 0) or 0))
+        tol = tick if tick > 0 else max(abs(float(level)), 1.0) * 1e-9
+        # 「像本次持仓的价位」的容忍带：以目标价到入场价的距离为尺度。带外的单
+        # 只可能是上一笔交易的残留（同一仓位不会锁出这么远的价），一律换掉。
+        span = max(abs(float(level) - float(entry or level)) * 1.5, tol * 2)
+
+        reusable = None
+        for r in rows:
+            if abs(r["size"]) != abs(signed):
+                continue
+            if entry and abs(r["px"] - float(entry)) > span:
+                continue
+            tighter = ((r["px"] <= float(level) + tol) if side == "short"
+                       else (r["px"] >= float(level) - tol))
+            if tighter:
+                reusable = r
+                break
+        if reusable is not None:
+            for r in rows:                       # 只留一条，多余的撤掉
+                if r["id"] and r["id"] != reusable["id"]:
+                    try:
+                        self.client.cancel_price_order(r["id"])
+                    except Exception:  # noqa: BLE001
+                        pass
+            return {"action": "kept", "order_id": reusable["id"],
+                    "level": round(float(reusable["px"]), 8), **info}
+        if dry:
+            return {"action": "dry", **info}
+
+        body = {
+            "initial": {
+                "contract": symbol,
+                "size": signed,
+                "price": "0",             # 触发后走市价（IOC）成交，不做限价赌运气
+                "tif": "ioc",
+                "reduce_only": True,      # 兜底：挂反/无仓时交易所直接拒绝
+                "text": self._give_back_text(),
+            },
+            "trigger": {
+                "rule": 1 if side == "short" else 2,   # 空单涨破 / 多单跌破
+                "price_type": 1,                       # mark，与本方法算术同源
+                "price": f"{float(level):.8f}".rstrip("0").rstrip("."),
+            },
+        }
+        try:
+            placed = self.client.place_price_order(body)      # 先挂新
+        except Exception as e:  # noqa: BLE001 — 挂不上就保住旧单，如实回报
+            return {"action": "error", "error": str(e)[:160], **info}
+        for r in rows:                                        # 再撤旧
+            if r["id"]:
+                try:
+                    self.client.cancel_price_order(r["id"])
+                except Exception:  # noqa: BLE001
+                    pass
+        return {"action": "placed" if not rows else "moved",
+                "order_id": str((placed or {}).get("id") or ""), **info}
 
     def check_peak_trail(self, symbol: str) -> dict:
         """单持仓**价格峰值回撤** → 上移 SL（`account_risk.peak_trail` 逐 bot 开，默认关）。

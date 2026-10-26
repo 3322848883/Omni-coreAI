@@ -1088,6 +1088,41 @@ def _peak_trail_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict, *,
     return done
 
 
+def _give_back_off_cleanup(bot: BotConfig, paths: ProjectPaths) -> None:
+    """`account_risk.give_back` 关掉后，回收留在交易所的锁盈触发单。
+
+    为什么必须做：那张单是 reduce-only 的条件单，功能关掉而单还挂着，它仍会按旧
+    价位自动平仓 —— 「关了还在动仓」不可接受（方案 3 引入交易所驻留后的新责任）。
+
+    **只在 `state/give_back.json` 有残留时才动手**：绝大多数 bot 从未开过这个功能，
+    给它们每 60 秒白跑一次 REST 查单没必要。
+    """
+    try:
+        state_path = (paths.root / "data" / "bots" / bot.bot_id
+                      / "state" / "give_back.json")
+        if not state_path.is_file():
+            return
+        raw = json.loads(state_path.read_text(encoding="utf-8") or "{}")
+        if not (raw.get("positions") or {}):
+            state_path.unlink(missing_ok=True)
+            return
+        client = bot.create_client()
+        executor = Executor(
+            client,
+            label_prefix=getattr(bot, "label_prefix", "") or bot.bot_id,
+            root=paths.root,
+            bot_id=bot.bot_id,
+            account=getattr(bot, "account", "") or "",
+            account_risk=getattr(bot, "account_risk", None),
+            manage_positions=getattr(bot, "manage_positions", True),
+        )
+        res = executor.clear_give_back("")
+        log.warning("give back[off] %s: 功能已关，回收锁盈触发单 %d 张 + 清 %d 条状态",
+                    bot.bot_id, len(res.get("cancelled") or []), res.get("cleared") or 0)
+    except Exception as e:  # noqa: BLE001 — 回收失败不拖垮扫描，只留痕
+        log.warning("give back[off] %s: 回收失败: %s", bot.bot_id, e)
+
+
 def _give_back_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict, *,
                      client=None, symbols=None) -> int:
     """浮盈从峰值回撤 `give_back_pct`% → 平掉仓位（`account_risk.give_back` 逐 bot 开）。
@@ -1105,9 +1140,16 @@ def _give_back_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict, *,
       - `dry`          只记 info，说明「会平在哪」
     """
     mode = (getattr(bot, "account_risk", None) or {}).get("give_back", False)
-    if not mode:
+    # `"off"` 是**真值**：只写 `if not mode` 时，配置 `give_back: off` 会掉进 live
+    # 分支真的去平仓（文档早已声明 off/dry/live 三态，实现必须认字符串）。
+    flag = str(mode).strip().lower()
+    if not mode or flag in ("off", "false", "0", "no", "none"):
+        # 功能被关掉（或本来就是关的）→ 回收可能残留的锁盈触发单。
+        # 「关了还在动仓」不可接受：那是张 reduce-only 条件单，功能关掉后它仍会按
+        # 旧价位自动平仓。只在状态文件有残留时才动手，不白跑 REST。
+        _give_back_off_cleanup(bot, paths)
         return 0
-    dry = str(mode).lower() == "dry"
+    dry = flag == "dry"
     if client is None:
         try:
             client = bot.create_client()
@@ -1168,6 +1210,22 @@ def _give_back_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict, *,
                     float(res.get("trigger_pnl") or 0), float(res.get("r_usd") or 0),
                 )
                 continue
+            gb = res.get("gb") or {}
+            if gb.get("action") in ("placed", "moved", "dry"):
+                # 锁盈触发单上/下移（方案 3）—— 只在峰值创新时才发生，天然低噪
+                log.info(
+                    "give back %s %s/%s: 锁盈触发单 %s @%.8g 张数=%s (peak=%.4f)",
+                    bot.bot_id, sym, res.get("position_side"), gb["action"],
+                    float(gb.get("level") or 0), gb.get("size"),
+                    float(res.get("peak_pnl") or 0),
+                )
+            if gb.get("action") == "error":
+                key = f"{bot.bot_id}:{sym}:gb_place"
+                now = time.time()
+                if now - float(alerted.get(key) or 0) >= _AUTO_PROTECT_ALERT_SEC:
+                    alerted[key] = now
+                    log.error("give back %s %s: 锁盈触发单挂失败: %s",
+                              bot.bot_id, sym, gb.get("error"))
             if not res.get("error"):
                 continue
             key = f"{bot.bot_id}:{sym}:{res.get('position_side')}:giveback"
