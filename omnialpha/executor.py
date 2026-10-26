@@ -183,7 +183,8 @@ def _sl_move_rejected(pos_side: str, entry: float, new_sl: float,
     return ""
 
 
-def _apportion_sizes(total: int, weights: list[int]) -> list[int]:
+def _apportion_sizes(total: float, weights: list[float],
+                     step: float = 1.0) -> list[float]:
     """最大余数法：把 `total` 按 `weights` 比例分成 `len(weights)` 份。
 
     - 合计**恒等于** total —— 多一分就会挂出合计超过持仓的 reduce-only 单
@@ -194,16 +195,23 @@ def _apportion_sizes(total: int, weights: list[int]) -> list[int]:
 
     用于 TP 腿组对齐（`_align_tp_group`）：逐档止盈每腿各平自己那份，
     减仓后按原比例缩，而不是把每腿都放大到全仓。
+
+    **`step`（2026-10-26）**：全程按「一个步长的整数倍」分配。原来按整数张算，
+    ETH 持仓 0.7 张时 `total=0.7` 会被补成 **1 张** → 挂出合计 1 张的 reduce-only TP，
+    而持仓只有 0.7 张 → 交易所直接拒（超平）。步长 1 的合约（BTC/DOGE）行为不变。
     """
     n = len(weights)
+    st = float(step or 0) or 1.0
     if n == 0 or total <= 0:
-        return [0] * n
-    wsum = sum(weights)
-    if wsum <= 0:
-        return [0] * n
-    raw = [total * w / wsum for w in weights]
+        return [0.0] * n
+    units = [max(0, int(round(float(w) / st))) for w in weights]
+    tot_u = max(0, int(round(float(total) / st)))
+    wsum = sum(units)
+    if wsum <= 0 or tot_u <= 0:
+        return [0.0] * n
+    raw = [tot_u * u / wsum for u in units]
     sizes = [int(x) for x in raw]          # 向下取整：和 ≤ total，差 ≥ 0
-    diff = total - sum(sizes)
+    diff = tot_u - sum(sizes)
     if diff > 0:
         # 小数余数大的先补；并列按列表序（确定性，测试可复现）
         order = sorted(range(n), key=lambda i: raw[i] - sizes[i], reverse=True)
@@ -212,7 +220,7 @@ def _apportion_sizes(total: int, weights: list[int]) -> list[int]:
             sizes[order[i % n]] += 1
             diff -= 1
             i += 1
-    return sizes
+    return [round(u * st, 8) for u in sizes]
 
 
 def _parse_symbol_positions(positions: list, symbol: str) -> list[dict]:
@@ -3226,7 +3234,16 @@ class Executor:
         notes.extend(self._align_tp_group(symbol, tp_group, total))
         return notes
 
-    def _align_tp_group(self, symbol: str, legs: list[dict], total: int) -> list:
+    def _size_step(self, symbol: str) -> float:
+        """该合约的张数步长（取不到规格退回 1，即老行为）。"""
+        try:
+            meta = self.client.get_contract(symbol)
+            step = float(getattr(meta, "size_step", 0) or 0)
+        except Exception:  # noqa: BLE001
+            return 1.0
+        return step if step > 0 else 1.0
+
+    def _align_tp_group(self, symbol: str, legs: list[dict], total: float) -> list:
         """把**多级 TP 腿组**的张数合计对齐到剩余持仓（逐档止盈结构保持）。
 
         背景：网格/马丁逐档止盈 = 多条同向 reduce-only TP 单、触发价各异、
@@ -3253,10 +3270,13 @@ class Executor:
         notes: list = []
         if not legs or total <= 0:
             return notes
-        group_sum = sum(abs(int(l["psz"])) for l in legs)
-        if group_sum == total:
-            return notes                      # 逐档结构保持 + 零 churn
-        full = [l for l in legs if abs(int(l["psz"])) >= total]
+        # 步长：ETH 0.1 / BTC 1。取不到规格就退回 1（老行为）。
+        step = self._size_step(symbol)
+        total = round(float(total), 8)
+        group_sum = round(sum(qty(l["psz"]) for l in legs), 8)
+        if abs(group_sum - total) < step / 2:
+            return notes                      # 逐档结构保持 + 零 churn（含步长容差）
+        full = [l for l in legs if qty(l["psz"]) >= total - 1e-9]
         if len(full) == 1 and len(legs) > 1:
             # 有意重叠：一条全仓腿（马丁共用 TP）+ 若干各自部分腿。
             # 只收超过持仓的那条，其余不动。
@@ -3289,13 +3309,13 @@ class Executor:
             except Exception as e:  # noqa: BLE001 — 挂不上不撤旧的
                 notes.append({"resize_error": str(e), "text": l["text"]})
             return notes
-        weights = [max(1, abs(int(l["psz"]))) for l in legs]
-        sizes = _apportion_sizes(total, weights)
+        weights = [max(step, qty(l["psz"])) for l in legs]
+        sizes = _apportion_sizes(total, weights, step)
         keep_old: set = set()                 # 下标 → 旧单保留（尺寸正好/挂新失败）
         for i, (l, sz) in enumerate(zip(legs, sizes)):   # 先挂新
             if sz <= 0:
                 continue                      # 0 张腿 → 撤（见下）
-            if abs(int(l["psz"])) == sz:
+            if abs(qty(l["psz"]) - sz) < 1e-9:
                 keep_old.add(i)               # 尺寸正好 → 旧单即新单
                 continue
             body = {

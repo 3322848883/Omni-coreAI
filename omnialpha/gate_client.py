@@ -308,10 +308,17 @@ class GateClient:
             self._contract_cache, self._contract_cache_ts = disk, now
             return disk
         try:
-            raw = self.public_get(
-                f"{FUTURES_API}/contracts",
-                extra_headers={"X-Gate-Size-Decimal": "1"},
-            ) or []
+            # 带 `X-Gate-Size-Decimal: 1`：不带的话 Gate 会把 `order_size_min` 按 int
+            # 截断（ETH 0.1 → 0）。**退回分支**是给「只接受 (path, qs) 的旧子类 /
+            # 测试替身」留的：真实 client 永远不会抛 TypeError，所以生产行为只有一条路。
+            try:
+                raw = self.public_get(
+                    f"{FUTURES_API}/contracts",
+                    extra_headers={"X-Gate-Size-Decimal": "1"},
+                ) or []
+            except TypeError:
+                log.warning("public_get 不支持 extra_headers，合约步长可能被按 int 截断")
+                raw = self.public_get(f"{FUTURES_API}/contracts") or []
         except GateApiError:
             # 合约元数据（quanto_multiplier / tick / lot / 杠杆上限）几乎不变，所以拉取失败时
             # **回退到上一份缓存**，而不是让整笔操作失败。实测 /contracts 返回约 1.1 MB，
