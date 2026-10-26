@@ -5,6 +5,7 @@ Gate 语义：price="0"/None 表示市价；tif: GTC/IOC/FOK/PO/POC。
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Optional
 
 
@@ -57,12 +58,26 @@ def validate_and_round_order(
     if size == 0:
         raise PaperReject("size must be non-zero")
 
-    lot = float(getattr(contract_meta, "order_size_round", 0) or 0)
-    if lot > 0:
-        rounded = _round_to(abs(size), lot)
-        if rounded <= 0:
+    # lot 步长与 live 同源（sizing.safe_step）：优先 `size_step`。
+    # `order_size_round` 交易所**不提供**（Gate 1061 个合约 0 命中，2026-10-26 实测），
+    # 恒为假值 1 → paper 永远只能整数张：0.7 张 SL 被舍入成 1 张（名义/风险走样）、
+    # `_cap_combined_risk` 缩出的 0.43 张被取整成 0 拒单 → 整轮失败 → 回滚 →
+    # 旧单每轮泄漏堆积。取整改 **floor**：交易所对非步长倍数就是静默 floor，
+    # 与 live `quantize_size`（floor）同口径。
+    step = float(getattr(contract_meta, "size_step", 0) or 0)
+    if step > 0:
+        floored = round(math.floor(abs(size) / step + 1e-9) * step, 10)
+        if floored <= 0:
             raise PaperReject("size below lot size")
-        size = rounded if size > 0 else -rounded
+        size = floored if size > 0 else -floored
+    else:
+        # 旧测试替身没有 size_step → 退回 order_size_round 最近取整（既有行为不变）
+        lot = float(getattr(contract_meta, "order_size_round", 0) or 0)
+        if lot > 0:
+            rounded = _round_to(abs(size), lot)
+            if rounded <= 0:
+                raise PaperReject("size below lot size")
+            size = rounded if size > 0 else -rounded
 
     # 乘数绝不兜底成 1：BTC_USDT 真实值是 0.0001，兜底会让 notional/fee/margin 全错 10000 倍
     quanto = float(getattr(contract_meta, "quanto_multiplier", 0) or 0)

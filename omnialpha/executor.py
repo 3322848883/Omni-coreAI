@@ -622,9 +622,20 @@ class Executor:
         # 整轮失败 → 回滚本轮新挂的单，不留半成品（见 _rollback_newly_placed）
         if not report.ok:
             self._rollback_newly_placed(pre_owned, intents, report)
+            # 回滚后**补跑 stale 清理**（2026-10-27）：原来只有 report.ok 才撤旧单，
+            # 失败轮次快照里的旧单（上一轮的阶梯 + SL）永远没人收 —— 失败连续出现时
+            # 每轮泄漏一批（paper 实测 20 条入场 + 11 条 SL 堆积）。回滚已撤掉本轮
+            # 新单，旧单成了纯垃圾；承接物守卫此时必然 no_replacement，但「整轮失败
+            # 回滚」本身就是撤旧依据 —— 把快照面全量当显式撤单面传入。真在保护持仓
+            # 的 reduce-only 单仍由 _should_keep_protection 拦住，不会裸奔。
+            if replace_mode != "none" and pre_owned:
+                self._cancel_stale_owned(
+                    pre_owned, intents, report,
+                    explicit_cancel_symbols=set(pre_owned),
+                )
 
         # After successful steps: withdraw OLD owned orders (keep newly placed ids)
-        if replace_mode != "none" and report.ok:
+        elif replace_mode != "none":
             # A 修复（系统级网格空窗）：把「本轮有显式撤单意图的 symbol」一并传下去，
             # 供 _cancel_stale_owned 判断「撤旧单到底有没有承接物」（详见该函数）。
             # converted_cancels 是被 place_before_cancel 转换掉的 cancel_* —— 它们的
