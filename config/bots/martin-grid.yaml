@@ -146,6 +146,11 @@ strategist:
     native: true
     # SMC/ICT + Al Brooks 两套体系：SMC 用专用工具，Brooks 直接读 klines 的 OHLC。
     max_rounds: 14
+    # 必查取数覆盖（2026-10-26 实测：模型只查 map 15m/1h/4h + events 15m 就出计划，
+    # 马丁第 3 档声称「落在日线结构位」却从没查过日线）。缺项 → 引擎重试一次并点名。
+    required_coverage:
+      smc_map: ["15m", "1h", "4h", "1d"]
+      smc_events: ["15m", "1h"]
     allow:
       - klines        # Brooks 信号 K 线 + 结构高低点，全靠它
       - ticker        # 现价
