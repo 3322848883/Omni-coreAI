@@ -39,8 +39,10 @@ class FakeGate:
         return "[FAKE]"
 
     def get_contract(self, symbol):
+        # ETH 是小数张合约：size_min=0.1 / enable_decimal=True → size_step=0.1
         return ContractMeta(name=symbol, quanto_multiplier=QM, order_size_round=1,
-                            order_price_round=0.01, leverage_max=100)
+                            order_price_round=0.01, leverage_max=100,
+                            size_min=0.1, size_max=1e7, enable_decimal=True)
 
     def get_last_price(self, symbol):
         return PX
@@ -207,6 +209,45 @@ class TestOtherReaders(Base):
         out = self.ex._give_back_side(
             {"side": "short", "size": -0.7, "entry_price": PX}, SYM, {}, dry=True)
         self.assertAlmostEqual(out["position_size"], 0.7)
+
+
+class TestAlignTpGroup(Base):
+    """减仓后 TP 腿对齐（`_align_tp_group` / `_apportion_sizes`）。
+
+    原逻辑全按整数张算：`_apportion_sizes(0.7, [1])` 会因 `diff=0.7` 给这条腿补 1 张
+    → 挂出 **1 张 reduce_only** 而持仓只有 0.7 张 → 交易所直接拒（超平）。
+    """
+
+    def _leg(self, gate, sz, px="2400"):
+        oid = gate.add_price_order("t-pt-signal-tp", sz, px, rule=1)
+        return {"psz": sz, "pid": oid, "text": "t-pt-signal-tp",
+                "rule": 1, "price_type": 0, "px": px}
+
+    def test_fractional_total_not_rounded_up(self):
+        self.gate.set_position(0.7)
+        leg = self._leg(self.gate, -0.4)
+        notes = self.ex._align_tp_group(SYM, [leg], 0.7)
+        sizes = [abs(float(o["initial"]["size"]))
+                 for o in self.gate.price_orders.values()]
+        self.assertEqual(len(sizes), 1, f"应只剩一条腿：{notes}")
+        self.assertAlmostEqual(sum(sizes), 0.7, msg=f"合计必须等于持仓 0.7：{notes}")
+
+    def test_aligned_fraction_is_zero_churn(self):
+        self.gate.set_position(0.7)
+        leg = self._leg(self.gate, -0.7)
+        before = set(self.gate.price_orders)
+        notes = self.ex._align_tp_group(SYM, [leg], 0.7)
+        self.assertEqual(notes, [], "已对齐就不该动")
+        self.assertEqual(set(self.gate.price_orders), before)
+
+    def test_integer_total_still_integral(self):
+        """整数张（BTC 步长 1）行为不变：6 张分 3 腿 → 2/2/2。"""
+        self.gate.set_position(6)
+        legs = [self._leg(self.gate, -3, px) for px in ("2400", "2450", "2500")]
+        self.ex._align_tp_group(SYM, legs, 6)
+        sizes = sorted(abs(float(o["initial"]["size"]))
+                       for o in self.gate.price_orders.values())
+        self.assertEqual(sizes, [2.0, 2.0, 2.0])
 
 
 class TestGateClientFlatten(unittest.TestCase):

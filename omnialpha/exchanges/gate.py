@@ -136,8 +136,10 @@ class GateExchange(ExchangeClient):
     def stop_trailing_orders(self, contract: Optional[str] = None):
         return self._c.stop_trailing_orders(self._s(contract) if contract else None)
 
-    def public_get(self, path: str, query_string: str = "", attempts: int = 3) -> Any:
-        return self._c.public_get(path, query_string, attempts=attempts)
+    def public_get(self, path: str, query_string: str = "", attempts: int = 3,
+                   extra_headers: Optional[dict] = None) -> Any:
+        return self._c.public_get(path, query_string, attempts=attempts,
+                                  extra_headers=extra_headers)
 
     def rest_signed_request(
         self, method: str, path: str, query_string: str = "", body: Any = None
