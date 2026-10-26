@@ -75,7 +75,7 @@ class Intent:
     size_usd: Optional[float] = None
     size_pct: Optional[float] = None
     margin_pct: Optional[float] = None
-    size: Optional[int] = None
+    size: Optional[float] = None
     order_type: str = "market"
     price: Optional[float] = None
     leverage: Optional[int] = None
@@ -90,8 +90,8 @@ class Intent:
     # trigger = price_order (conditional); limit_order = resting reduce_only limit
     tp_scope: str = "per_level"  # per_level | shared (grid)
     sl_scope: str = "per_level"
-    tp_size_override: Optional[int] = None
-    sl_size_override: Optional[int] = None
+    tp_size_override: Optional[float] = None
+    sl_size_override: Optional[float] = None
     tp_mode: str = "trigger"
     sl_mode: str = "trigger"
     tp_limit_price: Optional[float] = None
@@ -102,7 +102,7 @@ class Intent:
     trigger_expiration: Optional[int] = None
     margin_mode: Optional[str] = None
     side: Optional[str] = None  # for close / grid
-    close_size: Optional[int] = None
+    close_size: Optional[float] = None
     price_offset: Optional[str] = None
     activation_price: Optional[str] = None
     trigger_price_tp: Optional[float] = None
@@ -156,6 +156,21 @@ def _i(value: Any, name: str) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError) as e:
         raise SchemaError(f"{name} must be an integer, got {value!r}") from e
+
+
+def _q(value: Any, name: str) -> Optional[float]:
+    """张数解析（**小数张**）。与 `_i` 的区别只在这一个语义：保留小数。
+
+    Gate 有 15 个合约的 `order_size_min < 1`（ETH 0.1），模型写 `size: 0.7` 是
+    合法意图。原来走 `_i` → `int(0.7)` 变 **0**（静默，执行层再把 0 当「没给」
+    或者下 0 张单）；写成 `"0.7"` 则抛 `SchemaError` 让整轮作废。两种都错。
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError) as e:
+        raise SchemaError(f"{name} must be a number, got {value!r}") from e
 
 
 def infer_trigger_rules(action: str, is_tp: bool) -> int:
@@ -300,7 +315,7 @@ def _parse_stop_entry(data: dict, action: str, default_label: str) -> Intent:
     if order_type != "market" and price is None:
         raise SchemaError(f"type={order_type} requires price")
     size_usd = _f(data.get("size_usd"), "size_usd")
-    size = _i(data.get("size"), "size")
+    size = _q(data.get("size"), "size")
     size_pct = _f(data.get("size_pct"), "size_pct")
     margin_pct = _f(data.get("margin_pct"), "margin_pct")
     if size_usd is None and size is None and size_pct is None and margin_pct is None:
@@ -471,7 +486,7 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
             side = str(side).lower()
             if side not in ("long", "short"):
                 raise SchemaError("close.side must be long|short")
-        size = _i(data.get("size"), "size")
+        size = _q(data.get("size"), "size")
         return Intent(
             action="close",
             symbol=_check_symbol_token(symbol),
@@ -486,7 +501,7 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
     if not symbol:
         raise SchemaError(f"{action} requires symbol")
     size_usd = _f(data.get("size_usd"), "size_usd")
-    size = _i(data.get("size"), "size")
+    size = _q(data.get("size"), "size")
     size_pct = _f(data.get("size_pct"), "size_pct")
     margin_pct = _f(data.get("margin_pct"), "margin_pct")
     for name, val in (("size_pct", size_pct), ("margin_pct", margin_pct)):

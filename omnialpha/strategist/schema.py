@@ -105,7 +105,7 @@ class Chip:
     action: str
     confidence: float = 0.0
     size_usd: Optional[float] = None
-    size: Optional[int] = None
+    size: Optional[float] = None      # 小数张：ETH 步长 0.1，模型会写 0.7
     tp: Optional[float] = None
     sl: Optional[float] = None
     # 多级止盈：档位清单与解析统一在 `omnialpha.schema.tp_fields`（唯一来源），
@@ -256,6 +256,25 @@ def _int(v, name: str, idx: int) -> Optional[int]:
         return int(v)
     except (TypeError, ValueError):
         raise PlanError(f"chips[{idx}].{name} must be an integer, got {v!r}")
+
+
+def _qty(v, name: str, idx: int) -> Optional[float]:
+    """张数解析（**小数张**）：`0.7` / `"0.7"` 都保留。
+
+    原来用 `_int`：`int(0.7)` → **0**（模型明确要 0.7 张，静默变「没给量」甚至
+    0 张单）；`int("0.7")` → `PlanError`（整轮计划作废）。ETH/15 个小数张合约上
+    这两种都是错的。合法值必须原样传到执行层由 `_resolve_order_size` 统一定夺
+    （包括「小于一个步长就拒单」）。
+    """
+    if v is None or v == "":
+        return None
+    try:
+        out = float(v)
+    except (TypeError, ValueError):
+        raise PlanError(f"chips[{idx}].{name} must be a number, got {v!r}")
+    if out != out or out in (float("inf"), float("-inf")):  # NaN / inf
+        raise PlanError(f"chips[{idx}].{name} must be finite, got {v!r}")
+    return out
 
 
 def _memory_refs(raw: Any) -> list[str]:
@@ -649,7 +668,7 @@ def parse_plan(data: Any, symbols: Optional[list[str]] = None) -> Plan:
                 action=action,
                 confidence=conf,
                 size_usd=_f(raw.get("size_usd"), "size_usd", i),
-                size=_int(raw.get("size"), "size", i),
+                size=_qty(raw.get("size"), "size", i),
                 sl=_f(raw.get("sl"), "sl", i),
                 **tf,
                 order_type=order_type,
