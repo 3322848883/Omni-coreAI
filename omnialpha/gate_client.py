@@ -38,6 +38,18 @@ class GateApiError(Exception):
         self.label = label
 
 
+def _f(v: Any, default: float = 0.0) -> float:
+    """安全转 float。**0 与 "0" 必须保留** —— `x or default` 会把 `order_size_min=0`
+    当成假值换成 1。`int("0.7")` 会抛 ValueError，所以张数一律走这里。
+    """
+    if v is None or v == "":
+        return float(default)
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 @dataclass
 class ContractMeta:
     name: str
@@ -396,7 +408,7 @@ class GateClient:
 
                 retry = dict(body)
                 contract = str(body.get("contract") or "")
-                side_buy = int(body.get("size") or 0) > 0
+                side_buy = _f(body.get("size")) > 0
                 # prefer last/mark as fair value; clamp book top so we never chase a stale wide book
                 ref = None
                 try:
@@ -590,7 +602,7 @@ class GateClient:
         positions = self.get_positions()
         target = [
             p for p in positions
-            if p.get("contract") == contract and int(p.get("size") or 0) != 0
+            if p.get("contract") == contract and _f(p.get("size")) != 0
         ]
         if side:
             target = [p for p in target if _pos_is_side(p, side)]
@@ -598,7 +610,7 @@ class GateClient:
             raise GateApiError(f"no position to close on {contract} side={side}")
         if not side:
             side = _infer_side(target[0])
-        total = sum(abs(int(p.get("size") or 0)) for p in target)
+        total = sum(abs(_f(p.get("size"))) for p in target)
         close_size = total if size == 0 else min(size, total)
         # sell to close long (negative), buy to close short (positive)
         order_size = -abs(close_size) if side == "long" else abs(close_size)
@@ -617,7 +629,7 @@ def _is_empty_position_error(e: Exception) -> bool:
 
 
 def _pos_is_side(pos: dict, side: str) -> bool:
-    size = int(pos.get("size") or 0)
+    size = _f(pos.get("size"))
     mode = str(pos.get("mode") or "").lower()
     if side == "long":
         return size > 0 or mode.endswith("long")

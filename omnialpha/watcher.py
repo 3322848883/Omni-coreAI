@@ -117,11 +117,12 @@ def _own_label(bot: BotConfig) -> str:
     return str(getattr(bot, "label_prefix", "") or bot.bot_id or "").strip()
 
 
-def _position_size(p: dict) -> int:
+def _position_size(p: dict) -> float:
+    """持仓张数（**可为小数**）：`int("-0.7")` 会抛 ValueError，`int(0.7)` 会截成 0。"""
     try:
-        return int(p.get("size") or 0)
+        return float(p.get("size") or 0)
     except (TypeError, ValueError):
-        return 0
+        return 0.0
 
 
 def guard_scan_set(bot: BotConfig, client=None) -> dict:
@@ -603,7 +604,7 @@ def reconcile_protection(client, symbols: list[str], prefix: str = "") -> list[s
     except Exception as e:  # noqa: BLE001
         return [f"reconcile: cannot read positions: {e}"]
     for p in positions:
-        if int(p.get("size") or 0) == 0:
+        if _position_size(p) == 0:
             continue
         sym = p.get("contract") or ""
         if symbols and sym not in symbols:
