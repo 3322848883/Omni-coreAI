@@ -109,3 +109,48 @@ def round_price(price: float, meta: ContractMeta) -> float:
     precision = max(0, int(round(-math.log10(step))) if step < 1 else 0)
     rounded = round(price / step) * step
     return float(f"{rounded:.{precision}f}")
+
+
+def safe_step(meta: ContractMeta) -> float:
+    """张数步长（唯一来源）。`ContractMeta.size_step` 已封装交易所口径，这里只做兜底。"""
+    try:
+        step = float(getattr(meta, "size_step", 0) or 0)
+    except (TypeError, ValueError):
+        step = 0.0
+    if step <= 0:
+        step = 1.0
+    return step
+
+
+def quantize_size(qty: float, meta: ContractMeta, *, mode: str = "floor",
+                  at_least_step: bool = True) -> float:
+    """把张数对齐到交易所步长，并夹到 `[size_min, size_max]`。
+
+    - `mode="floor"`：向下取整（默认，**保证不超过请求的名义/风险**）
+    - `mode="round"`：四舍五入（份数表重算张数时用，贴近设计份数）
+    - `at_least_step=True`：小于一个步长会抬到 `size_min`（= 最小可下量）
+
+    **不能用内置 `round`**：Python 是银行家舍入（`round(42.5)==42` 但 `round(43.5)==44`），
+    同一份数表在不同价格下会忽上忽下；这里统一 `floor(x + 0.5)`。
+    """
+    step = safe_step(meta)
+    try:
+        q = float(qty or 0)
+    except (TypeError, ValueError):
+        q = 0.0
+    if q <= 0:
+        q = 0.0
+    if mode == "round":
+        n = math.floor(q / step + 0.5 + 1e-9) * step
+    else:
+        n = math.floor(q / step + 1e-9) * step
+    n = round(n, 8)
+
+    size_min = float(getattr(meta, "size_min", 0) or 0) or step
+    if at_least_step and n < size_min:
+        n = size_min
+    size_max = float(getattr(meta, "size_max", 0) or 0)
+    if size_max > 0 and n > size_max:
+        n = math.floor(size_max / step + 1e-9) * step
+        n = round(n, 8)
+    return n
