@@ -164,13 +164,31 @@ class TestRunOnceDegrade(unittest.TestCase):
                 notify.assert_not_called()
 
     def test_failure_alert_pushes_once_at_threshold(self):
+        """达到阈值推一次，之后按阈值间隔推（不是每轮都推）。
+
+        2026-10-26：默认阈值从 `HealthMonitor` 的 5 改成 `strategist.alert_fail_streak`
+        （默认 2，900s interval ≈ 30 分钟内必响）。本测试原来写死 5 次失败 → 1 次推送，
+        那是把「旧默认值」当契约。现在显式钉阈值，测的是**间隔规则**本身。
+        """
         with tempfile.TemporaryDirectory() as td:
             r = self._runner(td, lambda *_a, **_kw: GOOD_PLAN)
             r.cfg.env = "live"
+            r.cfg.alert_fail_streak = 5          # 显式：别依赖默认值
             with mock.patch("omnialpha.monitoring.notify_process_event") as notify:
                 for _ in range(5):
                     r._record_cycle_failure(Path(td), "bot-a", "llm_failed: x")
                 self.assertEqual(notify.call_count, 1)
+
+    def test_default_threshold_alerts_at_two(self):
+        """默认阈值 = 2：连续两次失败就要响（事故里 15 小时没响就是因为阈值形同不存在）。"""
+        with tempfile.TemporaryDirectory() as td:
+            r = self._runner(td, lambda *_a, **_kw: GOOD_PLAN)
+            r.cfg.env = "live"
+            with mock.patch("omnialpha.monitoring.notify_process_event") as notify:
+                r._record_cycle_failure(Path(td), "bot-a", "crash: TypeError: boom")
+                self.assertEqual(notify.call_count, 0, "1 次失败不该响")
+                r._record_cycle_failure(Path(td), "bot-a", "crash: TypeError: boom")
+                self.assertEqual(notify.call_count, 1, "第 2 次必须响")
 
 
 class TestParseWarningsSurfaceInNotes(unittest.TestCase):

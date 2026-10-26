@@ -61,6 +61,42 @@ class HasDataCallTest(unittest.TestCase):
                              "口径不一致：%s" % usage)
 
 
+class CoverageGuardTest(unittest.TestCase):
+    """守卫：所有「按品种取数据」的工具都必须被认成数据工具。
+
+    2026-10-26 手抄清单只写了 10 个，漏掉 `trades_flow` / `taker_delta` / `onchain` /
+    `orderflow_*` 等 13 个；而重试提示里明确列着 `trades_flow` —— 模型只调它会被判定
+    「没取数」白跑一轮。现在 `DATA_TOOL_NAMES` 从 `tools.SYMBOL_TOOLS` 派生，这条钉住它。
+    """
+
+    def test_every_symbol_tool_counts_as_data(self):
+        from omnialpha.strategist.loop import DATA_TOOL_NAMES
+        from omnialpha.strategist.tools import SYMBOL_TOOLS
+
+        missing = sorted(set(SYMBOL_TOOLS) - set(DATA_TOOL_NAMES))
+        self.assertEqual(missing, [], "这些取数工具没被认成数据：%s" % missing)
+
+    def test_aux_and_orderflow_tools_recognized(self):
+        from omnialpha.strategist.loop import PlanRunner, StrategistConfig
+
+        r = PlanRunner.__new__(PlanRunner)
+        r.cfg = StrategistConfig()
+        for name in ("trades_flow", "taker_delta", "liquidations", "onchain",
+                     "orderflow_tape", "orderbook_walls", "sentiment"):
+            r.tool_usage = [{"tool": name}]
+            self.assertTrue(r._has_data_call(), name)
+
+    def test_account_counts_but_journal_does_not(self):
+        from omnialpha.strategist.loop import PlanRunner, StrategistConfig
+
+        r = PlanRunner.__new__(PlanRunner)
+        r.cfg = StrategistConfig()
+        r.tool_usage = [{"tool": "account"}]
+        self.assertTrue(r._has_data_call(), "account 是取数据（持仓/权益）")
+        r.tool_usage = [{"tool": "journal_lookup"}]
+        self.assertFalse(r._has_data_call(), "journal 查的是自己的历史，不是行情")
+
+
 class RetryTest(unittest.TestCase):
     def test_retry_fires_when_only_meta_tool_called(self):
         """核心回归：只调 skill 时必须重试一次；重试里取到数据就返回第二次结果。"""

@@ -34,7 +34,8 @@ from .symbols import (
     UNIVERSE_EMPTY,
     resolve_symbol_arg,
 )
-from .tools import NATIVE_TOOLS, TOOL_GUIDE, available_native_tools, extract_tool_calls, filter_tool_schemas, run_tool
+from .tools import (NATIVE_TOOLS, SYMBOL_TOOLS, TOOL_GUIDE, available_native_tools,
+                   extract_tool_calls, filter_tool_schemas, run_tool)
 from .triggers import ConditionState, check_conditions, parse_conditions
 from .trigger_store import AITriggerPolicy, AITriggerStore, TriggerPolicyError, validate_trigger_payload
 
@@ -51,13 +52,17 @@ _ENTRY_ACTIONS = frozenset({
 # 「带止损」的动作：配置了 `require_checks` 时，这类腿必须带自证检查（`meta.checks`）。
 # 只约束会改变风险敞口的动作；`hold` / `close` / `reduce_*` 不受约束。
 # 「取数据」的工具名 —— `_tool_usage_summary.data_checked` 与防偷懒判据**共用**这一份。
-# `skill` / `skill_ref` 是加载指令的**元工具**，不算取数：2026-10-26 实测，
-# 模型调一次 `skill` 就骗过了「没有任何工具调用」的判据 → `data_checked=false`
-# 却不再触发重试，思考里还直说「call klines to satisfy the requirement」。
-DATA_TOOL_NAMES = frozenset({
-    "klines", "indicators", "ticker", "orderbook", "contract",
-    "stats", "account", "smc_map", "smc_events", "sqzmom",
-})
+#
+# **从 `tools.SYMBOL_TOOLS` 派生**（所有「按品种取数据」的工具，含 aux/orflow 那批），
+# 再补 `account`（不需要 symbol，但确实是取数据）。不要在这里手抄第二份清单：
+# 2026-10-26 手抄版只写了 10 个，漏掉 `trades_flow` / `taker_delta` / `onchain` /
+# `orderflow_*` 等 13 个 —— 重试提示里列着 `trades_flow`，判据却不认它，
+# 模型只调 `trades_flow` 会被判定「没取数」而白跑一轮。
+#
+# `skill` / `skill_ref` 是加载指令的**元工具**，**不算取数**：模型调一次 `skill`
+# 就能骗过「没有任何工具调用」的判据（`data_checked=false` 却不重试），
+# 思考里还直说「call klines to satisfy the requirement」。
+DATA_TOOL_NAMES = frozenset(SYMBOL_TOOLS) | {"account"}
 
 _STOP_ACTIONS = frozenset({
     "open_long", "open_short",
