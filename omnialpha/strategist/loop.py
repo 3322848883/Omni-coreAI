@@ -50,6 +50,15 @@ _ENTRY_ACTIONS = frozenset({
 
 # 「带止损」的动作：配置了 `require_checks` 时，这类腿必须带自证检查（`meta.checks`）。
 # 只约束会改变风险敞口的动作；`hold` / `close` / `reduce_*` 不受约束。
+# 「取数据」的工具名 —— `_tool_usage_summary.data_checked` 与防偷懒判据**共用**这一份。
+# `skill` / `skill_ref` 是加载指令的**元工具**，不算取数：2026-10-26 实测，
+# 模型调一次 `skill` 就骗过了「没有任何工具调用」的判据 → `data_checked=false`
+# 却不再触发重试，思考里还直说「call klines to satisfy the requirement」。
+DATA_TOOL_NAMES = frozenset({
+    "klines", "indicators", "ticker", "orderbook", "contract",
+    "stats", "account", "smc_map", "smc_events", "sqzmom",
+})
+
 _STOP_ACTIONS = frozenset({
     "open_long", "open_short",
     "add_long", "add_short",
@@ -1439,12 +1448,10 @@ class PlanRunner:
             rec["calls"] += 1
             if t not in rec["tools"]:
                 rec["tools"].append(t)
-        data_tools = {"klines", "indicators", "ticker", "orderbook", "contract",
-                      "stats", "account", "smc_map", "smc_events", "sqzmom"}
         return {
             "counts": counts,
             "total_calls": len(self.tool_usage),
-            "data_checked": bool(data_tools.intersection(counts.keys())),
+            "data_checked": bool(DATA_TOOL_NAMES.intersection(counts.keys())),
             "by_symbol": by_symbol,
             "missing_symbol": missing,
             "out_of_universe": out_of_universe,
@@ -1719,14 +1726,20 @@ class PlanRunner:
         plan.chips = kept
         return ["require_checks: 缺自证检查，已拒绝腿 %s" % ",".join(dropped)]
 
+    def _has_data_call(self) -> bool:
+        """本轮是否**真的取了行情数据**（`skill`/`skill_ref` 不算）。"""
+        return any(str((u or {}).get("tool") or "").strip() in DATA_TOOL_NAMES
+                   for u in self.tool_usage)
+
     def _chat_with_tools(self, system: str, user: str, chart_base64=None) -> str:
         """工具循环 + **防偷懒**：若全程未调用任何工具，强制重试一次。"""
         text = self._chat_with_tools_inner(system, user, chart_base64=chart_base64)
         tools_on = bool(self.cfg.tools.get("enabled"))
-        if tools_on and not self.tool_usage:
-            log.warning("no tool calls this cycle; forcing a data-fetch retry")
+        if tools_on and not self._has_data_call():
+            log.warning("no data-fetch call this cycle (meta tools don't count); forcing retry")
             nudge = (
                 "【强制要求】你上一轮**没有调用任何行情工具**就想输出计划，这是违规的。"
+                "注意：`skill` / `skill_ref` 只是加载方法论指令，**不算取数**。"
                 "现在必须先用工具获取真实市场数据（klines / indicators / ticker / orderbook / "
                 "smc_map / smc_events / sqzmom / trades_flow 至少一个），拿到数据后再输出 Plan JSON。"
             )
