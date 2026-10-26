@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import time
 import urllib.error
@@ -19,6 +20,31 @@ log = logging.getLogger(__name__)
 LIVE_REST = "https://api.gateio.ws"
 TESTNET_REST = "https://api-testnet.gateapi.io"
 FUTURES_API = "/api/v4/futures/usdt"
+
+
+def _wire_body(obj: Any) -> Any:
+    """下单体 JSON 归一化：**整数值 float → int**（返回新对象，不改调用方 dict）。
+
+    为什么必须在 wire 层做：Gate 的 `orders` / `price_orders` 里 `initial.size`
+    是 **int64**（Go 后端），JSON 浮点字面量（`-8.0`）在**反序列化阶段就失败**，
+    返回 400 `AUTO_INVALID_REQUEST_BODY` —— 它不是业务 label，日志里看不到原因。
+    实测 2026-10-27（同 body、同持仓，只差字面量类型）：
+      `"size": 0`   → `AUTO_INITIAL_SIZE_OVER_RANGE`（body 解析成功，业务层拒）
+      `"size": 0.0` → `AUTO_INVALID_REQUEST_BODY`（body 没进业务层）
+    4247ef8 把下单链 size 改成 float 后，martin-grid 实盘 10 小时**所有新单全灭**。
+
+    真小数（0.7 张）必须保留小数 —— 那是 enable_decimal 合约的合法张数，
+    Gate 对它的解析不受影响（只有整数值的 `8.0` 这种才多余）。
+    """
+    if isinstance(obj, dict):
+        return {k: _wire_body(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_wire_body(v) for v in obj]
+    if isinstance(obj, bool) or not isinstance(obj, float):
+        return obj
+    if math.isfinite(obj) and obj.is_integer():
+        return int(obj)
+    return obj
 
 SYMBOL_MAP = {
     "BTC": "BTC_USDT",
@@ -119,6 +145,10 @@ class GateClient:
         if query_string:
             url += f"?{query_string}"
 
+        # 归一化必须在**签名之前**：body_hash 与实际发送的字符串必须同源，
+        # 否则 Gate 报 INVALID_SIGNATURE（见 `_wire_body` docstring 的事故）。
+        if body is not None:
+            body = _wire_body(body)
         body_str = json.dumps(body, separators=(",", ":")) if body is not None else ""
         body_hash = hashlib.sha512(body_str.encode("utf8")).hexdigest()
         timestamp = str(int(time.time()))
