@@ -58,6 +58,7 @@ def _build_plan_runner(bot, paths: ProjectPaths):
     mk = dict(s.get("market") or {})
     cfg = StrategistConfig(
         enabled=bool(s.get("enabled", True)),
+        require_checks=bool(s.get("require_checks", False)),
         interval_sec=int(s.get("interval_sec") or 300),
         timeframe=str(s.get("timeframe") or "15m"),
         vision=bool(s.get("vision", True)),
@@ -79,6 +80,7 @@ def _build_plan_runner(bot, paths: ProjectPaths):
             exchange=str(mk.get("exchange") or bot.exchange or "gate").strip().lower(),
             stale_factor=2.0 if mk.get("stale_factor") is None else float(mk.get("stale_factor")),
             health_url=mk.get("health_url"),
+            structure=bool(mk.get("structure", False)),
             indicators=_resolve_list_cfg(mk, "indicators",
                                         ["ema20", "ema50", "atr14", "rsi14"]),
             extra_timeframes=(

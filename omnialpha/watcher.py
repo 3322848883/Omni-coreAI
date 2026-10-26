@@ -14,6 +14,7 @@ from .config import BotConfig
 from .executor import ExecReport, Executor
 from .gate_client import GateApiError
 from .monitoring.alerts import TYPE_PEAK_TRAIL
+from .observability import swallow
 from .schema import SchemaError, parse_signal
 
 log = logging.getLogger("omnialpha.watcher")
@@ -27,6 +28,46 @@ def _alert_store(paths: "ProjectPaths", bot_id: str):
         return AlertStore(paths.root, bot_id)
     except Exception:  # noqa: BLE001
         return None
+
+
+def _log_program_action(paths: "ProjectPaths", bot: BotConfig, *, source: str,
+                        action: str, symbol: str, detail: dict) -> None:
+    """把**程序自主**的敞口动作补写进 `trades.jsonl`（归因 + 计盈亏）。
+
+    为什么必须补写（2026-10-14）：watcher 的 sweep 直接调交易所，**不经过
+    `execute_signal`**，于是这类动作在两条归因链上会同时消失 ——
+      ① 本地 `trades.jsonl` 没有它 → `exchange_pnl` 的「bot 主动平仓」来源
+         （`local_realized_pnl`）收不到，盈亏统计漏账；
+      ② 交易所侧 `position_close` 里 `text` 要么是 `api`（主动平仓，不可归属），
+         要么是 `ao-<id>` 而 id 不在 `local_order_ids` 里 → 同样判为未归属。
+    结果就是「程序平了仓 / 挂了止损，事后查不到是谁干的」。
+
+    写进去之后：`source` 标明是谁干的；`detail.sl_placed` 的 id 会进
+    `local_order_ids`，条件单将来触发时才能归属；`detail.realized_pnl` 会进
+    `local_realized_pnl`，计入已实现盈亏。
+
+    **detail 的键名有讲究**：`local_order_ids` 只收
+    `order` / `tp_placed` / `sl_placed` / `tp_orders` / `sl_orders` 五处的 id。
+    挂出的保护单要用 `sl_placed`（才能归属）；而平仓**市价单**的 id 不能用
+    `order`，否则会混进「本 bot 条件单 id」集合、污染 `is_ours` 的归属判据。
+
+    失败只记 warning —— 留痕不该拖垮扫描循环。
+    """
+    try:
+        from .tradelog import TradeLogger, trade_log_path
+
+        TradeLogger(trade_log_path(paths.root, bot.bot_id)).log_execution(
+            bot.bot_id, {},
+            {"ok": True, "steps": [{
+                "action": action, "symbol": symbol, "ok": True,
+                "detail": detail, "error": "",
+            }]},
+            source=source,
+            env=getattr(bot, "env", "live") or "live",
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("trade log write failed (%s %s %s): %s",
+                    source, bot.bot_id, symbol, e)
 
 
 # ── 守护扫描集合：`bot.symbols` ∪ 「交易所上本 bot 有归属痕迹的合约」─────
@@ -127,12 +168,20 @@ def guard_scan_set(bot: BotConfig, client=None) -> dict:
                     extra.append(sym)
 
     scanned = universe + extra
-    if len(scanned) > _SCAN_SYMBOL_CAP:
-        for sym in scanned[_SCAN_SYMBOL_CAP:]:
+    cap = int(getattr(bot, "max_scan_symbols", 0) or 0) or _SCAN_SYMBOL_CAP
+    if len(scanned) > cap:
+        for sym in scanned[cap:]:
             skipped.append({"symbol": sym, "reason": "over_cap"})
-        scanned = scanned[:_SCAN_SYMBOL_CAP]
+        scanned = scanned[:cap]
+        # 超限是**成本闸门**生效，但也意味着「配了却没被守护的币」。此前只有一条
+        # log.warning 且上限不可配（模块常量），调用方拿到的 `skipped` 无人消费 ——
+        # 现在计数进 observability（供 health/巡检读），且上限可按 bot 配。
+        swallow("watcher.guard_scan_set.over_cap",
+                f"{len(universe) + len(extra) - cap} symbols skipped",
+                level=logging.WARNING,
+                note=f"{bot.bot_id}: cap={cap} universe={len(universe)} extra={len(extra)}")
         log.warning("guard scan %s: 币数 %d 超过上限 %d，本轮只扫前 %d 个（其余标记 over_cap）",
-                    bot.bot_id, len(universe) + len(extra), _SCAN_SYMBOL_CAP, _SCAN_SYMBOL_CAP)
+                    bot.bot_id, len(universe) + len(extra), cap, cap)
 
     positions: list[str] = []
     if client is not None:
@@ -174,8 +223,10 @@ def record_guard_coverage(paths: "ProjectPaths", bot_id: str, sweep: str,
 
     回答的是**事后**才问得出的那个问题：「这个仓到底有没有被守护」——
     只看日志回答不了（sweep 正常跑完是不打日志的），所以必须落一份可读状态。
-    文件按 sweep 名分节（`round` = 300s 那五步、`give_back` = 60s 那一步），
-    每节覆盖上一轮同名节，节内带 `ts` 便于判断新鲜度。
+    文件按 sweep 名分节（`round` = 300s 那四步、`give_back` = 60s 快扫描；
+    `grid_tp` 同样跑在 60s 快扫描上，但它自行取扫描集合、**不落**覆盖记录，
+    别把这里的节名当成「快扫描全都在册」），每节覆盖上一轮同名节，节内带
+    `ts` 便于判断新鲜度。
     """
     try:
         p = guard_coverage_path(paths, bot_id)
@@ -431,6 +482,9 @@ def process_file(path: Path, bot: BotConfig, paths: ProjectPaths, executor: Opti
             position_policy=bot.position_policy,
             default_replace=bot.default_replace,
             order_scope=getattr(bot, "order_scope", "own"),
+            manage_positions=getattr(bot, "manage_positions", True),
+            allow_close=getattr(bot, "allow_close", True),
+            allow_reduce=getattr(bot, "allow_reduce", True),
             require_sl=getattr(bot, "require_sl", True),
             account_risk=getattr(bot, "account_risk", None) or {},
             label_prefix=getattr(bot, "label_prefix", "") or bot.bot_id,
@@ -591,6 +645,9 @@ def run_bot_once(bot: BotConfig, paths: ProjectPaths) -> dict:
                     position_policy=bot.position_policy,
                     default_replace=bot.default_replace,
                     order_scope=getattr(bot, "order_scope", "own"),
+                    manage_positions=getattr(bot, "manage_positions", True),
+                    allow_close=getattr(bot, "allow_close", True),
+                    allow_reduce=getattr(bot, "allow_reduce", True),
                     require_sl=getattr(bot, "require_sl", True),
                     account_risk=getattr(bot, "account_risk", None),
                     label_prefix=getattr(bot, "label_prefix", "") or bot.bot_id,
@@ -633,12 +690,18 @@ def _record_exec_latency(bot: BotConfig, paths: ProjectPaths, seconds: float,
 
 def _reconcile_sweep(bot: BotConfig, paths: ProjectPaths, *,
                      client=None, symbols=None) -> int:
-    """保护单张数对账：同方向 tp/sl 合计 > 持仓张数时保留最新一组、撤其余。
+    """保护单**去重**：只裁「同向+同价+同文本」的重复腿，保留不同触发价的多级 TP。
 
     与 `_orphan_sweep` 的分工：那个管「**无持仓**时的孤儿」，这个管
-    「**有持仓**但保护单张数超额」—— 后者是每轮重挂入场单的必然产物
+    「保护单**重复堆积**」—— 后者是每轮重挂入场单的必然产物
     （实测 eth-disc 6 小时堆到 30 个 / 202 张 vs 4 张持仓），而
     `executor._resync_protectors` 只在平/减仓路径被调用，加仓路径没人管。
+
+    **判据已于 2026-10-15 重写**（原「按张数裁到 持仓+待成交」）：因为 SL 单张
+    就覆盖整个目标，原判据会**周期性吃掉逐档 TP**（做 T 腿）—— 实测把马丁共用
+    TP 的三条腿（6/7/9 张）裁成一条、并会撤掉 `ensure_grid_tp` 挂的逐档腿。
+    新判据见 `reconcile.reconcile_protectors` docstring：TP 按**触发价**保留，
+    只裁重复。
 
     fail-closed：取不到交易所报告、无持仓、有未成交入场单 → 都不动。
     """
@@ -656,6 +719,9 @@ def _reconcile_sweep(bot: BotConfig, paths: ProjectPaths, *,
         bot_id=bot.bot_id,
         account=getattr(bot, "account", "") or "",
         alert_store=_alert_store(paths, bot.bot_id),
+        manage_positions=getattr(bot, "manage_positions", True),
+        allow_close=getattr(bot, "allow_close", True),
+        allow_reduce=getattr(bot, "allow_reduce", True),
     )
     total = 0
     for sym in _sweep_symbols(bot, client, symbols):
@@ -665,9 +731,18 @@ def _reconcile_sweep(bot: BotConfig, paths: ProjectPaths, *,
             log.warning("reconcile %s %s failed: %s", bot.bot_id, sym, e)
             continue
         n = len(res.get("cancelled") or [])
+        if not res.get("ok"):
+            # 原先静默 return（fail-closed 但**无日志**）—— 实测排查「11:16–11:40 为何
+            # 连续 5 个窗口没对账」时完全无据可查。取数失败是异常态，记 WARNING。
+            log.warning("reconcile %s %s: 取数失败，本轮不动（%s）",
+                        bot.bot_id, sym, res.get("error"))
+        elif res.get("skipped"):
+            log.debug("reconcile %s %s: skipped=%s", bot.bot_id, sym, res.get("skipped"))
         if n:
-            log.info("reconcile %s %s: 撤掉 %d 笔超额保护单（持仓 %s 张）",
-                     bot.bot_id, sym, n, res.get("position_size"))
+            log.info("reconcile %s %s: 清理重复保护单 %d 笔（保留 %d 笔，"
+                     "其中多级 TP %s 条；重复 %s／超上限 %s）",
+                     bot.bot_id, sym, n, res.get("kept"), res.get("tp_legs"),
+                     res.get("dedup"), res.get("capped"))
         total += n
     return total
 
@@ -690,6 +765,9 @@ def _orphan_sweep(bot: BotConfig, paths: ProjectPaths, *,
         root=paths.root,
         bot_id=bot.bot_id,
         account=getattr(bot, "account", "") or "",
+        manage_positions=getattr(bot, "manage_positions", True),
+        allow_close=getattr(bot, "allow_close", True),
+        allow_reduce=getattr(bot, "allow_reduce", True),
     )
     total = 0
     for sym in _sweep_symbols(bot, client, symbols):
@@ -738,6 +816,9 @@ def _auto_protect_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict, *,
         account=getattr(bot, "account", "") or "",
         account_risk=getattr(bot, "account_risk", None),
         alert_store=_alert_store(paths, bot.bot_id),
+        manage_positions=getattr(bot, "manage_positions", True),
+        allow_close=getattr(bot, "allow_close", True),
+        allow_reduce=getattr(bot, "allow_reduce", True),
     )
     done = 0
     for sym in _sweep_symbols(bot, client, symbols):
@@ -745,6 +826,41 @@ def _auto_protect_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict, *,
             out = executor.ensure_protection(sym)
         except Exception as e:  # noqa: BLE001 — 单个 symbol 失败不拖垮整轮扫描
             log.warning("auto protect %s %s raised: %s", bot.bot_id, sym, e)
+            continue
+        if out.get("skipped") == "partial_coverage":
+            # SL 只覆盖一部分：程序按不变量**不补差额** —— 差额补单会让 SL 触发时
+            # 只平掉一部分（部分出场 = 程序减仓），本仓明确禁止。但必须让人看见：
+            # 「静默的半裸仓」正是这个功能要消灭的状态。
+            if out.get("auto_protect") == "dry":
+                log.info(
+                    "auto protect[dry] %s %s: partial_coverage %s/%s 张"
+                    "（程序不补差额，会挂 SL %s mark=%s）",
+                    bot.bot_id, sym, out.get("covered_size"), out.get("position_size"),
+                    out.get("sl"), out.get("mark"),
+                )
+                continue
+            key = f"{bot.bot_id}:{sym}:partial"
+            now = time.time()
+            if now - float(alerted.get(key) or 0) < _AUTO_PROTECT_ALERT_SEC:
+                continue
+            alerted[key] = now
+            detail = (
+                f"{sym} partial_coverage: SL 只覆盖 "
+                f"{out.get('covered_size')}/{out.get('position_size')} 张"
+                f"（缺口 {out.get('shortfall')} 张）—— 程序不补差额"
+                f"（差额补单会造成部分出场），需 AI 或人工处理"
+            )
+            log.error("auto protect %s %s: %s", bot.bot_id, sym, detail)
+            try:
+                if executor.alert_store is not None:
+                    executor.alert_store.raise_alert(
+                        "unprotected_position", detail, symbol=sym,
+                        covered_size=out.get("covered_size"),
+                        position_size=out.get("position_size"),
+                        shortfall=out.get("shortfall"),
+                    )
+            except Exception:  # noqa: BLE001
+                pass
             continue
         if out.get("skipped") or out.get("auto_protect") == "off":
             if out.get("skipped") and out.get("auto_protect") == "dry":
@@ -758,6 +874,27 @@ def _auto_protect_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict, *,
             log.warning(
                 "auto protect %s %s: 裸仓补 SL id=%s price=%s size=%s",
                 bot.bot_id, sym, out["placed"].get("id"), out.get("sl"), out.get("position_size"),
+            )
+            # 补挂的 SL 也要留痕：它的 id 必须进 `local_order_ids`，否则将来这条
+            # 条件单触发时，交易所侧 `ao-<id>` 认不出是本 bot 的 → 盈亏落进 excluded。
+            # 键名用 `sl_placed`（`local_order_ids` 认得）；无 pnl 字段 → 不计盈亏。
+            _log_program_action(
+                # action 刻意用「不在 notify 的 open/close/reduce 集合里」的名字：
+                # 这是一次保护单**挂出**，不是开仓 —— 否则会推出一张「开仓告警」卡片。
+                paths, bot, source="watcher:auto_protect", action="auto_protect",
+                symbol=sym,
+                detail={
+                    "trigger": "auto_protect",
+                    "sl_placed": {
+                        "id": out["placed"].get("id"),
+                        "price": out.get("sl"),
+                        "size": out.get("position_size"),
+                    },
+                    "position_side": out.get("position_side"),
+                    "covered_size": out.get("covered_size"),
+                    "mark": out.get("mark"),
+                    "sl_pct": out.get("sl_pct"),
+                },
             )
             continue
         if out.get("auto_protect") == "dry":
@@ -785,6 +922,79 @@ def _auto_protect_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict, *,
             except Exception:  # noqa: BLE001
                 pass
     return done
+
+
+def _grid_tp_sweep(bot: BotConfig, paths: ProjectPaths, *,
+                   client=None, symbols: list[str]) -> None:
+    """阶梯档「**条件限价**止盈」执行（2026-10-15）：**AI 写目标价、程序成交后执行**。
+
+    与 `_auto_protect_sweep` 的分工：那个补**风控**（SL，程序可以兜底）；这个只
+    **执行 AI 已经写进计划的目标价**（`meta.tp_target` → 落盘在
+    `data/bots/<bot>/state/ladder_levels.json`）—— 程序**绝不自己造价格**，
+    缺目标价就跳过把决定交回 AI（详见 `Executor.ensure_grid_tp`）。
+
+    为什么需要：入场腿挂单时只能带**占位 TP**（多单 TP 触发价必须 > mark，而档位
+    目标在现价下方 → 非法挂不上）；档位成交后目标价才合法 —— 由本扫描在成交后
+    补挂「条件限价」单（trigger=目标价、限价=目标价、reduce_only）。
+
+    逐 bot 由 `account_risk.grid_tp_auto` 开启（默认 off）：
+      false/"off"（默认）→ 不动作 ｜ "dry" → 只记录「本来会挂什么」 ｜ true/"live" → 真挂
+
+    **扫描节奏（2026-10-16 起）**：挂在 `pnl_sweep_sec=60` 快扫描上（与 pnl /
+    give_back 同节奏），不再跟 300s do_sweep —— 成交 → 补 TP 时延 ≤1min。
+    开关关闭时本函数在创建 client 之前返回，快扫描零 REST 成本。
+    """
+    mode = (getattr(bot, "account_risk", None) or {}).get("grid_tp_auto", "off")
+    if not mode or str(mode).lower() in ("off", "false", "none"):
+        return
+    if client is None:
+        try:
+            client = bot.create_client()
+        except Exception:  # noqa: BLE001
+            return
+    executor = Executor(
+        client,
+        label_prefix=getattr(bot, "label_prefix", "") or bot.bot_id,
+        root=paths.root,
+        bot_id=bot.bot_id,
+        account=getattr(bot, "account", "") or "",
+        account_risk=getattr(bot, "account_risk", None),
+        alert_store=_alert_store(paths, bot.bot_id),
+        manage_positions=getattr(bot, "manage_positions", True),
+        allow_close=getattr(bot, "allow_close", True),
+        allow_reduce=getattr(bot, "allow_reduce", True),
+    )
+    for sym in _sweep_symbols(bot, client, symbols):
+        try:
+            out = executor.ensure_grid_tp(sym)
+        except Exception as e:  # noqa: BLE001 — 单个 symbol 失败不拖垮整轮扫描
+            log.warning("grid tp %s %s raised: %s", bot.bot_id, sym, e)
+            continue
+        placed = out.get("placed") or []
+        if out.get("grid_tp") == "dry":
+            if out.get("candidates"):
+                log.info("grid tp[dry] %s %s: 会挂 %s", bot.bot_id, sym, out["candidates"])
+            continue
+        if placed:
+            log.info("grid tp %s %s: 挂条件限价 TP %d 条 %s", bot.bot_id, sym, len(placed), placed)
+            _log_program_action(
+                paths, bot, source="watcher:grid_tp", action="auto_grid_tp",
+                symbol=sym,
+                detail={"tp_placed": [{"id": p.get("id"), "price": p.get("tp"),
+                                       "size": p.get("size")} for p in placed],
+                        "mode": out.get("grid_tp")},
+            )
+        if out.get("errors"):
+            log.warning("grid tp %s %s 未挂成的腿: %s", bot.bot_id, sym, out["errors"])
+        # 反向仓处置留痕（`account_risk.stray_position`）：flatten 会**真下单**，
+        # 必须落程序动作（`source=watcher*`），不能只留一行日志。
+        stray = out.get("stray") or {}
+        if stray.get("action") in ("flattened", "skip_unowned", "error"):
+            log.warning("grid tp %s %s 反向仓处置: %s", bot.bot_id, sym, stray)
+            _log_program_action(
+                paths, bot, source="watcher:grid_tp", action="stray_position",
+                symbol=sym, detail=stray,
+            )
 
 
 def _peak_trail_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict, *,
@@ -815,6 +1025,9 @@ def _peak_trail_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict, *,
         account=getattr(bot, "account", "") or "",
         account_risk=getattr(bot, "account_risk", None),
         alert_store=_alert_store(paths, bot.bot_id),
+        manage_positions=getattr(bot, "manage_positions", True),
+        allow_close=getattr(bot, "allow_close", True),
+        allow_reduce=getattr(bot, "allow_reduce", True),
     )
     done = 0
     for sym in _sweep_symbols(bot, client, symbols):
@@ -907,6 +1120,9 @@ def _give_back_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict, *,
         account=getattr(bot, "account", "") or "",
         account_risk=getattr(bot, "account_risk", None),
         alert_store=_alert_store(paths, bot.bot_id),
+        manage_positions=getattr(bot, "manage_positions", True),
+        allow_close=getattr(bot, "allow_close", True),
+        allow_reduce=getattr(bot, "allow_reduce", True),
     )
     done = 0
     for sym in _sweep_symbols(bot, client, symbols):
@@ -918,12 +1134,29 @@ def _give_back_sweep(bot: BotConfig, paths: ProjectPaths, alerted: dict, *,
         for res in (out.get("sides") or []):
             if res.get("closed"):
                 done += 1
+                closed = res["closed"]
                 log.warning(
                     "give back %s %s/%s: 平仓 pnl=%.4f (peak=%.4f size=%s)",
                     bot.bot_id, sym, res.get("position_side"),
-                    float(res["closed"].get("pnl") or 0),
-                    float(res["closed"].get("peak_pnl") or 0),
-                    res["closed"].get("size"),
+                    float(closed.get("pnl") or 0),
+                    float(closed.get("peak_pnl") or 0),
+                    closed.get("size"),
+                )
+                # 程序全平必须留痕（见 `_log_program_action`）——否则「谁平的仓」查不到
+                _log_program_action(
+                    paths, bot, source="watcher:give_back", action="close",
+                    symbol=sym,
+                    detail={
+                        "executed_as": "close",
+                        "trigger": "give_back",
+                        "realized_pnl": closed.get("pnl"),
+                        "pnl_source": closed.get("pnl_source"),
+                        "position_side": res.get("position_side"),
+                        "size": closed.get("size"),
+                        "peak_pnl": closed.get("peak_pnl"),
+                        # 刻意不叫 `order`：避免混进 local_order_ids（见 helper 注释）
+                        "close_order_id": closed.get("order_id"),
+                    },
                 )
                 continue
             if dry and res.get("skipped") == "dry":
@@ -1114,6 +1347,15 @@ def run_forever(bots: dict[str, BotConfig], paths: ProjectPaths, only: Optional[
                     except Exception as e:  # noqa: BLE001
                         log.warning("give back sweep %s failed: %s", bot.bot_id, e)
                     record_guard_coverage(paths, bot.bot_id, "give_back", scan)
+                try:
+                    # 阶梯档条件限价 TP（AI 写目标价、程序成交后执行）；默认 off。
+                    # **挂在 60s 快扫描而不是 300s do_sweep（2026-10-16）**：
+                    # 档位成交 → 补 TP 的时延从 ≤5min 压到 ≤1min —— 做 T 场景里
+                    # 延迟窗口内价格冲过目标又回落会错过一轮。开关关闭时本函数
+                    # 第一行就返回（在创建 client 之前），零 REST 成本。
+                    _grid_tp_sweep(bot, paths, symbols=None)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("grid tp sweep %s failed: %s", bot.bot_id, e)
             if do_sweep:
                 # 顺序固定：**先对齐张数（有持仓）→ 再撤孤儿（无持仓）→ 补缺失（裸仓）
                 # → 最后上移已有保护（防坐电梯）**。

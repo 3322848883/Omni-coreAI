@@ -53,6 +53,9 @@ def build_context(
     # `read_text()`，每轮多读一遍整个文件（独立评审指出）。
     # 一次读够索引层需要的条数，再切片 —— 摘要层与索引层共用这一份。
     rows = journal.read_recent(max(n_recent, n_index))
+    # 降级/故障行不是「决策」，一律不进 prompt —— 必须在切片**之前**过滤，
+    # 否则 3 个 recent 槽位会被故障占掉 1 个，有效记忆白少一条。
+    rows = [r for r in rows if not _is_failure_row(r)]
     # `n_recent=0` 时 `rows[-0:]` 会返回**全部**行（不是 0 行）—— 显式挡掉这个 -0 陷阱
     recent_rows = rows[-n_recent:] if (rows and n_recent > 0) else []
     recent_summaries = [
@@ -116,6 +119,15 @@ def build_context(
         "cacheable_prefix_tokens": _est_tokens(system),
         "dynamic_tokens": _est_tokens(user),
     }
+
+
+def _is_failure_row(row: dict) -> bool:
+    """这条 journal 记录是「故障降级」而不是一次真实决策？
+
+    识别依据是 `_hold_plan` 写入的固定前缀 `[降级]`（见 `strategist/loop.py`）。
+    故障原因里常带 schema 的合法值列表，一旦被模型当成契约读，比没有记忆更糟。
+    """
+    return str(row.get("reasoning") or "").startswith("[降级]")
 
 
 def _est_tokens(text: str) -> int:

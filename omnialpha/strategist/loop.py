@@ -22,7 +22,9 @@ from .llm_client import LLMClient, LLMConfig, LLMError
 from .market import MarketConfig
 from .prompt import build_system_prompt, build_user_prompt, load_strategy_prompt
 from .risk import RiskConfig, apply_risk
-from .schema import PlanError, extract_kline_reads, normalize_chip_type, parse_plan_text
+from .schema import (PlanError, extract_checks, extract_kline_reads,
+                     extract_regions, normalize_chip_type, parse_plan_text,
+                     verify_checks)
 from .snapshot import collect_snapshot
 from .symbols import (
     AMBIGUOUS_MULTI,
@@ -37,6 +39,23 @@ from .triggers import ConditionState, check_conditions, parse_conditions
 from .trigger_store import AITriggerPolicy, AITriggerStore, TriggerPolicyError, validate_trigger_payload
 
 log = logging.getLogger("omnialpha.strategist")
+
+# 「开仓类」动作：行情陈旧（snapshot stale）时一律不执行，退出类不受影响。
+# 新增开仓类 action 时必须同步加进来，否则该腿会绕过 `_gate_stale_snapshot`。
+_ENTRY_ACTIONS = frozenset({
+    "open_long", "open_short",
+    "add_long", "add_short",
+    "stop_entry_long", "stop_entry_short",
+})
+
+# 「带止损」的动作：配置了 `require_checks` 时，这类腿必须带自证检查（`meta.checks`）。
+# 只约束会改变风险敞口的动作；`hold` / `close` / `reduce_*` 不受约束。
+_STOP_ACTIONS = frozenset({
+    "open_long", "open_short",
+    "add_long", "add_short",
+    "stop_entry_long", "stop_entry_short",
+    "modify_tp_sl",
+})
 
 
 @dataclass
@@ -58,6 +77,10 @@ class StrategistConfig:
     symbols: list[str] = field(default_factory=list)
     prompt_file: str = "prompts/vergex_default.md"
     write_hold: bool = True
+    # True = 带止损的 chip 没写自证检查（`meta.checks`）时**丢掉该腿**。
+    # 默认 False（不改任何现有 bot 行为）。**系统层不认识检查内容** —— 只判「有没有」；
+    # 检查项叫什么、阈值多少、结论怎么叫，全由人格决定。
+    require_checks: bool = False
     candles: int = 100
     market: MarketConfig = field(default_factory=MarketConfig)
     env: str = "live"
@@ -639,6 +662,7 @@ class PlanRunner:
             market_cfg=self.cfg.market,
             env=self.cfg.env,
             bot_root=self.cfg.bot_root,
+            vision_timeframes=self.cfg.vision_timeframes,
         )
         self._remember_snapshot_digest(snapshot)
         account = snapshot.get("account") or {}
@@ -703,6 +727,7 @@ class PlanRunner:
                     trigger=trigger,
                     content=text,
                     reasoning=list(getattr(self.llm, "last_reasoning_chain", []) or []),
+                    snapshot=snapshot,
                 )
             except Exception:  # noqa: BLE001
                 pass
@@ -738,11 +763,14 @@ class PlanRunner:
             }
         self._last_cycle_id = plan.cycle_id
         self._save_last_cycle(plan.cycle_id)
+        stale_notes = self._gate_stale_snapshot(plan, snapshot)
+        check_notes = self._gate_checks_declared(plan)
         rejected_triggers = self._apply_ai_triggers(plan)
         risk_result = apply_risk(plan, self.cfg.risk)
         # 解析期的**宽容告警**（如 `scenarios` 非对象被丢弃，D9/T12）此前只落 `log.warning`，
         # run 结果与 ledger 里都看不到 —— 等于告警没有出口。这里并进 notes。
-        run_notes = risk_result.notes + rejected_triggers + list(plan.notes or [])
+        run_notes = (risk_result.notes + rejected_triggers
+                     + list(plan.notes or []) + stale_notes + check_notes)
         payload = chips_to_signal(plan, risk_result, bot_id=self.cfg.bot_id or self.inbox.name)
         orders = payload.get("orders") or []
         # agent-memory：每轮决策入 journal（含快照摘要/模型/缓存命中，设计 S2.4）
@@ -926,6 +954,7 @@ class PlanRunner:
             market_cfg=self.cfg.market,
             env=self.cfg.env,
             bot_root=self.cfg.bot_root,
+            vision_timeframes=self.cfg.vision_timeframes,
         )
         self._remember_snapshot_digest(snapshot)
         account = snapshot.get("account") or {}
@@ -977,6 +1006,7 @@ class PlanRunner:
                 trigger=trigger,
                 content=text,
                 reasoning=list(getattr(self.llm, "last_reasoning_chain", []) or []),
+                snapshot=snapshot,
             )
         except Exception as e:  # noqa: BLE001
             log.error("analyze llm failed: %s", e)
@@ -1380,6 +1410,39 @@ class PlanRunner:
         kline = extract_kline_reads(kw.get("content") or "")
         if kline:
             payload["kline"] = kline
+        # 通用自证检查留痕（`meta.checks`）：**非空才落**。
+        # 人格说「我用了哪些快照值、算出什么结论」；引擎只把 `inputs` 与快照对账，
+        # `calc` / `verdict` 原样留痕（不解释语义 —— 那是人格的事）。
+        # mismatch 打 WARNING：这类偏差几乎只有两种来源 —— 读错快照，或自己编了个数。
+        checks = extract_checks(kw.get("content") or "")
+        if checks:
+            _snap_c = kw.get("snapshot")
+            _mk_c = (_snap_c.get("market") or {}) if isinstance(_snap_c, dict) else {}
+            for _item in checks:
+                _item["verify"] = verify_checks(_item, _mk_c.get(_item.get("symbol")) or {})
+                if _item["verify"]["status"] == "mismatch":
+                    log.warning("check_mismatch %s %s %s: %s",
+                                _item.get("id") or "?", _item.get("action"),
+                                _item.get("symbol"), "; ".join(_item["verify"]["issues"]))
+            payload["checks"] = checks
+        # 区域判定的「依据 + 结论」同时留痕（2026-10-25）：
+        # `region` 决定能否给 TP2（range+tp2 会整轮作废），而人格判据是文字。
+        # 只记 facts 或只记 region 都无法校准 —— 必须**同一条记录**里都有。
+        # 纯留痕：不判对错、不打闸门（现行阈值是初版，等这些样本再定）。
+        _snap2 = kw.get("snapshot")
+        _facts = {}
+        if isinstance(_snap2, dict):
+            for _sym, _e in (_snap2.get("market") or {}).items():
+                _f = (_e or {}).get("structure") if isinstance(_e, dict) else None
+                if isinstance(_f, dict) and _f:
+                    _facts[_sym] = _f
+        if _facts:
+            payload["structure"] = _facts
+            # 用引擎同款容错提取：模型有时把 Plan 包进 ```json 围栏 + 后附说明，
+            # 裸 json.loads 会失败 → region 看起来像「没判」（2026-10-25 实测踩到）。
+            _declared = extract_regions(kw.get("content") or "")
+            if _declared:
+                payload["regions"] = _declared
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         # also into sqlite ledger
         try:
@@ -1519,43 +1582,70 @@ class PlanRunner:
         """单图（主周期）；多周期请用 _generate_charts。"""
         charts = self._generate_charts(snapshot)
         return charts[0] if charts else None
-        """从 snapshot 的 candles/indicators 生成 K 线图 base64（vision 模式）。"""
-        try:
-            from .vision import generate_and_encode
-            symbols = self.cfg.symbols or []
-            if not symbols:
-                return None
-            sym = symbols[0]
-            market = snapshot.get("market") or {}
-            # snapshot: market[sym] = {candles, indicators, ...}
-            m = market.get(sym) or {}
-            if not isinstance(m, dict):
-                m = {}
-            klines = (
-                m.get("candles")
-                or m.get("klines")
-                or m.get("kline")
-                or market.get("klines")
-                or []
-            )
-            if isinstance(klines, dict):
-                klines = klines.get("candles") or klines.get("klines") or []
-            if not klines or len(klines) < 10:
-                return None
-            # 指标：snapshot.indicators → 合并进 kline 字段（vision 自算兜底）
-            ind = m.get("indicators") or {}
-            merged = []
-            for i, k in enumerate(klines):
-                row = dict(k) if isinstance(k, dict) else {"c": k}
-                for name, series in (ind or {}).items():
-                    if isinstance(series, (list, tuple)) and i < len(series):
-                        row.setdefault(name, series[i])
-                merged.append(row)
-            return generate_and_encode(
-                merged, symbol=sym, timeframe=self.cfg.timeframe,
-            )
-        except Exception:  # noqa: BLE001
-            return None
+
+    def _gate_stale_snapshot(self, plan, snapshot: dict) -> list[str]:
+        """行情陈旧 → 丢弃**开仓类** chips，只留平仓/减仓/撤单/改保护。
+
+        为什么放引擎：`stale` 原先只写在快照 JSON 里，loop / prompt / risk 一处都不消费。
+        2026-10-25 实测 Gate REST 全挂 → `candle_source="local"`、本地库
+        `pa-data-source/data/kline.db` 停在 10.5 天前、`stale=True` —— 这种状态下
+        模型照常输出 `open_short`、引擎照常执行，等于拿十天前的 K 线开新仓。
+
+        为什么只禁开仓：行情再陈旧，「退出风险」也比「维持陈旧判断」安全。
+        判据：任一 symbol 的 `market.<sym>.stale is True`；没有 market 块 → 不拦
+        （数据质量闸门 ≠ 风控闸门，缺数据不等于数据坏）。
+        """
+        stale_syms = [
+            sym for sym, e in (snapshot.get("market") or {}).items()
+            if isinstance(e, dict) and e.get("stale") is True
+        ]
+        if not stale_syms:
+            return []
+        kept, dropped = [], []
+        for chip in plan.chips:
+            act = str(getattr(chip, "action", "") or "").lower()
+            if act in _ENTRY_ACTIONS:
+                dropped.append("%s:%s" % (getattr(chip, "symbol", "") or "?", act))
+                continue
+            kept.append(chip)
+        if not dropped:
+            return []
+        log.warning(
+            "行情陈旧（stale）: %s —— 丢弃 %d 条开仓腿 %s，只保留 %d 条风控腿",
+            ",".join(stale_syms), len(dropped), dropped, len(kept))
+        plan.chips = kept
+        return ["stale_snapshot: %s 行情陈旧，已拒绝开仓腿 %s"
+                % (",".join(stale_syms), ",".join(dropped))]
+
+    def _gate_checks_declared(self, plan) -> list[str]:
+        """`require_checks: true` 时，带止损的腿**必须**写 `meta.checks`（自证检查）。
+
+        为什么需要引擎闸门（而不是只靠人格）：
+        人格已经写明「只写『HC-03不合格』不带数字 = 未体检 → 必须 hold」，但
+        2026-10-25 实测同一个 bot 连跑三轮：①写了「不适用」②写了完整四数
+        ③**完全没写**。软约束的覆盖率不是 100%，而缺了它就无法复核「止损距离
+        够不够 1.5×ATR」，等于开仓没有留下判定依据。
+
+        判据只看「有没有写」，**不解释内容**（内容对不对由 `verify_checks` 对账，
+        判它 `mismatch` 也只在 thinking 里告警 —— 那属于策略判断，不该由引擎替它
+        否决交易）。默认 `require_checks=False`，不配置时行为与改动前一致。
+        """
+        if not getattr(getattr(self, "cfg", None), "require_checks", False):
+            return []
+        kept, dropped = [], []
+        for chip in plan.chips:
+            act = str(getattr(chip, "action", "") or "").lower()
+            if act in _STOP_ACTIONS and not (getattr(chip, "checks", None) or []):
+                dropped.append("%s:%s" % (getattr(chip, "symbol", "") or "?", act))
+                continue
+            kept.append(chip)
+        if not dropped:
+            return []
+        log.warning(
+            "require_checks: %d 条带止损的腿没写 meta.checks —— 丢弃 %s，保留 %d 条",
+            len(dropped), dropped, len(kept))
+        plan.chips = kept
+        return ["require_checks: 缺自证检查，已拒绝腿 %s" % ",".join(dropped)]
 
     def _chat_with_tools(self, system: str, user: str, chart_base64=None) -> str:
         """工具循环 + **防偷懒**：若全程未调用任何工具，强制重试一次。"""
@@ -1645,6 +1735,27 @@ class PlanRunner:
             pass
         return None
 
+    @staticmethod
+    def _forced_skill_choice(tools: list, *, skills_required: bool = False,
+                             skill_ids=None) -> Optional[dict]:
+        """`skills_required` + native 模式下的首轮 tool_choice 硬制。
+
+        实测（10-12 brooks-eth 5 轮 + A/B 60 次）：catalog hint 升级到「每轮必载」
+        文案在实盘多工具竞争下 0/5 生效 —— native 模式 tool_choice=auto 时模型
+        自己选，提示词层约束不构成强制。真正强制只有一条路：首轮把 tool_choice
+        钉死到 skill 函数（OpenAI 兼容 named function choice），技能加载后
+        后续轮恢复 auto。
+
+        返回 None = 不硬制（默认关闭 / 无技能白名单 / skill 工具不在工具面），
+        行为与改动前逐字一致。
+        """
+        if not skills_required or not skill_ids:
+            return None
+        for t in tools:
+            if (t.get("function") or {}).get("name") == "skill":
+                return {"type": "function", "function": {"name": "skill"}}
+        return None
+
     def _chat_native_tools(self, messages: list, max_rounds: int) -> str:
         """DeepSeek function calling + thinking: must echo reasoning_content on tool turns.
 
@@ -1664,9 +1775,25 @@ class PlanRunner:
             deny=self.cfg.tools.get("deny"),
         )
         active_tools: Optional[list] = None
+        # skills_required 硬制：首轮钉死调 skill（网关拒绝 named choice 则回退 auto）
+        force_choice = self._forced_skill_choice(
+            base_tools,
+            skills_required=bool(getattr(self.cfg, "skills_required", False)),
+            skill_ids=self.cfg.skills,
+        )
         for _round in range(max(1, max_rounds) + 1):
             tools = active_tools if active_tools is not None else base_tools
-            msg = self.llm.chat_message_full(messages, tools=tools, tool_choice="auto")
+            choice = force_choice if (_round == 0 and active_tools is None) else None
+            try:
+                msg = self.llm.chat_message_full(messages, tools=tools,
+                                                 tool_choice=choice or "auto")
+            except Exception as e:  # noqa: BLE001
+                if choice is None:
+                    raise
+                log.warning("forced skill tool_choice rejected by provider (%s); "
+                            "falling back to auto", e)
+                msg = self.llm.chat_message_full(messages, tools=tools,
+                                                 tool_choice="auto")
             calls = msg.get("tool_calls") or []
             if not calls:
                 return msg.get("content") or ""

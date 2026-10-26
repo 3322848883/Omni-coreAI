@@ -51,6 +51,9 @@ class MarketConfig:
     extra_candles: int = 20
     # P1 realtime refresh blocks (always REST): ticker includes funding/mark/index/24h
     refresh: list[str] = field(default_factory=lambda: ["ticker", "stats", "orderbook"])
+    # 是否在快照里附 `market.<sym>.structure`（净推进/效率/新高新低/边界测试次数）。
+    # **默认关**：它进 prompt，会改变模型读到的文本，不该无差别影响所有 bot。
+    structure: bool = False
 
     def __post_init__(self) -> None:
         mode = str(self.mode or "rest_only").strip().lower()

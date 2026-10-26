@@ -5,7 +5,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..gate_client import GateApiError, GateClient
-from .indicators import attach_indicators, latest_indicators
+from .indicators import (attach_indicators, latest_indicators,
+                       strip_carried_indicators)
 from .market import MarketConfig, resolve_candles
 
 TICKER_FIELDS = (
@@ -235,6 +236,67 @@ def _position_state_by_symbol(account: dict, symbols: Optional[list[str]]) -> tu
     return states, notes
 
 
+def structure_facts(rows: list[dict[str, Any]], n: int = 20,
+                    band: float = 0.10) -> dict[str, Any]:
+    """近 `n` 根的**机械结构事实**（只算数字，**不下判断**）。
+
+    为什么需要它（2026-10-25 核实）：
+    人格原先对「趋势 / 趋势中的区间 / 区间 / 反转」**没有任何判据**，而 `region` 不是
+    纯标签 —— `region=range` + `tp2` 会被 schema 判 PlanError **整轮作废**，
+    `trend`/`trend_range` 才允许多档止盈。于是标签被入场意图反向驱动：245 个可比轮次
+    里 region 跳动 34 次，多处 2–15 分钟内反复横跳（`trend→reversal→trend`）。
+
+    实测当轮（ETH 15m）：模型写 `region=range`，客观数据却是 `new_low=True`（创了新低）
+    + 下沿只被测试 1 次 —— 这些数本来能从 K 线算出来，**让模型脑算就等于让它自由心证**。
+    这与 ATR14 那条教训同源：数据必须来自快照，不许估。
+
+    返回（全部是**事实**，不含「是趋势还是区间」这类结论）：
+    `n` 窗口根数 / `net` 净推进 / `travel` 总行程 / `er` 效率=|net|/travel（0 纯震荡、1 单边）/
+    `hi`/`lo`/`range` 窗口最高最低与幅度 / `new_high`/`new_low` 是否创出**前一段**之外的新高新低 /
+    `touches_up`/`touches_lo` 上下沿各被触及几次（触及 = 进入上下各 `band` 区间）/
+    `pos` 收盘在窗口内的相对位置（0=下沿、1=上沿）。
+
+    数据不足 2×n 根（没有可比的上一段）→ 返回 `{}`（调用方据此不放这个键，不猜）。
+    """
+    n = max(5, int(n or 20))
+    if not rows or len(rows) < 2 * n:
+        return {}
+    win, prev = rows[-n:], rows[-2 * n:-n]
+    try:
+        cl = [float(b.get("c") or 0) for b in win]
+        hh = [float(b.get("h") or 0) for b in win]
+        ll = [float(b.get("l") or 0) for b in win]
+        prev_hi = max(float(b.get("h") or 0) for b in prev)
+        prev_lo = min(float(b.get("l") or 0) for b in prev)
+    except (TypeError, ValueError, AttributeError):
+        return {}
+    net = cl[-1] - cl[0]
+    travel = sum(abs(cl[i] - cl[i - 1]) for i in range(1, len(cl)))
+    hi, lo = max(hh), min(ll)
+    rng = hi - lo
+    out: dict[str, Any] = {
+        "n": n,
+        "net": round(net, 2),
+        "travel": round(travel, 2),
+        "er": round(abs(net) / travel, 3) if travel else 0.0,
+        "hi": round(hi, 2),
+        "lo": round(lo, 2),
+        "range": round(max(rng, 0.0), 2),
+        "new_high": hi > prev_hi,
+        "new_low": lo < prev_lo,
+    }
+    if rng <= 0:                      # 全平：边界无意义，次数记 0、位置记中枢
+        out.update({"touches_up": 0, "touches_lo": 0, "pos": 0.5})
+        return out
+    up_band, lo_band = hi - band * rng, lo + band * rng
+    out.update({
+        "touches_up": sum(1 for x in hh if x >= up_band),
+        "touches_lo": sum(1 for x in ll if x <= lo_band),
+        "pos": round((cl[-1] - lo) / rng, 2),
+    })
+    return out
+
+
 def collect_snapshot(
     client: GateClient,
     symbols: list[str],
@@ -243,6 +305,7 @@ def collect_snapshot(
     market_cfg: Optional[MarketConfig] = None,
     env: str = "live",
     bot_root: Optional[Path] = None,
+    vision_timeframes: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     cfg = market_cfg or MarketConfig()
     refresh = set(cfg.refresh or [])
@@ -325,7 +388,10 @@ def collect_snapshot(
                 env=env,
                 bot_root=bot_root,
             )
-            rows = attach_indicators(list(result.rows), cfg.indicators)
+            # 先 attach（已有值沿用），再按配置剥掉 K 线自带列 ——
+            # 否则 `indicators: []` 关不掉自带的 ema20/atr14（T180）。
+            rows = strip_carried_indicators(
+                attach_indicators(list(result.rows), cfg.indicators), cfg.indicators)
             entry["candles"] = rows
             entry["candle_source"] = result.source
             entry["stale"] = result.stale
@@ -340,9 +406,22 @@ def collect_snapshot(
                 entry["candles_error"] = result.error
             if rows:
                 entry["indicators"] = latest_indicators(rows, cfg.indicators)
+                # 区域判定的机械事实（净推进/效率/新高新低/边界测试次数/区间位置）。
+                # 只给数字不下判断 —— 判断归人格；但数字不许模型自己估（同 ATR14 教训）。
+                # `market.structure` 默认关：它会进 prompt，不该无差别影响所有 bot。
+                if getattr(cfg, "structure", False):
+                    facts = structure_facts(rows)
+                    if facts:
+                        entry["structure"] = facts
 
             # multi-timeframe extras (compact: last N bars + latest indicators)
             extra_tfs = [str(tf).lower() for tf in (getattr(cfg, "extra_timeframes", None) or [])]
+            # vision 请求的周期并入拉取：vision_timeframes 配了 5m 而市场层没配时，
+            # snapshot 永远没有 5m 数据 → vision 每轮 no_candles（2026-10-13 定性）。
+            for _vtf in (vision_timeframes or []):
+                _v = str(_vtf).lower()
+                if _v and _v not in extra_tfs:
+                    extra_tfs.append(_v)
             extra_tfs = [tf for tf in extra_tfs if tf and tf != str(interval).lower()]
             if extra_tfs:
                 entry["tf"] = {}
@@ -353,7 +432,9 @@ def collect_snapshot(
                             client, sym, tf, n_extra,
                             market_cfg=cfg, env=env, bot_root=bot_root,
                         )
-                        xrows = attach_indicators(list(xres.rows), cfg.indicators)
+                        xrows = strip_carried_indicators(
+                            attach_indicators(list(xres.rows), cfg.indicators),
+                            cfg.indicators)
                         entry["tf"][tf] = {
                             "candles": xrows[-n_extra:] if xrows else [],
                             "indicators": latest_indicators(xrows, cfg.indicators) if xrows else {},

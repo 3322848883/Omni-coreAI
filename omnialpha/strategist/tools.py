@@ -1510,6 +1510,9 @@ def run_tool(
     deny: Optional[list] = None,
     # 【品种宇宙】：工具的 symbol 缺省策略要用它（见 strategist/symbols.py）
     symbols: Optional[list] = None,
+    # 持仓管理总闸（config.manage_positions）：false 时 account 工具不返回
+    # 持仓/保护单（只开仓不管仓的 bot 看不到就无从管；执行侧另有闸门兜底）
+    manage_positions: bool = True,
 
 
 ) -> Any:
@@ -1961,7 +1964,9 @@ def run_tool(
             pos = []
 
 
-            for p in (client.get_positions() or []):
+            # manage_positions=false（只开仓不管仓）：持仓不注入 —— 模型看不到
+            # 就无从按人格管仓；执行侧 Executor._management_gate 另有兜底。
+            for p in ((client.get_positions() or []) if manage_positions else []):
 
 
                 if int(p.get("size") or 0) == 0:
@@ -2105,7 +2110,8 @@ def run_tool(
                 try:
 
 
-                    for p in (client.list_price_orders(s) or []):
+                    # 保护单同属持仓管理面：manage_positions=false 时不查不返回
+                    for p in ((client.list_price_orders(s) or []) if manage_positions else []):
 
 
                         ini = p.get("initial") or {}
@@ -2147,6 +2153,38 @@ def run_tool(
                     price_orders.append({"error": str(e)[:80], "contract": s})
 
 
+            # P2：阶梯档位表注入（executor._record_ladder_level 落盘）。
+            # 持仓快照无分笔成交价 —— 逐档止盈对账（每档自己的结构位/中值 TP）
+            # 需要「每档买入价/张数/目标止盈」的输入，就来自这张表：与
+            # open_orders 取差集即得成交档。缺失/损坏返回空列表（不拦）。
+            # 路径与 executor 写入处**同源**：`<bot_root>/data/bots/<bot_id>/state/`
+            # （bot_root 是项目根，`__main__` 传的就是 paths.root；bot 级隔离，
+            # 不读别人的档位表）。无 bot_id 时退回项目根下的 state/（不拦）。
+            ladder_levels: list[dict] = []
+            try:
+                if bot_root:
+                    from pathlib import Path as _P2
+                    _base = _P2(bot_root)
+                    if bot_id:
+                        _base = _base / "data" / "bots" / str(bot_id)
+                    _lp = _base / "state" / "ladder_levels.json"
+                    if _lp.exists():
+                        _ldata = json.loads(_lp.read_text(encoding="utf-8"))
+                        _lv_all = [
+                            lv for lv in (_ldata.get("levels") or [])
+                            if isinstance(lv, dict)
+                        ]
+                        # 只注入被问到的币（account 工具按 symbol 查询）
+                        if syms:
+                            _want = {str(s).strip().upper() for s in syms}
+                            _lv_all = [
+                                lv for lv in _lv_all
+                                if str(lv.get("symbol") or "").strip().upper() in _want
+                            ]
+                        ladder_levels = _lv_all[-50:]
+            except Exception:  # noqa: BLE001 — 档位表是增强不是关键路径
+                ladder_levels = []
+
             return {
 
 
@@ -2171,6 +2209,18 @@ def run_tool(
                 "protections": price_orders,
 
 
+                # 阶梯档位表（P1/P2）：每档买入价/张数/目标止盈。与 open_orders
+                # 取差集 = 已成交档；仅供阶梯/网格类人格做逐档止盈对账。
+                "ladder_levels": ladder_levels,
+
+
+                # 只开仓不管仓：说清「为什么没有持仓数据」—— 否则空 positions 会被
+                # 误读成「查失败了」或「真的没仓」，模型照人格 §54 强行给管理结论。
+                **({} if manage_positions else {
+                    "note": ("manage_positions=false：本 bot 只开仓、不管仓 —— "
+                             "持仓与保护单数据不注入，禁止输出 close/reduce/"
+                             "modify_tp_sl/trail 等持仓管理动作"),
+                }),
             }
 
 
