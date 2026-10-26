@@ -1,0 +1,90 @@
+# 对照测试 bot：用服务器正在跑的人格（ladder_nogate.md，只做多）在本地 paper 跑，
+# 与 ladder-v5-paper（动态多空）对照。风控口径对齐服务器 martin-grid（4x / 14x）。
+bot_id: srv-test
+account: gate-srv-test
+enabled: false
+env: paper
+
+symbols:
+  - ETH_USDT
+
+max_notional_usd: 1200
+max_orders_per_file: 32
+max_files_per_run: 20
+poll_interval_sec: 2
+label_prefix: stt
+position_policy: free
+default_replace: none
+place_before_cancel: true
+order_scope: own
+require_sl: true
+
+account_risk:
+  grid_tp_auto: live
+  halt: false
+  max_leverage: 50
+  margin_mode: cross
+  max_total_notional_usd: 1200
+  risk_pct: 0.12
+  total_risk_pct: 0.35
+  max_notional_pct: 4.0
+  max_total_notional_pct: 14.0
+  daily_loss_limit_usd: 15
+  no_flip: false
+  stray_position: warn
+  peak_trail: false
+  peak_trail_atr: 2.0
+  sl_move_policy: ladder
+
+strategist:
+  prompt_file: prompts/_srv_live_ladder_nogate.md
+  interval_sec: 900
+  timeframe: 15m
+  event_on_kline_close: false
+  event_timeframe: 15m
+  candles: 200
+  write_hold: true
+  vision: false
+  tools:
+    enabled: true
+    native: true
+    max_rounds: 14
+    allow:
+      - klines
+      - ticker
+      - contract
+      - smc_map
+      - smc_events
+  market:
+    mode: rest_only
+    indicators: [atr14]
+    timeframes: ["5m", "15m", "1h", "4h", "1d"]
+    extra_candles: 60
+  ai_triggers:
+    enabled: false
+    max_active: 5
+    default_cooldown_sec: 900
+  risk:
+    min_confidence: 0.55
+    max_chips: 32
+    max_notional_usd: 1200
+  skills: []
+  llm:
+    provider: gw-flash
+    reasoning_effort: high
+    max_tokens: 32768
+
+paper:
+  store_path: data/accounts/gate-srv-test/account.db
+  feed_exchange: gate
+  initial_capital: 67
+  leverage: 50
+  fee_rate: 0.0005
+  maker_fee_rate: 0.0002
+  funding_enabled: true
+  position_mode: dual
+  margin_mode: cross
+  price_band_pct: 20.0
+  maintenance_margin_rate: 0.01
+  trigger_price_type: latest
+  tick_interval_sec: 2

@@ -1,0 +1,101 @@
+# Brooks 人格 v5（交易者宣言体）· ETH_USDT
+#
+# 用途：本地测试 + 服务器 paper 共用同一份配置（单一来源，避免双端漂移）。
+#       5m 主周期 + 5m/15m/1h/4h 四周期 EMA20；逐K 20 根；工具白名单只留 PA 7 个。
+#       ① symbol = ETH_USDT
+#       ② account_risk.max_notional_pct = 20.0  ← 修复「未配默认 5×权益=50000 截断 2% 风险」
+#
+# 切实盘（三处，改完必须重启进程，配置无热重载）：
+#   1) env: live
+#   2) 加 api_key_env: GATE_API_KEY / api_secret_env: GATE_API_SECRET
+#   3) account_risk 加 max_total_notional_pct: 10.0；paper 段可留（live 不读）
+#   账户与 brooks-btc / brooks-eth 相同，靠 label_prefix=pev5 隔离，**三者不得同时 enabled**。
+bot_id: pa-eth-v5
+enabled: false          # 服务器部署后仍保持禁用：启动需显式 run/plan-loop
+env: paper
+exchange: gate
+symbols:
+  - ETH_USDT
+max_notional_usd: 200000
+max_orders_per_file: 10
+max_files_per_run: 20
+poll_interval_sec: 2
+label_prefix: pev5
+position_policy: manage_only
+default_replace: none
+order_scope: own
+require_sl: true
+account_risk:
+  halt: false
+  risk_pct: 0.02
+  max_leverage: 50
+  # 权益比例上限：10000 × 20 = 200000，与 max_notional_usd 对齐，避免 5×权益 默认值把 2% 风险截断
+  max_notional_pct: 20.0
+  max_total_notional_usd: 300000
+  daily_loss_limit_usd: 1000
+
+paper:
+  feed_exchange: gate
+  initial_capital: 10000
+  leverage: 50
+  fee_rate: 0.0005
+  # 0.0002 = Gate maker 0.02%。原先这里写 0.0，但存量库 `account.db` 被一条
+  # 已删除的迁移 UPDATE 改成了 0.0002 —— **配置写免佣、实际在收费**。
+  # 现在与库值对齐（也让 maker/taker 拆分真正生效：网格/限价腿全是 maker）。
+  maker_fee_rate: 0.0002
+  funding_enabled: true
+  position_mode: single
+  margin_mode: isolated
+  price_band_pct: 10.0
+  maintenance_margin_rate: 0.01
+  trigger_price_type: latest
+  tick_interval_sec: 2
+
+strategist:
+  # `enabled: true` 若保留也无效（本地是零消费死键），真正生效的是
+  # `strategist.runtime.plan_loop` / `runtime.run`（supervisor 读）。
+  prompt_file: prompts/_pa_slim_test_multi_v5.md
+  # 2026-10-25 试点 fail-closed：人格声明失配 → 拒绝启动（而不是只 warn）。
+  # 只在本 bot 开（paper）；live bot 保持 warn —— 那边停机的代价比多烧一轮更大。
+  persona_strict: true
+  skills: [brooks-bar-by-bar]
+  # 🔴 `skills_required: true` 已删除（2026-10-24）：本地主线**零引用**此键
+  # （只有服务器 trigger-fix worktree 实现了「首轮 tool_choice 硬制」）。
+  # 留在这儿会让人以为「每轮必载技能」已生效，实际靠模型自觉。
+  # 语义将迁到 `tools.require_first: [skill]`（S5 工具层），届时在此重新声明。
+  # 🔴 单仓位语义：重挂入场单前先撤同 symbol 的旧单。
+  # 不开这个的话，PA 每轮只出 1 条入场腿，永远够不到 REPLACE_MIN_ENTRY_LEGS(=5)，
+  # 旧入场单会留着；而重挂保护单时会撤掉旧 TP/SL → 旧单裸挂、成交即裸仓。
+  # 实测 2026-10-24 14:07 双开 3242+3328，其中 3242 无保护 74 分钟，市价自平 -135.49。
+  # 网格/阶梯 bot 必须是 false（它们靠增量补档，撤了整梯清空）。
+  replace_on_entry: true
+  interval_sec: 300
+  timeframe: 5m
+  event_on_kline_close: true
+  event_timeframe: 5m
+  candles: 200
+  write_hold: true
+  tools:
+    enabled: true
+    native: true
+    max_rounds: 6
+    # 只留 PA 需要的工具：schema 层过滤（模型看不到就调不到）+ 调用点双保险。
+    # 未配置时是 36/36 全开 —— 实测模型会顺手调 orderbook / smc_map，违反人格的铁律。
+    allow: [skill, skill_ref, account, indicators, klines, ticker, contract]
+  market:
+    mode: rest_only
+    indicators: [ema20, atr14]
+    extra_candles: 15
+  ai_triggers:
+    enabled: true
+    max_active: 5
+  risk:
+    min_confidence: 0.55
+    max_chips: 2
+    max_notional_usd: 200000
+  llm:
+    # 服务器实测（brooks-eth / martin-grid 2026-10-12 起）：global 池（gw-flash）
+    # 持续 503 no_healthy_account，每轮白耗 ~5s 重试再切备用 → 首选 cn 池。
+    provider: gw-cn-flash
+    fallback: [gw-flash, deepseek-official]
+    reasoning_effort: high

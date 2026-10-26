@@ -59,7 +59,6 @@ account_risk:
   auto_protect_sl_pct: 2.0
 
 strategist:
-  enabled: true
   prompt_file: prompts/wyckoff_pa.md
   interval_sec: 900
   timeframe: 15m

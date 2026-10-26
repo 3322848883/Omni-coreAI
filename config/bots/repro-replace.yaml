@@ -1,0 +1,34 @@
+bot_id: repro-replace
+account: gate-repro-replace
+enabled: false
+env: paper
+symbols:
+  - ETH_USDT
+max_notional_usd: 5000
+max_orders_per_file: 40
+max_files_per_run: 20
+poll_interval_sec: 2
+label_prefix: rrp
+position_policy: free
+default_replace: none
+place_before_cancel: true
+order_scope: own
+require_sl: true
+account_risk:
+  halt: false
+  max_leverage: 50
+  margin_mode: cross
+  max_total_notional_usd: 5000
+  risk_pct: 0.5
+  total_risk_pct: 0.9
+  max_notional_pct: 50.0
+  max_total_notional_pct: 100.0
+  daily_loss_limit_usd: 500
+  no_flip: false
+  stray_position: warn
+  peak_trail: false
+  sl_move_policy: ladder
+strategist:
+  runtime:
+    plan_loop: false
+    run: false

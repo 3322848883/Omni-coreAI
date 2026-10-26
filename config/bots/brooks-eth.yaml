@@ -38,7 +38,6 @@ account_risk:
   # daily_loss_limit：按要求不启用熔断
 
 strategist:
-  enabled: true
   prompt_file: prompts/brooks_eth_pa_slim.md
   interval_sec: 900
   # 主周期 5m：15m 上回抽挂单的窗口太长（实测「挂单 10 小时不成交、价格单边跌 2176 点」）。

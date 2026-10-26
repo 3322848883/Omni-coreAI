@@ -1,0 +1,71 @@
+# Brooks 三部曲技能驱动人格 v4（币种无关 · 5m 主周期）— ETH 最新行情验证载体
+#
+# 目的：用 brooks-bar-by-bar 技能对 ETH_USDT 最新行情做一轮分析（5m 主 + 5m/15m/1h/4h 四周期）。
+#       相对 pa-eth-test12~15 的唯一差异：
+#         ① symbol = ETH_USDT
+#         ② account_risk.max_notional_pct = 20.0  ← 修复上轮缺陷（未配默认 5×权益=50000 截断 2% 风险）
+bot_id: pa-eth-cmp1
+enabled: false          # 基线禁用；本机启用走 config/bots.local/ overlay
+env: paper
+exchange: gate
+symbols:
+  - ETH_USDT
+max_notional_usd: 200000
+max_orders_per_file: 10
+max_files_per_run: 20
+poll_interval_sec: 2
+label_prefix: pc1
+position_policy: manage_only
+default_replace: none
+order_scope: own
+require_sl: true
+account_risk:
+  halt: false
+  risk_pct: 0.02
+  max_leverage: 50
+  # 权益比例上限：10000 × 20 = 200000，与 max_notional_usd 对齐，避免 5×权益 默认值把 2% 风险截断
+  max_notional_pct: 20.0
+  max_total_notional_usd: 300000
+  daily_loss_limit_usd: 1000
+
+paper:
+  feed_exchange: gate
+  initial_capital: 10000
+  leverage: 50
+  fee_rate: 0.0005
+  maker_fee_rate: 0.0002
+  funding_enabled: true
+  position_mode: single
+  margin_mode: isolated
+  price_band_pct: 10.0
+  maintenance_margin_rate: 0.01
+  trigger_price_type: latest
+  tick_interval_sec: 2
+
+strategist:
+  prompt_file: prompts/_pa_slim_test_multi_v4_ptrading.md
+  skills: [price-action-trading]
+  interval_sec: 300
+  timeframe: 5m
+  event_on_kline_close: true
+  event_timeframe: 5m
+  candles: 200
+  write_hold: true
+  tools:
+    enabled: true
+    native: true
+    max_rounds: 6
+  market:
+    mode: rest_only
+    indicators: [ema20, atr14]
+    extra_candles: 15
+  ai_triggers:
+    enabled: true
+    max_active: 5
+  risk:
+    min_confidence: 0.55
+    max_chips: 2
+    max_notional_usd: 200000
+  llm:
+    provider: gw-flash
+    reasoning_effort: high

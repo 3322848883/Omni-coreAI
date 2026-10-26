@@ -1,0 +1,34 @@
+# 多币种一致性测试载体（enabled: false，不会被 supervisor 拉起；inbox 无人消费）
+# 目的：用**同一套人格规则**跑不同币种，看 region / HC-03 / structure 是否一致可审计。
+bot_id: verify-sol
+enabled: false
+env: paper
+exchange: gate
+symbols: [SOL_USDT]
+account: gate-grid-paper
+account_risk:
+  halt: false
+  risk_pct: 0.02
+strategist:
+  timeframe: 15m
+  event_timeframe: 15m
+  candles: 120
+  prompt_file: prompts/_verify_sol_pa.md
+  # 与 brooks-eth 同构：HC-03 四数硬闸门 + 结构事实
+  require_checks: true
+  market:
+    mode: hybrid
+    indicators: [ema20, atr14]
+    timeframes: ["1h", "4h"]
+    extra_candles: 60
+    structure: true
+  tools:
+    enabled: true
+    native: true
+    max_rounds: 3
+    allow: [klines, journal_lookup]
+  skills:
+    - price-action-trading
+  llm:
+    provider: gw-cn-flash
+    fallback: [gw-flash, deepseek-official]

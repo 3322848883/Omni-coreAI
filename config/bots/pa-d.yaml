@@ -12,7 +12,10 @@ paper:
   initial_capital: 5000
   leverage: 20
 strategist:
-  enabled: false
+  # 2026-10-25 停用：旧键 `strategist.enabled` 已删除（零消费，写 false 也会被
+  # 拉起）。真正生效的开关是下面这行 —— supervisor.prepare 读
+  # runtime.plan_loop / runtime.run，缺省为 True。
+  runtime: {plan_loop: false, run: false}
   prompt_file: prompts/multi_breakout.md
   timeframe: 15m
   candles: 30

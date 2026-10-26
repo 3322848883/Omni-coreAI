@@ -1,0 +1,78 @@
+# 端到端验证用 paper bot（`_` 前缀 → load_all_bots 会跳过，不计入 51 enabled 统计）
+#
+# 用途：验证「PA 人格 + 技能 → Plan → schema → 风控 → 模拟交易所撮合」整链
+# 为什么单独建一个而不是复用 pa-eth-v5：它的 inbox 积压 27 条历史信号，
+# 跑 once 会一起执行、污染 paper 账本与 A/B 数据。
+#
+# 验证完可整目录删除：data/bots/verify-paper/
+bot_id: verify-paper
+enabled: false
+env: paper
+symbols:
+  - ETH_USDT
+max_notional_usd: 300
+max_orders_per_file: 5
+max_files_per_run: 10
+poll_interval_sec: 2
+label_prefix: vfy
+position_policy: allow
+default_replace: none
+order_scope: own
+require_sl: true
+
+account_risk:
+  halt: false
+  max_leverage: 50
+  max_total_notional_usd: 600
+  daily_loss_limit_usd: 0
+
+paper:
+  feed_exchange: gate          # 行情/合约元数据用真实 Gate（只读），撮合在本地
+  initial_capital: 10000
+  leverage: 20
+  fee_rate: 0.0005             # taker
+  maker_fee_rate: 0.0002       # 与 Gate 实际一致（C 口径：不做免佣测试）
+  funding_enabled: false
+  position_mode: single
+  margin_mode: isolated
+  price_band_pct: 5.0
+  maintenance_margin_rate: 0.005
+  trigger_price_type: latest
+  tick_interval_sec: 30
+
+strategist:
+  prompt_file: prompts/brooks_eth_pa_slim.md   # 4.4k 精简 PA 人格（实盘同款）
+  skills: [brooks-bar-by-bar]                  # 验证 L1 catalog + L2 加载
+  replace_on_entry: true
+  interval_sec: 900
+  timeframe: 15m
+  event_on_kline_close: true
+  event_timeframe: 15m
+  candles: 200
+  write_hold: true
+  vision: false
+  tools:
+    enabled: true
+    native: true
+    max_rounds: 4
+    # 与 live `brooks-eth` 同构：人格所需的 ema20 / atr14 **由 snapshot 提供**
+    # （`market.<SYM>.indicators.*` 每轮 json.dumps 进 user prompt，实测 35k 字符里含
+    # `"atr14": 6.3`），所以不需要 indicators 工具。
+    allow: [skill, skill_ref, klines, ticker, contract, account]
+    # 首轮强制先载技能（`brooks-bar-by-bar`）：人格要求「先有判据再分析」，
+    # 原先只是软约束。查不到该工具会自动退回 auto，不会 400。
+    require_first: [skill]
+  market:
+    mode: rest_only
+    indicators: [ema20, atr14]
+    extra_candles: 15
+  ai_triggers:
+    enabled: true
+    max_active: 3
+  risk:
+    min_confidence: 0.55
+    max_chips: 2
+    max_notional_usd: 300
+  llm:
+    provider: gw-cn-flash
+    fallback: [gw-flash, deepseek-official]

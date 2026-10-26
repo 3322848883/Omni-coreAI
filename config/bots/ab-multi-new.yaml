@@ -37,7 +37,6 @@ account_risk:
   auto_protect: "dry"
 
 strategist:
-  enabled: true
   prompt_file: prompts/brooks_multi_pa.md
   interval_sec: 900
   timeframe: 5m

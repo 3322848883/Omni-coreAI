@@ -6,6 +6,9 @@
 #   （config/bots/ 是基线，全部 enabled: false；watchdog 只拉起 enabled: true 的 bot）
 
 bot_id: martin-grid
+account: gate-grid
+# ↑ 声明所属账户 → 与 config/accounts.yaml 的账户级风控**合并**（上限取更严、
+#   日初权益账户共享）。不声明则不参与合并。见 `config/accounts.yaml` 头注释。
 enabled: false
 env: live
 # 接管原 ladder-eth 的独立账户。
@@ -25,7 +28,9 @@ poll_interval_sec: 2
 # ⚠️ 新前缀 mtg：接管账户后**不会**接管原 ladder-eth 的 lad 挂单。
 #    停止旧网格时必须手动撤掉遗留的 lad 挂单，否则它们会一直挂在交易所。
 label_prefix: mtg
-# free：做T需要多档建仓 + 双向持仓，strict 会拦反向加仓
+# free：做T需要多档建仓（strict/manage_only 会拦「持仓后再 open_long」，见
+# executor._entry_gate）。反向开仓由下面的 account_risk.no_flip 拦 ——
+# 2026-10-16 账户为 **dual（双向）**：反向单 = 独立腿，闸门由模式推导为 false。
 position_policy: free
 # none：做T的挂单要留在市场上等成交，不能每轮被自动替换掉
 default_replace: none
@@ -38,10 +43,22 @@ order_scope: own
 require_sl: true
 
 account_risk:
+
+  # 2026-10-15 网格做T：成交后由程序按 AI 的 meta.tp_target 挂条件限价止盈
+
+  grid_tp_auto: live        # 2026-10-16 修复后恢复（无多头不挂 + reduce_only）
   halt: false
   # 固定 50x：交易所杠杆上限 + prompt 里逐档写死的 leverage=50，两处必须一致
   # （executor MAX_LEVERAGE 闸门：intent.leverage > max_leverage 整笔拒）。
   max_leverage: 50
+  # 保证金模式：全仓（cross）。2026-10-16 拍板切换（原为逐仓）。
+  # 逐仓 50x 下爆仓距离仅 ≈ −1.5%（10-15 02:23 事故：13 张在 −3.9% 那根被
+  # 强平 `liq-7479452`，亏 7.36U，占当期总亏 43%）；全仓用**整个账户权益**做
+  # 保证金，且双向持仓可互相对冲（Gate 官方：等量双向持仓「无爆仓风险」）。
+  # ⚠️ Gate 只允许「该合约**无持仓、无挂单**」时切换 —— 实测 2026-10-16 盘上
+  #    10 档挂单时报 `ORDER_PENDING`。所以 executor `_ensure_margin_mode` 是
+  #    **幂等 + 失败静默**：常态有挂单切不动，等重铺空窗自动生效，不阻塞下单。
+  margin_mode: cross
   # 绝对值兜底；真正 bind 的是下面的「权益倍数」闸门
   max_total_notional_usd: 1200
   # 马丁真加码路线（2026-10-12 拍板）：
@@ -66,16 +83,50 @@ account_risk:
   max_total_notional_pct: 14.0
   # 与风险口径对齐（拍板 15U）：≈1.4 次满阶止损 / 2 次半阶止损的空间
   daily_loss_limit_usd: 15
-  # 阶梯**永远双向**：持有多单时也必须能继续挂空腿。
-  # no_flip 默认开启（禁止反向开仓），会让双向对冲退化成单边 —— 必须关。
+  # 反手闸门：**生效值由交易所持仓模式推导**（`Executor._effective_no_flip`）——
+  #   single → true（拦）：单向簿里反向单**不是开反向仓，而是净平现有仓**，
+  #            AI 一句 open_short 就直接把多头仓平掉；
+  #   dual   → false（不拦）：反向意图开成**独立腿**，不污染本方向。
+  # 2026-10-16 账户已切为 **dual（双向）** → 这里显式 false 只为与推导一致、
+  # 避免「配置与模式不符」告警。**建议直接删掉本键**交给模式推导（切模式后无需改配置）。
+  # ⚠️ 历史（2026-10-16 上半日 single 期间）：闸门为 true，而账户上出现意外空仓时
+  #    **所有 open_long 都被拦死 → 网格停摆 4 小时**（只能人工平仓）。
   no_flip: false
+  # 反向仓处置：本策略只做多 → 反向 = 空腿。
+  # ⛔ **处置权在 AI / 人，不在程序** —— 程序**没有识别仓位意图的能力**：
+  #    它只知道「方向 ≠ 策略方向」，而这不等于「误开」；`_symbol_owned` 也只证明
+  #    「本 bot 在该合约有挂单」，不证明这条仓的意图。程序自主市价平仓属于
+  #    **「程序层减仓」**，越过既有边界（`ensure_protection` 只补风控、
+  #    `allow_close/reduce` 只作用 `_execute_intent`、程序绝不自己造价格）。
+  #    反例：① 手动留一条对冲空腿 → 被程序静默平掉；
+  #          ② 将来若做双向网格 → 空腿是**正常仓位**，flatten 会与策略打架；
+  #          ③ 平仓是市价 IOC，错了不可撤销。
+  # 所以本键 = `warn`：程序只**告警 + 每轮留痕**，不动手。
+  # ✅ 正确路径：AI 每轮快照里本来就有 `positions`（人格 §3.2），由 AI 发
+  #    `close_short` / `reduce_short` 处置（这两个动作本来就不受 `no_flip` 拦）
+  #    —— 程序只执行 AI 写下的计划。
+  # ⚠️ 改本键**必须重启服务**（配置无热重载，`load_all_bots` 只在进程启动时读一次）。
+  stray_position: warn
   # 浮盈回撤保护：某腿浮盈后，价格从峰值回撤 peak_trail_atr×ATR(1h) 就把该腿 SL 上移
   # （只上移不下移）。双向持仓下两条腿各自跟踪，状态按 bot 隔离。
-  peak_trail: true
+  #
+  # ⚠️ 2026-10-13 关闭（「没跑满 10 层就止损」事故，修复 P0-a）：
+  #   阶梯的 SL 是「全梯共用的一条最后防线」（锚在最深档之外），对它**只上移**
+  #   等于把最后防线一路推浅。实盘 10-12 23:46 → 10-13 02:23 四次 peak trail
+  #   把 SL 从 2245 推到 2431（浅于马丁 1 档之上），价格一回落就整梯提前止损
+  #   （05:44 / 07:02 / 08:06 三次只成交 4~5 档就平仓）。
+  #   做 T 靠 TP 锁盈，不需要移动止损。已同步关闭 config/bots/ 下全部 ladder 家族
+  #   （l10-* / l500-long-dn / ladder-eth / ladder-sol / lnogate / lorig-long）。
+  #   ⚠️ 更正（2026-10-13）：brooks 类单腿 bot **并未配此键** —— 引擎
+  #   `ar.get("peak_trail", False)` 默认就是关的；要开只应在单腿 bot 上显式开。
+  peak_trail: false
   peak_trail_atr: 2.0
+  # SL 移动纪律分派（2026-10-13，修复 P0-b）：阶梯用 "ladder" —— 跳过「浮亏禁动
+  # SL」并允许往深挪（widen），把被推浅的 SL 挪回结构位；仍保留「同值 no-op」与
+  # 「挂上即触发」护栏。brooks 类单腿策略保持默认 "strict"（不设即 strict）。
+  sl_move_policy: ladder
 
 strategist:
-  enabled: true
   prompt_file: prompts/ladder_nogate.md
   # 15m 一轮：作业尺度也是 15m。
   interval_sec: 900

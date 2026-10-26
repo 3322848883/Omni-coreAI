@@ -49,7 +49,6 @@ account_risk:
   # daily_loss_limit：按要求不启用熔断
 
 strategist:
-  enabled: true
   prompt_file: prompts/brooks_btc_pa.md
   interval_sec: 900
   # 主周期 5m（2026-10-07 由 15m 下调）。原因：15m 上「回抽挂单」的机会窗口太长 ——
@@ -87,6 +86,19 @@ strategist:
     min_confidence: 0.6
     max_chips: 1
     max_notional_usd: 10000
+    # ── 盈亏比 / 止损距离闸门：**已撤除代码级实现**（2026-10-11 晚）──
+    # 起因：本地两轮实测，模型连续两轮"正确拒单"，CoT 里算出
+    #   「区间宽 264.5 点，而 min_sl_pct=0.6% 要求止损 ≥499 点 ≈ 1.88 倍区间宽」
+    #   → 止损必然落在结构之外 → 任何区间单净 R 都 <1.5 → 永不开仓。
+    # 同时核对官方知识库（skills/price-action-trading/references/knowledge/
+    # instrument_crypto_specifics_part1.md:141）：
+    #   「Al Brooks 明确反对使用指标（包括 ATR）设定止损。加密货币止损应遵循
+    #     Al Brooks 价格结构止损原则。」
+    # 即固定百分比止损（min_sl_pct=0.6）与价格行为学**方向相反**，属误加。
+    # 结论：全部撤除，止损/盈亏比规则**只保留在提示词层**（prompts/brooks_btc_pa.md）。
+    #   —— 代码层不再新增任何止损位置约束。
+    # 官方唯一允许的 ATR 用法是 HC-03「止损 ≤ ATR14×2 → 超出则减仓 50%」，
+    #   该规则已写入人格提示词，由模型自行判断（引擎不改仓、不拒单）。
   llm:
     provider: gw-flash
     reasoning_effort: high
