@@ -65,6 +65,11 @@ strategist:
     enabled: true
     native: true
     max_rounds: 14
+    # 必查取数覆盖（2026-10-26 实测：模型只查 map 15m/1h/4h + events 15m 就出计划，
+    # 马 3 声称「落在日线结构位」却从没查过日线）。缺项 → 引擎重试一次并点名。
+    required_coverage:
+      smc_map: ["15m", "1h", "4h", "1d"]
+      smc_events: ["15m", "1h"]
     allow:
       - klines
       - ticker

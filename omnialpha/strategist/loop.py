@@ -1448,7 +1448,7 @@ class PlanRunner:
             rec["calls"] += 1
             if t not in rec["tools"]:
                 rec["tools"].append(t)
-        return {
+        out = {
             "counts": counts,
             "total_calls": len(self.tool_usage),
             "data_checked": bool(DATA_TOOL_NAMES.intersection(counts.keys())),
@@ -1456,6 +1456,49 @@ class PlanRunner:
             "missing_symbol": missing,
             "out_of_universe": out_of_universe,
         }
+        # **只在配了 `required_coverage` 时才多这个键** —— 未配置的 bot 输出形状
+        # 逐字不变（`tests/test_symbol_observability.py::test_old_fields_shape_unchanged`
+        # 钉住了旧字段集合）。`data_checked` 只判「调过没有」，判不了「够不够」。
+        if (getattr(getattr(self, "cfg", None), "tools", None) or {}).get("required_coverage"):
+            out["coverage_missing"] = self._data_coverage()[1]
+        return out
+
+    def _data_coverage(self) -> tuple[dict[str, set[str]], list[str]]:
+        """统计「工具 × 周期」覆盖，并返回**缺失项**。
+
+        为什么需要它：`data_checked` 只回答「有没有调过数据工具」，回答不了
+        「该看的周期看了没」。2026-10-26 实测（martin-grid-paper，4 轮）：
+        人格第八节要求「5 个周期 × (`smc_map` + `smc_events`) = 10 次」，
+        模型只调 **4 次**（`smc_map` 15m/1h/4h + `smc_events` 15m），
+        `data_checked=True` 照样放行 —— 结果马丁第 3 档声称「落在**日线**结构位」
+        却**从没查过日线**。
+
+        配置（`strategist.tools.required_coverage`，缺省空 = 不检查）：
+
+            required_coverage:
+              smc_map: [15m, 1h, 4h, 1d]
+              smc_events: [15m, 1h]
+
+        不足时的动作是**重试一次**（见 `_chat_with_tools`），不是拒单 ——
+        整轮作废的代价远大于「多查一次数据」。
+        """
+        covered: dict[str, set[str]] = {}
+        for u in self.tool_usage:
+            t = str(u.get("tool") or "")
+            tf = str((u.get("args") or {}).get("tf") or "").strip().lower()
+            if t and tf:
+                covered.setdefault(t, set()).add(tf)
+        tools_cfg = getattr(getattr(self, "cfg", None), "tools", None) or {}
+        req = tools_cfg.get("required_coverage") if isinstance(tools_cfg, dict) else None
+        if not isinstance(req, dict) or not req:
+            return covered, []
+        missing: list[str] = []
+        for tool, tfs in req.items():
+            have = covered.get(str(tool), set())
+            for tf in (tfs or []):
+                if str(tf).strip().lower() not in have:
+                    missing.append(f"{tool}:{tf}")
+        return covered, missing
 
     def _save_thinking(self, **kw: Any) -> None:
         """Persist LLM reasoning_content (CoT) for audit/replay."""
@@ -1732,7 +1775,13 @@ class PlanRunner:
                    for u in self.tool_usage)
 
     def _chat_with_tools(self, system: str, user: str, chart_base64=None) -> str:
-        """工具循环 + **防偷懒**：若全程未调用任何工具，强制重试一次。"""
+        """工具循环 + **防偷懒**（两级）：
+
+        1. 全程**一次工具都没调** → 强制重试一次（原有逻辑）；
+        2. 调了但**覆盖不足**（`tools.required_coverage` 里该查的周期没查）→ 也重试一次，
+           并把缺的具体项告诉模型。只重试一次、不递归；仍缺则放行但日志留痕 ——
+           「整轮作废」的代价远大于「多查一次数据」。
+        """
         text = self._chat_with_tools_inner(system, user, chart_base64=chart_base64)
         tools_on = bool(self.cfg.tools.get("enabled"))
         if tools_on and not self._has_data_call():
@@ -1746,6 +1795,30 @@ class PlanRunner:
             text2 = self._chat_with_tools_inner(system, user + "\n\n" + nudge,
                                                 chart_base64=chart_base64)
             if self.tool_usage:
+                return text2
+            return text
+
+        _, missing = self._data_coverage()
+        if tools_on and missing:
+            log.warning("data coverage incomplete (%s); forcing a data-fetch retry",
+                        ", ".join(missing))
+            nudge2 = (
+                "【强制要求·补数据】你上一轮的取数**不完整**，还没查："
+                + "、".join(missing) + "。" + "\n"
+                "这些是必查项（选点、止损深度、马丁第 3 档能否放那么深都依赖各周期自己的结构）：" + "\n"
+                "· `smc_map` 与 `smc_events` 的 `premium_discount` 口径**不同**"
+                "（前者按最近 swing range、后者按全历史），**不能互相替代**；" + "\n"
+                "· 日线结构决定马丁第 3 档（−6%）能不能放在那里。" + "\n"
+                "现在**先补查上面列出的项**，再输出 Plan JSON。已经查过的不用重查。"
+            )
+            text2 = self._chat_with_tools_inner(system, user + "\n\n" + nudge2,
+                                                chart_base64=chart_base64)
+            if (text2 or "").strip():
+                _, still = self._data_coverage()
+                if still:
+                    log.warning("data coverage STILL incomplete after retry: %s", ", ".join(still))
+                else:
+                    log.info("data coverage completed after retry")
                 return text2
         return text
 
