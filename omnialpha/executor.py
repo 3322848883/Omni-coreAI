@@ -1656,6 +1656,14 @@ class Executor:
                     f"SIZE_TOO_SMALL: {symbol} size_coins={coins:g} 折 {raw:g} 张，"
                     f"小于最小可下量 {size_min:g} 张（币口径最小单位 "
                     f"{getattr(meta, 'min_size_coins', 0):g}）")
+            # 审计：币数量口径按步长 floor 会少下一个最小单位（PEPE 一个单位
+            # = 1,000,000 枚 ≈ 4U，SOL 是 0.1 枚）。差额必须留痕，否则「我说 0.55
+            # 结果只下了 0.5」无法事后归因。
+            got = q * mult
+            if got < coins - 1e-12:
+                log.info(
+                    "size_coins=%.8g → 实下 %.8g 枚（步长 %.4g 张，少 %.8g 枚 < 1 个最小单位 %.8g）",
+                    coins, got, step, coins - got, float(getattr(meta, "min_size_coins", 0) or 0))
             px = entry_hint or intent.price
             if not px:
                 px = self.client.get_last_price(symbol)

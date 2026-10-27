@@ -131,3 +131,22 @@ class TestBasisConflict(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFloorLossIsBounded(unittest.TestCase):
+    """币数量口径 floor 的「损失」必须**小于一个最小单位**，绝不能更多。"""
+
+    def test_loss_less_than_one_unit(self):
+        cases = (
+            (0.1387, meta()),                       # ETH 单位 0.001
+            (0.55, meta(quanto=1.0, step=0.1, name="SOL_USDT")),      # SOL 单位 0.1
+            (2_500_000, meta(quanto=1e7, step=0.1, name="PEPE_USDT")),  # PEPE 单位 1e6
+        )
+        for coins, m in cases:
+            q, _, _ = _resolve({"action": "open_long", "symbol": m.name,
+                                "size_coins": coins}, m)
+            got = q * m.quanto_multiplier
+            unit = m.min_size_coins
+            self.assertLessEqual(got, coins + 1e-12, "绝不能超过用户指定的币数量")
+            self.assertLess(coins - got, unit + 1e-12,
+                            f"{m.name}: 少下 {coins - got} 超过一个最小单位 {unit}")
