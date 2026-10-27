@@ -25,12 +25,13 @@ from omnialpha.strategist.market import CandleResult, MarketConfig
 
 
 class TestWarmupBars(unittest.TestCase):
-    def test_ema200_needs_200(self):
-        self.assertGreaterEqual(indicator_warmup_bars(["ema200"]), 200)
+    def test_ema200_needs_full_convergence(self):
+        """长周期 EMA 用 SMA 种子，需 ~5×周期才收敛（205 根算出的值差 2.75%）。"""
+        self.assertGreaterEqual(indicator_warmup_bars(["ema200"]), 1000)
 
     def test_small_periods(self):
-        self.assertGreaterEqual(indicator_warmup_bars(["atr14"]), 15)
-        self.assertLessEqual(indicator_warmup_bars(["atr14"]), 40)
+        """短周期保持原行为（atr14 → 19 根），不动 martin-grid 的取数量。"""
+        self.assertEqual(indicator_warmup_bars(["atr14"]), 19)
 
     def test_takes_max_of_list(self):
         self.assertEqual(indicator_warmup_bars(["atr14", "ema200"]),
@@ -104,6 +105,7 @@ class TestSnapshotExtraTfFetch(unittest.TestCase):
         limits = [lim for tf, lim in rec.calls if tf == "4h"]
         self.assertTrue(limits, rec.calls)
         self.assertGreaterEqual(max(limits), 200, rec.calls)
+        self.assertLessEqual(max(limits), 1000, "Gate candlesticks 上限 1000 根")
 
     def test_prompt_rows_still_trimmed(self):
         """拉得多、但快照里只留 extra_candles 根（不许 token 暴涨）。"""

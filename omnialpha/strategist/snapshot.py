@@ -466,7 +466,11 @@ def collect_snapshot(
                 # 算指标要够根数：ema200 需要 200 根，而 extra_candles 只有 60 →
                 # 直接现算会恒为 None（实测 4h/1h 都是 None，v5 人格的 4H EMA200
                 # 方向判据因此退化成 EMA20）。拉 n_calc 根算指标，快照只留 n_extra 根。
-                n_calc = max(n_extra, indicator_warmup_bars(cfg.indicators))
+                # 算指标要够根数：长周期 EMA 用 SMA 种子，需 ~5×周期才收敛
+                # （4h EMA200：205 根 → 2535.75 vs 1000 根 → 2467.75，差 2.75%）。
+                # 拉 n_calc 根算指标，快照只留 n_extra 根（token 不涨）。
+                # Gate candlesticks 上限 1000 根。
+                n_calc = min(1000, max(n_extra, indicator_warmup_bars(cfg.indicators)))
                 for tf in extra_tfs:
                     try:
                         xres = resolve_candles(

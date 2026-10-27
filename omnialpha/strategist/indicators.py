@@ -1191,6 +1191,14 @@ def strip_carried_indicators(rows: list[dict[str, Any]], wanted) -> list[dict[st
 
 
 _WARMUP_PAD = 5
+#: 长周期指标（>= 阈值）要按 `period × _WARMUP_MULT` 拉根数才收敛。
+#:
+#: EMA 用 **SMA(period) 做种子**再递推，种子本身带巨大偏差，只用 `period+pad` 根
+#: 算出的值明显失真（实测 4h EMA200：205 根 → 2535.75；600 根 → 2467.57；
+#: 1000 根 → 2467.75，与真值差 **68 点 / 2.75%**）。5 倍周期后与 10 倍周期差
+#: 0.18 点，够用。短周期（atr14 等）在 60 根上已收敛，保持原行为不动。
+_WARMUP_MULT = 5
+_WARMUP_LONG_PERIOD = 50
 
 
 def indicator_warmup_bars(wanted: list[str] | None = None) -> int:
@@ -1211,7 +1219,10 @@ def indicator_warmup_bars(wanted: list[str] | None = None) -> int:
         period = int(spec.get("period") or 0)
         # 多段指标：macd 的 signal、rsi_bb 的 ma_len 等都要额外预热
         extra = int(spec.get("signal") or 0) + int(spec.get("ma_len") or 0)
-        need = max(need, period + extra + _WARMUP_PAD)
+        if period >= _WARMUP_LONG_PERIOD:
+            need = max(need, period * _WARMUP_MULT + extra + _WARMUP_PAD)
+        else:
+            need = max(need, period + extra + _WARMUP_PAD)
     return need
 
 
