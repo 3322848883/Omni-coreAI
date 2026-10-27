@@ -59,20 +59,23 @@ strategist:
   # `enabled: true` 若保留也无效（本地是零消费死键），真正生效的是
   # `strategist.runtime.plan_loop` / `runtime.run`（supervisor 读）。
   prompt_file: prompts/_pa_slim_test_multi_v5.md
-  # 2026-10-25 试点 fail-closed：人格声明失配 → 拒绝启动（而不是只 warn）。
-  # 只在本 bot 开（paper）；live bot 保持 warn —— 那边停机的代价比多烧一轮更大。
-  persona_strict: true
+  # 🔴 `persona_strict` 已删除（2026-10-27 核实）：全仓**零读取点**。
+  # 人格声明失配（人格里写了不在 symbols 的合约）只有一个 warn
+  # （`config._warn_persona_symbols`），**fail-closed 从未实现** —— 之前
+  # 写着 `persona_strict: true` 会让人以为「失配即拒绝启动」，实际只是告警。
   skills: [brooks-bar-by-bar]
   # 🔴 `skills_required: true` 已删除（2026-10-24）：本地主线**零引用**此键
   # （只有服务器 trigger-fix worktree 实现了「首轮 tool_choice 硬制」）。
   # 留在这儿会让人以为「每轮必载技能」已生效，实际靠模型自觉。
-  # 语义将迁到 `tools.require_first: [skill]`（S5 工具层），届时在此重新声明。
-  # 🔴 单仓位语义：重挂入场单前先撤同 symbol 的旧单。
-  # 不开这个的话，PA 每轮只出 1 条入场腿，永远够不到 REPLACE_MIN_ENTRY_LEGS(=5)，
-  # 旧入场单会留着；而重挂保护单时会撤掉旧 TP/SL → 旧单裸挂、成交即裸仓。
-  # 实测 2026-10-24 14:07 双开 3242+3328，其中 3242 无保护 74 分钟，市价自平 -135.49。
-  # 网格/阶梯 bot 必须是 false（它们靠增量补档，撤了整梯清空）。
-  replace_on_entry: true
+  # 注意：注释里提到的 `tools.require_first` 同样是**未实现的死键**
+  # （2026-10-27 核实，verify-paper 曾配过，已一并删除）。
+  # 🔴 `replace_on_entry` 已删除（2026-10-27 核实）：全仓**零读取点**。
+  # 真正生效的开关是：
+  #   ① bot 级 `default_replace: none|symbol|all`（executor._replace_mode）
+  #   ② 信号级 per-intent `replace` 字段（模型自己写）
+  # 本 bot 当前 `default_replace: none` = **不替换**。若确实需要「重挂入场单前
+  # 先撤同 symbol 旧单」，改 default_replace 或让模型在信号里写 replace —— 
+  # 别再用 replace_on_entry（它从来没生效过）。
   interval_sec: 300
   timeframe: 5m
   event_on_kline_close: true

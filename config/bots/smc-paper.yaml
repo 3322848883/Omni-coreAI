@@ -37,9 +37,8 @@ paper:
 
 strategist:
   prompt_file: prompts/smc_pa.md
-  # 2026-10-25 试点 fail-closed：人格声明失配 → 拒绝启动（而不是只 warn）。
-  # 只在本 bot 开（paper）；live bot 保持 warn —— 那边停机的代价比多烧一轮更大。
-  persona_strict: true
+  # 🔴 `persona_strict` 已删除（2026-10-27 核实）：全仓零读取点，人格声明失配
+  # 只有 warn（config._warn_persona_symbols），fail-closed 从未实现。
   interval_sec: 900
   timeframe: 5m
   event_on_kline_close: true

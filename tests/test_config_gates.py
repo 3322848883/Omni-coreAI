@@ -207,5 +207,43 @@ class TestUnknownKeyWarnsButLoads(unittest.TestCase):
         self.assertEqual(records, [], f"合法配置不该报未知键: {records}")
 
 
+class TestNoDeadKeysInConfigs(unittest.TestCase):
+    """仓库里的 bot 配置不许再出现**已核实零消费**的键。
+
+    2026-10-27 删除的三个键都带着「承诺了具体行为」的注释（fail-closed 拒绝启动 /
+    重挂入场单前撤旧单 / 首轮强制载技能），实际全仓零读取点 —— 这种「写了但不生效」
+    比没写更危险：读配置的人会以为保护已经开着。
+
+    真需要对应能力时的正确入口（已写在各 yaml 的注释里）：
+      · 替换入场单 → `default_replace: none|symbol|all` 或信号里的 `replace`
+      · 人格失配 → 目前只有 warn（`_warn_persona_symbols`），fail-closed 未实现
+      · 首轮强制载技能 → 需在 loop 里用 tool_choice 强制，没有配置键
+    """
+
+    DEAD = ("persona_strict", "replace_on_entry", "require_first")
+
+    def test_no_dead_keys(self):
+        import yaml
+
+        hits: list[str] = []
+        for p in sorted((ROOT / "config" / "bots").glob("*.yaml")):
+            data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+            if not isinstance(data, dict):
+                continue
+            for section in ("strategist", "account_risk", ""):
+                node = data.get(section) if section else data
+                if not isinstance(node, dict):
+                    continue
+                for k in self.DEAD:
+                    if k in node:
+                        hits.append(f"{p.name}: {section or '<root>'}.{k}")
+                tools = node.get("tools")
+                if isinstance(tools, dict):
+                    for k in self.DEAD:
+                        if k in tools:
+                            hits.append(f"{p.name}: {section or '<root>'}.tools.{k}")
+        self.assertEqual(hits, [], f"死键又被写回来了: {hits}")
+
+
 if __name__ == "__main__":
     unittest.main()

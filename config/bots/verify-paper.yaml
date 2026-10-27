@@ -43,7 +43,9 @@ paper:
 strategist:
   prompt_file: prompts/brooks_eth_pa_slim.md   # 4.4k 精简 PA 人格（实盘同款）
   skills: [brooks-bar-by-bar]                  # 验证 L1 catalog + L2 加载
-  replace_on_entry: true
+  # 🔴 `replace_on_entry` 已删除（2026-10-27 核实）：全仓零读取点。
+  # 真正生效的是 bot 级 `default_replace: none|symbol|all`（executor._replace_mode）
+  # 或信号里 per-intent 的 `replace` 字段；本 bot 当前 default_replace: none。
   interval_sec: 900
   timeframe: 15m
   event_on_kline_close: true
@@ -59,9 +61,9 @@ strategist:
     # （`market.<SYM>.indicators.*` 每轮 json.dumps 进 user prompt，实测 35k 字符里含
     # `"atr14": 6.3`），所以不需要 indicators 工具。
     allow: [skill, skill_ref, klines, ticker, contract, account]
-    # 首轮强制先载技能（`brooks-bar-by-bar`）：人格要求「先有判据再分析」，
-    # 原先只是软约束。查不到该工具会自动退回 auto，不会 400。
-    require_first: [skill]
+    # 🔴 `require_first: [skill]` 已删除（2026-10-27 核实）：全仓零读取点，
+    # 「首轮强制先载技能」从未生效（模型不自觉就一轮都不载）。要硬化得在
+    # loop 里用 tool_choice 强制，而不是靠这个键。
   market:
     mode: rest_only
     indicators: [ema20, atr14]
