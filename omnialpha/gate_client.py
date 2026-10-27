@@ -185,6 +185,24 @@ class ContractMeta:
     taker_fee_rate: float = 0.0
 
     @property
+    def min_size_coins(self) -> float:
+        """**币口径**的最小下单单位 = `size_step × quanto_multiplier`。
+
+        交易所的 `order_size_min` 是「张」，而人看的是币：
+          ETH 0.1 张 × 0.01 = **0.001 ETH**      SOL 0.1 张 × 1    = **0.1 SOL**
+          BTC 1 张  × 0.0001 = 0.0001 BTC        XRP 0.1 张 × 10   = 1 XRP
+          PEPE 0.1 张 × 1e7 = 1,000,000 PEPE     DOGE 1 张 × 10    = 10 DOGE
+        （2026-10-28 用带 `X-Gate-Size-Decimal: 1` 的合约接口逐个核对）
+        所有下单张数必须是它的整数倍 —— 换算链只在「张」上取整，
+        币口径由 quanto 决定，别在币上二次取整。
+        """
+        try:
+            q = float(self.quanto_multiplier or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        return round(self.size_step * q, 12) if q > 0 else 0.0
+
+    @property
     def size_step(self) -> float:
         """张数步长。实测：`enable_decimal=True` 的合约 `order_size_min=0.1`，其余 `=1`；
         且交易所对非步长倍数**静默 floor**（0.15→0.1），所以必须自己按此取整。

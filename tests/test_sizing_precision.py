@@ -132,3 +132,55 @@ class TestWireNormalization(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMinUnitInCoins(unittest.TestCase):
+    """「最小单位」必须按**币口径**核对：交易所的 order_size_min 是「张」，
+    人看的是币；两者关系 = size_step × quanto_multiplier。
+
+    数据来源（2026-10-28 用带 `X-Gate-Size-Decimal: 1` 的合约接口逐个核对）：
+      ETH  0.1 张 × 0.01   = 0.001 ETH          ← 与用户说法一致
+      SOL  0.1 张 × 1      = 0.1 SOL            ← 与用户说法一致
+      BTC  1 张   × 0.0001 = 0.0001 BTC
+      XRP  0.1 张 × 10     = 1 XRP
+      PEPE 0.1 张 × 1e7    = 1,000,000 PEPE
+      DOGE 1 张   × 10     = 10 DOGE
+    """
+
+    TABLE = (
+        ("ETH_USDT", 0.01, 0.1, True, 0.001),
+        ("SOL_USDT", 1.0, 0.1, True, 0.1),
+        ("BTC_USDT", 0.0001, 1.0, False, 0.0001),
+        ("XRP_USDT", 10.0, 0.1, True, 1.0),
+        ("PEPE_USDT", 1e7, 0.1, True, 1e6),
+        ("DOGE_USDT", 10.0, 1.0, False, 10.0),
+    )
+
+    def test_min_unit_coins_table(self):
+        for sym, quanto, step, dec, expect in self.TABLE:
+            m = meta(step, quanto=quanto, name=sym)
+            self.assertAlmostEqual(m.min_size_coins, expect, places=10,
+                                   msg=f"{sym}: {m.size_step} 张 × {quanto} 应为 {expect}")
+
+    def test_eth_user_claim(self):
+        """用户口径：ETH 下单张数必须是 0.001 ETH 的整数倍。"""
+        m = meta(0.1, quanto=0.01, name="ETH_USDT")
+        self.assertAlmostEqual(m.min_size_coins, 0.001, places=12)
+        # 13.8 张 = 0.138 ETH = 138 × 0.001 ✓
+        self.assertAlmostEqual(13.8 * m.quanto_multiplier / m.min_size_coins, 138, places=9)
+
+    def test_sol_user_claim(self):
+        m = meta(0.1, quanto=1.0, name="SOL_USDT")
+        self.assertAlmostEqual(m.min_size_coins, 0.1, places=12)
+
+    def test_wire_size_is_multiple_of_min_unit(self):
+        """任何输出到 wire 的张数，换算成币都必须是 min_size_coins 的整数倍。"""
+        from decimal import Decimal
+        for sym, quanto, step, dec, unit in self.TABLE:
+            m = meta(step, quanto=quanto, name=sym)
+            for raw in (13.87, 0.34, 2.29, 1.05):
+                q = qty_to_wire(raw, m.size_step)
+                coins = Decimal(str(q)) * Decimal(str(quanto))
+                k = coins / Decimal(str(unit))
+                self.assertEqual(k, k.to_integral_value(),
+                                 f"{sym}: {q} 张 = {coins} 币 不是 {unit} 的整数倍")
