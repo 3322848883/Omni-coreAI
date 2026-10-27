@@ -92,7 +92,15 @@ strategist:
   market:
     mode: rest_only
     indicators: [ema20, atr14]
-    extra_candles: 15
+    # 2026-10-27 15 → 60：HTF（15m/1h/4h）的图与 compact K 线要够看；
+    # indicators 取数已按 warmup 放大，这里只影响进 prompt 的行数
+    extra_candles: 60
+    # 2026-10-27：HTF K 线进快照 —— 配合 strategist.vision_timeframes 发 4 周期图
+    extra_timeframes: [15m, 1h, 4h]
+  # 2026-10-27：每轮发 4 张 K 线图（5m 主周期 + 15m/1h/4h 背景）。
+  # vision_timeframes 会整体替换默认的 [主周期]，所以 5m 必须显式写。
+  # 实测前提（2026-10-27）：网关 cn:deepseek-v4-flash 支持多图且按序识别。
+  vision_timeframes: [5m, 15m, 1h, 4h]
   ai_triggers:
     enabled: true
     max_active: 5
