@@ -817,3 +817,34 @@ def load_credentials(env: str, api_key_env: str = "", api_secret_env: str = "") 
             f"missing credentials: set {key_env} and {secret_env} for env={env}"
         )
     return key, secret
+
+
+def position_qty(pos: dict, meta: Any = None) -> float:
+    """持仓**真实**张数（带符号，小数安全）。
+
+    `/positions` 的 `size` 是 **int64 字段**：`enable_decimal` 合约的小数部分会被
+    丢掉（实测 ETH_USDT：真实 16.1 张 → `size` 返回 -16；真实 0.1 张 → 返回 0，
+    `mode` 仍是 `dual_long`）。真实张数只能由 `|value| / (mark_price × quanto)` 反算。
+
+    为什么必须这么读：`close_position` 过去拿 `size` 求和当平仓量 → 每轮都少平
+    0.1~0.9 张；reduce_only 只减不增 ⇒ 残量永久化（实盘挂过 29 小时幽灵腿）。
+
+    `value` / `mark_price` / `quanto_multiplier` 任一缺失 → 退回 `size` 字段
+    （宁可是旧行为，也不要在热路径上抛异常）。方向优先沿用交易所给的 `size` 符号，
+    `size==0` 时退回 `mode`（`dual_long` / `dual_short`）。
+    """
+    raw = _f(pos.get("size"))
+    sign = 1.0 if raw > 0 else (-1.0 if raw < 0 else 0.0)
+    if sign == 0.0:
+        mode = str(pos.get("mode") or "").lower()
+        if mode.endswith("long"):
+            sign = 1.0
+        elif mode.endswith("short"):
+            sign = -1.0
+    value = _f(pos.get("value"))
+    mark = _f(pos.get("mark_price"))
+    quanto = _f(getattr(meta, "quanto_multiplier", None)) if meta is not None else 0.0
+    if value and mark > 0 and quanto > 0:
+        exact = abs(value) / (mark * quanto)
+        return math.copysign(exact, sign) if sign else exact
+    return raw
