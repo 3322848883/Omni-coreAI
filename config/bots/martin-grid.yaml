@@ -157,7 +157,7 @@ strategist:
       - contract      # 最小下单量 / 张值 / 杠杆上限
       - smc_map       # 结构地图：swing/internal 趋势、OB、FVG、premium-discount、EQL/EQH
       - smc_events    # 结构事件流：扫荡 sweep、CHoCH/MSS、OB/FVG 生命周期
-      # 有意不给 indicators：ATR(14) 由 market.indicators 直接注入快照
+      - indicators    # 2026-10-28 新加：12.1 挤压判据需要模型自查 sqzmom_state
   market:
     mode: rest_only
     # ATR 是做T的门槛校验输入，必须给；boll 三件套 2026-10-27 新加（区间判断，
