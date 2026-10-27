@@ -416,11 +416,15 @@ def collect_snapshot(
                 meta["degraded"].append(f"{sym}:orderbook")
 
         try:
+            # 主周期同样按「指标预热」取数：ema200 要 1000 根才收敛，
+            # 只取 candles(200) 会让主周期 ema200 偏 0.08%、更长的指标直接 None。
+            # 只多拉不进 prompt —— 下面 attach 后再切回 candles 根。
+            n_main = min(1000, max(int(candles), indicator_warmup_bars(cfg.indicators)))
             result = resolve_candles(
                 client,
                 sym,
                 interval,
-                candles,
+                n_main,
                 market_cfg=cfg,
                 env=env,
                 bot_root=bot_root,
@@ -429,6 +433,7 @@ def collect_snapshot(
             # 否则 `indicators: []` 关不掉自带的 ema20/atr14（T180）。
             rows = strip_carried_indicators(
                 attach_indicators(list(result.rows), cfg.indicators), cfg.indicators)
+            rows = rows[-int(candles):] if len(rows) > int(candles) else rows
             entry["candles"] = rows
             entry["candle_source"] = result.source
             entry["stale"] = result.stale

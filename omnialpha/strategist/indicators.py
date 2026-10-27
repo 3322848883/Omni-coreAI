@@ -1166,6 +1166,24 @@ def _resolve_wanted(wanted) -> list[str]:
 # 真实 user prompt 里 `ema20` / `atr14` 各出现 280 次，而人格明令禁止用指标）。
 CARRIED_INDICATOR_KEYS = ("ema20", "atr14")
 
+#: 指标列名（与 contracts.kline_schema.INDICATOR_COLUMN_RE、pa-data-source/indicator_config 一致）。
+#: v2 起库里的指标列是**配置驱动**的（ema50/ema200/rsi14/macd*/boll*），
+#: 不能再靠固定常量枚举 —— 按行里实际出现的列名动态识别。
+_CARRIED_COLUMN_RE = re.compile(
+    r"^(?:ema|ma|sma|atr|rsi)\d+$"
+    r"|^macd(?:_\d+_\d+_\d+)?(?:_dea|_hist)?$"
+    r"|^boll\d*(?:_[\dpn]+)?(?:_upper|_lower)?$"
+)
+
+
+def carried_keys(rows: list[dict[str, Any]]) -> tuple[str, ...]:
+    """行里实际带的指标列（v1 恒为 ema20/atr14；v2 由库的列决定）。"""
+    if not rows or not isinstance(rows[0], dict):
+        return CARRIED_INDICATOR_KEYS
+    keys = tuple(k for k in rows[0]
+                 if isinstance(k, str) and _CARRIED_COLUMN_RE.match(k))
+    return keys or CARRIED_INDICATOR_KEYS
+
 
 def strip_carried_indicators(rows: list[dict[str, Any]], wanted) -> list[dict[str, Any]]:
     """剥掉 K 线自带的那几列，除非 `wanted` 明确要它。
@@ -1178,15 +1196,19 @@ def strip_carried_indicators(rows: list[dict[str, Any]], wanted) -> list[dict[st
     **`None` = 没配 → 默认集**（默认集含 `ema20`/`atr14`，不配就是留着它们）；
     **`[]` = 显式关掉 → 一个都不留**。
     不能写 `wanted or ()` —— 那会让「没配」比「显式配」剥得更狠，与工具路径语义相反。
+
+    v2 起「自带列」不再是固定两列，而是 `carried_keys(rows)` 动态识别的全部指标列
+    （否则 ema200/rsi14/macd* 会绕过 `indicators: []` 直接进 prompt）。
     """
     allow = set(_resolve_wanted(wanted))
+    keys = set(carried_keys(rows))
     out: list[dict[str, Any]] = []
     for r in (rows or []):
         if not isinstance(r, dict):
             out.append(r)
             continue
         out.append({k: v for k, v in r.items()
-                    if k not in CARRIED_INDICATOR_KEYS or k in allow})
+                    if k not in keys or k in allow})
     return out
 
 

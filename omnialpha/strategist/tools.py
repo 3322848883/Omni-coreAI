@@ -40,7 +40,8 @@ from typing import Any, Optional
 from ..gate_client import GateClient, GateApiError
 
 
-from .indicators import _resolve_wanted, attach_indicators, latest_indicators
+from .indicators import (_resolve_wanted, attach_indicators, indicator_warmup_bars,
+                         latest_indicators)
 
 
 from .market import MarketConfig, resolve_candles
@@ -1666,12 +1667,13 @@ def run_tool(
             limit = max(1, min(int(args.get("limit") or 50), 200))
 
 
-            res = resolve_candles(client, sym, tf, limit, market_cfg=market_cfg, env=env, bot_root=bot_root)
-
-
             wanted = _resolve_wanted(market_cfg.indicators if market_cfg else None)
+            # 取数按指标预热放大（否则 ema200 恒 None），返回前裁回 limit
+            fetch = min(1000, max(limit, indicator_warmup_bars(wanted)))
+            res = resolve_candles(client, sym, tf, fetch, market_cfg=market_cfg, env=env, bot_root=bot_root)
 
             rows = attach_indicators(list(res.rows), wanted)
+            rows = rows[-limit:] if len(rows) > limit else rows
 
 
             return {
@@ -1725,7 +1727,9 @@ def run_tool(
                 names = ["ema20", "ema50", "rsi14", "atr14", "macd", "boll20"]
 
 
-            res = resolve_candles(client, sym, tf, limit, market_cfg=market_cfg, env=env, bot_root=bot_root)
+            # 同理：工具侧 limit 上限 200 会让 ema200 恒 None / 偏 2.8%
+            fetch = min(1000, max(limit, indicator_warmup_bars(names)))
+            res = resolve_candles(client, sym, tf, fetch, market_cfg=market_cfg, env=env, bot_root=bot_root)
 
 
             rows = attach_indicators(list(res.rows), names)

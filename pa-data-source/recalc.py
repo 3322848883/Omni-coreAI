@@ -20,25 +20,36 @@ import indicators_core as core
 
 __all__ = ["recalc_series", "verify_series", "series_bounds"]
 
+#: 允许操作的表（避免 SQL 拼接注入；迁移时对 kline_v2_new 重算）
+ALLOWED_TABLES = ("kline", "kline_v2_new", "kline_v1_archive")
+
+
+def _tbl(table: str) -> str:
+    if table not in ALLOWED_TABLES:
+        raise ValueError(f"unsupported table: {table!r}")
+    return table
+
 _CORE_COLS = ("t", "o", "h", "l", "c")
 
 
-def series_bounds(conn: sqlite3.Connection, symbol: str, interval: str) -> tuple[Optional[int], Optional[int], int]:
+def series_bounds(conn: sqlite3.Connection, symbol: str, interval: str,
+                  table: str = "kline") -> tuple[Optional[int], Optional[int], int]:
     row = conn.execute(
-        "SELECT min(t), max(t), count(*) FROM kline WHERE symbol=? AND interval=?",
+        f"SELECT min(t), max(t), count(*) FROM [{_tbl(table)}] WHERE symbol=? AND interval=?",
         (symbol, interval),
     ).fetchone()
     return (row[0], row[1], int(row[2] or 0)) if row else (None, None, 0)
 
 
 def _read_batch(conn, symbol, interval, after_t: Optional[int], limit: int,
-                columns: Sequence[str]) -> list[sqlite3.Row]:
+                columns: Sequence[str], table: str = "kline") -> list[sqlite3.Row]:
+    tbl = _tbl(table)
     cols = ", ".join(["t", *columns])
     if after_t is None:
-        sql = f"SELECT {cols} FROM kline WHERE symbol=? AND interval=? ORDER BY t ASC LIMIT ?"
+        sql = f"SELECT {cols} FROM [{tbl}] WHERE symbol=? AND interval=? ORDER BY t ASC LIMIT ?"
         args = (symbol, interval, limit)
     else:
-        sql = (f"SELECT {cols} FROM kline WHERE symbol=? AND interval=? AND t>? "
+        sql = (f"SELECT {cols} FROM [{tbl}] WHERE symbol=? AND interval=? AND t>? "
                f"ORDER BY t ASC LIMIT ?")
         args = (symbol, interval, after_t, limit)
     return conn.execute(sql, args).fetchall()
@@ -52,6 +63,7 @@ def recalc_series(
     from_t: Optional[int] = None,
     batch: int = 500,
     dry_run: bool = False,
+    table: str = "kline",
 ) -> dict:
     """从 ``from_t - warmup`` 起重算该序列的指标列。
 
@@ -65,7 +77,8 @@ def recalc_series(
     specs = list(specs)
     spec_dicts = [s.as_dict() for s in specs]
     wanted = [c for s in specs for c in s.columns]
-    existing = {r[1] for r in conn.execute("PRAGMA table_info([kline])").fetchall()}
+    tbl = _tbl(table)
+    existing = {r[1] for r in conn.execute(f"PRAGMA table_info([{tbl}])").fetchall()}
     missing = [c for c in wanted if c not in existing]
     cols = [c for c in wanted if c in existing]
     if not cols:
@@ -76,7 +89,7 @@ def recalc_series(
     if from_t is not None:
         # 取 from_t 之前最近的 warmup 根作为预热起点
         row = conn.execute(
-            "SELECT t FROM kline WHERE symbol=? AND interval=? AND t<? "
+            f"SELECT t FROM [{tbl}] WHERE symbol=? AND interval=? AND t<? "
             "ORDER BY t DESC LIMIT 1 OFFSET ?",
             (symbol, interval, int(from_t), max(warmup - 1, 0)),
         ).fetchone()
@@ -87,7 +100,7 @@ def recalc_series(
     scanned = updated = 0
     cursor = start
     while True:
-        rows = _read_batch(conn, symbol, interval, cursor, batch, _CORE_COLS[1:])
+        rows = _read_batch(conn, symbol, interval, cursor, batch, _CORE_COLS[1:], table=tbl)
         if not rows:
             break
         payload = []
@@ -100,7 +113,7 @@ def recalc_series(
             payload.append(tuple([vals.get(cn) for cn in cols] + [symbol, interval, t]))
         if payload and not dry_run:
             sets = ", ".join(f"[{c}]=?" for c in cols)
-            sql = f"UPDATE kline SET {sets} WHERE symbol=? AND interval=? AND t=?"
+            sql = f"UPDATE [{tbl}] SET {sets} WHERE symbol=? AND interval=? AND t=?"
             with conn:
                 conn.executemany(sql, payload)
             updated += len(payload)
@@ -119,17 +132,19 @@ def verify_series(
     specs: Iterable,
     tail: int = 200,
     rel_tol: float = 1e-9,
+    table: str = "kline",
 ) -> dict:
     """独立校验：读库内已存值 vs 从全序列重算的尾部值，返回最大相对误差。"""
     specs = list(specs)
     spec_dicts = [s.as_dict() for s in specs]
     wanted = [c for s in specs for c in s.columns]
-    existing = {r[1] for r in conn.execute("PRAGMA table_info([kline])").fetchall()}
+    tbl = _tbl(table)
+    existing = {r[1] for r in conn.execute(f"PRAGMA table_info([{tbl}])").fetchall()}
     cols = [c for c in wanted if c in existing]
     if not cols:
         return {"n": 0, "max_rel": 0.0, "cols": []}
     total = conn.execute(
-        "SELECT count(*) FROM kline WHERE symbol=? AND interval=?", (symbol, interval)
+        f"SELECT count(*) FROM [{tbl}] WHERE symbol=? AND interval=?", (symbol, interval)
     ).fetchone()[0]
     if not total:
         return {"n": 0, "max_rel": 0.0, "cols": cols}
@@ -139,7 +154,7 @@ def verify_series(
     keep: list[tuple[int, dict]] = []
     cursor = None
     while True:
-        rows = _read_batch(conn, symbol, interval, cursor, 500, _CORE_COLS[1:])
+        rows = _read_batch(conn, symbol, interval, cursor, 500, _CORE_COLS[1:], table=tbl)
         if not rows:
             break
         for r in rows:
@@ -157,7 +172,7 @@ def verify_series(
     n = 0
     for t, ours in keep:
         stored = conn.execute(
-            f"SELECT {', '.join('[' + c + ']' for c in cols)} FROM kline "
+            f"SELECT {', '.join('[' + c + ']' for c in cols)} FROM [{tbl}] "
             "WHERE symbol=? AND interval=? AND t=?",
             (symbol, interval, t),
         ).fetchone()

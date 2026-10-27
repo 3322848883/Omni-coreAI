@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import time
 import urllib.error
@@ -157,67 +158,133 @@ def _to_float(v: Any) -> Optional[float]:
         return None
 
 
-def load_local_candles(db_path: Optional[Path], symbol: str, interval: str, limit: int) -> Optional[list[dict[str, Any]]]:
+class LocalLoad:
+    """本地库读取结果（带状态，供降级判定）。
+
+    status:
+      - ``ok``      读到了 ≥limit 根（或库本身就这么多且不短）
+      - ``short``   读到了，但少于请求根数（v2 起用于 hybrid 回退 REST 补齐）
+      - ``empty``   库/序列为空
+      - ``missing`` 库不存在
+      - ``schema``  契约不满足（缺必需列 / 不可读）
+      - ``sqlite``  SQL 错误
+    """
+
+    __slots__ = ("rows", "status", "requested", "returned", "version")
+
+    def __init__(self, rows: list[dict[str, Any]], status: str,
+                 requested: int, version: Optional[int] = None) -> None:
+        self.rows = rows
+        self.status = status
+        self.requested = requested
+        self.returned = len(rows)
+        self.version = version
+
+    @property
+    def usable(self) -> bool:
+        return self.status in ("ok", "short") and bool(self.rows)
+
+
+#: 库里允许出现的指标列（与 contracts.kline_schema 的正则一致，避免读进来未知列）
+_INDICATOR_COL_RE = re.compile(
+    r"^(?:ema|ma|sma|atr|rsi)\d+$"
+    r"|^macd(?:_\d+_\d+_\d+)?(?:_dea|_hist)?$"
+    r"|^boll\d+(?:_[\dpn]+)?(?:_upper|_lower)?$"
+)
+
+_CORE_SELECT = ("t", "o", "h", "l", "c", "v", "sum")
+
+
+def load_local_candles_ex(db_path: Optional[Path], symbol: str, interval: str,
+                          limit: int, closed_only: bool = True) -> LocalLoad:
+    """读本地库（v1/v2 通用）：显式列名、`closed=1` 过滤、返回状态与短数据标记。
+
+    v2 起库里有 11 个指标列（配置驱动），这里按列名**动态**拼 SELECT，
+    并原样把这些列带进 rows —— 读取端 `attach_indicators` 会「库值优先」沿用。
+    """
+    req = int(limit)
     if not db_path or not Path(db_path).exists():
-        return None
+        return LocalLoad([], "missing", req)
     try:
         from contracts.kline_schema import validate_kline_schema
 
-        validate_kline_schema(Path(db_path))
-    except Exception:  # noqa: BLE001 — contract miss → treat as unreadable, fall back REST
-        return None
+        version = validate_kline_schema(Path(db_path))
+    except Exception:  # noqa: BLE001
+        return LocalLoad([], "schema", req)
     try:
-        conn = sqlite3.connect(str(db_path), timeout=5)
+        # 只读 URI：绝不写盘、不会因为读端建 WAL 而卡住写端
+        conn = sqlite3.connect(f"file:{Path(db_path)}?mode=ro", uri=True, timeout=5)
         try:
+            cols = [r[1] for r in conn.execute("PRAGMA table_info([kline])").fetchall()]
+            if not cols:
+                return LocalLoad([], "schema", req, version)
+            ind_cols = [c for c in cols if _INDICATOR_COL_RE.match(str(c))]
+            select = ", ".join(list(_CORE_SELECT) + ind_cols)
+            where = "symbol=? AND interval=?"
+            if closed_only and "closed" in cols:
+                where += " AND closed=1"
             rows = conn.execute(
-                "SELECT t,o,h,l,c,v,sum,ema20,atr14 FROM kline "
-                "WHERE symbol=? AND interval=? ORDER BY t DESC LIMIT ?",
-                (symbol, interval, int(limit)),
+                f"SELECT {select} FROM kline WHERE {where} ORDER BY t DESC LIMIT ?",
+                (symbol, interval, req),
             ).fetchall()
+            names = list(_CORE_SELECT) + ind_cols
         finally:
             conn.close()
     except sqlite3.Error:
-        return None
+        return LocalLoad([], "sqlite", req, version)
     if not rows:
-        return None
+        return LocalLoad([], "empty", req, version)
     out: list[dict[str, Any]] = []
     for r in reversed(rows):
-        out.append(
-            {
-                "t": int(r[0]),
-                "o": _to_float(r[1]),
-                "h": _to_float(r[2]),
-                "l": _to_float(r[3]),
-                "c": _to_float(r[4]),
-                "v": _to_float(r[5]),
-                "sum": _to_float(r[6]),
-                "ema20": _to_float(r[7]),
-                "atr14": _to_float(r[8]),
-            }
-        )
-    return out
+        item: dict[str, Any] = {"t": int(r[0])}
+        for name, val in zip(names[1:], r[1:]):
+            item[name] = _to_float(val)
+        out.append(item)
+    status = "ok" if len(out) >= req else "short"
+    return LocalLoad(out, status, req, version)
+
+
+def load_local_candles(db_path: Optional[Path], symbol: str, interval: str, limit: int) -> Optional[list[dict[str, Any]]]:
+    """兼容旧签名：只返回 rows（不可用/为空 → None）。需状态判定请用 `load_local_candles_ex`。"""
+    res = load_local_candles_ex(db_path, symbol, interval, limit)
+    return res.rows if res.usable else None
 
 
 def _normalize_candle_rows(rows: Any, limit: int) -> list[dict[str, Any]]:
+    """归一 REST 行：**dict 与 list/tuple 两种形态都认**（Gate 实测两种都出现过）。
+
+    list 形态列序为 Gate 原生 `[t, v, c, h, l, o, sum]`；
+    `t` 统一按秒处理（ms 自动 /1000，见 `_to_epoch_seconds`）。
+    """
     out: list[dict[str, Any]] = []
     for r in rows or []:
-        if not isinstance(r, dict):
-            continue
-        out.append(
-            {
-                "t": int(r.get("t") or 0),
+        if isinstance(r, dict):
+            rec = {
+                "t": _to_epoch_seconds(r.get("t")),
                 "o": _to_float(r.get("o")),
                 "h": _to_float(r.get("h")),
                 "l": _to_float(r.get("l")),
                 "c": _to_float(r.get("c")),
                 "v": _to_float(r.get("v")),
-                "sum": _to_float(r.get("sum")),
-                "ema20": _to_float(r.get("ema20")),
-                "atr14": _to_float(r.get("atr14")),
+                "sum": _to_float(r.get("sum") if r.get("sum") is not None else r.get("a")),
             }
-        )
+        elif isinstance(r, (list, tuple)) and len(r) >= 6:
+            rec = {
+                "t": _to_epoch_seconds(r[0]),
+                "v": _to_float(r[1]),
+                "c": _to_float(r[2]),
+                "h": _to_float(r[3]),
+                "l": _to_float(r[4]),
+                "o": _to_float(r[5]),
+                "sum": _to_float(r[6]) if len(r) > 6 else None,
+            }
+        else:
+            continue
+        rec["ema20"] = _to_float(r.get("ema20")) if isinstance(r, dict) else None
+        rec["atr14"] = _to_float(r.get("atr14")) if isinstance(r, dict) else None
+        out.append(rec)
     out.sort(key=lambda x: x["t"])
-    return out[-int(limit) :]
+    return out[-int(limit):]
 
 
 def fetch_rest_candles(client: Any, symbol: str, interval: str, limit: int) -> list[dict[str, Any]]:
@@ -299,6 +366,7 @@ def resolve_candles(
     cfg = market_cfg or MarketConfig()
     degraded: list[str] = []
     local_rows: Optional[list[dict[str, Any]]] = None
+    local_status: Optional[str] = None
     use_local_gate = True
 
     if cfg.mode in ("hybrid", "local_only"):
@@ -309,9 +377,14 @@ def resolve_candles(
         if cfg.mode == "hybrid" and db_path is None:
             degraded.append("local_db_path")
         else:
-            local_rows = load_local_candles(db_path, symbol, interval, limit)
+            local = load_local_candles_ex(db_path, symbol, interval, limit)
+            local_status = local.status
+            local_rows = local.rows if local.usable else None
             if local_rows is None and cfg.mode == "hybrid":
                 degraded.append("local_db")
+            # 短数据：库里有但不够 limit 根 → 标记并（hybrid 下）回退 REST 补齐
+            if local_status == "short":
+                degraded.append("local_short")
             if local_rows is not None and not use_local_gate and cfg.mode == "hybrid":
                 local_rows = None
 
@@ -331,10 +404,13 @@ def resolve_candles(
         return CandleResult(rows=local_rows, source="local", stale=stale, degraded=degraded)
 
     # hybrid
-    if local_rows is not None:
+    if local_rows is not None and local_status != "short":
         stale = is_stale(local_rows, interval, cfg.stale_factor, now=now)
         if not stale:
             return CandleResult(rows=local_rows, source="local", stale=False, degraded=degraded)
+        degraded.append("candles_stale")
+    elif local_rows is not None:
+        # short：不直接交付，先尝试 REST 补齐（REST 失败再回落这批短数据）
         degraded.append("candles_stale")
     try:
         rows = fetch_rest_candles(client, symbol, interval, limit)
