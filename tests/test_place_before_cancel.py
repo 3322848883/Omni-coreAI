@@ -173,9 +173,16 @@ class TestCombinedRiskCap(unittest.TestCase):
         before_sizes = {id(i): i.size_usd for i in intents if i.action == "open_long"}
         out, note = ex._cap_combined_risk(intents)
         self.assertTrue(note)   # 缩仓必须带 note（WARNING 由 execute_signal 层打，见下一测试）
-        scale = (72.0 * 0.35) / total
+        # 2026-10-28 契约更新：等比缩不得把任何腿缩到 <1 张
+        # （1 张是最小可交易单位；0.9 张会被 Gate 整数 floor 成 **0 张挂单**，
+        #  实测 19:53 轮 7 条 size=0 即由此产生）。因此断言改为：
+        #   ① 每条腿缩后 ≤ 原值（只减不增）；② 缩后 ≥ 1 张的等价名义。
         for i in (x for x in out if x.action == "open_long"):
-            self.assertAlmostEqual(before_sizes[id(i)] * scale, i.size_usd, places=1)
+            one_lot = round(float(i.price) * 0.01, 2)
+            self.assertLessEqual(i.size_usd, before_sizes[id(i)] + 1e-9,
+                                 f"{i.price} 缩后不得变大")
+            self.assertGreaterEqual(i.size_usd, one_lot - 1e-6,
+                                    f"{i.price} 缩后不得低于 1 张（{one_lot}）")
         hold_intents = [i for i in out if i.action == "hold"]
         self.assertEqual(len(hold_intents), 1)   # 非 open 档不动
 

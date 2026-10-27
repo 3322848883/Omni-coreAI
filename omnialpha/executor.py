@@ -1821,17 +1821,64 @@ class Executor:
         if total <= limit:
             return intents, ""
         scale = limit / total
-        risked_ids = {id(r[0]) for r in risked}
+
+        # ── 最小可交易单位保护（2026-10-28 实测事故）────────────────────
+        # 等比缩放会把「网格档 1 张」缩成 0.92 张 → floor 到步长 0.9 张 →
+        # Gate `orders` 端点对 ETH 实际按**整数张** floor → **0 张挂单**（实测
+        # 19:53 轮 7 条 size=0 垃圾单，全来自这里）。
+        # 1 张已是最小可交易单位、无法再小，缩放它只会产生 0 张单：
+        #   · 折算张数 ≤1 的腿**跳过缩放**（保持 1 张）；
+        #   · 只缩 >1 张的腿，并按「缩放后仍 ≥1 张」为下限。
+        # 代价：极端情况下组合风险略超 cap，但 cap 是软上限、0 张单是硬故障。
+        meta_cache: dict[str, object] = {}
+
+        def _contracts(intent) -> float:
+            sym = str(getattr(intent, "symbol", "") or "")
+            if sym not in meta_cache:
+                try:
+                    meta_cache[sym] = self.client.get_contract(sym)
+                except Exception:  # noqa: BLE001
+                    meta_cache[sym] = None
+            meta = meta_cache[sym]
+            try:
+                mult = float(getattr(meta, "quanto_multiplier", 0) or 0)
+                px = float(getattr(intent, "price", 0) or 0)
+                usd = float(getattr(intent, "size_usd", 0) or 0)
+                if mult > 0 and px > 0 and usd > 0:
+                    return usd / (px * mult)
+            except (TypeError, ValueError):
+                pass
+            return 0.0
+
+        scalable, skipped_small = [], []
+        for i, risk in risked:
+            (scalable if _contracts(i) > 1.05 else skipped_small).append((i, risk))
+        if not scalable:
+            note = (f"combined stop-loss {total:.0f}U > equity {equity:.0f}U × {pct:.0%}"
+                    f" → {len(risked)} legs all ≤1 张，跳过缩放（最小单位不可缩）")
+            return intents, note
+        # scale 仍按**全体**风险算（跳过缩放的小腿会略微超出 cap，可接受）
+        scale = limit / total if total > 0 else 1.0
+        risked_ids = {id(r[0]) for r in scalable}
         out = []
         for i in intents:
             if id(i) in risked_ids:
                 try:
+                    before = _contracts(i)
                     i.size_usd = round(float(i.size_usd) * scale, 2)
+                    after = _contracts(i)
+                    if before > 1.05 and after < 1.0:
+                        # 缩到不足 1 张 → 回退到「恰好 1 张」的等价名义
+                        i.size_usd = round(float(getattr(i, "price", 0)) * 0.01, 2)
+                        log.warning("风险缩放会把 %s 缩到 <1 张（%.2f→%.2f），"
+                                    "已回退为 1 张（最小可交易单位）",
+                                    i.symbol, before, after)
                 except (TypeError, ValueError):
                     pass
             out.append(i)
         note = (f"combined stop-loss {total:.0f}U > equity {equity:.0f}U × {pct:.0%}"
-                f" → {len(risked)} open legs ×{scale:.2f}")
+                f" → 缩 {len(scalable)} 腿 ×{scale:.2f}"
+                f"（{len(skipped_small)} 条 ≤1 张腿未缩）")
         return out, note
 
     def _align_size_to_risk(self, intent: Intent, entry: float) -> tuple[float, str]:
