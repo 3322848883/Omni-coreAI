@@ -2290,6 +2290,19 @@ class Executor:
                               detail={"size_error": str(e)}, error=str(e))
         detail_size = {"size_basis": size_basis, "size_notional": round(size_notional, 4)}
 
+        # 兜底闸门（2026-10-28 实测事故）：19:02 的计划被**重放执行**时，
+        # 有 7 条 23~24U 的网格腿最终以 `size=0` 挂到了交易所（text=t-mtg、
+        # status=open、left=0）—— 0 张单不成交也不占保证金，但会污染挂单清单、
+        # 让对账把「空档」算错。`_resolve_order_size` 自身不会返回 0，所以这里
+        # 是**防御性**闸门：任何上游回归都在下单前被拒，绝不静默放行。
+        if not contracts or float(contracts) <= 0:
+            return StepResult(
+                intent.action, intent.symbol, False,
+                detail={"size_error": "SIZE_ZERO_REFUSED", **detail_size},
+                error=(f"SIZE_ZERO: {intent.symbol} 解析出 {contracts!r} 张，"
+                       f"拒绝挂 0 张单（口径 {size_basis}）"),
+            )
+
         # Gate: positive size = buy/long, negative = sell/short
         order_size = contracts if intent.action == "open_long" else -contracts
         body: dict[str, Any] = {"contract": intent.symbol, "size": order_size}
