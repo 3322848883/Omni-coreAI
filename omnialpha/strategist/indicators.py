@@ -1190,6 +1190,31 @@ def strip_carried_indicators(rows: list[dict[str, Any]], wanted) -> list[dict[st
     return out
 
 
+_WARMUP_PAD = 5
+
+
+def indicator_warmup_bars(wanted: list[str] | None = None) -> int:
+    """算这些指标**至少需要多少根 K 线**（含几根预热）。
+
+    为什么需要它（2026-10-27 实测缺陷）：`market.mode: rest_only` 每轮现算指标，
+    而非主周期只拉 `extra_candles`（默认 60）根 —— `ema200` 要 200 根，永远算不出来
+    （4h/1h 实测 ema200=None，模型只能退化成 EMA20；主周期 15m 给 200 根刚好够，
+    所以看起来"本地是好的"）。调用方据此决定**拉多少根**，prompt 里仍只留 extra_candles 根。
+    """
+    want = _resolve_wanted(wanted)
+    need = 0
+    for name in want:
+        try:
+            spec = parse_indicator_name(name)
+        except Exception:  # noqa: BLE001 — 未知名字交给 attach_indicators 报错
+            continue
+        period = int(spec.get("period") or 0)
+        # 多段指标：macd 的 signal、rsi_bb 的 ma_len 等都要额外预热
+        extra = int(spec.get("signal") or 0) + int(spec.get("ma_len") or 0)
+        need = max(need, period + extra + _WARMUP_PAD)
+    return need
+
+
 def attach_indicators(rows: list[dict[str, Any]], wanted: list[str] | None = None) -> list[dict[str, Any]]:
     """Attach indicator columns; raises IndicatorNameError on unknown names.
 

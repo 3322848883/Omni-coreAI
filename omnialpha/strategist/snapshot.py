@@ -4,9 +4,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Optional
 
-from ..gate_client import GateApiError, GateClient
-from .indicators import (attach_indicators, latest_indicators,
-                       strip_carried_indicators)
+from ..gate_client import GateApiError, GateClient, position_qty
+from .indicators import (attach_indicators, indicator_warmup_bars,
+                         latest_indicators, strip_carried_indicators)
 from .market import MarketConfig, resolve_candles
 
 TICKER_FIELDS = (
@@ -139,6 +139,43 @@ def _rows_for(rows: Any, symbols: Optional[list[str]]) -> list[dict]:
     return [r for r in (rows or [])
             if isinstance(r, dict)
             and str(r.get("contract") or "").strip().upper() in uni]
+
+
+def positions_view(client: Any) -> list[dict]:
+    """`/positions` → 给 AI 看的持仓视图（**真实张数**，小数安全）。
+
+    `/positions` 的 `size` 是 int64：小数张合约会被截断 —— 实测 ETH_USDT
+    真实 **0.1** 张的幽灵多仓返回 `size=0`（`mode` 仍是 `dual_long`），真实
+    **16.1** 张的空仓返回 `-16`。按 `size` 过滤会让前一条**从模型视野里彻底消失**，
+    模型只能看到 `-16` 并据此决策，而交易所上真实存在两条腿 —— 「AI 说无仓 /
+    AI 说平仓」永远对不上账（2026-10-27 实盘：一多一空挂了 29 小时）。
+
+    真实张数由 `position_qty`（`value/(mark×quanto)`）反算；取不到元数据/`value`
+    时退回 `size` 字段（旧行为）。
+    """
+    metas: dict[str, Any] = {}
+
+    def _meta_of(sym: str) -> Any:
+        if sym not in metas:
+            try:
+                metas[sym] = client.get_contract(sym)
+            except Exception:  # noqa: BLE001 — 取不到就退回 size 字段
+                metas[sym] = None
+        return metas[sym]
+
+    rows: list[dict] = []
+    for p in (client.get_positions() or []):
+        real = position_qty(p, _meta_of(str(p.get("contract") or "")))
+        if real == 0:
+            continue
+        rows.append({
+            "contract": p.get("contract"),
+            "mode": p.get("mode"),
+            "size": round(real, 8),
+            "entry_price": p.get("entry_price"),
+            "leverage": p.get("leverage"),
+        })
+    return rows
 
 
 def position_state(account: dict, symbols: Optional[list[str]] = None) -> tuple[str, str]:
@@ -426,10 +463,14 @@ def collect_snapshot(
             if extra_tfs:
                 entry["tf"] = {}
                 n_extra = int(getattr(cfg, "extra_candles", 20) or 20)
+                # 算指标要够根数：ema200 需要 200 根，而 extra_candles 只有 60 →
+                # 直接现算会恒为 None（实测 4h/1h 都是 None，v5 人格的 4H EMA200
+                # 方向判据因此退化成 EMA20）。拉 n_calc 根算指标，快照只留 n_extra 根。
+                n_calc = max(n_extra, indicator_warmup_bars(cfg.indicators))
                 for tf in extra_tfs:
                     try:
                         xres = resolve_candles(
-                            client, sym, tf, n_extra,
+                            client, sym, tf, n_calc,
                             market_cfg=cfg, env=env, bot_root=bot_root,
                         )
                         xrows = strip_carried_indicators(
@@ -471,18 +512,7 @@ def collect_snapshot(
         meta["degraded"].append("account")
     if "error" not in account:
         try:
-            account["positions"] = [
-                {
-                    "contract": p.get("contract"),
-                    "mode": p.get("mode"),
-                    "size": p.get("size"),
-                    "entry_price": p.get("entry_price"),
-                    "leverage": p.get("leverage"),
-                }
-                for p in (client.get_positions() or [])
-                # 小数张（ETH 0.1 步长）：`int("0.7")` 会抛 ValueError → 整段 positions 丢失
-                if float(p.get("size") or 0) != 0
-            ]
+            account["positions"] = positions_view(client)
         except Exception as e:  # noqa: BLE001
             account["error"] = f"positions: {e}"
             account.setdefault("positions", [])
