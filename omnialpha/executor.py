@@ -5381,8 +5381,35 @@ class Executor:
         # 张数 <1 就自动走 auto_size。**不能全局开 venue-close**：网格/阶梯 bot 的
         # 多档 TP 每档只平一部分，auto_size 会变成「第一档就平掉整侧」。
         fractional_residual = 0 < abs(close_size) < 1
+        # 2026-10-28 实盘（pa-eth-v5）：持仓 13.8 张 = 0.138 ETH，SL/TP 被挂成
+        # **−13 张**（显式整数）→ 触发时只平 13 张，残 0.8 张永久化。
+        # 根因链：ETH `size_step=0.1`（enable_decimal）→ 入场 323U/(2340.5×0.01)
+        # = 13.8 张可以下；但 `/price_orders` 的 `initial.size` 是 **int64**，
+        # `_int_price_order_size` 向零取整 → 13。**小数张 + 显式张数保护 =
+        # 必然残仓**，与「仓位大小」无关，只要带小数就会发生。
+        #
+        # 判据用「该保护单是否覆盖整个方向」，不是「是否有小数」：
+        #   · 覆盖整仓（SL / 全仓 TP）：auto_size 语义完全等价 → 走 venue-close；
+        #   · 部分档（网格/阶梯的多档 TP）：仍走显式张数，绝不能被放大成整侧平仓。
+        abs_close = abs(close_size)
+        has_fraction = abs(abs_close - math.floor(abs_close)) > 1e-9
+        whole_position = False
+        if has_fraction and not fractional_residual:
+            try:
+                qty = sum(abs(float(p.get("size") or 0))
+                          for p in self._symbol_positions(intent.symbol)
+                          if str(p.get("side") or "") == (intent.side or "long"))
+                whole_position = qty > 0 and abs_close >= qty - 1e-9
+            except Exception as e:  # noqa: BLE001 — 取不到持仓就退回显式张数
+                swallow("executor._place_trigger.whole_position", e, level=logging.WARNING)
+                whole_position = False
+            if whole_position:
+                log.warning(
+                    "保护单张数 %.4f 带小数且覆盖整仓（持仓 %.4f）→ 走 auto_size"
+                    "（price_orders 的 size 是 int64，显式张数会截断成残仓）",
+                    abs_close, qty)
         use_venue_close = (bool((self.account_risk or {}).get("use_venue_close"))
-                           or fractional_residual)
+                           or fractional_residual or whole_position)
         if use_venue_close and not dual:
             # 单向模式没有 `auto_size`；`close=true` 在触发单端点上未验证，
             # 不拿实盘裸奔 —— 退回显式张数（= 旧行为）。
