@@ -92,6 +92,7 @@ def _columns(kind: str, params: tuple) -> tuple[str, ...]:
 
 
 def _warmup(kind: str, params: tuple) -> int:
+    """预热根数取该 spec 内**最长周期**（`ema:[20,200]` 必须按 200 算）。"""
     if kind == "macd":
         fast, slow, signal = (int(x) for x in params)
         base = slow * _WARMUP_MULT if slow >= _LONG_PERIOD else slow
@@ -99,7 +100,7 @@ def _warmup(kind: str, params: tuple) -> int:
     if kind == "boll":
         period = int(params[0])
         return (period * _WARMUP_MULT if period >= _LONG_PERIOD else period) + _WARMUP_PAD
-    period = int(params[0])
+    period = max(int(p) for p in params)
     return (period * _WARMUP_MULT if period >= _LONG_PERIOD else period) + _WARMUP_PAD
 
 
