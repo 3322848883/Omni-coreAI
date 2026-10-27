@@ -13,7 +13,10 @@
 
 from __future__ import annotations
 
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 import sqlite3
 from typing import Iterable, Optional
 
@@ -114,6 +117,20 @@ class SeriesRegistry:
             return {"engine": "legacy", "written": True, "values": vals}
 
         w = self.writer(symbol, interval)
+        # ── 首次写入前预热（2026-10-28 实测事故）────────────────────────
+        # `prime()` 此前**没有任何调用者**：v2 引擎启动时 StreamState 是空的，
+        # 于是前 20~200 根新 bar 的指标列全 NULL（实测 21:42/21:43 两根 0/7 填充）。
+        # 每序列只在首写时 seed 一次，代价是读 warmup 根 OHLC。
+        if not getattr(w, "_primed", False):
+            try:
+                seeded = self.prime(conn, symbol, interval)
+                logger.info("primed %s %s: %d 根（engine=%s）",
+                            symbol, interval, seeded, self.engine)
+            except Exception as e:  # noqa: BLE001 — 预热失败不阻断写入
+                logger.warning("prime %s %s failed: %s", symbol, interval, e)
+            finally:
+                w._primed = True
+
         if self.engine == "shadow":
             # 旧值入库（下游零影响），新引擎只推进状态 + 比对
             legacy = legacy_values(conn, symbol, interval, bar)
