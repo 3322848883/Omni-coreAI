@@ -4,11 +4,67 @@ from __future__ import annotations
 
 import logging
 import math
+from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
 from typing import Optional
 
 from .gate_client import ContractMeta, GateApiError
 
 log = logging.getLogger(__name__)
+
+
+# ── 小数张：唯一精度口径 ─────────────────────────────────────
+# 2026-10-28 实盘：ETH 13.8 张（0.138 ETH）在 float 下可能变成
+# 13.799999999999999，交易所按步长 floor 后成 **13.7** —— 每笔少 0.1 张，
+# 且这种误差在「仓位 ↔ 保护单」对齐时会被放大成残仓。统一用 Decimal，
+# 并按步长的小数位输出，禁止用 float 运算后再 round。
+
+def _dec(x) -> Decimal:
+    """float/str/int → Decimal，并把 float 的二进制噪声压到 1e-9。
+
+    典型输入：`13.799999999999999`（上游 float 乘除的产物）—— 直接按 0.1 步长
+    floor 会掉成 **13.7**（每笔少 0.1 张）。压到 1e-9 后还原成 13.8。
+    """
+    return Decimal(str(x)).quantize(Decimal("1e-9"))
+
+
+def step_decimals(step: float) -> int:
+    """步长需要几位小数：0.1→1、0.01→2、1→0、10→0。"""
+    d = _dec(step).normalize()
+    exp = d.as_tuple().exponent
+    return max(0, -int(exp)) if isinstance(exp, int) else 0
+
+
+def floor_to_step(qty: float, step: float) -> Decimal:
+    """按步长向下取整（Decimal，无二进制误差）。"""
+    q, s = _dec(qty), _dec(step)
+    if s <= 0:
+        s = Decimal(1)
+    if q <= 0:
+        return Decimal(0)
+    return (q / s).to_integral_value(rounding=ROUND_FLOOR) * s
+
+
+def round_to_step(qty: float, step: float) -> Decimal:
+    """按步长四舍五入（Decimal，替代银行家舍入的 round()）。"""
+    q, s = _dec(qty), _dec(step)
+    if s <= 0:
+        s = Decimal(1)
+    if q <= 0:
+        return Decimal(0)
+    return (q / s).to_integral_value(rounding=ROUND_HALF_UP) * s
+
+
+def qty_to_wire(qty: float, step: float) -> float | int:
+    """把张数格式化成可以直接上 wire 的值。
+
+    - 步长 ≥1（BTC/DOGE 这类整张合约）→ 返回 `int`，避免 13.0 被部分客户端拒
+    - 步长带小数（ETH/SOL/PEPE…）→ 返回**已是步长整数倍**的 float（13.8 而不是
+      13.799999999999999），交易所侧不会再 floor 掉一位
+    """
+    v = floor_to_step(qty, step)
+    if step_decimals(step) == 0:
+        return int(v)
+    return float(v)
 
 
 def vol_adjust_size(base_size_usd: float, atr_pct: float,
@@ -65,13 +121,16 @@ def usd_to_contracts(
             f"（{multiplier!r}）→ 拒绝换算张数；请确认该所的合约元数据接口可用"
         )
     multiplier = float(multiplier)
-    raw = size_usd / (entry_price * multiplier)
+    # 除法也走 Decimal：`100 / (0.00001 × 1e7)` 在 float 里会是
+    # 0.9999999999999999 → floor 成 0.9 张（PEPE 这类 quanto 极大的币会踩到）。
+    raw = _dec(size_usd) / (_dec(entry_price) * _dec(multiplier))
     # 步长**必须**取交易所真实值（`size_step`：enable_decimal → 0.1，否则 1）。
     # 原来用 `meta.order_size_round` —— 交易所根本不提供这个字段（1061 个合约
     # 0 命中），恒为假值 1 → ETH 的 0.1 步长对代码不可见，永远只能下整数张。
     step = safe_step(meta)
-    contracts = math.floor(raw / step + 1e-9) * step
-    contracts = round(contracts, 8)
+    # Decimal 取整：`math.floor(raw/step)*step` 在 13.8/0.1 这类除法上会出
+    # 12.9999999 的尾巴，交易所再 floor 就少一张（每笔 0.1 张的静默缩水）。
+    contracts = float(floor_to_step(raw, step))
     size_min = float(getattr(meta, "size_min", 0) or 0) or step
     if contracts < size_min:
         # **兜底：抬到「最小可下量」，不抛错**。
@@ -149,17 +208,14 @@ def quantize_size(qty: float, meta: ContractMeta, *, mode: str = "floor",
         q = 0.0
     if q <= 0:
         q = 0.0
-    if mode == "round":
-        n = math.floor(q / step + 0.5 + 1e-9) * step
-    else:
-        n = math.floor(q / step + 1e-9) * step
-    n = round(n, 8)
+    # Decimal 取整：float 版 `math.floor(q/step)*step` 会带出 12.999999 这类
+    # 尾巴（13.8/0.1 在 float 里不精确），下游再 floor 一次就少一张。
+    n = float(round_to_step(q, step) if mode == "round" else floor_to_step(q, step))
 
     size_min = float(getattr(meta, "size_min", 0) or 0) or step
     if at_least_step and n < size_min:
         n = size_min
     size_max = float(getattr(meta, "size_max", 0) or 0)
     if size_max > 0 and n > size_max:
-        n = math.floor(size_max / step + 1e-9) * step
-        n = round(n, 8)
+        n = float(floor_to_step(size_max, step))
     return n

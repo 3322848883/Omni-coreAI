@@ -12,6 +12,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Optional
 
@@ -42,9 +43,14 @@ def _wire_body(obj: Any) -> Any:
         return [_wire_body(v) for v in obj]
     if isinstance(obj, bool) or not isinstance(obj, float):
         return obj
-    if math.isfinite(obj) and obj.is_integer():
-        return int(obj)
-    return obj
+    if not math.isfinite(obj):
+        return obj
+    # 小数张的二进制尾巴（13.799999999999999）会在交易所侧被 floor 掉一位，
+    # 变成 13.7 → 每笔静默少 0.1 张。统一按 8 位小数归一化后再决定 int/float。
+    d = Decimal(str(obj)).quantize(Decimal("1e-8"), rounding=ROUND_HALF_UP)
+    if d == d.to_integral_value():
+        return int(d)
+    return float(d)
 
 SYMBOL_MAP = {
     "BTC": "BTC_USDT",
