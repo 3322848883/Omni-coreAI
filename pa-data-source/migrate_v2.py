@@ -158,11 +158,19 @@ def run_gates(conn: sqlite3.Connection, specs: Iterable, warmup: int,
     # OHLC 抽样：每序列取最新 20 行比对
     worst = 0.0
     samples = 0
+    worst_detail: dict = {}
     for symbol, interval in conn.execute(
             "SELECT DISTINCT symbol, interval FROM kline").fetchall():
+        # ⚠️ 只比**已收盘**的 bar：`ORDER BY t DESC LIMIT 20` 会把正在形成的那根
+        # 也算进去，而活库里它的 OHLC 每几秒变一次 —— 复制快照与比对时刻不同 →
+        # 必然不等。实测 2026-10-28：同一份数据两次 dry-run 分别报 1.8e-4 / 9.9e-5 / 0.0，
+        # 全是「当前 bar 在动」造成的假阳性。取 21 根、跳过最新那根。
         src_rows = conn.execute(
-            "SELECT t,o,h,l,c FROM kline WHERE symbol=? AND interval=? ORDER BY t DESC LIMIT 20",
+            "SELECT t,o,h,l,c FROM kline WHERE symbol=? AND interval=? "
+            "ORDER BY t DESC LIMIT 21",
             (symbol, interval)).fetchall()
+        if len(src_rows) > 20:
+            src_rows = src_rows[1:]      # 丢掉未收盘的最新 bar
         for t, o, h, l, c in src_rows:
             dst = conn.execute(
                 "SELECT o,h,l,c FROM kline_v2_new WHERE symbol=? AND interval=? AND t=?",
@@ -170,12 +178,20 @@ def run_gates(conn: sqlite3.Connection, specs: Iterable, warmup: int,
             if not dst:
                 worst = float("inf")
                 continue
-            for a, b in zip((o, h, l, c), dst):
+            for col, a, b in zip(("o", "h", "l", "c"), (o, h, l, c), dst):
                 samples += 1
                 x, y = float(a), float(b)
                 if x != y:
-                    worst = max(worst, abs(x - y) / max(abs(x), abs(y), 1e-12))
-    gates["ohlc_sample"] = {"ok": worst <= rel_tol, "worst_rel": worst, "samples": samples}
+                    rel = abs(x - y) / max(abs(x), abs(y), 1e-12)
+                    if rel > worst:
+                        worst = rel
+                        worst_detail.update({
+                            "symbol": symbol, "interval": interval, "t": t,
+                            "col": col, "src": repr(a), "dst": repr(b),
+                            "src_type": type(a).__name__, "dst_type": type(b).__name__,
+                        })
+    gates["ohlc_sample"] = {"ok": worst <= rel_tol, "worst_rel": worst,
+                            "samples": samples, "worst_detail": worst_detail}
 
     # 指标完整性：越过预热窗口的收线行不应为 NULL
     cols = [c for s in specs for c in s.columns]
@@ -266,6 +282,11 @@ def migrate(db_path: Path, specs: Iterable, backup_path: Optional[Path] = None,
                 "ok": True, "skipped": "dry_run",
                 "note": "dry-run 不写指标列，nulls 不作判据（正式迁移会写并复核）",
                 "nulls": gates["indicator_nulls"].get("nulls", 0),
+            }
+            # all_ok 是 run_gates 内部算的，早于上面的覆盖 → 必须重算，
+            # 否则「7 项全绿但 all_ok=False」（实测 2026-10-28）。
+            gates["all_ok"] = {
+                "ok": all((v or {}).get("ok") for k, v in gates.items() if k != "all_ok")
             }
         result = {"backup": info, "copy": copy, "recalc": filled, "gates": gates}
         if dry_run or not gates["all_ok"]["ok"]:
