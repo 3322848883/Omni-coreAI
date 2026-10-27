@@ -19,8 +19,7 @@ body = {
         "price": "0",
         "tif": "ioc",
         "text": "t-mtg-sl",
-        "is_reduce_only": True,
-        "auto_size": "",
+        "reduce_only": True,
     },
     "trigger": {
         "strategy_type": 0,
