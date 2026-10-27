@@ -45,6 +45,14 @@ class BotConfig:
     # ⚠️ 仅对本 bot 生效：其他 bot 不配置就走原语义（撤类先执行）。
     place_before_cancel: bool = False
     ladder_shrink_guard: bool = False
+    # BOT 级阶梯模板（引擎补齐用）。全局默认关闭，只有显式配 enabled: true 的 bot 生效。
+    #   ladder_template:
+    #     enabled: true
+    #     grid_levels: 7          # 网格档数
+    #     grid_lots: 1            # 每档张数
+    #     grid_step_pct: 0.6      # 档距（% of mark）
+    #     martin: [{pct: 2.8, lots: 6}, {pct: 4.6, lots: 7}, {pct: 6.6, lots: 9}]
+    ladder_template: dict = field(default_factory=dict)
     # own = only manage orders with text prefix t-{label}; all = wipe symbol (legacy)
     order_scope: str = "own"
     # ── 持仓管理闸门（yaml 可关）────────────────────────────────
@@ -485,6 +493,7 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
         default_replace=str(data.get("default_replace") or "none").strip().lower(),
         place_before_cancel=bool(data.get("place_before_cancel", False)),
         ladder_shrink_guard=bool(data.get("ladder_shrink_guard", False)),
+        ladder_template=dict(data.get("ladder_template") or {}),
         order_scope=str(data.get("order_scope") or "own").strip().lower(),
         # 三闸门：缺省 True（与 Executor 的默认一致）；yaml 写 false 现在真的生效
         manage_positions=bool(data.get("manage_positions", True)),

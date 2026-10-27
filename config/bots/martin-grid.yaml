@@ -42,6 +42,18 @@ place_before_cancel: true
 # 缩梯防护（2026-10-28）：replace 时若本轮腿数少于盘上入场单数，
 # 保留价格不重合的旧档 —— 实测 19:29 轮只规划 3 条腿把 10 层梯撤成 3 层。
 ladder_shrink_guard: true
+# BOT 级阶梯模板：模型腿数不稳定（实测 3/4/10 条），引擎按模板补齐缺档。
+# 全局默认关闭（BotConfig.ladder_template 空 = 不启用），只对本 bot 生效。
+# 只补缺、不撤不改；只在「本轮有入场腿且带 sl」时补。
+ladder_template:
+  enabled: true
+  grid_levels: 7        # 7 网格档（人格：10 层 = 7 网格 + 3 马丁）
+  grid_lots: 1          # 网格每档 1 张
+  grid_step_pct: 0.6    # 档距 ≈ 现价 14 点（人格要求 ≥10 点）
+  martin:               # 马丁三档：深度% + 张数
+    - {pct: 2.8, lots: 6}
+    - {pct: 4.6, lots: 7}
+    - {pct: 6.6, lots: 9}
 order_scope: own
 require_sl: true
 

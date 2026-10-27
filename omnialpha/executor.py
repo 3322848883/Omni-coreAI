@@ -466,6 +466,7 @@ class Executor:
         account: str = "",
         place_before_cancel: bool = False,
         ladder_shrink_guard: bool = False,
+        ladder_template: Optional[dict] = None,
     ):
         self.client = client
         self.symbols_whitelist = (
@@ -503,6 +504,8 @@ class Executor:
         # 保留价格不重合的旧档（避免阶梯从 10 层塌到 3 层）。默认关，
         # 既有 replace 契约不变（test_replace_no_empty_grid）。
         self.ladder_shrink_guard = bool(ladder_shrink_guard)
+        # BOT 级阶梯模板（引擎补齐）。全局默认空 = 不启用。
+        self.ladder_template = dict(ladder_template or {})
         # P0.4 告警落盘：权益偏离 / 孤儿保护单
         self.alert_store = alert_store
         # 本轮**将要被撤掉的旧普通单 id 集**（`execute_signal` 每轮重算；见 `_sl_cover_cap`）。
@@ -711,6 +714,11 @@ class Executor:
             self._cancel_stale_owned(
                 pre_owned, intents, report, explicit_cancel_symbols=cancel_syms,
             )
+        # BOT 级阶梯补齐（ladder_template.enabled 才生效；默认关 → 行为不变）
+        try:
+            self._complete_ladder(intents, report)
+        except Exception as e:  # noqa: BLE001 — 补齐失败绝不影响本轮已成交的腿
+            log.warning("ladder template completion failed: %s", e)
         return report
 
     def _replace_mode(self, signal: SignalFile, intents: list) -> str:
@@ -1184,6 +1192,93 @@ class Executor:
                 report.results.append(StepResult(
                     "replace_cancel", sym, True, detail=detail,
                 ))
+
+    def _complete_ladder(self, intents: list, report) -> None:
+        """BOT 级阶梯补齐（`ladder_template.enabled`，全局默认关闭）。
+
+        为什么要有：模型每轮给的入场腿数不稳定（实测 3/4/10 条都出现过），
+        而 `replace` 是整梯替换 → 阶梯层数随模型波动，10 层变 3 层。
+        补齐只在「模板启用 + 本轮有入场腿（拿得到 sl）+ 存在缺档」时动手：
+          · 锚 = 最新价；网格档 = 锚 × (1 − step_pct×i)；
+          · 马丁档 = 锚 × (1 − pct)，张数按模板；
+          · 已存在（±0.3%）的档跳过 —— **只补缺，不撤不改**；
+          · 单次最多补 template 总档数，避免异常配置刷单。
+        """
+        tpl = getattr(self, "ladder_template", None) or {}
+        if not tpl.get("enabled"):
+            return
+        entry_legs = [i for i in intents
+                      if str(getattr(i, "action", "") or "").lower() in _ENTRY_ACTIONS]
+        if not entry_legs:
+            return
+        sym = str(getattr(entry_legs[0], "symbol", "") or "")
+        if not sym:
+            return
+        sl = getattr(entry_legs[0], "sl", None)
+        if sl is None:
+            return                      # 没有 sl 的轮次不补（补齐必须带止损）
+        try:
+            mark = float(self.client.get_last_price(sym) or 0)
+            meta = self.client.get_contract(sym)
+        except Exception as e:  # noqa: BLE001
+            report.results.append(StepResult("ladder_template", sym, False,
+                                             error=f"取价/合约失败: {e}"))
+            return
+        if mark <= 0:
+            return
+        try:
+            grid_n = int(tpl.get("grid_levels") or 0)
+            grid_lots = float(tpl.get("grid_lots") or 1)
+            step_pct = float(tpl.get("grid_step_pct") or 0.6)
+            martin = list(tpl.get("martin") or [])
+        except (TypeError, ValueError):
+            return
+        want: list[tuple[float, float]] = []
+        for i in range(1, grid_n + 1):
+            want.append((mark * (1 - step_pct * i / 100.0), grid_lots))
+        for m in martin:
+            try:
+                want.append((mark * (1 - float(m["pct"]) / 100.0), float(m["lots"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+        if not want:
+            return
+        # 已存在的入场档（价格）
+        try:
+            existing = [float(o.get("price") or 0)
+                        for o in self.client.list_orders(sym) or []
+                        if not (o.get("is_reduce_only") or o.get("reduce_only"))]
+        except Exception:  # noqa: BLE001
+            existing = []
+        placed, skipped = [], []
+        for px, lots in want:
+            try:
+                price = round_price(px, meta)
+            except Exception:  # noqa: BLE001
+                continue
+            if any(p > 0 and abs(price - p) / p <= 0.003 for p in existing):
+                skipped.append(price)
+                continue
+            if price >= mark:           # 只补现价下方
+                skipped.append(price)
+                continue
+            body = {"contract": sym, "size": lots, "price": str(price),
+                    "tif": "gtc", "text": f"t-{self._bot_tag('')}"}
+            try:
+                order = self.client.place_order(body)
+                placed.append({"price": price, "size": lots,
+                               "id": str((order or {}).get("id") or "")})
+                existing.append(price)
+            except Exception as e:  # noqa: BLE001
+                report.results.append(StepResult(
+                    "ladder_template", sym, False,
+                    detail={"price": price, "size": lots},
+                    error=f"补档失败: {str(e)[:120]}"))
+        if placed or skipped:
+            report.results.append(StepResult(
+                "ladder_template", sym, True,
+                detail={"placed": placed, "skipped": skipped,
+                        "anchor": mark, "sl": sl}))
 
     def _entry_gate(self, intent: Intent) -> str:
         """Return error string to reject intent, or '' to allow.
