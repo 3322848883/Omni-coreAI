@@ -76,6 +76,11 @@ class Intent:
     size_pct: Optional[float] = None
     margin_pct: Optional[float] = None
     size: Optional[float] = None
+    # 2026-10-28：补两种「自然口径」，与交易所下单面板的 4 种输入对齐
+    #   size_coins : 币数量（0.138 ETH / 0.5 SOL）—— 与 quanto 无关，直接 /quanto 换张
+    #   margin_usd : 指定保证金（USDT）—— 名义 = margin × leverage
+    size_coins: Optional[float] = None
+    margin_usd: Optional[float] = None
     order_type: str = "market"
     price: Optional[float] = None
     leverage: Optional[int] = None
@@ -318,8 +323,16 @@ def _parse_stop_entry(data: dict, action: str, default_label: str) -> Intent:
     size = _q(data.get("size"), "size")
     size_pct = _f(data.get("size_pct"), "size_pct")
     margin_pct = _f(data.get("margin_pct"), "margin_pct")
-    if size_usd is None and size is None and size_pct is None and margin_pct is None:
-        raise SchemaError(f"{action} requires size_usd, size_pct, margin_pct, or size")
+    size_coins = _f(data.get("size_coins"), "size_coins")
+    margin_usd = _f(data.get("margin_usd"), "margin_usd")
+    for name, val in (("size_coins", size_coins), ("margin_usd", margin_usd)):
+        if val is not None and val <= 0:
+            raise SchemaError(f"{name} must be positive, got {val}")
+    if all(v is None for v in (size_usd, size, size_pct, margin_pct,
+                               size_coins, margin_usd)):
+        raise SchemaError(
+            f"{action} requires one of size_usd / size_coins / size / "
+            f"margin_usd / size_pct / margin_pct")
     default_rule = 1 if action == "stop_entry_long" else 2
     rule = _i(data.get("trigger_rule"), "trigger_rule") or default_rule
     # SL 的 rule 必须显式落定，不能留给下游兜底：做空止损在**上方**（rule=1
@@ -341,6 +354,8 @@ def _parse_stop_entry(data: dict, action: str, default_label: str) -> Intent:
         size_pct=size_pct,
         margin_pct=margin_pct,
         size=size,
+        size_coins=size_coins,
+        margin_usd=margin_usd,
         order_type=order_type,
         price=price,
         leverage=_i(data.get("leverage"), "leverage"),
@@ -504,11 +519,19 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
     size = _q(data.get("size"), "size")
     size_pct = _f(data.get("size_pct"), "size_pct")
     margin_pct = _f(data.get("margin_pct"), "margin_pct")
+    size_coins = _f(data.get("size_coins"), "size_coins")
+    margin_usd = _f(data.get("margin_usd"), "margin_usd")
     for name, val in (("size_pct", size_pct), ("margin_pct", margin_pct)):
         if val is not None and not (0 < val <= 1):
             raise SchemaError(f"{name} must be in (0, 1], got {val}")
-    if size_usd is None and size is None and size_pct is None and margin_pct is None:
-        raise SchemaError(f"{action} requires size_usd, size_pct, margin_pct, or size")
+    for name, val in (("size_coins", size_coins), ("margin_usd", margin_usd)):
+        if val is not None and val <= 0:
+            raise SchemaError(f"{name} must be positive, got {val}")
+    if all(v is None for v in (size_usd, size, size_pct, margin_pct,
+                               size_coins, margin_usd)):
+        raise SchemaError(
+            f"{action} requires one of size_usd / size_coins / size / "
+            f"margin_usd / size_pct / margin_pct")
 
     order_type = str(data.get("type") or "market").lower()
     if order_type not in ORDER_TYPES:
@@ -574,6 +597,8 @@ def parse_intent(data: dict, default_label: str = "signal") -> Intent:
         size_pct=size_pct,
         margin_pct=margin_pct,
         size=size,
+        size_coins=size_coins,
+        margin_usd=margin_usd,
         order_type=order_type,
         price=price,
         leverage=leverage,

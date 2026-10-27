@@ -21,6 +21,7 @@ from .schema import (
 )
 from .sizing import (
     default_trigger_limit_price,
+    floor_to_step,
     pct_to_size_usd,
     quantize_size,
     round_price,
@@ -1588,7 +1589,15 @@ class Executor:
     #   size_pct   可用权益比例（0..1）
     #   margin_pct 保证金比例（0..1，× 杠杆得名义）
     # 同时给多个 = 模型自相矛盾 → 拒单（此前是静默「size 优先」，另一个口径白写）。
-    _SIZE_BASES = ("size", "size_usd", "size_pct", "margin_pct")
+    # 六个口径，与交易所下单面板的自然输入对齐（2026-10-28 补后两个）：
+    #   size        张数（合约数，最精确，模型自己算）
+    #   size_coins  币数量（0.138 ETH / 0.5 SOL）→ 张 = 币 / quanto
+    #   size_usd    名义 USDT（= 币 × 价）
+    #   margin_usd  指定保证金 USDT → 名义 = margin × leverage
+    #   size_pct    可用 USDT 的百分比 → 名义
+    #   margin_pct  可用 USDT 的百分比 × 杠杆 → 名义
+    _SIZE_BASES = ("size", "size_usd", "size_coins", "margin_usd",
+                   "size_pct", "margin_pct")
 
     def _resolve_order_size(
         self,
@@ -1604,7 +1613,8 @@ class Executor:
         given = [b for b in self._SIZE_BASES if getattr(intent, b, None) is not None]
         if not given:
             raise GateApiError(
-                "SIZE_REQUIRED: 未给 size / size_usd / size_pct / margin_pct 任一口径")
+                "SIZE_REQUIRED: 未给 size / size_coins / size_usd / margin_usd / "
+                "size_pct / margin_pct 任一口径")
         if len(given) > 1:
             raise GateApiError(
                 f"SIZE_CONFLICT: 同时给了 {given} —— 只允许一个口径，"
@@ -1630,6 +1640,27 @@ class Executor:
                 notional = q * float(px or 0) * mult
             return q, notional, basis
 
+        if basis == "size_coins":
+            # 币数量 → 张数：张 = 币 ÷ quanto（与价格无关）。按步长 **floor**，
+            # 宁可少下也不超出指定币量（超出等于未经授权的敞口）。
+            coins = abs(float(intent.size_coins))
+            if mult <= 0:
+                raise GateApiError(
+                    f"SIZE_INVALID: {symbol} 缺 quanto_multiplier，无法把 {coins:g} 枚换成张数")
+            raw = coins / mult
+            step = safe_step(meta)
+            q = float(floor_to_step(raw, step))
+            if q <= 0:
+                size_min = float(getattr(meta, "size_min", 0) or 0) or step
+                raise GateApiError(
+                    f"SIZE_TOO_SMALL: {symbol} size_coins={coins:g} 折 {raw:g} 张，"
+                    f"小于最小可下量 {size_min:g} 张（币口径最小单位 "
+                    f"{getattr(meta, 'min_size_coins', 0):g}）")
+            px = entry_hint or intent.price
+            if not px:
+                px = self.client.get_last_price(symbol)
+            return q, q * float(px) * mult, basis
+
         entry = entry_hint or intent.price
         if entry is None:
             entry = self.client.get_last_price(symbol)
@@ -1639,6 +1670,11 @@ class Executor:
 
         if basis == "size_usd":
             size_usd = float(intent.size_usd)
+        elif basis == "margin_usd":
+            # 指定保证金：名义 = 保证金 × 杠杆（杠杆缺省取 1，退化成名义口径）。
+            # 保证金口径的语义是「用多少钱」，不是「开多大仓」——必须乘杠杆。
+            lev = int(intent.leverage or 0) or 1
+            size_usd = float(intent.margin_usd) * lev
         elif basis == "size_pct":
             size_usd = pct_to_size_usd(float(intent.size_pct), self.client.get_available_usdt())
         else:
