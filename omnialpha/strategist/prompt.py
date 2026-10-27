@@ -19,7 +19,7 @@ _SYSTEM_HEAD = (
     '"confidence":0.0,"size_usd":50,"tp":null,"tp2":null,"tp1_share":null,"sl":null,"type":"market|limit|post_only|ioc|fok",'
     '"price":null,"trigger_price":null,"leverage":null,"side":"long|short|null",'
     '"tp_mode":"trigger|limit_order","sl_mode":"trigger|limit_order","reasoning":"...",'
-    '"region":"trend|range|reversal|null","invalidation":null,"time_stop_bars":null,'
+    '"region":"trend|range|reversal|null","invalidation":null,'
     '"give_back_pct":null,"risk_pct":null}],'
     '"triggers":[]}\n'
     # 每条规则标注**归属**：让模型知道哪些是硬边界（会被后端拒绝/改写）、
@@ -125,7 +125,7 @@ _SYSTEM_HEAD = (
     "**region=range 时禁止给 tp2** —— 这不是「拒绝那一档」，而是**整轮计划作废**"
     "（区间只做 scalp，不持有 2R 目标；要给 tp2 就说明这不是区间）。"
     "`invalidation`=前提失效价（触及即视为结构破坏）；"
-    "`time_stop_bars`=最大持仓轮数；`give_back_pct`=浮盈回撤阈值(%)；"
+    "`give_back_pct`=浮盈回撤阈值(%)；"
     "`risk_pct`=本单实际风险占权益的**百分数**（`0.4` = 0.4%，不是 0.004）。"
     # `rule_ids` 不再要求模型产出：它是**技能体系的产物**（BAN-01 / SB-06 那套编号），
     # 而人格不使用技能时，提示词里没有任何编号体系 —— 无源可引。

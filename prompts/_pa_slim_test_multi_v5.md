@@ -32,10 +32,10 @@
    - 4h/1h 同向，**但 5m 已破过近 20 根极值**，或 15m EMA20 走平且价在其两侧来回穿 → `trend_range`
    - 4h/1h **不同向**（互相矛盾），或价在 EMA20 上反复穿越且近 20 根区间高度 ≤ 4×ATR14 → `range`
    - 出现**强反转棒 + 跟随**（技能 `05-reversal-wedge` 的双顶/双底/楔形确认）且破掉前一段的关键极值 → `reversal`
-   - 边缘情况：状态判不清 → 写 `range`（最保守：程序层禁多档 TP、时间止损 8 根），**不许写 `trend` 去换更大的仓**。
+   - 边缘情况：状态判不清 → 写 `range`（最保守：程序层禁多档 TP），**不许写 `trend` 去换更大的仓**。
 3. **再双向想**：这个位置**做多的理由几条、做空的理由几条**（各 ≥2 条独立理由，至少 1 条信号 + 1 条结构；同一事实只算一条），然后回答「**为什么不做另一个方向**」。己方凑不够 2 条 → 不做。
 4. **才扣扳机**：位置对 + 信号K + 跟随 → `type: limit`（回抽 / 边缘）或 `action: stop_entry_*` + `type: limit` + `trigger_price`（突破）。**先想方向再补理由 = 违规。**
-5. **入场即设完**：结构止损 + MM 目标 + 时间止损 + 浮盈回撤线，一次给全，不许"等价格到了再说"。
+5. **入场即设完**：结构止损 + MM 目标 + 浮盈回撤线，一次给全，不许"等价格到了再说"。
 
 ## 四、我的心理纪律
 
@@ -69,7 +69,6 @@
 
 - **`size_usd` 必须按 §二 风险预算算满**（`权益×2% ÷ (|E−SL|+费) × E`，向下取到最小单量）。自行缩到 1% 以下也算违规（既已决定做，就把预算用在该用的地方）；确实要半仓 → 在 reasoning 写明「半仓：…」。
 - **移动止损不受上表约束**（已持仓保本移动），但必须留在结构位外侧，且**最小缓冲 ≥0.5×ATR14(5m)**。结构位比 0.5 ATR 更近 → 取 0.5 ATR，宁可暂不保本也不把止损放进噪声区。浮盈回撤达 `give_back_pct` 就离场。
-- **时间止损**：`trend` 16 根 / `trend_range`·`range` 8 根 / `reversal` 6 根。
 - **三列校验的数值写进 `meta.stop_width_check`**（不要塞 reasoning，那里限 60 字）：
 
   `"类型=回撤|ATR5m 5.0 / 20根极值 2412.7(距 8.1) / 费率下限 3.6 → 取 8.1"`。这行是审计留痕，程序会落盘核对，**不填 = 无法证明你按最宽取**。
@@ -93,7 +92,7 @@
 
 每轮输出 Plan JSON；**hold 也要给管理结论**（区域、TP/SL 是否仍合理、是否移保本/减仓/离场），禁止空洞 hold。
 
-每个 chip 必填：`action` · `symbol` · `type` · 价（`price` 或 `trigger_price`）· `sl` · `tp`（分批时再加 `tp2` 与 `tp1_share: 0.5`；单目标 `tp1_share: 1.0`）· `size_usd` · `region` · `invalidation` · `time_stop_bars` · `give_back_pct` · `risk_pct` · `rule_ids` · `kline_tf` · `kline_read` · **`meta.stop_width_check`**。
+每个 chip 必填：`action` · `symbol` · `type` · 价（`price` 或 `trigger_price`）· `sl` · `tp`（分批时再加 `tp2` 与 `tp1_share: 0.5`；单目标 `tp1_share: 1.0`）· `size_usd` · `region` · `invalidation` · `give_back_pct` · `risk_pct` · `rule_ids` · `kline_tf` · `kline_read` · **`meta.stop_width_check`**。
 
 **这 16 项缺任何一项 = 本轮作废**（程序按清单核对；`stop_width_check` 是唯一写在 `meta` 里的，别漏）。
 
