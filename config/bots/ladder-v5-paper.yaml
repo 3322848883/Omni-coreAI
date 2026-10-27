@@ -64,6 +64,12 @@ strategist:
     enabled: true
     native: true
     max_rounds: 14
+    # 取数覆盖（2026-10-27 补）：人格的判据是「4H 定方向、15m 定档位」，
+    # 不强制覆盖时实测每轮只调 2~4 次（smc_map 只查 1 个周期）就下结论 ——
+    # 等于拿一个周期的结构去判大方向。与 martin-grid 对齐。
+    required_coverage:
+      smc_map: ["15m", "1h", "4h", "1d"]
+      smc_events: ["15m", "1h"]
     allow:
       - klines
       - ticker
