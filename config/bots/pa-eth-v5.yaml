@@ -89,6 +89,15 @@ strategist:
     # 只留 PA 需要的工具：schema 层过滤（模型看不到就调不到）+ 调用点双保险。
     # 未配置时是 36/36 全开 —— 实测模型会顺手调 orderbook / smc_map，违反人格的铁律。
     allow: [skill, skill_ref, account, indicators, klines, ticker, contract]
+    # 2026-10-28（用户要求）：「先加载技能、并逐周期查行情，才许出方案」。
+    # 引擎会统计本轮 `tool_usage` 的「工具:周期」覆盖；缺项 → 强制重试一次并把
+    # 缺的具体项告诉模型（仍缺则放行 + 日志留痕，不做整轮作废）。
+    #   skill 项用技能名当键（skill 调用没有 tf）；
+    #   四周期必须各自单独查一次 —— 快照虽自带 HTF 数据，但「有没有真的逐周期看」
+    #   需要可审计的调用痕迹，不能靠模型自述。
+    required_coverage:
+      skill: [brooks-bar-by-bar]
+      indicators: [5m, 15m, 1h, 4h]
   market:
     mode: rest_only
     indicators: [ema20, atr14]

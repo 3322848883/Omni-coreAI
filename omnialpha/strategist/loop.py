@@ -1493,18 +1493,24 @@ class PlanRunner:
         for u in self.tool_usage:
             t = str(u.get("tool") or "")
             tf = str((u.get("args") or {}).get("tf") or "").strip().lower()
-            if t and tf:
-                covered.setdefault(t, set()).add(tf)
+            name = str((u.get("args") or {}).get("name") or "").strip()
+            # `skill(name)` 没有 tf —— 用技能名做「周期位」，这样
+            # `required_coverage.skill: [brooks-bar-by-bar]` 能强制「先载技能再出方案」
+            # （2026-10-28：人格写了「先有判据再分析」，但此前只是软约束，
+            # 模型某轮可以完全跳过 skill 直接凭数字下结论）。
+            slot = tf or (name if t == "skill" else "")
+            if t and slot:
+                covered.setdefault(t, set()).add(slot)
         tools_cfg = getattr(getattr(self, "cfg", None), "tools", None) or {}
         req = tools_cfg.get("required_coverage") if isinstance(tools_cfg, dict) else None
         if not isinstance(req, dict) or not req:
             return covered, []
         missing: list[str] = []
-        for tool, tfs in req.items():
+        for tool, keys in req.items():
             have = covered.get(str(tool), set())
-            for tf in (tfs or []):
-                if str(tf).strip().lower() not in have:
-                    missing.append(f"{tool}:{tf}")
+            for k in (keys or []):
+                if str(k).strip().lower() not in have:
+                    missing.append(f"{tool}:{k}")
         return covered, missing
 
     def _save_thinking(self, **kw: Any) -> None:
@@ -1821,13 +1827,44 @@ class PlanRunner:
         return any(str((u or {}).get("tool") or "").strip() in DATA_TOOL_NAMES
                    for u in self.tool_usage)
 
+    def _coverage_nudge(self, missing: list[str]) -> str:
+        """按缺失项生成「补数据」提示（**不写死具体工具名**）。
+
+        2026-10-28：原提示把 `smc_map`/`smc_events`/日线/马丁第 3 档写死在字符串里，
+        对 PA 类 bot 完全是噪音；而且新增的 `skill` 必查项也无处体现。
+        现在按 `tool:key` 的形态分类生成：
+          · `skill:<name>` → 先加载方法论再出方案
+          · `<tool>:<tf>`  → 该周期的数据必须自己查一遍
+        """
+        skills = [m.split(":", 1)[1] for m in missing if m.startswith("skill:")]
+        data = [m for m in missing if not m.startswith("skill:")]
+        parts = [
+            "【强制要求·补数据】你上一轮的取数/准备**不完整**，还缺："
+            + "、".join(missing) + "。",
+        ]
+        if skills:
+            parts.append(
+                "· 先调用 `skill` 加载：" + "、".join(skills)
+                + "（方法论必须先进入上下文，再据此判定，不许凭数字直接下结论）。")
+        if data:
+            parts.append(
+                "· 下面这些「工具:周期」必须**各自单独查一次**，不同周期的结构不能互相替代："
+                + "、".join(data) + "。")
+        parts.append("现在先补齐上面列出的项，再输出 Plan JSON。已经查过的不用重查。")
+        return "\n".join(parts)
+
     def _chat_with_tools(self, system: str, user: str, chart_base64=None) -> str:
-        """工具循环 + **防偷懒**（两级）：
+        """工具循环 + **防偷懒**（两级，**串行**）：
 
         1. 全程**一次工具都没调** → 强制重试一次（原有逻辑）；
-        2. 调了但**覆盖不足**（`tools.required_coverage` 里该查的周期没查）→ 也重试一次，
-           并把缺的具体项告诉模型。只重试一次、不递归；仍缺则放行但日志留痕 ——
-           「整轮作废」的代价远大于「多查一次数据」。
+        2. 调了但**覆盖不足**（`tools.required_coverage` 里该查的技能/周期没查）→
+           再重试一次，并把缺的具体项告诉模型。只重试一次、不递归；仍缺则放行但
+           日志留痕 —— 「整轮作废」的代价远大于「多查一次数据」。
+
+        🔴 2026-10-28 实测 bug：第 1 级重试成功后**直接 return**，第 2 级覆盖检查被
+        整段跳过 —— 本地跑 pa-eth-v5 时模型先只调 skill、被第 1 级逼着补了
+        ticker+indicators(5m)，然后**带着 15m/1h/4h 全缺的状态照样出了 2 条单**。
+        两级必须串行：第 1 级只是把 text 换成重试结果，然后继续往下做覆盖检查。
         """
         text = self._chat_with_tools_inner(system, user, chart_base64=chart_base64)
         tools_on = bool(self.cfg.tools.get("enabled"))
@@ -1841,23 +1878,15 @@ class PlanRunner:
             )
             text2 = self._chat_with_tools_inner(system, user + "\n\n" + nudge,
                                                 chart_base64=chart_base64)
-            if self.tool_usage:
-                return text2
-            return text
+            if self.tool_usage and (text2 or "").strip():
+                text = text2
+            # 不 return：继续做下面的覆盖检查（两级是并集，不是二选一）
 
         _, missing = self._data_coverage()
         if tools_on and missing:
             log.warning("data coverage incomplete (%s); forcing a data-fetch retry",
                         ", ".join(missing))
-            nudge2 = (
-                "【强制要求·补数据】你上一轮的取数**不完整**，还没查："
-                + "、".join(missing) + "。" + "\n"
-                "这些是必查项（选点、止损深度、马丁第 3 档能否放那么深都依赖各周期自己的结构）：" + "\n"
-                "· `smc_map` 与 `smc_events` 的 `premium_discount` 口径**不同**"
-                "（前者按最近 swing range、后者按全历史），**不能互相替代**；" + "\n"
-                "· 日线结构决定马丁第 3 档（−6%）能不能放在那里。" + "\n"
-                "现在**先补查上面列出的项**，再输出 Plan JSON。已经查过的不用重查。"
-            )
+            nudge2 = self._coverage_nudge(missing)
             text2 = self._chat_with_tools_inner(system, user + "\n\n" + nudge2,
                                                 chart_base64=chart_base64)
             if (text2 or "").strip():
