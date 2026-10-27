@@ -46,6 +46,15 @@ class BotConfig:
     place_before_cancel: bool = False
     # own = only manage orders with text prefix t-{label}; all = wipe symbol (legacy)
     order_scope: str = "own"
+    # ── 持仓管理闸门（yaml 可关）────────────────────────────────
+    # 2026-10-27 修：这三个键此前**只存在于 `config_keys.TOP_LEVEL` 白名单**，
+    # `BotConfig` 没有对应字段 —— 而消费方是 `watcher` 的
+    # `getattr(bot, "manage_positions", True)`，属性不存在 ⇒ 恒取默认 True。
+    # 于是 yaml 里写 `manage_positions: false` 会被**静默忽略**：bot 照样管仓、
+    # 照样平掉用户的手动仓。键名合法（白名单里有）→ 连 typo 告警都没有。
+    manage_positions: bool = True
+    allow_close: bool = True
+    allow_reduce: bool = True
     # pre-trade: open/stop_entry must carry sl
     require_sl: bool = True
     # account-level risk: {halt, max_total_notional_usd, daily_loss_limit_usd, max_leverage}
@@ -334,6 +343,18 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
             path.name, ov_dir.name, path.name,
         )
     data = deep_merge(data, ov_data)
+    # 未知键告警（阶段 1：只告警不报错）：白名单外/拼错的键此前**静默 no-op**。
+    # 本仓最贵的失败形态就是「配了但不生效」，而 typo 连日志都没有。
+    try:
+        from .config_keys import find_unknown_keys
+
+        unknown = find_unknown_keys(data)
+    except Exception as e:  # noqa: BLE001 — 校验本身绝不能拦住配置加载
+        unknown = []
+        log.debug("config_keys 校验失败（忽略）：%s", e)
+    if unknown:
+        log.warning("%s: 未识别的配置键（不会生效，检查拼写）: %s",
+                    path.name, ", ".join(unknown))
     enabled = bool(ov_data.get("enabled", False))
     # ── 反向陷阱：基线显式关、overlay 又开 ──
     # 「在 git 基线里把 bot 关掉」是直觉操作，但按上面的规则它**完全不生效**，
@@ -463,6 +484,10 @@ def load_bot_config(path: Path, overlay_dir: Optional[Path] = None,
         default_replace=str(data.get("default_replace") or "none").strip().lower(),
         place_before_cancel=bool(data.get("place_before_cancel", False)),
         order_scope=str(data.get("order_scope") or "own").strip().lower(),
+        # 三闸门：缺省 True（与 Executor 的默认一致）；yaml 写 false 现在真的生效
+        manage_positions=bool(data.get("manage_positions", True)),
+        allow_close=bool(data.get("allow_close", True)),
+        allow_reduce=bool(data.get("allow_reduce", True)),
         require_sl=bool(data.get("require_sl", True)),
         account=eff_account,
         account_risk=merged_risk,

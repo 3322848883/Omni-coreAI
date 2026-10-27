@@ -57,6 +57,8 @@ ACCOUNT_RISK: frozenset[str] = frozenset({
     # 单向模式下空仓会让 no_flip 拦死所有 open_long → 网格停摆（实盘 2026-10-16
     # 停摆 4 小时），本键是那条程序侧自愈路径（Executor.flatten_stray）。
     "stray_position",
+    # 2026-10-27：`executor._modify_tp_sl` 真在读（strict | ladder），白名单漏了
+    "sl_move_policy",
 })
 
 # ── ③ strategist 段 ──────────────────────────────────────────
@@ -64,8 +66,9 @@ STRATEGIST: frozenset[str] = frozenset({
     "account_risk", "ai_triggers", "bot_id", "bot_root", "candles",
     "check_interval_sec", "cond_gap_sec", "conditions", "enabled", "env",
     "event_on_kline_close", "event_timeframe", "interval_sec", "llm",
-    "manage_positions", "market", "prompt_file", "risk", "skills",
-    "skills_required", "symbols", "timeframe", "tools", "vision",
+    "manage_positions", "market", "prompt_file", "risk", "runtime",
+    "require_checks",
+    "skills", "skills_required", "symbols", "timeframe", "tools", "vision",
     "vision_timeframes", "write_hold",
 })
 
@@ -80,6 +83,8 @@ STRATEGIST_LLM: frozenset[str] = frozenset({
 STRATEGIST_MARKET: frozenset[str] = frozenset({
     "db", "exchange", "extra_candles", "extra_timeframes", "health_url",
     "indicators", "mode", "pa_data_root", "refresh", "stale_factor",
+    # 2026-10-27：`__main__.py` 的 `mk.get("structure")` 真在读，白名单漏了
+    "structure",
     "timeframes",
 })
 
@@ -95,6 +100,8 @@ STRATEGIST_TOOLS: frozenset[str] = frozenset({
     "allow", "deny", "enabled", "max_rounds", "native",
     # F4：工具预算与超时（默认 null = 不限，行为与现状一致）
     "max_tokens", "max_calls", "timeout_sec",
+    # 2026-10-27：`loop.py` 的 required_coverage 闸门真在读，白名单漏了
+    "required_coverage",
 })
 
 # ── ⑧ strategist.ai_triggers 段 ──────────────────────────────
