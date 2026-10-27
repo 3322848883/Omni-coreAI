@@ -3871,16 +3871,8 @@ class Executor:
                             "sl_pct": pct})
             return out
         # 走到这里 covered == 0：完全裸仓 → 挂**全量** SL（与旧版行为一致）
-        if size < 1 and not self._venue_close_on():
-            # 触发单端点只收整数张（`_int_price_order_size` 向零取整）：持仓不足
-            # 1 张时「挂全量 SL」必然算成 0 张 → 那道闸门抛错，整轮 auto_protect
-            # 变失败。这是小数张残仓（幽灵仓）的必然结果 —— 报出来，而不是挂一条
-            # 0 张的假保护单。有 venue close（`auto_size`）时不带张数，不受此限。
-            out.update({"position_side": pos_side, "position_size": size,
-                        "covered_size": covered,
-                        "skipped": "below_min_protectable"})
-            return out
-
+        # 持仓不足 1 张（小数张残仓）：`_place_trigger` 会自动改用 venue-close
+        # （`auto_size`，不带张数），所以这里不再跳过 —— 跳过等于把残仓留在裸奔状态。
         try:
             ticker = self.client.get_ticker(symbol) or {}
             mark = float(ticker.get("mark_price") or ticker.get("last") or 0)
@@ -5376,7 +5368,14 @@ class Executor:
             dual = str(self.client.get_position_mode() or "").lower() == "dual"
         except Exception:  # noqa: BLE001
             dual = False
-        use_venue_close = bool((self.account_risk or {}).get("use_venue_close"))
+        # 残仓（持仓不足 1 张，如 0.1 张幽灵腿）**只有** venue-close 能表达：
+        # 触发单端点把 0.1 张向零取整成 0 → 闸门拒单（等于裸仓）。此时
+        # 「全平该方向」恰好等于原意（本来就只剩 0.1 张），所以不依赖配置开关，
+        # 张数 <1 就自动走 auto_size。**不能全局开 venue-close**：网格/阶梯 bot 的
+        # 多档 TP 每档只平一部分，auto_size 会变成「第一档就平掉整侧」。
+        fractional_residual = 0 < abs(close_size) < 1
+        use_venue_close = (bool((self.account_risk or {}).get("use_venue_close"))
+                           or fractional_residual)
         if use_venue_close and not dual:
             # 单向模式没有 `auto_size`；`close=true` 在触发单端点上未验证，
             # 不拿实盘裸奔 —— 退回显式张数（= 旧行为）。

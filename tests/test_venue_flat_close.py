@@ -254,6 +254,77 @@ class TestVenueProtectorNotOrphan(unittest.TestCase):
         self.assertNotIn("close", init)
 
 
+class TestFractionalResidualProtection(unittest.TestCase):
+    """0.1 张残仓的 SL 必须自动走 venue-close，不能被整数闸门拒成整轮失败。
+
+    实盘 2026-10-27 15:26（北京）复现：SL 触发平 16 张后剩 0.1 张空仓，
+    下一轮 AI 正确地要求「给两侧补 SL」，执行却报
+    `sl#2 price_orders 只接受整数张：-0.1 张不足 1 张` → 整轮 ok:false、
+    残仓继续裸奔。残仓的「全平该方向」在语义上就等于原意，所以张数 <1 时
+    必须无条件走 `auto_size`（不依赖 `use_venue_close` 配置）。
+    """
+
+    def _ex(self, gate, risk=None):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        return Executor(gate, root=Path(td.name), label_prefix="vt",
+                        bot_id="vt", account_risk=risk or {})
+
+    def _intent(self, side):
+        from omnialpha.schema import parse_signal
+        return parse_signal({
+            "action": "open_long" if side == "long" else "open_short",
+            "symbol": SYM, "size_usd": 100, "price": 2300,
+            "sl": 2290 if side == "long" else 2310,
+            "tp": 2320 if side == "long" else 2280,
+            "side": side,
+        }).intents[0]
+
+    def test_fractional_sl_uses_venue_close_without_config(self):
+        """配置里没有 use_venue_close，0.1 张 SL 也必须挂成 auto_size（size=0）。"""
+        gate = _Gate([GHOST_LONG])
+        ex = self._ex(gate)  # account_risk={}
+        ex._place_trigger(self._intent("long"), "long", 2299.4, False,
+                          _meta(), 0.1)
+        self.assertEqual(len(gate.placed), 1, gate.placed)
+        init = gate.placed[0]["initial"]
+        self.assertEqual(init["size"], 0, "残仓保护单不能带张数")
+        self.assertEqual(init["auto_size"], "close_long")
+        self.assertTrue(init["reduce_only"])
+        self.assertNotIn("close", init)
+
+    def test_fractional_short_sl_uses_close_short(self):
+        gate = _Gate([{"contract": SYM, "mode": "dual_short", "size": 0,
+                       "entry_price": "2311.05", "mark_price": "2300",
+                       "value": "2.3"}])
+        ex = self._ex(gate)
+        ex._place_trigger(self._intent("short"), "short", 2323.1, False,
+                          _meta(), 0.1)
+        init = gate.placed[0]["initial"]
+        self.assertEqual(init["size"], 0)
+        self.assertEqual(init["auto_size"], "close_short")
+
+    def test_full_size_sl_keeps_explicit_size(self):
+        """张数 ≥1 时保持显式张数（网格/阶梯多档 TP 不能被 auto_size 吞掉）。"""
+        gate = _Gate([REAL_SHORT])
+        ex = self._ex(gate)
+        ex._place_trigger(self._intent("short"), "short", 2323.1, False,
+                          _meta(), 16)
+        init = gate.placed[0]["initial"]
+        self.assertEqual(init["size"], 16)
+        self.assertNotIn("auto_size", init)
+
+    def test_ensure_protection_no_longer_skips_fractional(self):
+        """auto_protect 不许再把 <1 张的裸仓标成 skip 后放走。"""
+        gate = _Gate([GHOST_LONG])
+        gate.get_ticker = lambda s: {"mark_price": "2300"}
+        ex = self._ex(gate, risk={"auto_protect": True, "auto_protect_sl_pct": 1.0})
+        out = ex.ensure_protection(SYM)
+        self.assertNotEqual(out.get("skipped"), "below_min_protectable", out)
+        self.assertEqual(len(gate.placed), 1, out)
+        self.assertEqual(gate.placed[0]["initial"]["auto_size"], "close_long")
+
+
 class TestAlignTpSkipsVenue(unittest.TestCase):
     def test_venue_tp_not_apportioned(self):
         """venue TP 没有可分摊张数 —— 混进 `_align_tp_group` 会把它改成显式张数。"""
