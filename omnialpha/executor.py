@@ -169,7 +169,14 @@ def _sl_move_rejected(pos_side: str, entry: float, new_sl: float,
     is_long = pos_side == "long"
     ladder = str(policy or "strict").strip().lower() in (
         "ladder", "grid", "widen", "free")
-    if not ladder:
+    if not ladder and old_sl > 0:
+        # **只有「移动既有 SL」才受浮盈纪律约束**。`old_sl == 0` 表示该方向
+        # 此刻**没有**任何 SL（裸仓）—— 这是「从无到有补保护」，不是「亏损时
+        # 放宽止损」，拒掉等于让仓位一直裸奔，而且 `_modify_tp_sl` 会把它报成
+        # `ok:true` 的良性 no-op（静默丢腿）。
+        # 实测 2026-10-27 08:32 pa-eth-v5：0.1 张空腿裸仓，AI 要求挂硬 SL
+        # 2324.72，被判 "not floating (mark 2312.94 vs entry 2311.05)" 挡下
+        # → 空腿继续无保护。护栏仍由下面两条兜住：即时触发 + （有旧 SL 时）收紧方向。
         if mark > 0:
             floating = (mark > entry) if is_long else (mark < entry)
             if not floating:
