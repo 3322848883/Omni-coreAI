@@ -419,7 +419,7 @@ def collect_snapshot(
             # 主周期同样按「指标预热」取数：ema200 要 1000 根才收敛，
             # 只取 candles(200) 会让主周期 ema200 偏 0.08%、更长的指标直接 None。
             # 只多拉不进 prompt —— 下面 attach 后再切回 candles 根。
-            n_main = min(1000, max(int(candles), indicator_warmup_bars(cfg.indicators)))
+            n_main = min(2000, max(int(candles), indicator_warmup_bars(cfg.indicators)))
             result = resolve_candles(
                 client,
                 sym,
@@ -475,7 +475,7 @@ def collect_snapshot(
                 # （4h EMA200：205 根 → 2535.75 vs 1000 根 → 2467.75，差 2.75%）。
                 # 拉 n_calc 根算指标，快照只留 n_extra 根（token 不涨）。
                 # Gate candlesticks 上限 1000 根。
-                n_calc = min(1000, max(n_extra, indicator_warmup_bars(cfg.indicators)))
+                n_calc = min(2000, max(n_extra, indicator_warmup_bars(cfg.indicators)))
                 for tf in extra_tfs:
                     try:
                         xres = resolve_candles(

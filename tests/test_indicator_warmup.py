@@ -105,7 +105,9 @@ class TestSnapshotExtraTfFetch(unittest.TestCase):
         limits = [lim for tf, lim in rec.calls if tf == "4h"]
         self.assertTrue(limits, rec.calls)
         self.assertGreaterEqual(max(limits), 200, rec.calls)
-        self.assertLessEqual(max(limits), 1000, "Gate candlesticks 上限 1000 根")
+        # Gate 实测（2026-10-27）：limit=1000/1005/2000 均按请求返回，
+        # ema200 需 1005 根（含预热），所以上限放到 2000 而不是 1000。
+        self.assertLessEqual(max(limits), 2000, "取数上限 2000 根")
 
     def test_prompt_rows_still_trimmed(self):
         """拉得多、但快照里只留 extra_candles 根（不许 token 暴涨）。"""

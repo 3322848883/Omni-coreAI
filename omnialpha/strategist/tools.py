@@ -1669,7 +1669,7 @@ def run_tool(
 
             wanted = _resolve_wanted(market_cfg.indicators if market_cfg else None)
             # 取数按指标预热放大（否则 ema200 恒 None），返回前裁回 limit
-            fetch = min(1000, max(limit, indicator_warmup_bars(wanted)))
+            fetch = min(2000, max(limit, indicator_warmup_bars(wanted)))
             res = resolve_candles(client, sym, tf, fetch, market_cfg=market_cfg, env=env, bot_root=bot_root)
 
             rows = attach_indicators(list(res.rows), wanted)
@@ -1728,7 +1728,7 @@ def run_tool(
 
 
             # 同理：工具侧 limit 上限 200 会让 ema200 恒 None / 偏 2.8%
-            fetch = min(1000, max(limit, indicator_warmup_bars(names)))
+            fetch = min(2000, max(limit, indicator_warmup_bars(names)))
             res = resolve_candles(client, sym, tf, fetch, market_cfg=market_cfg, env=env, bot_root=bot_root)
 
 
