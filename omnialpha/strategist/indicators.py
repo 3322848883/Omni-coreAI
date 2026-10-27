@@ -1467,11 +1467,19 @@ def attach_indicators(rows: list[dict[str, Any]], wanted: list[str] | None = Non
                 # `boll20` column aliases middle (basis) band for latest_indicators
                 for i, r in enumerate(rows):
                     r[spec["name"]] = series["middle"][i]
+                # 自定义倍数（如 boll20_2.5）同时暴露 upper/lower，命名与
+                # pa-data-source 落库一致（那边小数点转 p：boll20_2p5_upper）。
+                if float(spec.get("k") or 2.0) != 2.0:
+                    for i, r in enumerate(rows):
+                        r[spec["name"] + "_upper"] = series["upper"][i]
+                        r[spec["name"] + "_lower"] = series["lower"][i]
             else:
                 for i, r in enumerate(rows):
                     r[spec["name"]] = series[field][i]
-            # 默认 SMA 家族写共享列（兼容 boll_upper / boll_*_band）
-            if mat == "sma":
+            # 默认 SMA 家族写共享列（兼容 boll_upper / boll_*_band）。
+            # 只允许 **k=2.0 且 period=20** 的默认参数写共享列 —— 否则请求
+            # `boll20_2.5` 会把 `boll_upper`（k=2.0 的语义）静默覆写成 2.5 倍带宽。
+            if mat == "sma" and float(spec.get("k") or 2.0) == 2.0:
                 for i, r in enumerate(rows):
                     r["boll_upper"] = series["upper"][i]
                     r["boll_middle"] = series["middle"][i]
