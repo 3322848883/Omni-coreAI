@@ -75,23 +75,40 @@ class WriteResult:
     values: dict = field(default_factory=dict)
 
 
+def table_columns(conn: sqlite3.Connection, table: str = "kline") -> set[str]:
+    return {r[1] for r in conn.execute(f"PRAGMA table_info([{table}])").fetchall()}
+
+
 def upsert_bar(conn: sqlite3.Connection, symbol: str, interval: str, bar: Bar,
-               indicator_cols: Iterable[str] = (), values: Optional[dict] = None) -> int:
-    """写一根 bar。指标列单独 UPDATE（避免 REPLACE 清列）。"""
+               indicator_cols: Iterable[str] = (), values: Optional[dict] = None,
+               present: Optional[set] = None) -> int:
+    """写一根 bar，指标列单独 UPDATE（避免 REPLACE 清列）。
+
+    **列感知**：v1 表没有 `closed`/`src` 列 → 自动省略，同一个函数既能写 v1 也能写 v2。
+    `present` 可由调用方缓存（每根都 PRAGMA 一次没必要）。
+    """
     bar.validate()
-    cols = ["symbol", "interval", "t", "o", "h", "l", "c", "v", "sum", "closed", "src"]
-    args = [symbol, interval, int(bar.t), bar.o, bar.h, bar.l, bar.c,
-            bar.v, bar.sum, 1 if bar.closed else 0, bar.src]
+    have = present if present is not None else table_columns(conn)
+    base = ["symbol", "interval", "t", "o", "h", "l", "c", "v", "sum"]
+    extra = [c for c in ("closed", "src") if c in have]
+    cols = base + extra
+    args = [symbol, interval, int(bar.t), bar.o, bar.h, bar.l, bar.c, bar.v, bar.sum]
+    if "closed" in have:
+        args.append(1 if bar.closed else 0)
+    if "src" in have:
+        args.append(bar.src)
+    updates = "o=excluded.o, h=excluded.h, l=excluded.l, c=excluded.c, v=excluded.v, sum=excluded.sum"
+    if "closed" in have:
+        updates += ", closed=excluded.closed"
+    if "src" in have:
+        updates += ", src=excluded.src"
     sql = (f"INSERT INTO kline ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))}) "
-           "ON CONFLICT(symbol, interval, t) DO UPDATE SET "
-           "o=excluded.o, h=excluded.h, l=excluded.l, c=excluded.c, v=excluded.v, "
-           "sum=excluded.sum, closed=excluded.closed, src=excluded.src")
+           f"ON CONFLICT(symbol, interval, t) DO UPDATE SET {updates}")
     cur = conn.execute(sql, args)
     if values:
-        present = {r[1] for r in conn.execute("PRAGMA table_info([kline])").fetchall()}
         sets, vals = [], []
         for col in (indicator_cols or values.keys()):
-            if col in values and col in present:
+            if col in values and col in have:
                 sets.append(f"[{col}]=?")
                 vals.append(values[col])
         if sets:
@@ -128,6 +145,11 @@ class SeriesWriter:
         self._last_retention = 0.0
         self.retention_every = retention_every
         self.retention_sec = retention_sec
+        self._cols_cache: Optional[set] = None
+
+    def compute(self, bar: Bar) -> dict:
+        """只推进状态、返回指标值（不写库）。shadow 模式用它算「新引擎值」。"""
+        return self.state.push(bar.o, bar.h, bar.l, bar.c)
 
     # ── 状态预热 ──────────────────────────────────────────────
     def seed_from_db(self, conn: sqlite3.Connection, symbol: str, interval: str,
@@ -142,6 +164,11 @@ class SeriesWriter:
         return len(rows)
 
     # ── 写一根 ────────────────────────────────────────────────
+    def columns(self, conn: sqlite3.Connection) -> set:
+        if self._cols_cache is None:
+            self._cols_cache = table_columns(conn)
+        return self._cols_cache
+
     def write(self, conn: sqlite3.Connection, symbol: str, interval: str, bar: Bar,
               now: Optional[float] = None) -> WriteResult:
         now = time.time() if now is None else now
@@ -150,12 +177,13 @@ class SeriesWriter:
                 return WriteResult(False, False, "throttled")
             self.last_unclosed_write = now
             # 未收线：只写 OHLCV，不推指标状态（否则状态会被半根 bar 污染）
-            upsert_bar(conn, symbol, interval, bar)
+            upsert_bar(conn, symbol, interval, bar, present=self.columns(conn))
             self._writes += 1
             return WriteResult(True, False)
 
-        vals = self.state.push(bar.o, bar.h, bar.l, bar.c)
-        upsert_bar(conn, symbol, interval, bar, indicator_cols=self.cols, values=vals)
+        vals = self.compute(bar)
+        upsert_bar(conn, symbol, interval, bar, indicator_cols=self.cols, values=vals,
+                   present=self.columns(conn))
         self._writes += 1
         return WriteResult(True, True, values=vals)
 

@@ -11,9 +11,41 @@ symbols:
     intervals: [1m, 5m, 15m, 30m, 1h, 4h, 1d]
   - name: XAG_USDT
     intervals: [1m, 5m, 15m, 30m, 1h, 4h, 1d]
+# 指标落库集合（**配置驱动**：配了才算、才算落库列；没配的不加列、不计算）
+# 默认 9 个声明 → 11 个物理列：
+#   ema20/ema50/ema200、atr14、rsi14、macd/macd_dea/macd_hist、boll20/boll20_upper/boll20_lower
 indicators:
-  - ema: [20]
+  - ema: [20, 50, 200]
+  - atr: [14]
+  - rsi: [14]
+  - macd: [12, 26, 9]
+  - boll: [20, 2]
 output_dir: "./data"
+
+# 保留策略：**分周期**（v2 起生效；旧字段保留作兜底）
+#   max_candles  滚动上限（按行数截断）
+#   days         时间上限（0 = 不按时间删）
+#   depth_bars   可回填上限（Gate 单次 limit≤1000 的回溯深度；1m 只能累积不能回填 4 天）
+# 校验：max_candles ≥ 指标预热（ema200 → 1005）、days 容量 ≥ 0.9×max_candles
+retention:
+  per_interval:
+    1m:  {max_candles: 5760, days: 4,    depth_bars: 1000}
+    5m:  {max_candles: 8640, days: 30,   depth_bars: 1000}
+    15m: {max_candles: 8640, days: 90,   depth_bars: 1000}
+    30m: {max_candles: 8640, days: 180,  depth_bars: 1000}
+    1h:  {max_candles: 8760, days: 365,  depth_bars: 1000}
+    4h:  {max_candles: 2000, days: 333,  depth_bars: 1000}
+    1d:  {max_candles: 1600, days: 1600, depth_bars: 1500}
+  reconcile_sec:            # REST 校准频率（按周期；1d 从 5 分钟降到 1 小时）
+    1m: 300
+    5m: 300
+    15m: 900
+    30m: 900
+    1h: 1800
+    4h: 1800
+    1d: 3600
+
+# 旧全局阈值：v2 的分周期策略生效后仅作兜底
 retention_days: 300
 max_candles: 2000
 log_level: INFO

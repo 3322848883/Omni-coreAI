@@ -125,6 +125,38 @@ _last_status_log = 0.0
 latest_prices = {}
 prices_lock = threading.Lock()
 last_disconnect_time = 0
+
+# ── 写入引擎路由（kline v2 迁移期）────────────────────────────
+# PA_INDICATOR_ENGINE=legacy(默认)|shadow|v2 ；PA_KLINE_V2=1 等价 v2
+_INGEST = None
+_INGEST_ENGINE = None
+
+
+def _ingest_engine():
+    """读环境变量决定引擎（一次解析后缓存）。任何异常都退回 legacy，绝不影响采集。"""
+    global _INGEST_ENGINE
+    if _INGEST_ENGINE is None:
+        try:
+            from ingest import resolve_engine
+
+            _INGEST_ENGINE = resolve_engine()
+        except Exception:  # noqa: BLE001
+            _INGEST_ENGINE = "legacy"
+    return _INGEST_ENGINE
+
+
+def _get_ingest():
+    """按 `watchlist.indicators` 构建 SeriesRegistry（懒加载，进程内单例）。"""
+    global _INGEST
+    if _INGEST is None:
+        from indicator_config import parse_indicators
+        from ingest import SeriesRegistry
+
+        specs = parse_indicators(watchlist_config.get("indicators"))
+        _INGEST = SeriesRegistry(specs, engine=_ingest_engine())
+        logger.info("ingest engine=%s indicators=%s", _INGEST.engine,
+                    [c for s in specs for c in s.columns])
+    return _INGEST
 downtime_gaps = {}
 
 # ── 账户推送状态 ───────────────────────────────────────────
@@ -1400,6 +1432,33 @@ def handle_candle_update(n_field, candle_data):
     checked_candle = check_and_switch_source(full_symbol, interval, candle, market_type)
     if checked_candle is not None:
         candle = checked_candle
+
+    # ── 引擎路由（kline v2 迁移期）──────────────────────────────
+    # legacy（默认）= 原样；shadow = 算两套写旧值并对拍；v2 = 新引擎写全部配置指标。
+    # 开关：环境变量 PA_INDICATOR_ENGINE=legacy|shadow|v2，或 PA_KLINE_V2=1（=v2）。
+    engine = _ingest_engine()
+    if engine != "legacy":
+        try:
+            from writer_v2 import Bar as _Bar
+            from writer_v2 import SRC_WS as _SRC_WS
+
+            _bar = _Bar(t=int(candle["t"]), o=float(candle["o"]), h=float(candle["h"]),
+                        l=float(candle["l"]), c=float(candle["c"]),
+                        v=float(candle.get("v") or 0), sum=float(candle.get("sum") or 0),
+                        closed=bool(candle_data.get("w", True)), src=_SRC_WS)
+            with db_lock:
+                _res = _get_ingest().write(db_conn, full_symbol, interval, _bar)
+                db_conn.commit()
+            total = retention_cleanup(full_symbol, interval)
+            update_status(full_symbol, interval, "add", total)
+            update_data_time(full_symbol, interval)
+            flush_status()
+            if engine == "shadow" and _res.get("shadow") is not None:
+                logger.debug("shadow %s %s t=%s legacy=%s new=%s", full_symbol, interval,
+                             _bar.t, _res.get("values"), _res.get("shadow"))
+            return
+        except Exception as _e:  # noqa: BLE001 — 路由失败必须回落到旧路径，不能丢数据
+            logger.error("ingest engine=%s failed (%s) → fallback legacy", engine, _e)
 
     ema_val = compute_latest_ema(full_symbol, interval, str(candle["c"]), t_val)
     if ema_val is not None:
