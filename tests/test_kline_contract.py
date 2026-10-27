@@ -30,21 +30,33 @@ class TestKlineContract(unittest.TestCase):
         return db
 
     def test_schema_version_constant(self):
-        self.assertEqual(KLINE_SCHEMA_VERSION, 1)
+        # v2 起（REAL + closed/src + 配置驱动指标列），写端版本号为 2；
+        # 读端判定看探测结果，不看这个常量。
+        self.assertEqual(KLINE_SCHEMA_VERSION, 2)
 
     def test_validate_ok(self):
         with tempfile.TemporaryDirectory() as td:
             db = self._make_db(Path(td))
+            # v1 库（无 closed/src）探测为 1，仍可用
             self.assertEqual(validate_kline_schema(db), 1)
             self.assertTrue(schema_ok(db))
 
-    def test_validate_missing_column(self):
+    def test_validate_missing_required_column(self):
+        """OHLCV 是硬需求：缺 `c` 必须抛。"""
         with tempfile.TemporaryDirectory() as td:
-            cols = [c for c in REQUIRED_COLUMNS if c != "ema20"]
+            cols = [c for c in REQUIRED_COLUMNS if c != "c"]
             db = self._make_db(Path(td), cols=cols)
             with self.assertRaises(SchemaError):
                 validate_kline_schema(db)
             self.assertFalse(schema_ok(db))
+
+    def test_missing_ema20_is_tolerated(self):
+        """v2 起指标列可选：没有 ema20 也视为可用（配置里没配就不该有列）。"""
+        with tempfile.TemporaryDirectory() as td:
+            cols = [c for c in ("t", "symbol", "interval", "o", "h", "l", "c", "v", "sum")]
+            db = self._make_db(Path(td), cols=cols)
+            self.assertEqual(validate_kline_schema(db), 1)
+            self.assertTrue(schema_ok(db))
 
     def test_validate_missing_file(self):
         self.assertFalse(schema_ok(None))
