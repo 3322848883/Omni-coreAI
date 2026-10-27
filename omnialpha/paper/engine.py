@@ -133,10 +133,50 @@ class PaperEngine:
         self.store.update_account(available=balance - pos_margin - order_margin)
 
     # ── 下单 ───────────────────────────────────────────
+    def _venue_close_size(self, symbol: str, initial_or_body: dict) -> float:
+        """把 venue-computed close 换成纸面张数（带符号）。
+
+        交易所语义（Gate 实测）：`size=0` + `auto_size=close_long|close_short`
+        （或单向模式 `close=true`）表示「平该方向全部持仓」，张数由交易所算。
+        纸面引擎没有这个概念，所以在**下单那一刻**把它物化成当前持仓量：
+
+        · `auto_size=close_long`  → 卖出全部多仓 → 负张数
+        · `auto_size=close_short` → 买入全部空仓 → 正张数
+        · `close=true`（单向）     → 净仓反手 → 负的净持仓
+
+        ⚠️ 已知近似：触发单在**挂单时**定尺寸，触发时不再重算。单腿策略
+        （一条 TP/SL 覆盖该方向）不受影响；网格逐档 TP 不该开
+        `use_venue_close`（那会把逐档结构炸掉）。
+        """
+        want = None
+        a = str(initial_or_body.get("auto_size") or "").strip().lower()
+        if a == "close_long":
+            want = "long"
+        elif a == "close_short":
+            want = "short"
+        long_sum = short_sum = 0.0
+        for p in (self.store.get_positions(symbol) or []):
+            try:
+                s = float(p.get("size") or 0)
+            except (TypeError, ValueError):
+                continue
+            if s > 0:
+                long_sum += s
+            elif s < 0:
+                short_sum += s
+        if want == "long":
+            return -abs(long_sum)
+        if want == "short":
+            return abs(short_sum)
+        return -(long_sum + short_sum)
+
     def place_order(self, body: dict) -> dict:
         symbol = str(body.get("contract") or body.get("symbol") or "")
         if not symbol:
             raise PaperReject("contract required")
+        if not body.get("size") and (body.get("auto_size") or body.get("close")):
+            body = dict(body)
+            body["size"] = self._venue_close_size(symbol, body)
         meta = self.feed.get_contract(symbol)
         last = self._last(symbol)
         acct = self.store.get_account()
@@ -210,11 +250,17 @@ class PaperEngine:
         if not symbol:
             raise PaperReject("contract required")
 
-        size_raw = initial.get("size") or body.get("size")
+        size_raw = initial.get("size")
+        if size_raw is None:
+            size_raw = body.get("size")
         try:
-            size = float(size_raw)
+            size = float(size_raw) if size_raw is not None else 0.0
         except (TypeError, ValueError):
             raise PaperReject("invalid size")
+        if size == 0 and (initial.get("auto_size") or initial.get("close")):
+            # venue-computed close（size=0 + auto_size / close）→ 物化成纸面张数，
+            # 否则下面 `size required` 会把一条合法的保护单拒掉。
+            size = self._venue_close_size(symbol, initial)
         if size == 0:
             raise PaperReject("size required")
 

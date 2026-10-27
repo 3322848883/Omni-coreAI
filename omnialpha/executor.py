@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from .gate_client import GateApiError, GateClient, resolve_symbol
+from .gate_client import GateApiError, GateClient, position_qty, resolve_symbol
 from .observability import swallow
 from .schema import (
     Intent,
@@ -244,23 +244,56 @@ def _apportion_sizes(total: float, weights: list[float],
     return [round(u * st, 8) for u in sizes]
 
 
-def _parse_symbol_positions(positions: list, symbol: str) -> list[dict]:
+def _protector_side(init: dict) -> Optional[str]:
+    """保护单平的是哪个方向（`long` / `short` / `None`）。
+
+    **`auto_size` 优先**：venue-computed 保护单（`size=0` + `auto_size`）的 `size`
+    恒为 0，靠符号推方向必然失败 —— 旧代码 `if raw_sz == 0: continue` 会把这类腿
+    整条丢掉，保护审计随即认为「没有 SL」→ 每轮重挂，无限 churn。
+    缺 `auto_size` 时才退回符号：负 = 卖 = 平多，正 = 买 = 平空。
+    """
+    a = str(init.get("auto_size") or "").strip().lower()
+    if a == "close_long":
+        return "long"
+    if a == "close_short":
+        return "short"
+    sz = _num(init.get("size"))
+    if sz < 0:
+        return "long"
+    if sz > 0:
+        return "short"
+    return None
+
+
+def _parse_symbol_positions(positions: list, symbol: str, meta: Any = None) -> list[dict]:
     """从 `/positions` 原始记录里取出该 symbol 的**非零**持仓。
 
     `Executor._symbol_positions` 与撤单闸门共用这一份解析，避免两条路径漂移。
     输出**总是带 `contract`** —— 这样孤儿判定可以「永远比对 contract」，
     而不必靠「持仓记录里有没有 contract」去反推它来自哪条路径（那种推断
     一旦多出第三方调用方就会静默失效）。
+
+    **张数用 `position_qty` 反算真实值**（`value/(mark×quanto)`）：
+    `/positions` 的 `size` 是 int64，小数张合约会被截掉小数部分 —— 实测 ETH
+    真实 0.1 张的幽灵多仓 `size` 返回 **0**，真实 16.1 张的空仓返回 **-16**。
+    按 `size` 过滤会让前一条**在整个引擎里彻底消失**（保护审计 / 孤儿清理 /
+    `_resync_protectors` / `ensure_protection` 全看不见），它于是永远得不到保护、
+    也永远不会被清掉。
     """
     out = []
     for p in positions or []:
         if p.get("contract") != symbol:
             continue
-        size = _num(p.get("size"))
+        size = position_qty(p, meta)
         if size == 0:
             continue
         mode = str(p.get("mode") or "")
-        side = "long" if (size > 0 or mode.endswith("long")) else "short"
+        if size > 0:
+            side = "long"
+        elif size < 0:
+            side = "short"
+        else:  # 理论上不可达（已过滤 0），保留 mode 兜底
+            side = "long" if mode.endswith("long") else "short"
         out.append({
             "contract": symbol, "side": side, "size": size, "mode": mode,
             # 持仓身份与定价：峰值跟踪要靠 `entry_price` 判「还是不是同一条持仓」
@@ -268,6 +301,9 @@ def _parse_symbol_positions(positions: list, symbol: str) -> list[dict]:
             # 去卡一条新仓）。缺字段时是 0.0，调用方按「判不了身份」保守处理。
             "entry_price": _to_float(p.get("entry_price")),
             "mark_price": _to_float(p.get("mark_price")),
+            # 交易所 `size` 字段原值（int）：`|真实| - |字段|` 就是触发单
+            # （只收整数张）必然留下的**保护缺口**，供留痕/告警用。
+            "size_field": _num(p.get("size")),
         })
     return out
 
@@ -1192,7 +1228,19 @@ class Executor:
             # 「取数失败」—— 这正是 2026-10-13 事故那类误判的温床。留痕 + 计数。
             swallow("executor._symbol_positions", e, level=logging.WARNING)
             return []
-        return _parse_symbol_positions(positions, symbol)
+        # 合约元数据用于把 `size`（int64）反算成真实张数（见 `position_qty`）。
+        return _parse_symbol_positions(positions, symbol, meta=self._safe_meta(symbol))
+
+    def _safe_meta(self, symbol: str):
+        """合约元数据；取不到返回 None（调用方退回 `size` 字段的旧口径）。
+
+        `get_contract` 有进程内 + 磁盘缓存，热路径上不额外打网络。
+        """
+        try:
+            return self.client.get_contract(symbol)
+        except Exception as e:  # noqa: BLE001
+            swallow("executor._safe_meta", e, level=logging.DEBUG)
+            return None
 
     def _management_gate(self, action: str, intent: Optional[Intent] = None) -> str:
         """持仓管理动作闸门 → 拒绝原因（"" = 放行）。
@@ -3124,9 +3172,8 @@ class Executor:
             return False
         if not self._order_is_reduce_only(po):
             return False
-        sz = float(init.get("size") or po.get("size") or 0)
-        # 保护单方向：负=卖平多，正=买平空
-        want = "long" if sz < 0 else "short" if sz > 0 else None
+        # 保护单方向：负=卖平多，正=买平空；venue-computed 腿（size=0）靠 auto_size
+        want = _protector_side(init) or _protector_side(po)
         if want is None:
             return True  # 无方向无法匹配 → 保守当孤儿
         o_contract = str(init.get("contract") or po.get("contract") or "")
@@ -3273,8 +3320,13 @@ class Executor:
                 continue
 
             if tail in ("sl", "ls"):
-                # 归并 SL：多单保护 size 为负、空单为正，**符号即方向**
-                side = "long" if psz < 0 else "short"
+                # 归并 SL：多单保护 size 为负、空单为正，**符号即方向**；
+                # venue-computed 腿（size=0）改由 `auto_size` 定方向。
+                side = _protector_side(init) or _protector_side(p) or (
+                    "long" if psz < 0 else "short")
+                if psz == 0:
+                    # 「平该方向全部持仓」 → 等价张数就是该方向持仓量
+                    psz = per_side.get(side, 0.0)
                 try:
                     key = (side, round(float(trigger_price), 6))
                 except (TypeError, ValueError):
@@ -3287,6 +3339,8 @@ class Executor:
                 if pid:
                     g["ids"].append(pid)
                 g["size"] += abs(psz)
+                if init.get("auto_size"):
+                    g["auto_size"] = init.get("auto_size")
                 continue
 
             # ── TP / limit 腿：收集，方法末按「组」对齐（_align_tp_group）──
@@ -3298,6 +3352,13 @@ class Executor:
                 "pid": pid, "psz": psz, "px": str(trigger_price),
                 "rule": trig.get("rule"), "price_type": trig.get("price_type"),
                 "text": text or f"t-{tag}-tp",
+                # venue-computed 腿（size=0 + auto_size）：语义是「平该方向全部
+                # 持仓」，不能参与逐档分摊（见 `_align_tp_group` 首段守卫）。
+                "auto_size": init.get("auto_size"),
+                # 该腿保护的方向：双向持仓下 TP 对齐**必须按方向分别算目标**，
+                # 否则多头那 0.1 张的残仓会把空头 TP 的合计目标抬高到 16.2。
+                "side": _protector_side(init) or _protector_side(p) or (
+                    "long" if psz < 0 else "short"),
             })
 
         # ── SL 归并执行：一个 (方向, 触发价) 只留一条 ──
@@ -3309,15 +3370,21 @@ class Executor:
                 continue  # 已是单条且张数正确 → 不动（避免无谓 churn）
             new_size = -target if side == "long" else target
             try:
+                _init = {
+                    "contract": symbol,
+                    "size": new_size,
+                    "price": "0",
+                    "tif": "ioc",
+                    "reduce_only": True,
+                    "text": g["text"],
+                }
+                if g.get("auto_size") or self._venue_close_on():
+                    # 归并后的那条 SL 也用 venue-computed 口径（不带张数）：
+                    # `target` 是浮点真实持仓（16.1），触发单只收整数 → 会差 0.1 张。
+                    _init["size"] = 0
+                    _init["auto_size"] = ("close_long" if side == "long" else "close_short")
                 body = {
-                    "initial": {
-                        "contract": symbol,
-                        "size": new_size,
-                        "price": "0",
-                        "tif": "ioc",
-                        "reduce_only": True,
-                        "text": g["text"],
-                    },
+                    "initial": _init,
                     "trigger": {
                         "rule": int(g["rule"] or (2 if side == "long" else 1)),
                         "price_type": int(g["price_type"] or 0),
@@ -3336,8 +3403,14 @@ class Executor:
                               "trigger": g["px"], "size": new_size})
             except Exception as e:  # noqa: BLE001
                 notes.append({"merged_sl_error": str(e), "text": g["text"]})
-        # ── TP 腿组对齐：张数合计 == 持仓 → 逐档结构保持（零 churn）──
-        notes.extend(self._align_tp_group(symbol, tp_group, total))
+        # ── TP 腿组对齐：张数合计 == **该方向**持仓 → 逐档结构保持（零 churn）──
+        # 按方向分组：双向持仓时用 `total`（两侧相加）当目标会把多头残仓的 0.1 张
+        # 摊到空头 TP 上（16.1 → 16.2），越摊越偏。
+        tp_by_side: dict[str, list[dict]] = {}
+        for _leg in tp_group:
+            tp_by_side.setdefault(str(_leg.get("side") or ""), []).append(_leg)
+        for _side, _legs in tp_by_side.items():
+            notes.extend(self._align_tp_group(symbol, _legs, per_side.get(_side, 0.0)))
         return notes
 
     def _size_step(self, symbol: str) -> float:
@@ -3348,6 +3421,15 @@ class Executor:
         except Exception:  # noqa: BLE001
             return 1.0
         return step if step > 0 else 1.0
+
+    def _venue_close_on(self) -> bool:
+        """保护单是否走 venue-computed close（`size=0` + `auto_size`）。
+
+        `account_risk.use_venue_close`，默认 **False**。只在「一个方向只有一条
+        保护腿」的策略（单腿 brooks 类）上开：网格/马丁逐档 TP 各有自己的张数，
+        一旦改成「平全方向」会把逐档结构炸掉。
+        """
+        return bool((self.account_risk or {}).get("use_venue_close"))
 
     def _align_tp_group(self, symbol: str, legs: list[dict], total: float) -> list:
         """把**多级 TP 腿组**的张数合计对齐到剩余持仓（逐档止盈结构保持）。
@@ -3375,6 +3457,11 @@ class Executor:
         """
         notes: list = []
         if not legs or total <= 0:
+            return notes
+        if any(l.get("auto_size") for l in legs):
+            # venue-computed 腿（`size=0` + `auto_size`）已被交易所定义为
+            # 「平该方向全部持仓」，没有可分摊的张数；混入分摊会把它的语义改坏。
+            # 单腿 bot 的稳态就是「一条 venue TP + 一条 venue SL」→ 直接放行。
             return notes
         # 步长：ETH 0.1 / BTC 1。取不到规格就退回 1（老行为）。
         step = self._size_step(symbol)
@@ -3506,6 +3593,24 @@ class Executor:
         误判 —— 那一刻 SL 恰好跑到 mark 的另一侧，正是最需要认对它的时候。
         """
         out: list[tuple[str, float, int, str]] = []
+        # venue-computed 腿（`size=0`）覆盖的是「该方向全部持仓」——物化成当前
+        # 真实张数再返回，下游「保护合计 vs 持仓」的算式才不会失真（否则 0 张
+        # 会被读成「没有保护」→ 每轮重挂）。按需取数，无 venue 腿时零额外开销。
+        cov: Optional[dict[str, float]] = None
+
+        def _coverage() -> dict[str, float]:
+            nonlocal cov
+            if cov is None:
+                cov = {}
+                try:
+                    for p in self._symbol_positions(symbol):
+                        cov[p["side"]] = cov.get(p["side"], 0.0) + abs(p["size"])
+                except Exception as e:  # noqa: BLE001
+                    swallow("executor._owned_sl_orders_sided.coverage", e,
+                            level=logging.DEBUG)
+                    cov = {}
+            return cov
+
         for po in self._owned_price_orders(symbol, self._own_prefix("")):
             init = po.get("initial") or {}
             text = str(init.get("text") or po.get("text") or "")
@@ -3529,9 +3634,16 @@ class Executor:
                 raw_sz = _num(init.get("size") or po.get("size"))
             except (TypeError, ValueError):
                 raw_sz = 0
-            if raw_sz == 0:
+            side = _protector_side(init) or _protector_side(po)
+            if side is None:
                 continue
-            side = "long" if raw_sz < 0 else "short"
+            if raw_sz == 0:
+                # venue-computed：张数由交易所算，等价于「该方向全部持仓」
+                raw_sz = _coverage().get(side, 0.0)
+                if raw_sz == 0:
+                    continue  # 该方向已无持仓 → 交给孤儿清理
+            else:
+                side = "long" if raw_sz < 0 else "short"
             out.append((str(pid), px, abs(raw_sz), side))
         return out
 
@@ -3759,6 +3871,15 @@ class Executor:
                             "sl_pct": pct})
             return out
         # 走到这里 covered == 0：完全裸仓 → 挂**全量** SL（与旧版行为一致）
+        if size < 1 and not self._venue_close_on():
+            # 触发单端点只收整数张（`_int_price_order_size` 向零取整）：持仓不足
+            # 1 张时「挂全量 SL」必然算成 0 张 → 那道闸门抛错，整轮 auto_protect
+            # 变失败。这是小数张残仓（幽灵仓）的必然结果 —— 报出来，而不是挂一条
+            # 0 张的假保护单。有 venue close（`auto_size`）时不带张数，不受此限。
+            out.update({"position_side": pos_side, "position_size": size,
+                        "covered_size": covered,
+                        "skipped": "below_min_protectable"})
+            return out
 
         try:
             ticker = self.client.get_ticker(symbol) or {}
@@ -3869,7 +3990,7 @@ class Executor:
             out["skipped"] = "positions_unavailable"
             out["error"] = f"持仓查询失败: {perr}"
             return out
-        positions = _parse_symbol_positions(raw_pos, symbol)
+        positions = _parse_symbol_positions(raw_pos, symbol, meta=self._safe_meta(symbol))
         # ⚠️ **2026-10-16 事故修复（严重）**：覆盖口径必须是「**多头持仓**」，
         # 原来用 Σ|size| —— 空仓也会被算成「需要覆盖的敞口」，于是程序继续挂
         # 卖单，越挂越空（实盘：−14 张空单，22:51~05:01 累积）。
@@ -5236,17 +5357,32 @@ class Executor:
         # size for close-trigger: 默认用**显式张数**（历史行为）。
         #
         # `account_risk.use_venue_close: true` 时改用 **venue-computed close**：
-        # Gate 的 `size=0` + `close=true`（dual 模式配 `auto_size=close_long|close_short`）
-        # 语义是「平掉该方向全部仓位」—— 于是保护单**不需要跟踪持仓张数**，
-        # 从根上消除「张数对齐」这个问题（实测 eth-disc 堆到 30 个 / 202 张
-        # vs 4 张持仓）。参照 NautilusTrader 把这类单白名单化、跳过数量检查的做法。
+        # `size=0` + `auto_size=close_long|close_short` 的语义是「平掉该方向全部
+        # 仓位」—— 保护单**不需要跟踪持仓张数**，从根上消除「张数对齐」这个问题。
         #
-        # **默认关闭**：需先在目标交易所实测 `price_orders` 是否接受这些字段。
+        # ⚠️ **不能带 `close=true`**：实测 2026-10-27 真端点
+        #   · `/price_orders` + `close` → `AUTO_INVALID_PARAM_CLOSE`
+        #   · `auto_size` 必须配 `size=0 & reduce_only=true & close=false`
+        #     （否则 `INVALID_ARGUMENT`）
+        # 本方法原先同时写 `close=true` + `auto_size` —— 一旦打开开关必然 400，
+        # 且一直默认关闭所以从未暴露。
+        #
         # 小数张必须保留：`int(0.7)` = 0 → 挂出一条 0 张的「保护单」（等于裸仓）
         close_size = round(float(size), 8)
         # API: buy to close short (positive), sell to close long (negative)
         api_size = -close_size if (intent.side or "long") == "long" else close_size
+        dual = False
+        try:
+            dual = str(self.client.get_position_mode() or "").lower() == "dual"
+        except Exception:  # noqa: BLE001
+            dual = False
         use_venue_close = bool((self.account_risk or {}).get("use_venue_close"))
+        if use_venue_close and not dual:
+            # 单向模式没有 `auto_size`；`close=true` 在触发单端点上未验证，
+            # 不拿实盘裸奔 —— 退回显式张数（= 旧行为）。
+            log.warning("use_venue_close 仅支持双向持仓模式；%s 为单向 → 退回显式张数",
+                        intent.symbol)
+            use_venue_close = False
         if use_venue_close:
             api_size = 0
 
@@ -5270,15 +5406,8 @@ class Executor:
             "text": f"t-{self._bot_tag(intent.label)}-{'tp' if is_tp else 'sl'}",
         }
         if use_venue_close:
-            init["close"] = True
-            # dual（双向持仓）模式必须指明平哪个方向；单向模式 close 即可
-            try:
-                dual = str(self.client.get_position_mode() or "").lower() == "dual"
-            except Exception:  # noqa: BLE001
-                dual = False
-            if dual:
-                init["auto_size"] = ("close_long" if (intent.side or "long") == "long"
-                                     else "close_short")
+            init["auto_size"] = ("close_long" if (intent.side or "long") == "long"
+                                 else "close_short")
 
         body: dict[str, Any] = {
             "initial": init,

@@ -68,14 +68,30 @@ class TestVenueClose(unittest.TestCase):
         self.assertNotIn("close", init)
         self.assertNotIn("auto_size", init)
 
-    def test_venue_close_sets_size_zero_and_close(self):
+    def test_single_mode_falls_back_to_explicit_size(self):
+        """单向模式没有 `auto_size` → 退回显式张数（`close=true` 未在触发单端点验证）。
+
+        实测 `/price_orders` + `close` 在 dual 下报 `AUTO_INVALID_PARAM_CLOSE`；
+        单向模式没有可验证路径，不拿实盘裸奔。
+        """
         client = _Client(mode="single")
         ex = self._ex(client, account_risk={"use_venue_close": True})
         ex._place_trigger(_intent(), "short", 51000.0, True, client.get_contract("BTC_USDT"), 7)
         init = client.bodies[0]["initial"]
+        self.assertEqual(init["size"], -7, "单向模式必须退回显式张数")
+        self.assertNotIn("close", init)
+        self.assertNotIn("auto_size", init)
+        self.assertTrue(init["reduce_only"])
+
+    def test_dual_venue_close_never_sets_close_flag(self):
+        """dual 下 `close=true` 会被 Gate 拒（`POSITION_DUAL_MODE`）—— 必须只写 auto_size。"""
+        client = _Client(mode="dual")
+        ex = self._ex(client, account_risk={"use_venue_close": True})
+        ex._place_trigger(_intent(), "short", 51000.0, True, client.get_contract("BTC_USDT"), 7)
+        init = client.bodies[0]["initial"]
         self.assertEqual(init["size"], 0, "venue close 应用 size=0")
-        self.assertTrue(init["close"])
-        self.assertNotIn("auto_size", init, "单向模式不需要 auto_size")
+        self.assertNotIn("close", init, "dual 模式禁止 close=true")
+        self.assertEqual(init["auto_size"], "close_long")
         self.assertTrue(init["reduce_only"], "保护单必须 reduce_only")
 
     def test_dual_mode_adds_auto_size(self):

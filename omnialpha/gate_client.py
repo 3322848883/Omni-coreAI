@@ -73,6 +73,13 @@ def _int_price_order_size(body: Any) -> Any:
     init = body.get("initial")
     if not isinstance(init, dict) or init.get("close"):
         return body
+    # venue-computed close（`size=0` + `auto_size=close_long|close_short`）：张数由
+    # 交易所自己算「该方向全部持仓」，语义上**必须**是 0 —— 走到下面的整数化会
+    # 被拦成「0 张不足 1 张」。实测 2026-10-27：`/price_orders` 接受该组合
+    # （建单成功，读回 `size=0 / is_reduce_only=true / auto_size=close_long`），
+    # 被拦的只有我们自己这一道闸门。
+    if init.get("auto_size"):
+        return body
     raw = init.get("size")
     if raw is None or isinstance(raw, bool):
         return body
@@ -109,6 +116,40 @@ def _f(v: Any, default: float = 0.0) -> float:
         return float(v)
     except (TypeError, ValueError):
         return float(default)
+
+
+def position_qty(pos: dict, meta: Any = None) -> float:
+    """持仓**真实**张数（带符号，小数安全）。
+
+    `/positions` 的 `size` 是 **int64 字段**：`enable_decimal` 合约的小数部分会被
+    丢掉（实测 ETH_USDT：真实 **16.1** 张 → `size` 返回 -16；真实 **0.1** 张 →
+    返回 0，`mode` 仍是 `dual_long`）。真实张数只能由
+    `|value| / (mark_price × quanto_multiplier)` 反算。
+
+    **为什么必须这么读**：`close_position` 过去拿 `size` 求和当平仓量 → 每轮都少平
+    0.1~0.9 张；reduce_only 只减不增 ⇒ 残量永久化。双向模式下一侧留一条幽灵腿，
+    实盘挂了 **29 小时**（`position_close` 从 10-26 21:21 之后再无记录 —— 说明两边
+    都没回过 0），并使保护单张数长期对不上持仓。
+
+    `value` / `mark_price` / `quanto_multiplier` 任一缺失 → 退回 `size` 字段
+    （宁可是旧行为，也不要在热路径上抛异常）。方向优先沿用交易所给的
+    `size` 符号，`size==0` 时退回 `mode`（`dual_long` / `dual_short`）。
+    """
+    raw = _f(pos.get("size"))
+    sign = 1.0 if raw > 0 else (-1.0 if raw < 0 else 0.0)
+    if sign == 0.0:
+        mode = str(pos.get("mode") or "").lower()
+        if mode.endswith("long"):
+            sign = 1.0
+        elif mode.endswith("short"):
+            sign = -1.0
+    value = _f(pos.get("value"))
+    mark = _f(pos.get("mark_price"))
+    quanto = _f(getattr(meta, "quanto_multiplier", None)) if meta is not None else 0.0
+    if value and mark > 0 and quanto > 0:
+        exact = abs(value) / (mark * quanto)
+        return math.copysign(exact, sign) if sign else exact
+    return raw
 
 
 #: 合约磁盘缓存的 schema 版本。
@@ -703,12 +744,47 @@ class GateClient:
             )
         return result
 
-    def close_position(self, contract: str, side: Optional[str] = None, size: int = 0) -> dict:
-        """Official close (verified on testnet).
+    def _venue_flat_close(self, contract: str, side: Optional[str], dual: bool) -> dict:
+        """交易所侧「按方向全平」—— **不带张数**，由交易所自己算该方向全部持仓。
 
-        single full close: size=0, close=true, reduce_only=true
-        dual reduce:       reduce_only=true, size>0 reduces short, size<0 reduces long
+        实测约束（Gate APIv4，2026-10-27 真端点）：
+          · dual 模式禁止 `close=true`：`POSITION_DUAL_MODE: close is not allowed
+            in dual-mode` → 必须改用 `auto_size=close_long|close_short`；
+          · `auto_size` 必须配 `size=0 & reduce_only=true & close=false`：
+            `INVALID_ARGUMENT: auto_size must come with size=0&reduce_only=true&close=false`；
+          · 无仓时返回 `POSITION_EMPTY`（由调用方当 no-op）。
         """
+        body: dict[str, Any] = {
+            "contract": contract,
+            "size": 0,
+            "price": "0",
+            "tif": "ioc",
+            "reduce_only": True,
+        }
+        if dual:
+            if side not in ("long", "short"):
+                raise GateApiError("dual venue close requires side=long|short")
+            body["auto_size"] = "close_long" if side == "long" else "close_short"
+        else:
+            body["close"] = True
+        return self.place_order(body)
+
+    def close_position(self, contract: str, side: Optional[str] = None,
+                       size: float = 0) -> dict:
+        """平仓。**全平不带张数，只有真减仓才带。**
+
+        为什么全平不能带张数（2026-10-27 实盘取证）：`position.size` 是 int64，
+        真实 16.1 张只回报 -16。拿它去平 → 每次都少平 0.1 张，reduce_only 又只减
+        不增 ⇒ 残量永久化，双向模式下表现为「一多一空」两条幽灵腿挂 29 小时。
+        交给交易所（`auto_size` / `close=true`）算「全部」才是可判定的。
+
+        三档语义：
+          · single 全平 → `size=0 + close=true + reduce_only`（原路不变）；
+          · dual   全平 → `size=0 + reduce_only + auto_size=close_long|close_short`；
+          · 真减仓     → 显式张数，先按**真实持仓**（`position_qty`）钳制；
+            请求量 ≥ 真实持仓时**升级成全平** —— 否则取整越界会被交易所裁出残量。
+        """
+        size = _f(size)
         if size < 0:
             raise GateApiError("close size must be >= 0")
         dual = self.is_dual_position_mode()
@@ -717,33 +793,53 @@ class GateClient:
 
         if not dual and size == 0:
             try:
-                return self.place_order({
-                    "contract": contract,
-                    "size": 0,
-                    "close": True,
-                    "price": "0",
-                    "tif": "ioc",
-                    "reduce_only": True,
-                })
+                return self._venue_flat_close(contract, None, dual=False)
             except GateApiError as e:
                 # flatten/close_all on an already-flat book is a no-op success
                 if _is_empty_position_error(e):
                     return {"id": None, "status": "already_flat", "contract": contract}
                 raise
 
+        meta = None
+        try:
+            meta = self.get_contract(contract)
+        except Exception:  # noqa: BLE001 — 元数据取不到就退回 size 字段
+            meta = None
         positions = self.get_positions()
         target = [
             p for p in positions
-            if p.get("contract") == contract and _f(p.get("size")) != 0
+            if p.get("contract") == contract and position_qty(p, meta) != 0
         ]
         if side:
             target = [p for p in target if _pos_is_side(p, side)]
         if not target:
+            if size == 0:
+                return {"id": None, "status": "already_flat", "contract": contract}
             raise GateApiError(f"no position to close on {contract} side={side}")
         if not side:
             side = _infer_side(target[0])
-        total = sum(abs(_f(p.get("size"))) for p in target)
-        close_size = total if size == 0 else min(size, total)
+        real = sum(abs(position_qty(p, meta)) for p in target)
+
+        if size == 0 or size >= real - 1e-9:
+            # 全平：**不传张数**
+            try:
+                return self._venue_flat_close(contract, side, dual=dual)
+            except GateApiError as e:
+                if _is_empty_position_error(e):
+                    return {"id": None, "status": "already_flat", "contract": contract}
+                raise
+
+        # 真减仓：按步长向下取整，永不越过真实持仓
+        step = 1.0
+        try:
+            step = float(getattr(meta, "size_step", 0) or 0) or 1.0
+        except Exception:  # noqa: BLE001
+            step = 1.0
+        close_size = math.floor(size / step + 1e-9) * step
+        close_size = round(min(close_size, real), 8)
+        if close_size <= 0:
+            raise GateApiError(
+                f"reduce size {size:g} 小于最小步长 {step:g} —— 拒绝下 0 张单")
         # sell to close long (negative), buy to close short (positive)
         order_size = -abs(close_size) if side == "long" else abs(close_size)
         return self.place_order({
@@ -817,34 +913,3 @@ def load_credentials(env: str, api_key_env: str = "", api_secret_env: str = "") 
             f"missing credentials: set {key_env} and {secret_env} for env={env}"
         )
     return key, secret
-
-
-def position_qty(pos: dict, meta: Any = None) -> float:
-    """持仓**真实**张数（带符号，小数安全）。
-
-    `/positions` 的 `size` 是 **int64 字段**：`enable_decimal` 合约的小数部分会被
-    丢掉（实测 ETH_USDT：真实 16.1 张 → `size` 返回 -16；真实 0.1 张 → 返回 0，
-    `mode` 仍是 `dual_long`）。真实张数只能由 `|value| / (mark_price × quanto)` 反算。
-
-    为什么必须这么读：`close_position` 过去拿 `size` 求和当平仓量 → 每轮都少平
-    0.1~0.9 张；reduce_only 只减不增 ⇒ 残量永久化（实盘挂过 29 小时幽灵腿）。
-
-    `value` / `mark_price` / `quanto_multiplier` 任一缺失 → 退回 `size` 字段
-    （宁可是旧行为，也不要在热路径上抛异常）。方向优先沿用交易所给的 `size` 符号，
-    `size==0` 时退回 `mode`（`dual_long` / `dual_short`）。
-    """
-    raw = _f(pos.get("size"))
-    sign = 1.0 if raw > 0 else (-1.0 if raw < 0 else 0.0)
-    if sign == 0.0:
-        mode = str(pos.get("mode") or "").lower()
-        if mode.endswith("long"):
-            sign = 1.0
-        elif mode.endswith("short"):
-            sign = -1.0
-    value = _f(pos.get("value"))
-    mark = _f(pos.get("mark_price"))
-    quanto = _f(getattr(meta, "quanto_multiplier", None)) if meta is not None else 0.0
-    if value and mark > 0 and quanto > 0:
-        exact = abs(value) / (mark * quanto)
-        return math.copysign(exact, sign) if sign else exact
-    return raw

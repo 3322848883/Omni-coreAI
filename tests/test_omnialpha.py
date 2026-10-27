@@ -1315,9 +1315,20 @@ class TestStopEntrySharesOpenGates(unittest.TestCase):
         report = ex.execute_signal(parse_signal({"action": "close", "symbol": "BTC_USDT"}))
         self.assertFalse(report.ok)
 
-    def test_dual_close_long_sells_negative_size(self):
+    def test_dual_full_close_uses_auto_size(self):
+        """全平**不下张数**：`size=0 + reduce_only + auto_size`，且不得带 `close`。
+
+        `position.size` 是 int64（真实 16.1 张只回报 -16），拿它当平仓量每轮都会
+        少平一小截 → reduce_only 又只减不增 ⇒ 残量永久化（实盘「一多一空」）。
+        交易所侧 `auto_size` 语义是「平该方向全部」，这才是可判定的全平。
+        """
+        from omnialpha.gate_client import ContractMeta
+
         client = GateClient("k", "s", env="live")
         client.is_dual_position_mode = lambda: True
+        client.get_contract = lambda s: ContractMeta(
+            name=s, quanto_multiplier=0.0001, order_size_round=1,
+            order_price_round=0.1, leverage_max=100., size_min=1.0)
         client.get_positions = lambda: [
             {"contract": "BTC_USDT", "size": 5, "mode": "dual_long"},
             {"contract": "BTC_USDT", "size": -2, "mode": "dual_short"},
@@ -1325,8 +1336,30 @@ class TestStopEntrySharesOpenGates(unittest.TestCase):
         placed = {}
         client.place_order = lambda body: placed.update(body) or {"id": 1, **body}
         client.close_position("BTC_USDT", side="long", size=0)
-        self.assertEqual(placed["size"], -5)
+        self.assertEqual(placed["size"], 0, "全平不带张数")
+        self.assertEqual(placed["auto_size"], "close_long")
+        self.assertNotIn("close", placed, "dual 模式禁止 close=true")
         self.assertTrue(placed["reduce_only"])
+
+    def test_dual_partial_reduce_sells_negative_size(self):
+        """真减仓才带张数：平多 → 负张数，且必须 reduce_only。"""
+        from omnialpha.gate_client import ContractMeta
+
+        client = GateClient("k", "s", env="live")
+        client.is_dual_position_mode = lambda: True
+        client.get_contract = lambda s: ContractMeta(
+            name=s, quanto_multiplier=0.0001, order_size_round=1,
+            order_price_round=0.1, leverage_max=100., size_min=1.0)
+        client.get_positions = lambda: [
+            {"contract": "BTC_USDT", "size": 5, "mode": "dual_long"},
+            {"contract": "BTC_USDT", "size": -2, "mode": "dual_short"},
+        ]
+        placed = {}
+        client.place_order = lambda body: placed.update(body) or {"id": 1, **body}
+        client.close_position("BTC_USDT", side="long", size=3)
+        self.assertEqual(placed["size"], -3)
+        self.assertTrue(placed["reduce_only"])
+        self.assertNotIn("auto_size", placed)
 
     def test_cancel_all_without_symbol_uses_open_orders(self):
         client = FakeClient()

@@ -251,8 +251,10 @@ class TestAlignTpGroup(Base):
 
 
 class TestGateClientFlatten(unittest.TestCase):
-    def _client(self):
+    def _client(self, pos=("-0.7", 100.0)):
         from omnialpha.gate_client import GateClient
+
+        size, value = pos
 
         class C(GateClient):
             def __init__(self):
@@ -262,9 +264,16 @@ class TestGateClientFlatten(unittest.TestCase):
             def is_dual_position_mode(self):
                 return True
 
+            def get_contract(self, symbol):
+                # 必须有：否则会去真网络拉合约表
+                return ContractMeta(name=symbol, quanto_multiplier=QM, order_size_round=1,
+                                    order_price_round=0.01, leverage_max=100,
+                                    size_min=0.1, size_max=1e7, enable_decimal=True)
+
             def get_positions(self):
-                return [{"contract": SYM, "size": "-0.7", "mode": "dual_long",
-                         "entry_price": str(PX)}]
+                return [{"contract": SYM, "size": size, "mode": "dual_long",
+                         "entry_price": str(PX), "mark_price": str(PX),
+                         "value": str(value)}]
 
             def place_order(self, body):
                 self.sent.append(dict(body))
@@ -278,12 +287,59 @@ class TestGateClientFlatten(unittest.TestCase):
         self.assertFalse(_pos_is_side({"size": "0.7"}, "short"))
         self.assertEqual(_infer_side({"size": "-0.7"}), "short")
 
-    def test_close_position_sends_fractional_size(self):
+    def test_full_close_is_venue_computed(self):
+        """全平**不带张数**：`size=0 + reduce_only + auto_size`，且不得带 close。
+
+        `size` 字段是 int64（真实 0.7 张可能回报 0 / 真实 16.1 回报 -16），
+        拿它算平仓量必然留下小数残仓（实盘挂过 29 小时的「一多一空」就是这么来的）。
+        """
         c = self._client()
         c.close_position(SYM, side="long")
         self.assertEqual(len(c.sent), 1)
-        self.assertAlmostEqual(float(c.sent[0]["size"]), -0.7)
+        self.assertEqual(c.sent[0]["size"], 0, "全平不下张数")
+        self.assertEqual(c.sent[0]["auto_size"], "close_long")
+        self.assertNotIn("close", c.sent[0], "dual 模式禁止 close=true")
         self.assertTrue(c.sent[0].get("reduce_only"))
+
+    def test_short_full_close_uses_close_short(self):
+        c = self._client(pos=("-16", 371.0))
+        c.close_position(SYM, side="short")
+        self.assertEqual(c.sent[0]["auto_size"], "close_short")
+        self.assertEqual(c.sent[0]["size"], 0)
+
+    def test_partial_reduce_sends_fractional_size(self):
+        """真减仓才带张数，且保留小数（0.7 张不许被取整成 0/1）。"""
+        c = self._client(pos=("-0.7", 100.0))
+        c.close_position(SYM, side="long", size=0.4)
+        self.assertAlmostEqual(float(c.sent[0]["size"]), -0.4)
+        self.assertTrue(c.sent[0].get("reduce_only"))
+        self.assertNotIn("auto_size", c.sent[0])
+
+    def test_reduce_ge_position_upgrades_to_venue_close(self):
+        """请求减仓量 ≥ 真实持仓 → 升级成全平（否则取整越界会被交易所裁出残量）。"""
+        c = self._client(pos=("-16", 371.0))
+        c.close_position(SYM, side="short", size=16)
+        self.assertEqual(c.sent[0]["size"], 0, "16 ≥ 真实 16.1 → 走全平")
+        self.assertEqual(c.sent[0]["auto_size"], "close_short")
+
+    def test_flat_book_full_close_is_noop(self):
+        c = self._client(pos=("0", 0.0))
+        out = c.close_position(SYM, side="long")
+        self.assertEqual(out.get("status"), "already_flat")
+        self.assertEqual(c.sent, [])
+
+    def test_position_qty_uses_value_for_truncated_int(self):
+        """`size=0` 但 `value` 非零 = 0.1 张幽灵仓；`size=-16` 真实 16.1 张。"""
+        from omnialpha.gate_client import position_qty
+        meta = ContractMeta(name=SYM, quanto_multiplier=QM, order_size_round=1,
+                            order_price_round=0.01, leverage_max=100,
+                            size_min=0.1, size_max=1e7, enable_decimal=True)
+        assert abs(position_qty({"size": 0, "mode": "dual_long", "value": "2.3",
+                                 "mark_price": "2300"}, meta) - 0.1) < 1e-9
+        assert abs(position_qty({"size": -16, "mode": "dual_short", "value": "370.3",
+                                 "mark_price": "2300"}, meta) + 16.1) < 1e-9
+        # 无元数据 → 退回 size 字段（旧行为）
+        assert position_qty({"size": -16, "value": "370.3", "mark_price": "2300"}) == -16
 
 
 if __name__ == "__main__":
