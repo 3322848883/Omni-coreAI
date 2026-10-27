@@ -657,6 +657,7 @@ def run_bot_once(bot: BotConfig, paths: ProjectPaths) -> dict:
                     bot_id=bot.bot_id,
                     account=getattr(bot, "account", "") or "",
                     place_before_cancel=getattr(bot, "place_before_cancel", False),
+                    ladder_shrink_guard=getattr(bot, "ladder_shrink_guard", False),
                 )
             except GateApiError as e:
                 _archive_failed(paths, bot.bot_id, taken, path.name, f"credentials: {e}")

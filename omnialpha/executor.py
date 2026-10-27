@@ -368,6 +368,13 @@ _MGMT_ONLY_ACTIONS = frozenset({
     "close", "close_all", "close_long", "close_short", "flatten",
 })
 
+#: 「铺单类」动作（入场挂单）。用于 2026-10-28 的**缩梯防护**：
+#: `replace: symbol` 触发 stale 清理时，只撤与本轮新梯档位重合的旧入场单。
+_ENTRY_ACTIONS = frozenset({
+    "open_long", "open_short", "add_long", "add_short",
+    "stop_entry_long", "stop_entry_short",
+})
+
 #: 每轮 `ensure_grid_tp` 最多做多少次「台账 ↔ 交易所对齐」的 `get_order` 查询。
 #: 为什么要限：档位表历史上只增不清（实测 5 小时涨到 110 条），若一次全查会把
 #: 一轮扫描拖死。老档优先、每轮 20 条 → 病态表约半小时收敛，之后每轮只有新增几条。
@@ -458,6 +465,7 @@ class Executor:
         bot_id: str = "",
         account: str = "",
         place_before_cancel: bool = False,
+        ladder_shrink_guard: bool = False,
     ):
         self.client = client
         self.symbols_whitelist = (
@@ -491,6 +499,10 @@ class Executor:
         self.label_prefix = str(label_prefix or "").strip()
         # place-before-cancel：显式撤类 intent 转换为「快照差集」语义（config 逐 bot 开启）
         self.place_before_cancel = bool(place_before_cancel)
+        # 缩梯防护（2026-10-28）：replace 时若本轮腿数 < 盘上入场单数，
+        # 保留价格不重合的旧档（避免阶梯从 10 层塌到 3 层）。默认关，
+        # 既有 replace 契约不变（test_replace_no_empty_grid）。
+        self.ladder_shrink_guard = bool(ladder_shrink_guard)
         # P0.4 告警落盘：权益偏离 / 孤儿保护单
         self.alert_store = alert_store
         # 本轮**将要被撤掉的旧普通单 id 集**（`execute_signal` 每轮重算；见 `_sl_cover_cap`）。
@@ -1115,21 +1127,62 @@ class Executor:
                     cancelled.append(("price", pid))
                 except GateApiError:
                     pass
+            # ── 缩梯防护（2026-10-28 实测事故）─────────────────────────────
+            # `replace: symbol` 会把「不在本轮计划里」的旧入场单全撤。实测 19:29 轮
+            # 模型只规划 3 条腿（1 网格 + 2 马丁），旧 7 条网格档被 stale 清理全撤 →
+            # 盘上阶梯从 10 层塌缩到 3 层（TP/SL 尺寸随之漂移）。
+            # 规则：**只撤与本轮新梯档位重合（±0.3% ≈ 7 点）的旧入场单**；价格不
+            # 重合的档位是独立阶梯档，保留（既不缩梯也不堆叠 —— 同位置被新档替换）。
+            # 阈值必须小于最小档距（人格 10 点 ≈ 0.43%）：0.6% 会把相邻档误判成重合。
+            new_entry_prices: list[float] = []
+            for it in intents:
+                if str(getattr(it, "symbol", "") or "") not in (sym, ""):
+                    continue
+                if str(getattr(it, "action", "") or "").lower() not in _ENTRY_ACTIONS:
+                    continue
+                try:
+                    px = float(getattr(it, "price", None) or 0)
+                except (TypeError, ValueError):
+                    px = 0.0
+                if px > 0:
+                    new_entry_prices.append(px)
+            # 只在「本轮铺得比盘上少」时启用保留：正常重铺（腿数 ≥ 现有单数）
+            # 仍按 replace 契约整梯替换，不改变既有行为（test_replace_no_empty_grid）。
+            old_entry_count = sum(
+                1 for oid in old_o
+                if not (cur_orders.get(str(oid)) or {}).get("is_reduce_only")
+            )
+            shrink_keep_enabled = (getattr(self, "ladder_shrink_guard", False)
+                                   and bool(new_entry_prices)
+                                   and len(new_entry_prices) < old_entry_count)
+            shrink_kept = []
             for oid in sorted(old_o):
-                if self._should_keep_protection(cur_orders.get(str(oid)), positions, pending_entry):
+                cur = cur_orders.get(str(oid)) or {}
+                if self._should_keep_protection(cur, positions, pending_entry):
                     skipped.append(("order", oid))
+                    continue
+                try:
+                    o_px = float(cur.get("price") or 0)
+                except (TypeError, ValueError):
+                    o_px = 0.0
+                if shrink_keep_enabled and o_px > 0 and not any(
+                        abs(o_px - p) / p <= 0.003 for p in new_entry_prices):
+                    # 价格不重合 = 独立档位，保留（缩梯防护）
+                    shrink_kept.append(oid)
                     continue
                 try:
                     self.client.cancel_order(oid)
                     cancelled.append(("order", oid))
                 except GateApiError:
                     pass
-            if cancelled or skipped:
+            if cancelled or skipped or shrink_kept:
+                detail = {"replace": "owned", "prefix": prefix,
+                          "cancelled": cancelled,
+                          "skipped_live_protection": skipped}
+                if shrink_kept:
+                    detail["ladder_shrink_guarded"] = shrink_kept
                 report.results.append(StepResult(
-                    "replace_cancel", sym, True,
-                    detail={"replace": "owned", "prefix": prefix,
-                            "cancelled": cancelled,
-                            "skipped_live_protection": skipped},
+                    "replace_cancel", sym, True, detail=detail,
                 ))
 
     def _entry_gate(self, intent: Intent) -> str:

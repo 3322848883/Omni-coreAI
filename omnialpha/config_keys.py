@@ -31,7 +31,7 @@ TOP_LEVEL: frozenset[str] = frozenset({
     "api_key_env", "api_secret_env", "bot_id", "default_replace", "enabled",
     "env", "exchange", "label_prefix", "manage_positions", "max_files_per_run",
     "max_notional_usd", "max_orders_per_file", "max_scan_symbols", "order_scope",
-    "paper", "place_before_cancel", "poll_interval_sec", "position_policy",
+    "paper", "place_before_cancel", "ladder_shrink_guard", "poll_interval_sec", "position_policy",
     "require_sl", "root", "strategist", "symbols", "symbols_unrestricted",
     # 加载期开关 / 账户级
     "validate_contracts", "accounts", "groups",

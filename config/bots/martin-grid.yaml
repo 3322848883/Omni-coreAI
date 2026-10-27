@@ -39,6 +39,9 @@ default_replace: none
 # ~4 分钟交易所空窗。副作用（正是想要的）：stale 清理会连旧批保护单一起撤
 # （本轮新保护挂上后 fresh_protection 生效）→ 新旧 tp 价位并存问题一并解决。
 place_before_cancel: true
+# 缩梯防护（2026-10-28）：replace 时若本轮腿数少于盘上入场单数，
+# 保留价格不重合的旧档 —— 实测 19:29 轮只规划 3 条腿把 10 层梯撤成 3 层。
+ladder_shrink_guard: true
 order_scope: own
 require_sl: true
 
