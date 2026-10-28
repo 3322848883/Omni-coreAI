@@ -49,7 +49,19 @@ ladder_template:
   enabled: true
   grid_levels: 7        # 7 网格档（人格：10 层 = 7 网格 + 3 马丁）
   grid_lots: 1          # 网格每档 1 张
-  grid_step_pct: 0.5    # 档距 0.5% ≈ 12 点（人格要求 ≥10 点）
+  grid_step_pct: 0.5    # 动态关闭时的固定档距；动态开启时只作马丁缩放基准
+  # 动态区间（A+C，2026-10-28）：档距随波动缩放，避免高波动一根 K 线穿透 5~7 层
+  #   step = clamp(max(ATR% × atr_mult, 带宽% ÷ bb_div), min, max)，再按总跨度封顶
+  #   数据源 = v2 库同序列最新收盘 bar 的 atr14 / boll 三件套
+  dynamic:
+    enabled: true
+    interval: 15m
+    atr_mult: 1.0         # 档距 ≥ 1.0 × ATR%（ATR 7.24 → 0.31%）
+    bb_div: 6.0           # 档距 ≥ 带宽 ÷ 6（带宽 1.66% → 0.28%）
+    min_step_pct: 0.45    # 下限 ≈ 10.6 点（人格要求相邻档 ≥10 点）
+    max_step_pct: 1.2     # 上限（高波动时不再无限放宽）
+    max_span_pct: 6.0     # 7 档总跨度 ≤ 6%（≈142 点）
+    scale_martin: true    # 马丁深度同比缩放，避免档距放大后挤在网格里
   # ⚠️ 马丁深度必须与网格档错开 ≥0.5%（补档容差 ±0.3%，同价会被去重吞掉一档）：
   #    网格 7 档到 -3.5%；马丁从 -4.2% 起，实测 0.6×5=-3.0% 会撞 -2.8% 只铺出 9 层。
   martin:               # 马丁三档：深度% + 张数

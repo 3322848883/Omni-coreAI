@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1212,6 +1213,60 @@ class Executor:
                     "replace_cancel", sym, True, detail=detail,
                 ))
 
+    def _dynamic_step(self, sym: str, mark: float, grid_n: int,
+                      base_step: float, dyn: dict) -> tuple[float, dict]:
+        """按波动算档距（A+C）：`max(ATR% × atr_mult, 带宽% ÷ bb_div)`，clamp + 跨度封顶。
+
+        为什么要动态：固定 0.5% 档距在 ATR 40（高波动）时会被一根 K 线穿透 5~7 层，
+        马丁瞬间满仓；ATR 6（低波动）时又太稀。数据源 = v2 库该序列最新**收盘** bar
+        的 atr14 / boll 三件套（2026-10-28 上线的 11 列指标）。
+        读不到指标 → 回退固定 `base_step`，在 detail 留痕（fail-safe，不阻断铺梯）。
+        """
+        note: dict = {"base_step_pct": base_step}
+        try:
+            atr_mult = float(dyn.get("atr_mult", 1.0))
+            bb_div = float(dyn.get("bb_div", 6.0))
+            min_step = float(dyn.get("min_step_pct", 0.3))
+            max_step = float(dyn.get("max_step_pct", 1.2))
+            max_span = float(dyn.get("max_span_pct") or 0)
+            interval = str(dyn.get("interval") or "15m")
+            db_path = str(dyn.get("db_path") or
+                          (Path(__file__).resolve().parents[1]
+                           / "pa-data-source" / "data" / "kline.db"))
+        except (TypeError, ValueError):
+            return base_step, note
+
+        try:
+            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
+            try:
+                row = con.execute(
+                    "SELECT atr14, boll20, boll20_upper, boll20_lower FROM kline "
+                    "WHERE symbol=? AND interval=? AND closed=1 "
+                    "ORDER BY t DESC LIMIT 1", (sym, interval)).fetchone()
+            finally:
+                con.close()
+        except Exception as e:  # noqa: BLE001 — 读库失败回退固定档距
+            note["error"] = f"db: {str(e)[:80]}"
+            return base_step, note
+        if not row or any(v is None for v in row):
+            note["error"] = "no_indicator_row"
+            return base_step, note
+
+        atr, mid, up, lo = (float(v) for v in row)
+        if mid <= 0 or mark <= 0:
+            return base_step, note
+        atr_pct = atr / mark * 100.0
+        bw_pct = (up - lo) / mid * 100.0
+        raw = max(atr_pct * atr_mult,
+                  (bw_pct / bb_div) if bb_div > 0 else 0.0)
+        step = max(min_step, min(max_step, raw))
+        if max_span > 0 and grid_n > 0:
+            step = min(step, max_span / grid_n)
+        note.update({"atr_pct": round(atr_pct, 4), "bw_pct": round(bw_pct, 4),
+                     "raw_step_pct": round(raw, 4), "step_pct": round(step, 4),
+                     "interval": interval})
+        return step, note
+
     def _complete_ladder(self, intents: list, report) -> None:
         """BOT 级阶梯补齐（`ladder_template.enabled`，全局默认关闭）。
 
@@ -1248,10 +1303,35 @@ class Executor:
         try:
             grid_n = int(tpl.get("grid_levels") or 0)
             grid_lots = float(tpl.get("grid_lots") or 1)
-            step_pct = float(tpl.get("grid_step_pct") or 0.6)
+            base_step = float(tpl.get("grid_step_pct") or 0.6)
             martin = list(tpl.get("martin") or [])
         except (TypeError, ValueError):
             return
+        # ── 动态档距（A+C：ATR% 与 BB 带宽/6 取较大者，2026-10-28）────────────
+        # 固定百分比档距在高波动时会被一根 K 线穿透 5~7 层（马丁瞬间满仓），
+        # 低波动时又太稀导致不成交。改为随波动缩放：
+        #   step = clamp(max(ATR% × atr_mult, 带宽% ÷ bb_div), min, max)
+        #   step = min(step, max_span_pct / grid_n)      # 总跨度封顶
+        # 数据源 = v2 库该序列最新**收盘** bar 的 atr14 / boll 三件套。
+        dyn = tpl.get("dynamic") or {}
+        step_pct = base_step
+        dyn_note: dict = {}
+        if dyn.get("enabled"):
+            step_pct, dyn_note = self._dynamic_step(sym, mark, grid_n, base_step, dyn)
+        # 马丁深度同比缩放（否则档距放大后马丁档会挤在网格里）
+        martin = list(martin)
+        if dyn.get("enabled") and dyn.get("scale_martin", True) and base_step > 0:
+            ratio = step_pct / base_step
+            if abs(ratio - 1.0) > 1e-9:
+                scaled = []
+                for m in martin:
+                    try:
+                        scaled.append({"pct": float(m["pct"]) * ratio,
+                                       "lots": m["lots"]})
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                martin = scaled
+                dyn_note["martin_scaled_by"] = round(ratio, 3)
         want: list[tuple[float, float]] = []
         for i in range(1, grid_n + 1):
             want.append((mark * (1 - step_pct * i / 100.0), grid_lots))
@@ -1409,8 +1489,8 @@ class Executor:
             report.results.append(StepResult(
                 "ladder_template", sym, True,
                 detail={"placed": placed, "skipped": skipped, "dup_removed": dup_removed,
-                        "protection": prot_added,
-                        "anchor": mark, "sl": sl}))
+                        "protection": prot_added, "step_pct": round(step_pct, 4),
+                        "dynamic": dyn_note, "anchor": mark, "sl": sl}))
 
     def _entry_gate(self, intent: Intent) -> str:
         """Return error string to reject intent, or '' to allow.
