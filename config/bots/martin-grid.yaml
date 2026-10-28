@@ -50,6 +50,11 @@ ladder_template:
   grid_levels: 7        # 7 网格档（人格：10 层 = 7 网格 + 3 马丁）
   grid_lots: 1          # 网格每档 1 张
   grid_step_pct: 0.5    # 动态关闭时的固定档距；动态开启时只作马丁缩放基准
+  # 锚点（2026-10-29）：fixed = 锚点跨轮/跨重启保持，价格回撤才吃得到；
+  # trailing = 每轮跟最新价（旧行为，日化 ~864 次撤+挂，且回撤永远在阶梯上方）
+  anchor_mode: fixed
+  reanchor_threshold_pct: 2.0     # mark 偏离锚点 >2% 才重锚
+  anchor_state_file: data/ladder_anchor.json
   # 动态区间（A+C，2026-10-28）：档距随波动缩放，避免高波动一根 K 线穿透 5~7 层
   #   step = clamp(max(ATR% × atr_mult, 带宽% ÷ bb_div), min, max)，再按总跨度封顶
   #   数据源 = v2 库同序列最新收盘 bar 的 atr14 / boll 三件套

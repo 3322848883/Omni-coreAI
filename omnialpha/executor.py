@@ -1215,6 +1215,78 @@ class Executor:
                     "replace_cancel", sym, True, detail=detail,
                 ))
 
+    def _resolve_anchor(self, sym: str, mark: float, tpl: dict) -> tuple[float, dict]:
+        """阶梯锚点（`anchor_mode`）。
+
+        `trailing`（默认）= 每轮用最新价 → 阶梯永远贴在现价下方（实测日化 864 次
+        撤+挂，且价格回撤永远在阶梯上方，吃不到震荡）。
+        `fixed` = 锚点写入 state 文件、跨轮/跨重启保持；只有 |mark−anchor| 超过
+        `reanchor_threshold_pct` 才重锚（趋势走开时才跟上）。
+        """
+        mode = str(tpl.get("anchor_mode") or "trailing").lower()
+        note: dict = {"mode": mode}
+        if mode != "fixed":
+            note["anchor"] = round(mark, 4)
+            return mark, note
+
+        try:
+            sp = tpl.get("anchor_state_file")
+            path = (Path(str(sp)) if sp else
+                    Path(__file__).resolve().parents[1]
+                    / "data" / "ladder_anchor.json")
+            if not path.is_absolute():
+                path = Path(__file__).resolve().parents[1] / path
+        except Exception:  # noqa: BLE001
+            note["error"] = "bad_state_path"
+            return mark, note
+
+        try:
+            thr = float(tpl.get("reanchor_threshold_pct") or 2.0)
+        except (TypeError, ValueError):
+            thr = 2.0
+
+        data: dict = {}
+        try:
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8")) or {}
+        except Exception as e:  # noqa: BLE001
+            note["error"] = f"state_read: {str(e)[:60]}"
+
+        rec = data.get(sym) or {}
+        try:
+            anchor = float(rec.get("anchor") or 0)
+        except (TypeError, ValueError):
+            anchor = 0.0
+
+        reanchored = False
+        if anchor <= 0:
+            anchor = mark
+            reanchored = True
+            note["reason"] = "no_state"
+        else:
+            drift = abs(mark - anchor) / anchor * 100.0
+            note["drift_pct"] = round(drift, 3)
+            if drift > thr:
+                anchor = mark
+                reanchored = True
+                note["reason"] = f"drift {drift:.2f}% > {thr:.2f}%"
+
+        if reanchored:
+            data[sym] = {"anchor": round(anchor, 6), "ts": int(time.time()),
+                         "mode": "fixed"}
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(path.suffix + ".tmp")
+                tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1),
+                               encoding="utf-8")
+                tmp.replace(path)
+            except Exception as e:  # noqa: BLE001 — 写不进去不影响本轮铺梯
+                note["error"] = f"state_write: {str(e)[:60]}"
+
+        note.update({"anchor": round(anchor, 4), "reanchored": reanchored,
+                     "threshold_pct": thr})
+        return anchor, note
+
     def _dynamic_step(self, sym: str, mark: float, grid_n: int,
                       base_step: float, dyn: dict) -> tuple[float, dict]:
         """按波动算档距（A+C）：`max(ATR% × atr_mult, 带宽% ÷ bb_div)`，clamp + 跨度封顶。
@@ -1322,6 +1394,8 @@ class Executor:
         dyn = tpl.get("dynamic") or {}
         step_pct = base_step
         dyn_note: dict = {}
+        # 锚点：fixed 模式跨轮/跨重启保持（trailing=现状，每轮跟最新价）
+        anchor, anchor_note = self._resolve_anchor(sym, mark, tpl)
         if dyn.get("enabled"):
             step_pct, dyn_note = self._dynamic_step(sym, mark, grid_n, base_step, dyn)
 
@@ -1400,10 +1474,10 @@ class Executor:
                 dyn_note["max_martin_pct"] = max_martin
         want: list[tuple[float, float]] = []
         for i in range(1, grid_n + 1):
-            want.append((mark * (1 - step_pct * i / 100.0), grid_lots))
+            want.append((anchor * (1 - step_pct * i / 100.0), grid_lots))
         for m in martin:
             try:
-                want.append((mark * (1 - float(m["pct"]) / 100.0), float(m["lots"])))
+                want.append((anchor * (1 - float(m["pct"]) / 100.0), float(m["lots"])))
             except (KeyError, TypeError, ValueError):
                 continue
         if not want:
@@ -1453,11 +1527,14 @@ class Executor:
         # 模板只会「补缺」，两套叠加会把 10 层变成 14 层（实测 martin-grid
         # 入场单 14 条、马丁 9/9/9）。模板的语义是「保证有 10 层」，不是「再加 10 层」：
         # 现有入场单已经 ≥ 模板总档数时，本轮不补。
-        if len(existing) >= len(want):
+        # 重锚的轮次不能走 already_full：旧梯是按旧锚点铺的，必须换掉
+        # （实测：drift 越阈值 → anchor 更新，但 old 10 条仍在 → 误判已满 → 阶梯卡在旧价位）
+        if not anchor_note.get("reanchored") and len(existing) >= len(want):
             report.results.append(StepResult(
                 "ladder_template", sym, True,
                 detail={"skipped": "already_full", "existing": len(existing),
-                        "template_total": len(want)}))
+                        "template_total": len(want), "anchor": anchor,
+                        "anchor_info": anchor_note, "mark": mark}))
             return
         placed, skipped = [], []
         for px, lots in want:
@@ -1618,7 +1695,8 @@ class Executor:
                 "ladder_template", sym, True,
                 detail={"placed": placed, "skipped": skipped, "dup_removed": dup_removed,
                         "protection": prot_added, "step_pct": round(step_pct, 4),
-                        "dynamic": dyn_note, "anchor": mark, "sl": sl}))
+                        "dynamic": dyn_note, "anchor": anchor,
+                        "anchor_info": anchor_note, "mark": mark, "sl": sl}))
 
     def _entry_gate(self, intent: Intent) -> str:
         """Return error string to reject intent, or '' to allow.
