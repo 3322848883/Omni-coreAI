@@ -1340,7 +1340,8 @@ class Executor:
         step = max(min_step, min(max_step, raw))
         if max_span > 0 and grid_n > 0:
             step = min(step, max_span / grid_n)
-        note.update({"atr_pct": round(atr_pct, 4), "bw_pct": round(bw_pct, 4),
+        note.update({"atr": round(atr, 4),
+                     "atr_pct": round(atr_pct, 4), "bw_pct": round(bw_pct, 4),
                      "raw_step_pct": round(raw, 4), "step_pct": round(step, 4),
                      "interval": interval})
         return step, note
@@ -1454,6 +1455,12 @@ class Executor:
                     max_martin = 9.0
                 scaled = []
                 for m in martin:
+                    # ATR 基准的档位**不参与** step 比例缩放（它本来就随波动走），
+                    # 且必须原样保留 `atr_mult` —— 早期实现只重建 {pct,lots}，
+                    # 把 atr_mult 吃掉 → 马丁退回固定 pct 并撞进网格（实测只剩 7 层）。
+                    if m.get("atr_mult") is not None:
+                        scaled.append(dict(m))
+                        continue
                     try:
                         scaled.append({"pct": float(m["pct"]) * ratio,
                                        "lots": m["lots"]})
@@ -1473,15 +1480,131 @@ class Executor:
                 dyn_note["martin_scaled_by"] = round(ratio, 3)
                 dyn_note["max_martin_pct"] = max_martin
         want: list[tuple[float, float]] = []
-        for i in range(1, grid_n + 1):
-            want.append((anchor * (1 - step_pct * i / 100.0), grid_lots))
-        for m in martin:
+        # ── 模型 A：等距 N 档 + 马丁占位（2026-10-29，推荐）────────────────
+        # 人格本义是「10 层 = 7 网格 + 3 马丁**穿插**」：马丁不是额外再加 3 档，
+        # 而是占用其中 3 个层位、张数放大。旧实现按「网格 + 马丁深度」相加，
+        # 与网格缝隙（step/2=0.24%）< 去重容差（0.3%）在数学上不可共存 ——
+        # 马丁档必被当成网格重复吞掉（实测反复只剩 7~8 层）。
+        # 配置：`martin_slots: {2: 6, 6: 7, 10: 9}` + `grid_levels: 10`
+        slots = tpl.get("martin_slots") or {}
+        slot_lots: dict[int, float] = {}
+        for k, v in (slots or {}).items():
             try:
-                want.append((anchor * (1 - float(m["pct"]) / 100.0), float(m["lots"])))
+                slot_lots[int(k)] = float(v)
+            except (TypeError, ValueError):
+                continue
+        if slot_lots:
+            use_n = max(max(slot_lots), grid_n)
+            for i in range(1, use_n + 1):
+                lots = slot_lots.get(i, grid_lots)
+                want.append((anchor * (1 - step_pct * i / 100.0), lots))
+            dyn_note["model"] = "slots"
+            dyn_note["slots"] = {str(k): v for k, v in sorted(slot_lots.items())}
+            grid_n = use_n
+        for i in range(1, grid_n + 1 if not slot_lots else 1):
+            want.append((anchor * (1 - step_pct * i / 100.0), grid_lots))
+        # ── 马丁深度 ATR 化（2026-10-29）───────────────────────────────
+        # 档距已按 ATR 自适应，马丁深度却写死 4.2/5.4/6.6% —— 实测 ATR 7.5(0.32%)
+        # 时最深档 = 21×ATR，那一档永不成交，还逼着 SL 放到 -7.4%（形同没有）。
+        # 有 `atr_mult` 时 depth = atr_mult × atr_pct；否则回退固定 `pct`。
+        atr_pct_now = None
+        try:
+            atr_pct_now = float(dyn_note.get("atr_pct") or 0) or None
+        except (TypeError, ValueError):
+            atr_pct_now = None
+        atr_based = False
+        for m in ([] if slot_lots else martin):
+            try:
+                lots = float(m["lots"])
             except (KeyError, TypeError, ValueError):
                 continue
+            if m.get("atr_mult") is not None and atr_pct_now:
+                try:
+                    pct = float(m["atr_mult"]) * atr_pct_now
+                except (TypeError, ValueError):
+                    continue
+                atr_based = True
+            else:
+                try:
+                    pct = float(m["pct"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+            want.append((anchor * (1 - pct / 100.0), lots))
+        # ── 档位吸附结构位（2026-10-29）──────────────────────────────────
+        # 纯几何档位（anchor × (1−step×i)）没有任何市场含义。模型可从 smc_map 取
+        # 结构位（OB / FVG / swing）放进 plan meta，每档在 ±snap_tol_pct 内吸附到
+        # 最近结构位；若吸附后与上一档间距 < 0.6×step 则放弃（防止档位挤在一起）。
+        snap_note: dict = {}
+        try:
+            raw_lv = (getattr(self, "_round_meta", {}) or {}).get("structure_levels") or []
+            levels = [float(x) for x in raw_lv if float(x) > 0]
+        except (TypeError, ValueError):
+            levels = []
+        if levels and want:  # 只吸网格档，马丁档随后按缝隙取中点
+            try:
+                tol = float(dyn.get("snap_tol_pct", 0.15))
+            except (TypeError, ValueError):
+                tol = 0.15
+            min_gap = step_pct * 0.6
+            snapped: list[tuple[float, float]] = []
+            n_snap = 0
+            for px, lots in want[:grid_n]:
+                best = None
+                for lv in levels:
+                    if abs(lv - px) / px * 100 <= tol:
+                        if best is None or abs(lv - px) < abs(best - px):
+                            best = lv
+                if best is None:
+                    snapped.append((px, lots))
+                    continue
+                prev_px = snapped[-1][0] if snapped else None
+                if prev_px is not None and (prev_px - best) / prev_px * 100 < min_gap:
+                    snapped.append((px, lots))       # 会挤档 → 保持几何
+                    continue
+                snapped.append((best, lots))
+                n_snap += 1
+            want = snapped + list(want[grid_n:])
+            snap_note = {"levels": len(levels), "snapped": n_snap, "tol_pct": tol}
+            dyn_note["structure_snap"] = snap_note
+        if atr_based:
+            dyn_note["martin_atr_based"] = True
+            dyn_note["martin_depths_pct"] = [
+                round((1 - px / anchor) * 100, 3) for px, _ in want[grid_n:]
+            ]
         if not want:
             return
+        # ── SL 距离护栏（2026-10-29）────────────────────────────────────
+        # 实测线上 SL=2160：距 mark 7.4%、距最深档 19.6 点看似合理，但距近 200 根
+        # 低点 2296 有 136 点 = 18×ATR —— 要跌 7.4% 才触发，等于没有保护。
+        # 护栏：SL 必须落在 [最深档 − 3×ATR, 最深档 − 1×ATR]。
+        sl_note: dict = {}
+        try:
+            atr_price = float(dyn_note.get("atr") or 0) or None
+        except (TypeError, ValueError):
+            atr_price = None
+        if sl is not None and want and atr_price:
+            deepest_px = min(p for p, _ in want)
+            lo_b = deepest_px - 3.0 * atr_price
+            hi_b = deepest_px - 1.0 * atr_price
+            try:
+                cur = float(sl)
+            except (TypeError, ValueError):
+                cur = None
+            if cur is not None:
+                new_sl = min(max(cur, lo_b), hi_b)
+                if abs(new_sl - cur) > 1e-9:
+                    sl_note = {"original": round(cur, 2),
+                               "adjusted": round(new_sl, 2),
+                               "atr": round(atr_price, 2),
+                               "bounds": [round(lo_b, 2), round(hi_b, 2)]}
+                    sl = new_sl
+        if sl_note:
+            dyn_note["sl_adjusted"] = sl_note
+
+        # 同价判定容差：占位模型下滑块都落在 step 整数倍上（间距 > 0.3%），
+        # 固定 0.3% 足够；旧的「相加模型」缝隙问题改用 martin_slots 根治。
+        dedupe_tol = 0.003
+
         # ── 模板权威：撤掉不在模板档位上的入场单（2026-10-28）────────────
         # 模型每轮都会把它自己的 12 条档位铺回来（replace 整梯替换），只靠「补缺 +
         # 上限」无法收敛：实测清理到 10 层后，下一轮又变 12 条（2211.5×9 / 2223.5×1 复活）。
@@ -1502,7 +1625,7 @@ class Executor:
                 continue
             if px <= 0:
                 continue
-            if any(abs(px - t) / t <= 0.003 for t in tmpl_prices if t > 0):
+            if any(abs(px - t) / t <= dedupe_tol for t in tmpl_prices if t > 0):
                 continue
             try:
                 self.client.cancel_order(o["id"])
@@ -1542,7 +1665,7 @@ class Executor:
                 price = round_price(px, meta)
             except Exception:  # noqa: BLE001
                 continue
-            if any(p > 0 and abs(price - p) / p <= 0.003 for p in existing):
+            if any(p > 0 and abs(price - p) / p <= dedupe_tol for p in existing):
                 skipped.append(price)
                 continue
             if price >= mark:           # 只补现价下方
@@ -1575,7 +1698,7 @@ class Executor:
             for o in sorted(books, key=lambda x: -float(x.get("price") or 0)):
                 px = float(o.get("price") or 0)
                 for b in buckets:
-                    if abs(px - float(b[0].get("price") or 0)) / max(px, 1e-9) <= 0.003:
+                    if abs(px - float(b[0].get("price") or 0)) / max(px, 1e-9) <= dedupe_tol:
                         b.append(o)
                         break
                 else:
