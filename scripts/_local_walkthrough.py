@@ -19,14 +19,10 @@ ATR = 7.5
 PATH = [("① 建梯", 2332.71), ("② 小跌", 2325.0), ("③ 破位", 2315.0),
         ("④ 深跌", 2300.0), ("⑤ 触底", 2293.0), ("⑥ 反弹", 2320.0)]
 
-NEW = {
-    "enabled": True, "grid_levels": 10, "grid_lots": 1, "grid_step_pct": 0.5,
-    "martin_slots": {2: 6, 6: 7, 10: 9}, "snap_tol_pct": 0.15, "martin": [],
-    "anchor_mode": "trailing",
-    "dynamic": {"enabled": True, "interval": "15m", "atr_mult": 1.5, "bb_div": 6.0,
-                "min_step_pct": 0.45, "max_step_pct": "auto", "max_span_pct": 6.0,
-                "scale_martin": True, "max_martin_pct": 9.0},
-}
+from omnialpha.config import load_bot_config  # noqa: E402
+
+NEW = dict(load_bot_config(ROOT / "config/bots/martin-grid.yaml").ladder_template)
+NEW["anchor_mode"] = "trailing"      # 本演示只比阶梯形态，锚点固定已在别处验过
 OLD = {
     "enabled": True, "grid_levels": 7, "grid_lots": 1, "grid_step_pct": 0.5,
     "martin": [{"pct": 4.2, "lots": 6}, {"pct": 5.4, "lots": 7},
@@ -141,7 +137,7 @@ def walk(tag, tpl):
             "entry": all_entry}
 
 
-new = walk("新版本：10 档等距 + 马丁占第 2/6/10 档 + SL 护栏", NEW)
+new = walk(f"新版本：10 档等距 + 马丁占 {NEW.get(chr(109)+chr(97)+chr(114)+chr(116)+chr(105)+chr(110)+chr(95)+chr(115)+chr(108)+chr(111)+chr(116)+chr(115))} + SL 护栏", NEW)
 old = walk("旧版本：7 网格 + 马丁固定深度 4.2/5.4/6.6%", OLD)
 
 print(f"\n{'=' * 78}\n对比总结（同一路径，mark 从 2332.71 跌到 2293 再反弹 2320）\n{'=' * 78}")

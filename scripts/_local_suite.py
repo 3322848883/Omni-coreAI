@@ -147,7 +147,11 @@ print(f"  张数={[s for _, s in px]}")
 print(f"  档位={[round(p, 1) for p, _ in px]}")
 check("10 层", len(px) == 10, f"实际 {len(px)}")
 sizes_desc = [s for _, s in reversed(px)]     # 从锚点往下
-check("马丁占第 2/6/10 档", sizes_desc == [1, 6, 1, 1, 1, 7, 1, 1, 1, 9], f"{sizes_desc}")
+slots_cfg = {int(k): int(v) for k, v in (TPL_PROD.get("martin_slots") or {}).items()}
+want_sizes = [slots_cfg.get(i + 1, int(TPL_PROD.get("grid_lots") or 1))
+              for i in range(len(sizes_desc))]
+check("马丁占位与配置一致", sizes_desc == want_sizes,
+      f"实际{sizes_desc} 期望{want_sizes}（slots={slots_cfg}）")
 gaps = [round(px[i][0] - px[i + 1][0], 2) for i in range(len(px) - 1)]
 check("间距基本等距", max(gaps) - min(gaps) < 1.0, f"{gaps}")
 prot = c.prot[-1]["initial"]["size"] if c.prot else None
