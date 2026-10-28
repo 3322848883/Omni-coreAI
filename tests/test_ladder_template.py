@@ -35,6 +35,7 @@ class C:
         self.existing = existing or []
         self.mark = mark
         self.placed = []
+        self.cancelled = []
 
     def get_last_price(self, sym):
         return self.mark
@@ -44,6 +45,11 @@ class C:
 
     def list_orders(self, sym):
         return list(self.existing)
+
+    def cancel_order(self, oid):
+        self.cancelled.append(oid)
+        self.existing = [o for o in self.existing if str(o.get("id")) != str(oid)]
+        return {"id": oid}
 
     def place_order(self, body):
         self.placed.append(body)
@@ -107,6 +113,35 @@ class TestLadderTemplate(unittest.TestCase):
         self.assertEqual(c.placed, [], "已满 4 档（模板 3+1）时不得再补")
         dets = [r.detail for r in rep.results if r.detail.get("skipped")]
         self.assertEqual(dets[0]["skipped"], "already_full")
+
+    def test_prunes_off_template_levels(self):
+        """模板启用时是唯一权威：价格不在模板档位上的入场单被撤掉。
+
+        实测：清理到 10 层后模型下一轮又把 2211.5×9 / 2223.5×1 铺回来 → 只靠补缺不收敛。
+        """
+        # 模板：1980/1960/1940 + 马丁 1920；库里多了一条 1930（距最近模板档 0.52% > 0.3%）
+        olds = [{"id": "keep1", "price": "1980", "size": 1},
+                {"id": "bad", "price": "1930", "size": 9}]
+        c = C(existing=olds, mark=2000.0)
+        ex = self._ex(c)
+        rep = Report()
+        ex._complete_ladder([_intent()], rep)
+        self.assertIn("bad", c.cancelled, "非模板档必须撤销")
+        self.assertNotIn("keep1", c.cancelled, "模板档必须保留")
+        pruned = [r.detail for r in rep.results if r.detail.get("pruned_off_template")]
+        self.assertEqual(pruned[0]["pruned_off_template"][0]["price"], 1930.0)
+
+    def test_dedupes_same_price_orders(self):
+        """同价重复档（模型与补档同轮抢挂）只保留一条。"""
+        olds = [{"id": "dupA", "price": "1980", "size": 1},
+                {"id": "dupB", "price": "1980.5", "size": 1}]
+        c = C(existing=olds, mark=2000.0)
+        ex = self._ex(c)
+        rep = Report()
+        ex._complete_ladder([_intent()], rep)
+        self.assertEqual(len(c.cancelled), 1, "同价两条必须撤掉一条")
+        dets = [r.detail for r in rep.results if r.detail.get("dup_removed")]
+        self.assertTrue(dets and len(dets[0]["dup_removed"]) == 1)
 
     def test_no_sl_no_completion(self):
         c = C(mark=2000.0)

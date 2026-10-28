@@ -1243,6 +1243,40 @@ class Executor:
                 continue
         if not want:
             return
+        # ── 模板权威：撤掉不在模板档位上的入场单（2026-10-28）────────────
+        # 模型每轮都会把它自己的 12 条档位铺回来（replace 整梯替换），只靠「补缺 +
+        # 上限」无法收敛：实测清理到 10 层后，下一轮又变 12 条（2211.5×9 / 2223.5×1 复活）。
+        # 既然这个 bot 的策略就是固定阶梯，模板启用时它就是唯一权威：
+        # 价格不在「模板 10 档 ±0.3%」内的入场单撤掉，然后把缺的补上。
+        tmpl_prices = [price for price, _ in want]          # want 已按 mark 计算好
+        removed = []
+        try:
+            owned = [o for o in self.client.list_orders(sym) or []
+                     if float(o.get("size") or 0) > 0
+                     and not (o.get("is_reduce_only") or o.get("reduce_only"))]
+        except Exception:  # noqa: BLE001
+            owned = []
+        for o in owned:
+            try:
+                px = float(o.get("price") or 0)
+            except (TypeError, ValueError):
+                continue
+            if px <= 0:
+                continue
+            if any(abs(px - t) / t <= 0.003 for t in tmpl_prices if t > 0):
+                continue
+            try:
+                self.client.cancel_order(o["id"])
+                removed.append({"price": px, "size": o.get("size")})
+            except Exception as e:  # noqa: BLE001
+                report.results.append(StepResult(
+                    "ladder_template", sym, False,
+                    detail={"price": px}, error=f"撤非模板档失败: {str(e)[:80]}"))
+        if removed:
+            report.results.append(StepResult(
+                "ladder_template", sym, True,
+                detail={"pruned_off_template": removed, "anchor": mark}))
+
         # 已存在的入场档（价格）
         try:
             existing = [float(o.get("price") or 0)
@@ -1287,10 +1321,44 @@ class Executor:
                     "ladder_template", sym, False,
                     detail={"price": price, "size": lots},
                     error=f"补档失败: {str(e)[:120]}"))
-        if placed or skipped:
+        # ── 同价去重（2026-10-28）：模型与本补档在同一轮抢挂同一价（实测 2247×2）
+        # 快照取单发生在本轮下单之前，模型随后挂出的档看不到 → 同价重复。
+        # 按 ±0.3% 分桶，每桶只留一条（优先张数更接近模板的），其余撤掉。
+        dup_removed = []
+        try:
+            books = [o for o in self.client.list_orders(sym) or []
+                     if float(o.get("size") or 0) > 0
+                     and not (o.get("is_reduce_only") or o.get("reduce_only"))]
+            buckets: list[list[dict]] = []
+            for o in sorted(books, key=lambda x: -float(x.get("price") or 0)):
+                px = float(o.get("price") or 0)
+                for b in buckets:
+                    if abs(px - float(b[0].get("price") or 0)) / max(px, 1e-9) <= 0.003:
+                        b.append(o)
+                        break
+                else:
+                    buckets.append([o])
+            for b in buckets:
+                if len(b) < 2:
+                    continue
+                b.sort(key=lambda x: -float(x.get("size") or 0))   # 保留张数大的
+                for o in b[1:]:
+                    try:
+                        self.client.cancel_order(o["id"])
+                        dup_removed.append({"price": float(o.get("price") or 0),
+                                            "size": o.get("size")})
+                    except Exception as e:  # noqa: BLE001
+                        report.results.append(StepResult(
+                            "ladder_template", sym, False,
+                            detail={"price": o.get("price")},
+                            error=f"去重撤单失败: {str(e)[:80]}"))
+        except Exception as e:  # noqa: BLE001
+            log.warning("ladder dedupe failed %s: %s", sym, e)
+
+        if placed or skipped or dup_removed:
             report.results.append(StepResult(
                 "ladder_template", sym, True,
-                detail={"placed": placed, "skipped": skipped,
+                detail={"placed": placed, "skipped": skipped, "dup_removed": dup_removed,
                         "anchor": mark, "sl": sl}))
 
     def _entry_gate(self, intent: Intent) -> str:
