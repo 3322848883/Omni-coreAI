@@ -59,7 +59,7 @@ ladder_template:
     atr_mult: 1.5         # 档距 ≥ 1.5 × ATR%（20 天回测：触发率 17%→54%）
     bb_div: 6.0           # 档距 ≥ 带宽 ÷ 6（带宽 1.66% → 0.28%）
     min_step_pct: 0.45    # 下限 ≈ 10.6 点（人格要求相邻档 ≥10 点）
-    max_step_pct: 1.2     # 上限（高波动时不再无限放宽）
+    max_step_pct: auto    # auto = 由 max_span_pct/grid_levels 推导（0.857%）；也可写死数值
     max_span_pct: 6.0     # 7 档总跨度 ≤ 6%（≈142 点）
     scale_martin: true    # 马丁深度同比缩放，避免档距放大后挤在网格里
     max_martin_pct: 9.0   # 马丁最深档上限（高波动时不被同比放大带飞）

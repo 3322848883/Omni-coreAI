@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+MARK0 = 2335.0
 sys.path.insert(0, str(ROOT))
 
 from omnialpha.executor import Executor  # noqa: E402
@@ -169,6 +170,61 @@ class _C:
 
     def cancel_order(self, oid):
         return {}
+
+
+class TestAiStepHint(unittest.TestCase):
+    """AI 档距建议通道：模型可给 ladder_step_pct，引擎 clamp 兜底。"""
+
+    def _run(self, hint_meta=None, hint_intent=None, max_step="auto"):
+        db = _db(atr=7.8, mid=MARK0, up=MARK0 * 1.013, lo=MARK0 * 0.987)
+        c = _C(MARK0)
+        ex = Executor(c, symbols_whitelist=["ETH_USDT"])
+        ex.ladder_template = {
+            "enabled": True, "grid_levels": 7, "grid_lots": 1, "grid_step_pct": 0.5,
+            "dynamic": {"enabled": True, "interval": "15m", "atr_mult": 1.5,
+                        "bb_div": 6.0, "min_step_pct": 0.45, "max_step_pct": max_step,
+                        "max_span_pct": 6.0, "scale_martin": True,
+                        "max_martin_pct": 9.0, "db_path": db},
+            "martin": [{"pct": 4.2, "lots": 6}],
+        }
+        ex._round_meta = dict(hint_meta or {})
+        import omnialpha.executor as E
+        leg = E.Intent(action="open_long", symbol="ETH_USDT", price=MARK0 * 0.995,
+                       size_usd=MARK0 * 0.01, sl=MARK0 * 0.92,
+                       meta=dict(hint_intent or {}))
+        class Rep:
+            results = []
+        rep = Rep()
+        ex._complete_ladder([leg], rep)
+        det = next((x.detail for x in rep.results
+                    if getattr(x, "action", "") == "ladder_template" and x.detail), {})
+        import pathlib as _pl
+        _pl.Path(db).unlink(missing_ok=True)
+        return det.get("step_pct"), (det.get("dynamic") or {})
+
+    def test_ai_hint_used_when_in_range(self):
+        step, dyn = self._run(hint_meta={"ladder_step_pct": 0.7})
+        self.assertAlmostEqual(step, 0.7, places=4)
+        self.assertFalse(dyn.get("ai_step_clamped"))
+
+    def test_ai_hint_clamped_by_span(self):
+        step, dyn = self._run(hint_meta={"ladder_step_pct": 2.0})
+        self.assertAlmostEqual(step, 6.0 / 7, places=3, msg="越界必须被跨度封顶")
+        self.assertTrue(dyn.get("ai_step_clamped"))
+
+    def test_ai_hint_clamped_by_min(self):
+        step, dyn = self._run(hint_meta={"ladder_step_pct": 0.1})
+        self.assertAlmostEqual(step, 0.45, places=4)
+        self.assertTrue(dyn.get("ai_step_clamped"))
+
+    def test_ai_hint_from_intent_meta(self):
+        step, _ = self._run(hint_intent={"ladder_step_pct": 0.8})
+        self.assertAlmostEqual(step, 0.8, places=4)
+
+    def test_no_hint_falls_back_to_dynamic(self):
+        step, dyn = self._run()
+        self.assertIsNone(dyn.get("ai_step_pct"))
+        self.assertAlmostEqual(step, 0.5011, places=3)
 
 
 if __name__ == "__main__":

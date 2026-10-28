@@ -94,7 +94,7 @@ def run(tag, atr, up, lo):
     ex.ladder_template = {
         "enabled": True, "grid_levels": 7, "grid_lots": 1, "grid_step_pct": 0.5,
         "dynamic": {"enabled": True, "interval": "15m", "atr_mult": 1.5, "bb_div": 6.0,
-                    "min_step_pct": 0.45, "max_step_pct": 1.2, "max_span_pct": 6.0,
+                    "min_step_pct": 0.45, "max_step_pct": "auto", "max_span_pct": 6.0,
                     "scale_martin": True, "max_martin_pct": 9.0, "db_path": db},
         "martin": [{"pct": 4.2, "lots": 6}, {"pct": 5.4, "lots": 7},
                    {"pct": 6.6, "lots": 9}],

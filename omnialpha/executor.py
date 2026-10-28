@@ -646,6 +646,8 @@ class Executor:
         # 为什么不「剪枝」就够了：模型每轮锚点不同（实测 2352→2357→2360），
         # 按价格剪枝只能剪掉当轮不重合的，下一轮又铺新的 → 13→12→11→9→15 反复。
         # 两个 master 永远不收敛；阶梯策略里档位本就该固定，交给引擎。
+        # 本轮 plan 的 meta：模板读 AI 的档距建议（`ladder_step_pct`）
+        self._round_meta = dict(getattr(signal, "meta", None) or {})
         tpl_intents = list(intents)      # 模板补齐要看**原始**意图（含入场腿的 sl）
         if (getattr(self, "ladder_template", None) or {}).get("enabled"):
             kept = []
@@ -1227,7 +1229,11 @@ class Executor:
             atr_mult = float(dyn.get("atr_mult", 1.0))
             bb_div = float(dyn.get("bb_div", 6.0))
             min_step = float(dyn.get("min_step_pct", 0.3))
-            max_step = float(dyn.get("max_step_pct", 1.2))
+            # `auto` = 不设固定上限，只由 max_span_pct/grid_n 推导（否则 float("auto")
+            # 抛 ValueError 被外层 except 吞掉 → **静默回退固定档距**，实测踩过）
+            _max_raw = dyn.get("max_step_pct", 1.2)
+            max_step = (float("inf") if _max_raw in (None, "", "auto")
+                        else float(_max_raw))
             max_span = float(dyn.get("max_span_pct") or 0)
             interval = str(dyn.get("interval") or "15m")
             db_path = str(dyn.get("db_path") or
@@ -1318,6 +1324,47 @@ class Executor:
         dyn_note: dict = {}
         if dyn.get("enabled"):
             step_pct, dyn_note = self._dynamic_step(sym, mark, grid_n, base_step, dyn)
+
+        # ── AI 建议档距（2026-10-28）：给模型留操作空间，但不让它越界 ────────
+        # 模型可在 plan 根 `meta.ladder_step_pct` 或任一 chip 的 `meta` 里给建议值，
+        # 引擎按 [min_step_pct, min(max_step_pct, max_span/grid_n)] clamp，
+        # 越界只记录不报错（`ai_step_clamped`）。不给 → 走 ATR/BB 动态公式。
+        ai_step = None
+        for src in (getattr(self, "_round_meta", {}) or {},):
+            if src.get("ladder_step_pct") is not None:
+                ai_step = src.get("ladder_step_pct")
+        if ai_step is None:
+            for it in intents:
+                m = getattr(it, "meta", None) or {}
+                if m.get("ladder_step_pct") is not None:
+                    ai_step = m.get("ladder_step_pct")
+                    break
+        if ai_step is not None:
+            try:
+                want_step = float(ai_step)
+            except (TypeError, ValueError):
+                want_step = None
+            if want_step is not None and want_step > 0:
+                try:
+                    lo = float(dyn.get("min_step_pct", 0.3))
+                except (TypeError, ValueError):
+                    lo = 0.3
+                try:
+                    hi_raw = dyn.get("max_step_pct")
+                    hi = float(hi_raw) if hi_raw not in (None, "", "auto") else float("inf")
+                except (TypeError, ValueError):
+                    hi = float("inf")
+                try:
+                    span = float(dyn.get("max_span_pct") or 0)
+                except (TypeError, ValueError):
+                    span = 0.0
+                if span > 0 and grid_n > 0:
+                    hi = min(hi, span / grid_n)
+                final = max(lo, min(hi, want_step))
+                dyn_note["ai_step_pct"] = want_step
+                dyn_note["ai_step_clamped"] = abs(final - want_step) > 1e-9
+                dyn_note["effective_max_step_pct"] = round(hi, 4) if hi != float("inf") else None
+                step_pct = final
         # 马丁深度同比缩放（否则档距放大后马丁档会挤在网格里）
         martin = list(martin)
         if dyn.get("enabled") and dyn.get("scale_martin", True) and base_step > 0:
