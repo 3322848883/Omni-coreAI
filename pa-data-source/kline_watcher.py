@@ -605,16 +605,35 @@ def list_all_sorted(symbol, interval):
 
 
 def upsert_candle(symbol, interval, candle):
+    """历史回补/REST 刷新的落库入口。
+
+    ⚠️ **不能整行 REPLACE**（2026-10-28 实测事故）：v2 表有 11 个指标列，
+    `INSERT OR REPLACE` 只带 11 个字段（含 ema20/atr14）会把其余 9 列**清成 NULL**
+    —— 迁移完成后每次重启的 REST 回补都会把最近若干根 15m bar 的指标抹掉
+    （实测 05:57-06:57 三根全 NULL，且「v2 引擎隔离测试完全正常」，因为主路径没问题）。
+    正确语义：**已存在的行只更新 OHLCV，指标列原样保留**；新行才插入。
+    """
     with db_lock:
-        db_conn.execute(
-            "INSERT OR REPLACE INTO [kline] (symbol,interval,t,o,h,l,c,v,sum,ema20,atr14) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        cur = db_conn.execute(
+            "UPDATE [kline] SET o=?, h=?, l=?, c=?, v=?, sum=? "
+            "WHERE symbol=? AND interval=? AND t=?",
             (
+                str(candle["o"]), str(candle["h"]), str(candle["l"]),
+                str(candle["c"]), str(candle["v"]), str(candle["sum"]),
                 symbol, interval, candle["t"],
-                str(candle["o"]), str(candle["h"]), str(candle["l"]), str(candle["c"]),
-                str(candle["v"]), str(candle["sum"]),
-                candle.get("ema20"), candle.get("atr14"),
             ),
         )
+        if cur.rowcount == 0:
+            db_conn.execute(
+                "INSERT OR REPLACE INTO [kline] "
+                "(symbol,interval,t,o,h,l,c,v,sum,ema20,atr14) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    symbol, interval, candle["t"],
+                    str(candle["o"]), str(candle["h"]), str(candle["l"]), str(candle["c"]),
+                    str(candle["v"]), str(candle["sum"]),
+                    candle.get("ema20"), candle.get("atr14"),
+                ),
+            )
         db_conn.commit()
 
 
