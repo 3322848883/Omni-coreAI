@@ -123,3 +123,9 @@ strategist:
     provider: gw-cn-flash
     fallback: [gw-flash, deepseek-official]
     reasoning_effort: high
+    # 2026-10-28 启用四周期人格（B 版）后单轮输出显著变长（四段分析 + 20 根
+    # kline_read + 四周期 EMA/状态/关键位）。实测回放 156–377 秒/轮，默认
+    # timeout_sec=120 必然超时（08:41:16 已实测 timed out attempt 1/3）。
+    # max_tokens 默认 8192 也可能截断（thinking 也计入 completion）。
+    timeout_sec: 600
+    max_tokens: 16384
