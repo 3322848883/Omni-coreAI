@@ -1323,6 +1323,14 @@ class Executor:
         if dyn.get("enabled") and dyn.get("scale_martin", True) and base_step > 0:
             ratio = step_pct / base_step
             if abs(ratio - 1.0) > 1e-9:
+                # 马丁深度同比缩放，但必须有独立上限：`max_span_pct` 只约束网格跨度，
+                # 不管马丁。实测（本地模拟高波动 bar）：step 0.857% × ratio 1.714 →
+                # 马丁最深 6.6%×1.714 = 11.3%、总跨度 10.46%（mark 2416 → 2143），
+                # 风险敞口远超预期。`max_martin_pct` 把最深档钉住（默认 9%）。
+                try:
+                    max_martin = float(dyn.get("max_martin_pct") or 9.0)
+                except (TypeError, ValueError):
+                    max_martin = 9.0
                 scaled = []
                 for m in martin:
                     try:
@@ -1330,8 +1338,19 @@ class Executor:
                                        "lots": m["lots"]})
                     except (KeyError, TypeError, ValueError):
                         continue
+                # 超上限时**整体等比压缩**到 [首档, max_martin] 区间，
+                # 不能各自截顶（两档都会被钉在 max_martin → 同价 → 去重吞档，
+                # 本地模拟实测：高波动下只铺出 9 层）。
+                if scaled:
+                    first, deepest = scaled[0]["pct"], scaled[-1]["pct"]
+                    if deepest > max_martin and deepest > first:
+                        k = (max_martin - first) / (deepest - first)
+                        for m in scaled:
+                            m["pct"] = first + (m["pct"] - first) * k
+                        dyn_note["martin_compressed"] = round(k, 3)
                 martin = scaled
                 dyn_note["martin_scaled_by"] = round(ratio, 3)
+                dyn_note["max_martin_pct"] = max_martin
         want: list[tuple[float, float]] = []
         for i in range(1, grid_n + 1):
             want.append((mark * (1 - step_pct * i / 100.0), grid_lots))

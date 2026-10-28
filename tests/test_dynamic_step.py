@@ -90,5 +90,86 @@ class TestDynamicStep(unittest.TestCase):
         self.assertEqual(note.get("error"), "no_indicator_row")
 
 
+class TestMartinScaling(unittest.TestCase):
+    """马丁同比缩放 + 上限压缩（本地模拟高波动暴露的两个坑）。"""
+
+    def _ex(self):
+        return Executor(C(), symbols_whitelist=["ETH_USDT"])
+
+    def _run(self, atr, mid, up, lo, max_martin=9.0):
+        db = _db(atr=atr, mid=mid, up=up, lo=lo)
+        ex = self._ex()
+        tpl = {
+            "enabled": True, "grid_levels": 7, "grid_lots": 1, "grid_step_pct": 0.5,
+            "dynamic": {"enabled": True, "interval": "15m", "atr_mult": 1.5,
+                        "bb_div": 6.0, "min_step_pct": 0.45, "max_step_pct": 1.2,
+                        "max_span_pct": 6.0, "scale_martin": True,
+                        "max_martin_pct": max_martin, "db_path": db},
+            "martin": [{"pct": 4.2, "lots": 6}, {"pct": 5.4, "lots": 7},
+                       {"pct": 6.6, "lots": 9}],
+        }
+        ex.ladder_template = tpl
+
+        class Rep:
+            results = []
+
+        import omnialpha.executor as E
+        leg = E.Intent(action="open_long", symbol="ETH_USDT", price=mid * 0.995,
+                       size_usd=mid * 0.01, sl=mid * 0.9)
+        c = _C(mid)
+        ex.client = c
+        rep = Rep()
+        ex._complete_ladder([leg], rep)
+        return [float(o["price"]) for o in c.placed], rep
+
+    def test_high_vol_martin_compressed_not_clamped(self):
+        """高波动：马丁必须压到 max_martin 且三档价格互不相同（10 层全铺）。"""
+        prices, rep = self._run(atr=18.2, mid=2417, up=2500, lo=2380, max_martin=9.0)
+        self.assertEqual(len(prices), 10, "压缩后仍应铺满 10 层（不能撞价被吞）")
+        deepest = (2417 - min(prices)) / 2417 * 100
+        self.assertLessEqual(deepest, 9.0 + 0.05, f"最深档 {deepest:.2f}% 超上限")
+
+    def test_scaled_martin_keeps_order(self):
+        prices, _ = self._run(atr=18.2, mid=2417, up=2500, lo=2380)
+        martin = sorted(prices)[:3]
+        self.assertEqual(len(set(round(p, 2) for p in martin)), 3, "三档不得重复")
+
+
+class _C:
+    def __init__(self, mark):
+        self.mark = mark
+        self.placed = []
+
+    def get_last_price(self, sym):
+        return self.mark
+
+    def get_contract(self, sym):
+        class M:
+            quanto_multiplier = 0.01
+            size_min = 0.1
+            size_step = 0.1
+            order_price_round = 0.05
+        return M()
+
+    def list_orders(self, sym):
+        return []
+
+    def list_price_orders(self, sym):
+        return []
+
+    def get_positions(self):
+        return []
+
+    def place_order(self, body):
+        self.placed.append(body)
+        return {"id": f"o{len(self.placed)}"}
+
+    def place_price_order(self, body):
+        return {"id": "p1"}
+
+    def cancel_order(self, oid):
+        return {}
+
+
 if __name__ == "__main__":
     unittest.main()
