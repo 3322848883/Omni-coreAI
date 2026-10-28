@@ -1479,6 +1479,68 @@ class Executor:
         # 无保护单时按 `sl`（来自原始入场腿）挂共享 SL，size = 持仓 + 入场总量。
         prot_added = None
         try:
+            # ── 覆盖校验（2026-10-28 实测 BUG）──────────────────────────
+            # `_sl_cover_cap` 的文档口径是「SL 应覆盖 持仓 + 未成交入场单」，
+            # 但它只被当作**上限**用于同价归并，没有下限兜底 → 模型给 -3 就照用。
+            # 实测线上：持仓 3 + 挂单 29 → SL 仍 -3，**29 张待成交完全没有止损**。
+            # 这里补下限：不足则先挂新 SL（-need）再撤旧的，避免裸窗。
+            # 敞口自算（不用 `_sl_cover_cap`：它依赖 bot 命名空间 prefix，
+            # prefix 为空时 `_owned_open_orders` 直接返回 [] → pending 恒 0，
+            # 本地三场景验证时就把 need 算成 3 而非 32）。
+            need = 0
+            try:
+                pos_sz = 0.0
+                for pos in self.client.get_positions() or []:
+                    if str(pos.get("contract")) == sym:
+                        pos_sz += abs(qty(pos.get("size")))
+                pend = 0.0
+                for o in self.client.list_orders(sym) or []:
+                    if o.get("is_reduce_only") or o.get("reduce_only"):
+                        continue
+                    if str(o.get("status") or "").lower() not in ("open", ""):
+                        continue
+                    size = _num(o.get("size"))
+                    left = o.get("left")
+                    left = size if left in (None, "") else _num(left)
+                    if size > 0 and left > 0:
+                        pend += left
+                need = int(round(pos_sz + pend))
+            except Exception:  # noqa: BLE001
+                need = 0
+            if need > 0 and sl is not None:
+                olds = []
+                covered = 0
+                for o in self.client.list_price_orders(sym) or []:
+                    trg = o.get("trigger") or {}
+                    ini = o.get("initial") or {}
+                    if str(o.get("status") or "").lower() not in ("open", ""):
+                        continue
+                    if int(trg.get("rule") or 0) != 2:
+                        continue
+                    olds.append(o)
+                    try:
+                        covered += abs(int(float(ini.get("size") or 0)))
+                    except (TypeError, ValueError):
+                        pass
+                if covered < need:
+                    body = {
+                        "initial": {"contract": sym, "size": -need, "price": "0",
+                                    "tif": "ioc", "reduce_only": True,
+                                    "text": f"t-{self._bot_tag('')}-sl"},
+                        "trigger": {"price": str(round_price(float(sl), meta)),
+                                    "rule": 2, "price_type": 1, "expiration": 86400},
+                    }
+                    o = self.client.place_price_order(body)
+                    prot_added = {"trigger": float(sl), "size": -need,
+                                  "reason": f"cover_gap({covered}<{need})",
+                                  "id": str((o or {}).get("id") or "")}
+                    for old_o in olds:      # 新单已挂 → 撤旧的不足尺寸 SL
+                        try:
+                            self.client.cancel_price_order(old_o["id"])
+                        except Exception:  # noqa: BLE001
+                            pass
+                else:
+                    prot_added = {"skipped": f"covered({covered}>={need})"}
             has_prot = bool(self.client.list_price_orders(sym) or [])
             if not has_prot and sl is not None:
                 pos_sz = 0.0
