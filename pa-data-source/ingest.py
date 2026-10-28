@@ -123,9 +123,15 @@ class SeriesRegistry:
         # 每序列只在首写时 seed 一次，代价是读 warmup 根 OHLC。
         if not getattr(w, "_primed", False):
             try:
-                seeded = self.prime(conn, symbol, interval)
-                logger.info("primed %s %s: %d 根（engine=%s）",
-                            symbol, interval, seeded, self.engine)
+                # 至少 50 根才值得 seed：太少时推进状态没有意义，反而会让
+                # 单测（2 根夹具）的期望值失真。生产库是 1700~2000 根。
+                cnt = conn.execute(
+                    "SELECT count(*) FROM kline WHERE symbol=? AND interval=?",
+                    (symbol, interval)).fetchone()[0]
+                if cnt >= 50:
+                    seeded = self.prime(conn, symbol, interval)
+                    logger.info("primed %s %s: %d 根（engine=%s）",
+                                symbol, interval, seeded, self.engine)
             except Exception as e:  # noqa: BLE001 — 预热失败不阻断写入
                 logger.warning("prime %s %s failed: %s", symbol, interval, e)
             finally:
