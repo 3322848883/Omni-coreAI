@@ -645,6 +645,7 @@ class Executor:
         # 为什么不「剪枝」就够了：模型每轮锚点不同（实测 2352→2357→2360），
         # 按价格剪枝只能剪掉当轮不重合的，下一轮又铺新的 → 13→12→11→9→15 反复。
         # 两个 master 永远不收敛；阶梯策略里档位本就该固定，交给引擎。
+        tpl_intents = list(intents)      # 模板补齐要看**原始**意图（含入场腿的 sl）
         if (getattr(self, "ladder_template", None) or {}).get("enabled"):
             kept = []
             for it in intents:
@@ -732,8 +733,9 @@ class Executor:
                 pre_owned, intents, report, explicit_cancel_symbols=cancel_syms,
             )
         # BOT 级阶梯补齐（ladder_template.enabled 才生效；默认关 → 行为不变）
+        # 用 `tpl_intents`（过滤前）：入场腿虽被跳过执行，但它的 sl 是补齐要用的止损价。
         try:
-            self._complete_ladder(intents, report)
+            self._complete_ladder(tpl_intents, report)
         except Exception as e:  # noqa: BLE001 — 补齐失败绝不影响本轮已成交的腿
             log.warning("ladder template completion failed: %s", e)
         return report
