@@ -58,7 +58,7 @@ paper:
 strategist:
   # `enabled: true` 若保留也无效（本地是零消费死键），真正生效的是
   # `strategist.runtime.plan_loop` / `runtime.run`（supervisor 读）。
-  prompt_file: prompts/_pa_slim_test_multi_v5.md
+  prompt_file: prompts/_pa_4tf_equal_v2.md
   # 🔴 `persona_strict` 已删除（2026-10-27 核实）：全仓**零读取点**。
   # 人格声明失配（人格里写了不在 symbols 的合约）只有一个 warn
   # （`config._warn_persona_symbols`），**fail-closed 从未实现** —— 之前
