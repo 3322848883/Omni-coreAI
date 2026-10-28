@@ -1374,10 +1374,42 @@ class Executor:
         except Exception as e:  # noqa: BLE001
             log.warning("ladder dedupe failed %s: %s", sym, e)
 
-        if placed or skipped or dup_removed:
+        # ── 模板附带保护单（2026-10-28）：独占铺梯后模型的入场腿被跳过，
+        # 若模型本轮又没发 modify_tp_sl，盘上就**一张保护单也没有** —— 实测 08:38 轮
+        # 10 层入场 + 0 触发单，成交即裸仓。模板既然独占入场，保护也要一并负责：
+        # 无保护单时按 `sl`（来自原始入场腿）挂共享 SL，size = 持仓 + 入场总量。
+        prot_added = None
+        try:
+            has_prot = bool(self.client.list_price_orders(sym) or [])
+            if not has_prot and sl is not None:
+                pos_sz = 0.0
+                for pos in self.client.get_positions() or []:
+                    if str(pos.get("contract")) == sym:
+                        pos_sz += abs(float(pos.get("size") or 0))
+                cover = pos_sz + sum(float(o.get("size") or 0) for o in
+                                     self.client.list_orders(sym) or []
+                                     if float(o.get("size") or 0) > 0)
+                if cover > 0:
+                    body = {
+                        "initial": {"contract": sym, "size": -int(round(cover)), "price": "0",
+                                    "tif": "ioc", "reduce_only": True,
+                                    "text": f"t-{self._bot_tag('')}-sl"},
+                        "trigger": {"price": str(round_price(float(sl), meta)),
+                                    "rule": 2, "price_type": 1, "expiration": 86400},
+                    }
+                    o = self.client.place_price_order(body)
+                    prot_added = {"trigger": float(sl), "size": int(round(cover)),
+                                  "id": str((o or {}).get("id") or "")}
+        except Exception as e:  # noqa: BLE001 — 保护单失败不该阻断本轮
+            report.results.append(StepResult(
+                "ladder_template", sym, False,
+                error=f"模板保护单失败: {str(e)[:120]}"))
+
+        if placed or skipped or dup_removed or prot_added:
             report.results.append(StepResult(
                 "ladder_template", sym, True,
                 detail={"placed": placed, "skipped": skipped, "dup_removed": dup_removed,
+                        "protection": prot_added,
                         "anchor": mark, "sl": sl}))
 
     def _entry_gate(self, intent: Intent) -> str:
