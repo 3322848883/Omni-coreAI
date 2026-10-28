@@ -640,6 +640,23 @@ class Executor:
         # 撞上总量闸门。`sorted` 是稳定排序，同优先级保持信号里的原顺序。
         intents = _sort_intents_by_priority(intents)
 
+        # ── 模板独占铺梯（2026-10-28）：`ladder_template.enabled` 时，模型的
+        # 入场腿一律不执行 —— 由 `_complete_ladder` 按模板铺 10 层。
+        # 为什么不「剪枝」就够了：模型每轮锚点不同（实测 2352→2357→2360），
+        # 按价格剪枝只能剪掉当轮不重合的，下一轮又铺新的 → 13→12→11→9→15 反复。
+        # 两个 master 永远不收敛；阶梯策略里档位本就该固定，交给引擎。
+        if (getattr(self, "ladder_template", None) or {}).get("enabled"):
+            kept = []
+            for it in intents:
+                if str(getattr(it, "action", "") or "").lower() in _ENTRY_ACTIONS:
+                    report.results.append(StepResult(
+                        it.action, str(getattr(it, "symbol", "") or ""), True,
+                        detail={"skipped": "template_owns_entries",
+                                "price": getattr(it, "price", None)}))
+                else:
+                    kept.append(it)
+            intents = kept
+
         for intent in intents:
             # 优雅停机检查点：参照 nofx 的 `isRunning`（每轮开始 + **每条决策
             # 执行前**都查）。我们原先只有进程级锁 —— 长批次执行中无法立即停手。
