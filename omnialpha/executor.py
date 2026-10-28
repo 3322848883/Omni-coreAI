@@ -1250,6 +1250,16 @@ class Executor:
                         if not (o.get("is_reduce_only") or o.get("reduce_only"))]
         except Exception:  # noqa: BLE001
             existing = []
+        # **总层数上限**（2026-10-28 实测）：模型自己铺的档位与模板价不重合 →
+        # 模板只会「补缺」，两套叠加会把 10 层变成 14 层（实测 martin-grid
+        # 入场单 14 条、马丁 9/9/9）。模板的语义是「保证有 10 层」，不是「再加 10 层」：
+        # 现有入场单已经 ≥ 模板总档数时，本轮不补。
+        if len(existing) >= len(want):
+            report.results.append(StepResult(
+                "ladder_template", sym, True,
+                detail={"skipped": "already_full", "existing": len(existing),
+                        "template_total": len(want)}))
+            return
         placed, skipped = [], []
         for px, lots in want:
             try:
@@ -1260,6 +1270,9 @@ class Executor:
                 skipped.append(price)
                 continue
             if price >= mark:           # 只补现价下方
+                skipped.append(price)
+                continue
+            if len(existing) >= len(want):
                 skipped.append(price)
                 continue
             body = {"contract": sym, "size": lots, "price": str(price),

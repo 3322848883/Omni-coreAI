@@ -97,6 +97,17 @@ class TestLadderTemplate(unittest.TestCase):
         self.assertNotIn(1980.0, prices, "已存在的档不得重复挂")
         self.assertEqual(prices, [1920.0, 1940.0, 1960.0])
 
+    def test_no_extra_layers_when_already_full(self):
+        """已存在入场单 ≥ 模板总档数 → 不再补（防模型档 + 模板档叠加成 14 层）。"""
+        olds = [{"price": str(px), "size": 1} for px in (1990, 1985, 1975, 1960)]
+        c = C(existing=olds, mark=2000.0)
+        ex = self._ex(c)
+        rep = Report()
+        ex._complete_ladder([_intent()], rep)
+        self.assertEqual(c.placed, [], "已满 4 档（模板 3+1）时不得再补")
+        dets = [r.detail for r in rep.results if r.detail.get("skipped")]
+        self.assertEqual(dets[0]["skipped"], "already_full")
+
     def test_no_sl_no_completion(self):
         c = C(mark=2000.0)
         ex = self._ex(c)
