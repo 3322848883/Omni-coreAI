@@ -108,9 +108,13 @@ def run(tag, atr=7.5, bw=2.6, null=False, sl=2160.0, meta=None, client=None,
     d = dict(TPL_PROD.get("dynamic") or {})
     d["db_path"] = db(atr, bw, null)
     ex.ladder_template = dict(TPL_PROD, dynamic=d)
-    if state:
-        ex.ladder_template.update({"anchor_mode": "fixed", "reanchor_threshold_pct": 2.0,
-                                   "anchor_state_file": str(state)})
+    # **必须**把锚点状态指到临时目录：生产配置里 anchor_mode=fixed +
+    # anchor_state_file=data/ladder_anchor.json，测试若照用会写脏真实锚点
+    # （实测本地跑完生成了 data/ladder_anchor.json，线上会直接读到错误锚点）。
+    ex.ladder_template.update({
+        "anchor_mode": "fixed", "reanchor_threshold_pct": 2.0,
+        "anchor_state_file": str(state or (Path(tempfile.mkdtemp()) / "anchor.json")),
+    })
     ex._round_meta = dict(meta or {})
     rep = Report()
     leg = Intent(action="open_long", symbol="ETH_USDT", price=MARK * 0.995,
@@ -173,9 +177,10 @@ print("\n" + "=" * 70)
 print("⑤ 幂等（同盘面连跑两次）")
 print("=" * 70)
 c3 = Client()
-run("a", client=c3)
+st3 = Path(tempfile.mkdtemp()) / "anchor.json"      # 同一 bot：锚点必须跨轮保持
+run("a", client=c3, state=st3)
 n1 = c3.total_placed
-_, det3, _ = run("b", client=c3)
+_, det3, _ = run("b", client=c3, state=st3)
 check("第二次不重复挂", c3.total_placed == n1, f"{n1} → {c3.total_placed}")
 check("标记 already_full", det3.get("skipped") == "already_full", str(det3.get("skipped")))
 
