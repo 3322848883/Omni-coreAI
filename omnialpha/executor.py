@@ -1675,6 +1675,160 @@ class Executor:
         except Exception:  # noqa: BLE001 — 写不进去不阻断铺梯
             pass
 
+    def _trend_weight(self, sym: str, tpl: dict) -> tuple[dict, dict]:
+        """两侧的**连续趋势权重**（0~1），供双向 3.0 决定每侧挂多少 / 多稀 / 多重。
+
+        用户口径（2026-10-30）：不是「一票否决式」翻向，也不是对称铺满 ——
+        大趋势那一侧多挂 / 密 / 重，逆势那侧少挂 / 稀 / 轻，极端时干脆不挂。
+
+            dev   = (close - ema200) / ema200       # 偏离（正 = 多头）
+            slope = ema200 近 lookback 根的变化率    # 趋势方向（正 = 上行）
+            trend = 0.6*clip(dev/full) + 0.4*clip(slope/full)    in [-1, 1]
+            w_long  = clip(0.5 + 0.5*trend)
+            w_short = clip(0.5 - 0.5*trend)
+
+        数据缺失 -> 两侧都 0.75（偏均衡，不瞎猜方向）。权重不落盘、不做迟滞：
+        它是「仓位倾斜」不是「方向判决」，每轮按最新 4H 重算即可。
+        """
+        cfg = tpl.get("two_way_cfg") or {}
+        note: dict = {}
+        iv = str(cfg.get("trend_interval") or "4h")
+        try:
+            lookback = int(cfg.get("trend_lookback") or 24)
+            dev_full = float(cfg.get("dev_full_pct") or 3.0) / 100.0
+            slope_full = float(cfg.get("slope_full_pct") or 3.0) / 100.0
+        except (TypeError, ValueError):
+            lookback, dev_full, slope_full = 24, 0.03, 0.03
+        dyn = tpl.get("dynamic") or {}
+        root = Path(__file__).resolve().parents[1]
+        db_path = str(dyn.get("db_path") or root / "pa-data-source" / "data" / "kline.db")
+
+        rows = []
+        try:
+            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
+            try:
+                rows = con.execute(
+                    "SELECT c, ema200 FROM kline WHERE symbol=? AND interval=? "
+                    "AND closed=1 ORDER BY t DESC LIMIT ?",
+                    (sym, iv, lookback + 1)).fetchall()
+            finally:
+                con.close()
+        except Exception as e:  # noqa: BLE001
+            note["error"] = f"db: {str(e)[:60]}"
+        rows = [(float(c), float(e)) for c, e in rows if c is not None and e]
+        if len(rows) < 2:
+            note["fallback"] = "no_4h_data"
+            return {"long": 0.75, "short": 0.75}, note
+
+        close, ema200 = rows[0]
+        ema_old = rows[-1][1]
+        dev = (close - ema200) / ema200 if ema200 else 0.0
+        slope = (ema200 - ema_old) / ema_old if ema_old else 0.0
+        cd = max(-1.0, min(1.0, dev / dev_full)) if dev_full else 0.0
+        cs = max(-1.0, min(1.0, slope / slope_full)) if slope_full else 0.0
+        trend = max(-1.0, min(1.0, 0.6 * cd + 0.4 * cs))
+        w_long = max(0.0, min(1.0, 0.5 + 0.5 * trend))
+        w_short = max(0.0, min(1.0, 0.5 - 0.5 * trend))
+        note.update({"rule": "trend_weight", "interval": iv,
+                     "close": round(close, 2), "ema200": round(ema200, 2),
+                     "dev_pct": round(dev * 100, 2),
+                     "slope_pct": round(slope * 100, 2),
+                     "trend": round(trend, 3),
+                     "w_long": round(w_long, 3), "w_short": round(w_short, 3),
+                     "samples": len(rows)})
+        return {"long": w_long, "short": w_short}, note
+
+    def _side_overrides(self, sym: str, mark: float, side: str,
+                        tpl: dict, dyn_note: dict) -> dict:
+        """双向 3.0：算出**这一侧**的 levels / step_pct / lots / weight。
+
+        优先级：AI 显式给定（`meta.two_way.<side>.*`）> 趋势权重映射 > 全局配置。
+        AI 给了具体值就照用（只做合法性 clamp）；只给 weight 则由映射展开。
+        """
+        cfg = tpl.get("two_way_cfg") or {}
+        ai_all = (getattr(self, "_round_meta", {}) or {}).get("two_way") or {}
+        ai = {}
+        if isinstance(ai_all, dict):
+            v = ai_all.get(side)
+            if isinstance(v, dict):
+                ai = v
+
+        base_n = float(tpl.get("grid_levels") or 10)
+        base_lots = float(tpl.get("grid_lots") or 1)
+        try:
+            min_w = float(cfg.get("min_weight") or 0.15)
+            lv_min = float(cfg.get("levels_at_min") or 0.35)
+            st_min = float(cfg.get("step_at_min") or 1.4)
+            lt_min = float(cfg.get("lots_at_min") or 0.3)
+            n_max = float(cfg.get("levels_max") or 15)
+        except (TypeError, ValueError):
+            min_w, lv_min, st_min, lt_min, n_max = 0.15, 0.35, 1.4, 0.3, 15.0
+
+        weights, wnote = self._trend_weight(sym, tpl)
+        dyn_note["trend_weight"] = wnote
+        w = weights.get(side, 0.75)
+        src = "trend"
+        if ai.get("weight") is not None:
+            try:
+                w = max(0.0, min(1.0, float(ai["weight"])))
+                src = "ai_weight"
+            except (TypeError, ValueError):
+                pass
+
+        out: dict = {"weight": round(w, 3), "weight_src": src}
+        # AI 明确要挂（给了 levels>0）时不接受权重否决 —— 否则「AI 说挂 3 层、
+        # 趋势说这侧不挂」会变成 AI 的意图被静默吞掉（实测 strong bear 下
+        # w_long=0.09，AI 给的 levels=3 被抹成 0）。
+        _ai_wants = False
+        if ai.get("levels") is not None:
+            try:
+                _ai_wants = int(ai["levels"]) > 0
+            except (TypeError, ValueError):
+                _ai_wants = False
+        if w < min_w and not _ai_wants:
+            out.update({"levels": 0,
+                        "reason": f"weight {w:.2f} < min {min_w:.2f}"})
+            dyn_note["side_plan"] = out
+            return out
+        if w < min_w and _ai_wants:
+            src += "+ai_forces_on"
+            w = max(w, min_w)          # 抬到阈值，让后续映射不产出 0 层
+
+        levels = base_n * (lv_min + (1.0 - lv_min) * w)
+        step_mul = st_min - (st_min - 1.0) * w
+        lots = base_lots * (lt_min + (1.0 - lt_min) * w)
+
+        for key in ("levels", "step_pct", "lots"):
+            if ai.get(key) is None:
+                continue
+            try:
+                if key == "levels":
+                    levels = float(int(ai[key]))
+                    src += "+ai_levels"
+                elif key == "step_pct":
+                    v = float(ai[key])
+                    if v > 0:
+                        out["step_pct_ai"] = v
+                        src += "+ai_step"
+                else:
+                    v = float(ai[key])
+                    if v > 0:
+                        lots = v
+                        src += "+ai_lots"
+            except (TypeError, ValueError):
+                continue
+
+        out.update({
+            "levels": max(0, min(int(n_max), int(round(levels)))),
+            "lots": max(1.0, round(lots, 2)),
+            # `step_mul` 是**倍数**，要在 `_dynamic_step` 算完之后再乘 ——
+            # 直接给绝对百分比会被动态公式覆盖掉（逆势侧间距放不大）。
+            "step_mul": round(step_mul, 4),
+            "weight_src": src,
+        })
+        dyn_note["side_plan"] = out
+        return out
+
     def _sl_drift_tol(self) -> float:
         """SL 规则的「允许漂移」比例（超过即按新规则重挂）。
 
@@ -2110,9 +2264,29 @@ class Executor:
                     sl = mark * (1 - pct / 100.0) if side == "long"                         else mark * (1 + pct / 100.0)
         if sl is None:
             return                      # 没有 sl 的轮次不补（补齐必须带止损）
+        dyn_note: dict = {}
+        # ── 每侧独立参数（双向 3.0，2026-10-30）────────────────────────────
+        # 双向**不是对称铺满**：大趋势那一侧多挂 / 密 / 重，逆势那侧少挂 / 稀 / 轻，
+        # 权重低于 `min_weight` 时该侧干脆不挂。参数优先级：
+        #   AI 显式（`meta.two_way.<side>.{weight,levels,step_pct,lots}`）
+        #   > 趋势权重映射（4H EMA200 偏离 + 斜率）
+        #   > 全局 grid_levels / grid_step_pct / grid_lots
+        sco: dict = {}
+        if forced in ("long", "short"):
+            sco = self._side_overrides(sym, mark, side, tpl, dyn_note)
+            if int(sco.get("levels") or 0) <= 0:
+                report.results.append(StepResult(
+                    "ladder_template", sym, True,
+                    detail={"two_way_side": side, "skipped": "side_weight_zero",
+                            "weight": sco.get("weight"),
+                            "reason": sco.get("reason"),
+                            "trend_weight": dyn_note.get("trend_weight")}))
+                return
         try:
-            grid_n = int(tpl.get("grid_levels") or 0)
-            grid_lots = float(tpl.get("grid_lots") or 1)
+            grid_n = int(sco["levels"] if sco.get("levels") is not None
+                         else (tpl.get("grid_levels") or 0))
+            grid_lots = float(sco["lots"] if sco.get("lots") is not None
+                              else (tpl.get("grid_lots") or 1))
             base_step = float(tpl.get("grid_step_pct") or 0.6)
             martin = list(tpl.get("martin") or [])
         except (TypeError, ValueError):
@@ -2125,11 +2299,28 @@ class Executor:
         # 数据源 = v2 库该序列最新**收盘** bar 的 atr14 / boll 三件套。
         dyn = tpl.get("dynamic") or {}
         step_pct = base_step
-        dyn_note: dict = {}
         # 锚点：fixed 模式跨轮/跨重启保持（trailing=现状，每轮跟最新价）
         anchor, anchor_note = self._resolve_anchor(sym, mark, tpl)
         if dyn.get("enabled"):
             step_pct, dyn_note = self._dynamic_step(sym, mark, grid_n, base_step, dyn)
+        # ── 每侧档距（双向 3.0）：必须在动态公式**之后**施加 ──────────────
+        # 逆势侧间距放大（step_mul > 1）、顺势侧维持 1.0；AI 显式给了
+        # `step_pct` 则以它为准（仍会被下面的 span 上限收一次）。
+        if forced in ("long", "short"):
+            if sco.get("step_pct_ai"):
+                try:
+                    step_pct = float(sco["step_pct_ai"])
+                    dyn_note["step_from_ai"] = round(step_pct, 4)
+                except (TypeError, ValueError):
+                    pass
+            elif sco.get("step_mul"):
+                try:
+                    _sm = float(sco["step_mul"])
+                    if _sm > 0:
+                        step_pct = step_pct * _sm
+                        dyn_note["step_mul"] = round(_sm, 4)
+                except (TypeError, ValueError):
+                    pass
 
         # ── AI 建议档距（2026-10-28）：给模型留操作空间，但不让它越界 ────────
         # 模型可在 plan 根 `meta.ladder_step_pct` 或任一 chip 的 `meta` 里给建议值，
@@ -2225,6 +2416,12 @@ class Executor:
         # 用户口径（2026-10-29）：层数动态 10~15，**档位放关键结构位**（OB/FVG/swing），
         # 不做等距等比网格；SL 覆盖价距 300~500 点，随区间放大。
         ld = tpl.get("levels_dynamic") or {}
+        # 双向 3.0：结构位模式的 10~15 层区间要跟着**这一侧**的目标层数走，
+        # 否则逆势侧明明只该挂 4 档，仍会按 min_levels=10 硬铺满。
+        if forced in ("long", "short") and sco.get("levels") is not None:
+            _n = max(1, int(sco["levels"]))
+            ld = dict(ld, min_levels=_n, max_levels=max(_n, min(
+                int(ld.get("max_levels") or 15), _n + 3)))
         level_note: dict = {}
         if ld.get("enabled") and not (tpl.get("edge") or {}).get("enabled"):
             r_pts, r_note = self._range_points(sym, dyn, ld)
@@ -2318,6 +2515,32 @@ class Executor:
                 slot_lots[int(k)] = float(v)
             except (TypeError, ValueError):
                 continue
+        if (slot_lots and forced in ("long", "short")
+                and int(grid_n) != int(tpl.get("grid_levels") or 0)):
+            # ── 马丁档位按比例重映射（双向 3.0）──────────────────────────
+            # `slot_lots` 的 key 是「在**基准层数**下的第几档」（10 层 → 3/7/10）。
+            # 逆势侧只挂 4 层时，key=10 会把 `use_n = max(max(slot_lots), grid_n)`
+            # 顶回 10 层，「少挂」直接失效；而硬裁掉 >n 的 key 又会让马丁只落在
+            # 前几档。按比例映射（3/10→1、7/10→3、10/10→4）保留马丁语义。
+            try:
+                _bn = int(tpl.get("grid_levels") or 10) or 10
+                _n = max(1, int(grid_n))
+                _remap: dict[int, float] = {}
+                for _k, _v in slot_lots.items():
+                    _pos = max(1, min(_n, int(round(float(_k) / _bn * _n))))
+                    _remap[_pos] = max(_remap.get(_pos, 0.0), float(_v))
+                slot_lots = _remap
+                dyn_note["martin_slots_remapped"] = {
+                    str(k): v for k, v in sorted(_remap.items())}
+            except (TypeError, ValueError):
+                pass
+        if slot_lots and forced in ("long", "short") and grid_lots != float(
+                tpl.get("grid_lots") or 1):
+            # 双向 3.0：逆势侧要把马丁档一起缩，否则「少挂」只减了网格档、
+            # 马丁那几档仍是原张数，总仓位压不下来。
+            _k = grid_lots / max(float(tpl.get("grid_lots") or 1), 1e-9)
+            slot_lots = {k: max(1.0, round(v * _k, 2)) for k, v in slot_lots.items()}
+            dyn_note["martin_scaled_by_side"] = round(_k, 3)
         if slot_lots and not edge.get("enabled") and not structured:
             use_n = max(max(slot_lots), grid_n)
             for i in range(1, use_n + 1):
@@ -2714,7 +2937,9 @@ class Executor:
                                                 dyn_note, report)
             report.results.append(StepResult(
                 "ladder_template", sym, True,
-                detail={"skipped": "already_full", "existing": len(existing),
+                detail={"side_plan": dyn_note.get("side_plan"),
+                "trend_weight": dyn_note.get("trend_weight"),
+                "skipped": "already_full", "existing": len(existing),
                         "template_total": len(want), "anchor": anchor,
                         "anchor_info": anchor_note, "mark": mark,
                         "off_max_pct": round(off_max * 100, 4),
@@ -2925,6 +3150,8 @@ class Executor:
                 "ladder_template", sym, True,
                 detail={"placed": placed, "skipped": skipped, "dup_removed": dup_removed,
                         "protection": prot_added, "step_pct": round(step_pct, 4),
+                        "side_plan": dyn_note.get("side_plan"),
+                        "trend_weight": dyn_note.get("trend_weight"),
                         "dynamic": dyn_note, "anchor": anchor,
                         "anchor_info": anchor_note, "mark": mark, "sl": sl}))
 

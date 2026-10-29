@@ -57,6 +57,21 @@ ladder_template:
   #    开之前先确认 total_risk_pct / max_total_notional_usd 容得下两侧。
   two_way: false
   two_way_sides: [long, short]   # 只挂一侧时可写成 [long] / [short]
+  # ── 趋势加权（双向 3.0）：两侧**不对称**，逆势侧少挂 / 稀 / 轻，极端可不挂 ──
+  # 权重 = f(4H close 对 EMA200 的偏离, EMA200 斜率)，两侧相加恒为 1。
+  # 映射：levels = base×(0.35+0.65w) / step = 动态档距×(1.4−0.4w) / lots = base×(0.3+0.7w)
+  # AI 可在 meta.two_way.<side> 里覆盖 weight/levels/step_pct/lots（优先级最高）。
+  two_way_cfg:
+    enabled: true
+    trend_interval: 4h
+    trend_lookback: 24        # EMA200 斜率回看根数
+    dev_full_pct: 3.0         # 偏离多少算满权重（3%）
+    slope_full_pct: 3.0       # 斜率多少算满权重
+    min_weight: 0.15          # 低于这个权重该侧**完全不挂**
+    levels_at_min: 0.35       # w=0 时保留的层数比例
+    step_at_min: 1.4          # w=0 时间距放大倍数
+    lots_at_min: 0.3          # w=0 时仓位比例
+    levels_max: 15
   grid_levels: 10       # **每侧**层数（7 网格 + 3 马丁，马丁占 2/6/10 档）
   grid_lots: 1          # 网格每档 1 张
   grid_step_pct: 0.5    # 动态关闭时的固定档距；动态开启时只作马丁缩放基准

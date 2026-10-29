@@ -144,11 +144,19 @@ def main():
     con = sqlite3.connect(dbp)
     con.execute("CREATE TABLE kline (symbol TEXT, interval TEXT, t INTEGER, closed INT, "
                 "o REAL, h REAL, l REAL, c REAL, atr14 REAL, boll20 REAL, "
-                "boll20_upper REAL, boll20_lower REAL)")
+                "boll20_upper REAL, boll20_lower REAL, ema200 REAL)")
     base = BARS[START]
-    con.execute("INSERT INTO kline VALUES ('ETH_USDT','15m',?,1,?,?,?,?,?,?,?,?)",
+    con.execute("INSERT INTO kline VALUES ('ETH_USDT','15m',?,1,?,?,?,?,?,?,?,?,NULL)",
                 (base["t"], base["o"], base["h"], base["l"], base["c"],
                  7.5, base["c"], base["c"] * 1.013, base["c"] * 0.987))
+    # 真实 4H 序列：趋势权重靠它（close vs ema200 + ema200 斜率）
+    h4 = DATA.get("h4") or []
+    for rec in h4:
+        con.execute(
+            "INSERT INTO kline (symbol, interval, t, closed, o, h, l, c, ema200) "
+            "VALUES ('ETH_USDT','4h',?,1,?,?,?,?,?)",
+            (rec["t"], rec.get("o", rec["c"]), rec.get("h", rec["c"]),
+             rec.get("l", rec["c"]), rec["c"], rec.get("ema200")))
     con.commit()
     tpl["dynamic"] = dict(tpl.get("dynamic") or {}, db_path=str(dbp))
     tpl["anchor_state_file"] = str(d / "anchor.json")
@@ -168,9 +176,13 @@ def main():
         bar = BARS[i]
         c.mark = float(bar["c"])
         con.execute("UPDATE kline SET t=?, o=?, h=?, l=?, c=?, boll20=?, boll20_upper=?, "
-                    "boll20_lower=?",
+                    "boll20_lower=? WHERE interval='15m'",
                     (bar["t"], bar["o"], bar["h"], bar["l"], bar["c"], bar["c"],
                      bar["c"] * 1.013, bar["c"] * 0.987))
+        # 4H「游标」：把当前时间段之前的 4H 行标成 closed=1、之后的标 closed=0，
+        # 这样 `_trend_weight` 只看到「当时已收盘」的 4H（不偷看未来）。
+        con.execute("UPDATE kline SET closed=CASE WHEN t<=? THEN 1 ELSE 0 END "
+                    "WHERE interval='4h'", (bar["t"],))
         con.commit()
         if k > 0:
             match(c, float(bar["h"]), float(bar["l"]), i)
@@ -186,6 +198,12 @@ def main():
                          for b in c.book if float(b["size"]) < 0))
         sl2 = [p for p in c.prot if int((p.get("trigger") or {}).get("rule") or 0) == 2]
         sl1 = [p for p in c.prot if int((p.get("trigger") or {}).get("rule") or 0) == 1]
+        det = {}
+        for _r in rep.results:
+            _d = getattr(_r, "detail", None) or {}
+            if _d.get("trend_weight") or _d.get("side_plan"):
+                det = _d
+                break
 
         print(f"\n── 第 {k+1} 轮  bar#{i}  mark={c.mark:.2f}  "
               f"高/低 {float(bar['h']):.2f}/{float(bar['l']):.2f}")
@@ -195,6 +213,20 @@ def main():
         print(f"   空 {len(shorts)} 档 " +
               (f"{shorts[0][0]:.2f} → {shorts[-1][0]:.2f} 张数 {[int(s) for _, s in shorts]}"
                if shorts else "（空）"))
+        tw = det.get("trend_weight") or {}
+        pl = det.get("side_plan") or {}
+        if tw.get("rule"):
+            print(f"   趋势 4H close={tw.get('close')} EMA200={tw.get('ema200')} "
+                  f"偏离={tw.get('dev_pct')}% 斜率={tw.get('slope_pct')}% "
+                  f"→ trend={tw.get('trend')}  w多={tw.get('w_long')} w空={tw.get('w_short')}")
+        for sd in ("long", "short"):
+            d2 = [r for r in rep.results
+                  if (getattr(r, "detail", None) or {}).get("two_way_side") == sd]
+            plan = (d2[0].detail.get("side_plan") if d2 else None) or {}
+            if plan:
+                print(f"   {sd:<5} plan: 权重 {plan.get('weight')} 层数 {plan.get('levels')} "
+                      f"档距×{plan.get('step_mul')} 张数×{plan.get('lots')} "
+                      f"({plan.get('weight_src')})")
         if sl2 and longs:
             p = float(sl2[0]["trigger"]["price"])
             print(f"   多SL rule2 {p:.2f} size={(sl2[0]['initial'] or {}).get('size')}"
