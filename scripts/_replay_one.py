@@ -9,6 +9,7 @@
   3) 记录 side / 阶梯 / 持仓 / 权益
 """
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -26,7 +27,7 @@ from omnialpha.schema import Intent  # noqa: E402
 
 QUANTO = 0.01
 FEE = 0.0002
-NOTIONAL_CAP = 1400.0      # 生产 max_total_notional_usd，回放里模拟风控拒单
+NOTIONAL_CAP = float(os.environ.get("REPLAY_NOTIONAL_CAP") or 1400.0)  # 生产 max_total_notional_usd，回放里模拟风控拒单
 
 
 class Meta:

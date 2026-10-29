@@ -597,6 +597,19 @@ class Executor:
         report = ExecReport()
         intents = expand_signal(signal)
         if not intents:
+            # ── always_on：0 单轮也必须维护阶梯（2026-10-29 链路实测 BUG）───────
+            # `loop.py` 已在 hold 轮写好信号文件，但这里提前 return →
+            # `_complete_ladder` 永不执行 → **always_on 形同虚设**。
+            # 实测线上 12 小时：模型 cancel_all 撤梯后连续 54/60 轮 hold，
+            # 阶梯与保护单全空；本地端到端同样 5 轮 0 层 0 SL。
+            _tpl = getattr(self, "ladder_template", None) or {}
+            if _tpl.get("enabled") and _tpl.get("always_on"):
+                try:
+                    self._complete_ladder([], report)
+                except Exception as e:  # noqa: BLE001
+                    report.results.append(StepResult(
+                        "ladder_template", "", False,
+                        error=f"always_on 铺梯失败: {str(e)[:120]}"))
             report.results.append(
                 StepResult("hold", "", True, detail={"skipped": True})
             )
@@ -1504,6 +1517,74 @@ class Executor:
                      if n > 1 else None})
         return want, note
 
+    def _levels_state_path(self, tpl: dict) -> Optional[Path]:
+        """档位稳定 state 路径（默认与锚点 state 同目录的 `ladder_levels.json`）。
+
+        独立文件而不是塞进 `ladder_anchor.json`：`_resolve_anchor` 在重锚时
+        `data[sym] = {...}` 整体替换，同文件会互相抹掉。
+        """
+        sp = tpl.get("levels_state_file")
+        if sp:
+            p = Path(str(sp))
+            return p if p.is_absolute() else Path(__file__).resolve().parents[1] / p
+        ap = tpl.get("anchor_state_file")
+        try:
+            if ap:
+                a = Path(str(ap))
+                if not a.is_absolute():
+                    a = Path(__file__).resolve().parents[1] / a
+                return a.with_name("ladder_levels.json")
+        except Exception:  # noqa: BLE001
+            pass
+        return Path(__file__).resolve().parents[1] / "data" / "ladder_levels.json"
+
+    def _read_levels_state(self, sym: str, tpl: dict) -> dict:
+        try:
+            p = self._levels_state_path(tpl)
+            if p and p.exists():
+                data = json.loads(p.read_text(encoding="utf-8")) or {}
+                return data.get(sym) or {}
+        except Exception:  # noqa: BLE001
+            pass
+        return {}
+
+    def _write_levels_state(self, sym: str, tpl: dict, side: str,
+                            anchor: float, want: list) -> None:
+        try:
+            p = self._levels_state_path(tpl)
+            if not p:
+                return
+            data: dict = {}
+            if p.exists():
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8")) or {}
+                except Exception:  # noqa: BLE001
+                    data = {}
+            data[sym] = {"side": side, "anchor": round(float(anchor), 6),
+                         "ts": int(time.time()),
+                         "levels": [[round(float(px), 6), float(l)] for px, l in want]}
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(p.suffix + ".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1),
+                           encoding="utf-8")
+            tmp.replace(p)
+        except Exception:  # noqa: BLE001 — 写不进去不阻断铺梯
+            pass
+
+    def _sl_drift_tol(self) -> float:
+        """SL 规则的「允许漂移」比例（超过即按新规则重挂）。
+
+        2026-10-29 回放实测：硬编码 5% 在 2400 价位 = 120 点，比 300~500 的
+        覆盖口径粒度还粗 → 锚点重锚 6 次、SL 只跟随 3 次，档位早就不在保护范围内。
+        改为可配 `sl_distance.drift_pct`，默认 0.015（≈36 点 @2400，不到口径的 1/8）。
+        """
+        cfg = (getattr(self, "ladder_template", None) or {}).get("sl_distance") or {}
+        try:
+            v = float(cfg.get("drift_pct") or 0.015)
+        except (TypeError, ValueError):
+            v = 0.015
+        return v if v > 0 else 0.015
+
     def _maybe_rewrite_sl(self, sym: str, meta: Any, sl: Any, side: str,
                           want: list, dyn_note: dict, report) -> Optional[dict]:
         """阶梯不动时的 SL 维护（张数不足 / 价格偏离当前规则 → 重挂）。
@@ -1557,6 +1638,38 @@ class Executor:
                 target_px = round_price(float(sl), meta)
             except (TypeError, ValueError):
                 return {"error": "bad_sl"}
+            # ── target 必须按**盘上实际档位**算，不能按重算的 `want`（2026-10-29）──
+            # already_full 的语义是「阶梯没动」，但 `want` 是每轮重新算的（结构位
+            # 随 96 根窗口滑动）→ 按 want 算出的 SL 在保护一个并不存在的档位。
+            # 回放实测：SL 在 2835.5 ↔ 2769.6 之间抖动、700 轮重挂 24 次，
+            # 且「距最深档」只剩 160~230 点（低于 300 口径）。
+            # 口径点数从 `dyn_note.sl_points` 取（主分支已按 300~500 算好）。
+            book_px: list[float] = []
+            try:
+                for o in self.client.list_orders(sym) or []:
+                    if o.get("is_reduce_only") or o.get("reduce_only"):
+                        continue
+                    if str(o.get("status") or "").lower() not in ("open", ""):
+                        continue
+                    px_o = float(o.get("price") or 0)
+                    sz_o = _num(o.get("size"))
+                    if px_o <= 0:
+                        continue
+                    if (side == "long" and sz_o > 0) or (side == "short" and sz_o < 0):
+                        book_px.append(px_o)
+            except Exception:  # noqa: BLE001
+                book_px = []
+            try:
+                pts = float((dyn_note.get("sl_points") or {}).get("points") or 0)
+            except (TypeError, ValueError):
+                pts = 0.0
+            if book_px and pts > 0:
+                deepest = max(book_px) if side == "short" else min(book_px)
+                raw_t = deepest + pts if side == "short" else deepest - pts
+                try:
+                    target_px = round_price(raw_t, meta)
+                except Exception:  # noqa: BLE001
+                    pass
 
             drift = None
             if covered >= need and olds and target_px:
@@ -1564,7 +1677,7 @@ class Executor:
                     cur_px = float((olds[-1].get("trigger") or {}).get("price") or 0)
                 except (TypeError, ValueError):
                     cur_px = 0.0
-                if cur_px > 0 and abs(cur_px - target_px) / cur_px > 0.05:
+                if cur_px > 0 and abs(cur_px - target_px) / cur_px > self._sl_drift_tol():
                     drift = {"from": cur_px, "to": target_px}
 
             if covered < need or drift:
@@ -1821,6 +1934,13 @@ class Executor:
         actions = {str(getattr(i, "action", "") or "").lower() for i in entry_legs}
         side = "short" if actions & {"open_short", "add_short", "stop_entry_short"} else "long"
         sl = getattr(entry_legs[0], "sl", None) if entry_legs else None
+        # `sl` 来源决定它能不能被「跟档位重算」（见下方 SL 护栏段）：
+        #   模型本轮明示的 sl = 交易意图 → 与 target 取更远者（收紧等于更容易被打）
+        #   盘上已有的 SL = **引擎自己前几轮的产物** → 必须跟档位走
+        # 2026-10-29 回放实测：不区分来源时 `max(cur, target)` 变成单调棘轮 ——
+        # 锚点重锚 6 次（2438→2302），SL 始终 2838.9，距现价从 400 点拉到 536 点，
+        # 远超 300~500 口径，且永远无法跟上档位。
+        sl_engine_owned = False
         if sl is None and always_on:
             # 回退 1：盘上已有 SL 的触发价（模型此前设过的）
             try:
@@ -1829,6 +1949,7 @@ class Executor:
                     if int(trg.get("rule") or 0) in (1, 2):
                         sl = float(trg.get("price") or 0) or None
                         if sl:
+                            sl_engine_owned = True
                             break
             except Exception:  # noqa: BLE001
                 pass
@@ -2124,6 +2245,43 @@ class Executor:
             ]
         if not want:
             return
+        # ── 档位跨轮稳定（2026-10-29 回放实测）──────────────────────────
+        # `want` 每轮重新算：结构位随 96 根窗口滑动、档距随 ATR/BB 变 →
+        # 档位抖动 → prune 每轮「撤一条补一条」、SL target 跟着抖
+        # （回放 700 轮：SL 重挂 46 次、盘上阶梯在 1~12 条之间震荡、成交暴增）。
+        # **锚点没重锚 = 阶梯不该动**：沿用上一轮实际铺出的档位。
+        # 只在 `anchor_mode: fixed` 下启用：trailing 的锚点每轮都换，缓存永远
+        # 不命中，白写一次磁盘（实测还会让所有走 `_complete_ladder` 的单元测试
+        # 往仓库 `data/ladder_levels.json` 里写测试数据）。
+        if anchor_note.get("mode") == "fixed" and not anchor_note.get("reanchored"):
+            cached = self._read_levels_state(sym, tpl)
+            try:
+                c_anchor = float(cached.get("anchor") or 0)
+            except (TypeError, ValueError):
+                c_anchor = 0.0
+            if (cached and cached.get("side") == side and c_anchor > 0
+                    and abs(c_anchor - anchor) / max(anchor, 1e-9) < 1e-4):
+                c_want = []
+                for it in cached.get("levels") or []:
+                    try:
+                        _px, _lots = float(it[0]), float(it[1])
+                    except (TypeError, ValueError, IndexError):
+                        c_want = []
+                        break
+                    # 缓存是磁盘文件，可能被外部改写/半截写入 → 逐档校验。
+                    # 实测：负价/0 价档位会被原样挂出去（px=[-1.0, 0.0, 2300.0]）。
+                    # 用**锚点**做基准而非现价：档位被价格穿过后落在「现价的错误侧」
+                    # 是正常状态（多头档位被跌穿），不能因此否决整份缓存。
+                    if _px <= 0 or _lots <= 0 or abs(_px / c_anchor - 1) > 1.0:
+                        c_want = []
+                        break
+                    c_want.append((_px, _lots))
+                if c_want:
+                    want = c_want
+                    dyn_note["levels_state"] = "reused"
+        if not dyn_note.get("levels_state") and anchor_note.get("mode") == "fixed":
+            self._write_levels_state(sym, tpl, side, anchor, want)
+            dyn_note["levels_state"] = "written"
         # ── SL 距离护栏（2026-10-29）────────────────────────────────────
         # 实测线上 SL=2160：距 mark 7.4%、距最深档 19.6 点看似合理，但距近 200 根
         # 低点 2296 有 136 点 = 18×ATR —— 要跌 7.4% 才触发，等于没有保护。
@@ -2150,11 +2308,14 @@ class Executor:
             deepest_px = (min(p for p, _ in want) if side == "long"
                           else max(p for p, _ in want))
             target = deepest_px - pts if side == "long" else deepest_px + pts
+            cur = None
             try:
                 cur = float(sl)
             except (TypeError, ValueError):
                 cur = None
-            if cur is None:
+            if cur is None or sl_engine_owned:
+                # 引擎自己挂的旧 SL 不参与「取更远者」：直接按本轮最深档重算，
+                # 否则档位上移时 SL 只增不减，跟不住阶梯。
                 sl = target
             else:
                 sl = min(cur, target) if side == "long" else max(cur, target)
@@ -2164,6 +2325,8 @@ class Executor:
                        "distance_pct": round(abs(sl - mark) / mark * 100, 2)}
             if cur is not None and abs(cur - sl) > 1e-9:
                 sl_note["original"] = round(cur, 2)
+            if sl_engine_owned:
+                sl_note["owner"] = "engine"
             dyn_note["sl_points"] = sl_note
         elif sl is not None and want and atr_price:
             if side == "long":
@@ -2276,8 +2439,13 @@ class Executor:
         tmpl_prices = [price for price, _ in want]          # want 已按 mark 计算好
         removed = []
         try:
+            # 🔴 不能按 `size > 0` 过滤：**空头挂单 size 是负数**，那样空梯一艘
+            # 都不在 `owned` 里 → 永不 prune → 重锚后阶梯卡在旧价位（2026-10-29
+            # 回放实测：锚点从 2438 重锚到 2302，盘上档位仍是 2446~2538，
+            # `existing >= len(want)` 又把新档全挡掉，阶梯 700 轮没换过一次，
+            # SL 按旧档位算出 2838.9，与新档位的 target 交替 → 重挂 24 次）。
             owned = [o for o in self.client.list_orders(sym) or []
-                     if float(o.get("size") or 0) > 0
+                     if float(o.get("size") or 0) != 0
                      and not (o.get("is_reduce_only") or o.get("reduce_only"))]
         except Exception:  # noqa: BLE001
             owned = []
@@ -2364,8 +2532,9 @@ class Executor:
         # 按 ±0.3% 分桶，每桶只留一条（优先张数更接近模板的），其余撤掉。
         dup_removed = []
         try:
+            # 同上：空头 size 为负，`size > 0` 会让空梯的同价去重整段失效。
             books = [o for o in self.client.list_orders(sym) or []
-                     if float(o.get("size") or 0) > 0
+                     if float(o.get("size") or 0) != 0
                      and not (o.get("is_reduce_only") or o.get("reduce_only"))]
             buckets: list[list[dict]] = []
             for o in sorted(books, key=lambda x: -float(x.get("price") or 0)):
@@ -2463,7 +2632,7 @@ class Executor:
                         cur_px = float((olds[-1].get("trigger") or {}).get("price") or 0)
                     except (TypeError, ValueError):
                         cur_px = 0.0
-                    if cur_px > 0 and abs(cur_px - target_px) / cur_px > 0.05:
+                    if cur_px > 0 and abs(cur_px - target_px) / cur_px > self._sl_drift_tol():
                         drift = {"from": cur_px, "to": target_px,
                                  "points": (dyn_note.get("sl_points") or {}).get("points")}
                 if covered < need or drift:
@@ -2495,9 +2664,16 @@ class Executor:
                 for pos in self.client.get_positions() or []:
                     if str(pos.get("contract")) == sym:
                         pos_sz += abs(float(pos.get("size") or 0))
-                cover = pos_sz + sum(float(o.get("size") or 0) for o in
-                                     self.client.list_orders(sym) or []
-                                     if float(o.get("size") or 0) > 0)
+                # 同向挂单按绝对值累加：空头 size 为负，`sum(size) if size>0`
+                # 会把整条空梯算成 0 → 兜底 SL 只覆盖持仓张数。
+                pend_abs = 0.0
+                for o in self.client.list_orders(sym) or []:
+                    if o.get("is_reduce_only") or o.get("reduce_only"):
+                        continue
+                    s = float(o.get("size") or 0)
+                    if (side == "long" and s > 0) or (side == "short" and s < 0):
+                        pend_abs += abs(s)
+                cover = pos_sz + pend_abs
                 if cover > 0:
                     body = {
                         "initial": {"contract": sym, "size": -int(round(cover)), "price": "0",
