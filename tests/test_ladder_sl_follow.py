@@ -311,6 +311,28 @@ class TestStaleLadderReplaced(Base):
                         f"重铺后间距应均匀，实际 {[round(g,3) for g in gaps]}")
         self.assertLessEqual(len(px), 11, f"旧档不该堆积：{len(px)} 条")
 
+    def test_martin_lot_mismatch_is_replaced(self):
+        """价格对但张数错（旧马丁位残留 9 张 vs 本档应 1 张）也必须换掉。
+
+        2026-10-30 实盘：旧梯最深档 2217.19 是 9 张（旧马丁位），新 want 的
+        2217.54 只要 1 张 —— 只比价格就会认领它 → 总张数 37 ≠ 29，多出 8 张敞口。
+        """
+        c = Client(MARK, 0.0, "long")
+        tpl = self._tpl()
+        self._run(c, tpl, action="open_long")
+        want_total = sum(abs(float(b["size"])) for b in c.book)
+        px = sorted((float(b["price"]) for b in c.book), reverse=True)
+        victim = px[8]                     # 倒数第二档：want 里是 1 张
+        for b in c.book:
+            if abs(float(b["price"]) - victim) < 1e-9:
+                b["size"] = 9.0
+        _, det, _ = self._run(c, tpl, action="open_long")
+        total = sum(abs(float(b["size"])) for b in c.book)
+        self.assertEqual(total, want_total,
+                         f"张数错位必须被纠正：{want_total} → {total}"
+                         f"（多出的就是没认领掉的旧马丁位）")
+        self.assertEqual(len(c.book), len(px), f"档数不该变：{len(px)} → {len(c.book)}")
+
     def test_aligned_ladder_not_touched(self):
         c = Client(MARK, 0.0, "long")
         tpl = self._tpl()

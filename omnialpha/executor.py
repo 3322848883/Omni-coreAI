@@ -2469,26 +2469,32 @@ class Executor:
         # （实测 2311.72 与 2310.21 相差 1.5 点并存 → 重铺后间距 0.42/0.61/0.44
         # 忽宽忽窄，档位语义破坏、SL 口径也算不准）。用全局贪心：先按距离排序，
         # 逐个认领（一条挂单只服务一个档位、一个档位只留一条挂单）。
+        # **张数也必须对上**：旧梯 2217.19 是 9 张（旧马丁位），新 want 的 2217.54
+        # 只要 1 张 —— 只比价格就会把它认领走，马丁张数错位（实测总张数 37 ≠ 29，
+        # 多出 8 张敞口）。张数不符 → 不认领，撤掉重挂。
         pairs: list = []
         for o in owned:
             try:
                 px = float(o.get("price") or 0)
+                sz_o = abs(_num(o.get("size")))
             except (TypeError, ValueError):
                 continue
             if px <= 0:
                 continue
-            for t in tmpl_prices:
+            for t, lots in want:
                 if t <= 0:
                     continue
                 d = abs(px - t) / t
                 if d <= align_tol:
-                    pairs.append((d, str(o.get("id")), px, t))
+                    pairs.append((d, str(o.get("id")), px, t, sz_o, float(lots)))
         pairs.sort()
         keep_ids: set = set()
         used_t: set = set()
-        for d, oid, px, t in pairs:
+        for d, oid, px, t, sz_o, lots in pairs:
             if oid in keep_ids or t in used_t:
                 continue
+            if abs(sz_o - lots) > max(0.5, lots * 0.1):
+                continue                      # 张数不符 → 交给撤单+重挂
             keep_ids.add(oid)
             used_t.add(t)
         for o in owned:
@@ -2510,9 +2516,9 @@ class Executor:
                 "ladder_template", sym, True,
                 detail={"pruned_off_template": removed, "anchor": mark}))
 
-        # 已存在的入场档（价格）
+        # 已存在的入场档（价格, 张数绝对值）
         try:
-            existing = [float(o.get("price") or 0)
+            existing = [(float(o.get("price") or 0), abs(_num(o.get("size"))))
                         for o in self.client.list_orders(sym) or []
                         if not (o.get("is_reduce_only") or o.get("reduce_only"))]
         except Exception:  # noqa: BLE001
@@ -2528,12 +2534,21 @@ class Executor:
         off_max = 0.0
         if existing and want:
             hit = 0
-            for q, _ in want:
+            for q, lots in want:
                 if q <= 0:
                     continue
-                best = min((abs(p - q) / q for p in existing if p > 0), default=1.0)
-                off_max = max(off_max, best)
-                if best <= align_tol:
+                best_d, best_sz = 1.0, None
+                for p, sz_o in existing:
+                    if p <= 0:
+                        continue
+                    d = abs(p - q) / q
+                    if d < best_d:
+                        best_d, best_sz = d, sz_o
+                off_max = max(off_max, best_d)
+                # 价格对齐 **且** 张数对得上才算这一档就绪：马丁档张数错位
+                # （旧梯 2217.19=9 张 vs want 2217.54=1 张）比价格错位更难看出来。
+                if (best_d <= align_tol and best_sz is not None
+                        and abs(best_sz - float(lots)) <= max(0.5, float(lots) * 0.1)):
                     hit += 1
             aligned = hit == len([1 for q, _ in want if q > 0])
         if (not anchor_note.get("reanchored") and aligned
@@ -2557,7 +2572,7 @@ class Executor:
                 price = round_price(px, meta)
             except Exception:  # noqa: BLE001
                 continue
-            if any(p > 0 and abs(price - p) / p <= align_tol for p in existing):
+            if any(p > 0 and abs(price - p) / p <= align_tol for p, _ in existing):
                 skipped.append(price)
                 continue
             if side == "long" and price >= mark:      # 多头只补现价下方
@@ -2576,7 +2591,7 @@ class Executor:
                 order = self.client.place_order(body)
                 placed.append({"price": price, "size": signed,
                                "id": str((order or {}).get("id") or "")})
-                existing.append(price)
+                existing.append((price, abs(float(lots))))
             except Exception as e:  # noqa: BLE001
                 report.results.append(StepResult(
                     "ladder_template", sym, False,
