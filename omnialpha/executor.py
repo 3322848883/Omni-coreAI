@@ -1428,19 +1428,25 @@ class Executor:
             return
         entry_legs = [i for i in intents
                       if str(getattr(i, "action", "") or "").lower() in _ENTRY_ACTIONS]
-        if not entry_legs:
+        # ── 模板常驻（2026-10-29）：模型 hold 时阶梯不该消失 ──────────────
+        # 实测 12h：02:05 模型 cancel_all 撤梯 → 之后 54/60 轮 hold → 模板因
+        # 「本轮无入场腿」直接 return → 阶梯空了 12 小时。
+        # `always_on: true` 时不再要求入场腿，SL 依次回退：
+        #   本意意图的 sl → 盘上已有 SL 触发价 → config `sl_pct`。
+        always_on = bool(tpl.get("always_on"))
+        if not entry_legs and not always_on:
             return
-        sym = str(getattr(entry_legs[0], "symbol", "") or "")
+        if entry_legs:
+            sym = str(getattr(entry_legs[0], "symbol", "") or "")
+        else:
+            sym = str(tpl.get("symbol") or "")
+            if not sym:
+                wl = getattr(self, "symbols_whitelist", None) or []
+                sym = str(wl[0]) if len(wl) == 1 else ""
         if not sym:
             return
-        # ── 方向（2026-10-29）：默认跟随模型入场腿；`direction_mode: auto` 时
-        # 由波动/趋势规则自己判（价格与 BB 中轨 + EMA 关系），从而同一套模板
-        # 可以「涨了做多回踩、跌了做空反弹」。
-        actions = {str(getattr(i, "action", "") or "").lower() for i in entry_legs}
-        side = "short" if actions & {"open_short", "add_short", "stop_entry_short"} else "long"
-        sl = getattr(entry_legs[0], "sl", None)
-        if sl is None:
-            return                      # 没有 sl 的轮次不补（补齐必须带止损）
+        # 取价/合约要早于 SL 回退：`sl_pct` 兜底要用 mark（早期实现放在后面，
+        # always_on + 无已有 SL 时会 NameError）。
         try:
             mark = float(self.client.get_last_price(sym) or 0)
             meta = self.client.get_contract(sym)
@@ -1450,6 +1456,34 @@ class Executor:
             return
         if mark <= 0:
             return
+
+        # ── 方向（2026-10-29）：默认跟随模型入场腿；`direction_mode: auto` 时
+        # 由波动/趋势规则自己判（价格与 BB 中轨 + EMA 关系），从而同一套模板
+        # 可以「涨了做多回踩、跌了做空反弹」。
+        actions = {str(getattr(i, "action", "") or "").lower() for i in entry_legs}
+        side = "short" if actions & {"open_short", "add_short", "stop_entry_short"} else "long"
+        sl = getattr(entry_legs[0], "sl", None) if entry_legs else None
+        if sl is None and always_on:
+            # 回退 1：盘上已有 SL 的触发价（模型此前设过的）
+            try:
+                for o in self.client.list_price_orders(sym) or []:
+                    trg = o.get("trigger") or {}
+                    if int(trg.get("rule") or 0) in (1, 2):
+                        sl = float(trg.get("price") or 0) or None
+                        if sl:
+                            break
+            except Exception:  # noqa: BLE001
+                pass
+            # 回退 2：config sl_pct（百分比）
+            if sl is None:
+                try:
+                    pct = float(tpl.get("sl_pct") or 0)
+                except (TypeError, ValueError):
+                    pct = 0.0
+                if pct > 0:
+                    sl = mark * (1 - pct / 100.0) if side == "long"                         else mark * (1 + pct / 100.0)
+        if sl is None:
+            return                      # 没有 sl 的轮次不补（补齐必须带止损）
         try:
             grid_n = int(tpl.get("grid_levels") or 0)
             grid_lots = float(tpl.get("grid_lots") or 1)

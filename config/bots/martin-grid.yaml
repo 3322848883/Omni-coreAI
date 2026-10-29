@@ -52,6 +52,12 @@ ladder_template:
   grid_step_pct: 0.5    # 动态关闭时的固定档距；动态开启时只作马丁缩放基准
   # 锚点（2026-10-29）：fixed = 锚点跨轮/跨重启保持，价格回撤才吃得到；
   # trailing = 每轮跟最新价（旧行为，日化 ~864 次撤+挂，且回撤永远在阶梯上方）
+  # 模板常驻（2026-10-29）：模型 hold 时阶梯也不消失。
+  # 实测 12h：模型 cancel_all 后 54/60 轮 hold → 模板因「无入场腿」直接 return，
+  # 阶梯空了 12 小时。开启后 SL 依次回退：已有 SL 触发价 → sl_pct。
+  always_on: true
+  symbol: ETH_USDT
+  sl_pct: 5.0
   anchor_mode: fixed
   reanchor_threshold_pct: 2.0     # mark 偏离锚点 >2% 才重锚
   anchor_state_file: data/ladder_anchor.json

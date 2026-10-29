@@ -31,6 +31,7 @@ class Meta:
 class Client:
     def __init__(self):
         self.book = []
+        self.prot = []
 
     def get_last_price(self, sym):
         return MARK
@@ -42,17 +43,20 @@ class Client:
         return []
 
     def list_orders(self, sym):
-        return []
+        return [{"id": b["id"], "price": str(b["price"]), "size": b["size"],
+                 "left": b["size"], "status": "open", "text": "t-mtg"} for b in self.book]
 
     def list_price_orders(self, sym):
-        return []
+        return self.prot
 
     def place_order(self, body):
-        self.book.append(body)
+        self.book.append(dict(body, id=f"o{len(self.book)}"))
         return {"id": f"o{len(self.book)}"}
 
     def place_price_order(self, body):
-        return {"id": "p"}
+        self.prot.append({"id": f"p{len(self.prot)}", "status": "open",
+                          "initial": body["initial"], "trigger": body["trigger"]})
+        return {"id": f"p{len(self.prot)}"}
 
     def cancel_order(self, oid):
         return {}
@@ -128,6 +132,51 @@ class TestMartinSlots(unittest.TestCase):
         self.assertAlmostEqual(adj["adjusted"], lo, places=1)
         self.assertLessEqual(abs(lo - (deepest - 3 * ATR)), 0.05)
         self.assertGreater(adj["adjusted"], 2160.0)
+
+
+class TestAlwaysOn(unittest.TestCase):
+    """模板常驻：模型 hold（无入场腿）时也要铺满，SL 走 sl_pct 兜底。"""
+
+    def _run(self, intents, tpl_extra=None):
+        db = _db()
+        c = Client()
+        ex = Executor(c, symbols_whitelist=["ETH_USDT"])
+        tpl = {
+            "enabled": True, "grid_levels": 10, "grid_lots": 1, "grid_step_pct": 0.5,
+            "martin_slots": {3: 6, 7: 7, 10: 9}, "martin": [], "snap_tol_pct": 0.15,
+            "always_on": True, "symbol": "ETH_USDT", "sl_pct": 5.0,
+            "dynamic": {"enabled": True, "interval": "15m", "atr_mult": 1.5,
+                        "bb_div": 6.0, "min_step_pct": 0.45, "max_step_pct": "auto",
+                        "max_span_pct": 6.0, "scale_martin": True,
+                        "max_martin_pct": 9.0, "db_path": db},
+        }
+        tpl.update(tpl_extra or {})
+        ex.ladder_template = tpl
+        ex._round_meta = {}
+        rep = Report()
+        ex._complete_ladder(intents, rep)
+        Path(db).unlink(missing_ok=True)
+        dets = [s.detail for s in rep.results
+                if getattr(s, "action", "") == "ladder_template" and s.detail]
+        det = next((d for d in dets if "step_pct" in d), dets[0] if dets else {})
+        return c, det
+
+    def test_hold_only_still_lays_ladder(self):
+        c, _det = self._run([Intent(action="hold", symbol="ETH_USDT")])
+        self.assertEqual(len(c.book), 10, "模型 hold 时仍应铺满 10 层")
+        self.assertTrue(c.prot, "必须挂出兜底 SL")
+
+    def test_sl_from_config_pct_and_clamped(self):
+        c, det = self._run([Intent(action="hold", symbol="ETH_USDT")])
+        sl_px = float(c.prot[-1]["trigger"]["price"])
+        self.assertLess(sl_px, MARK, "多头 SL 在现价下方")
+        adj = (det.get("dynamic") or {}).get("sl_adjusted") or {}
+        self.assertTrue(adj, "sl_pct 5% 应被护栏拉进 [最深-3ATR, 最深-1ATR]")
+
+    def test_no_always_on_still_requires_entry(self):
+        c, _ = self._run([Intent(action="hold", symbol="ETH_USDT")],
+                         {"always_on": False})
+        self.assertEqual(c.book, [], "未开常驻时 hold 不铺梯（旧行为）")
 
 
 if __name__ == "__main__":
