@@ -36,9 +36,13 @@ def slim(tr, start, end):
 
 panels = {}
 for seg, a, b, _title in SEGS:
-    for tag in ("live", "local"):
+    for tag in ("legacy", "structure"):
         d = load(tag, seg)
+        lv = [x["levels"] for x in d["trace"] if x.get("levels")]
+        slp = [x["sl_pts"] for x in d["trace"] if x.get("sl_pts")]
         panels[f"{seg}_{tag}"] = {
+            "lv_txt": f"{min(lv)}~{max(lv)}" if lv else "—",
+            "sl_txt": f"{int(min(slp))} 点" if slp else "5% 兜底 (≈128 点)",
             "bars": slim(d["trace"], a, b),
             "fills": d["fills"],
             "sl": d["sl_hits"],
@@ -57,7 +61,7 @@ payload = json.dumps({"panels": panels,
 
 HTML = """<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
-<title>阶梯回放 · 线上 vs 本地（真实 ETH 15m）</title>
+<title>阶梯回放 · 等距网格 vs 结构位档位（真实 ETH 15m）</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0d1117;color:#e6edf3;font:14px/1.6 -apple-system,"Segoe UI",system-ui,sans-serif;
@@ -84,8 +88,8 @@ canvas{width:100%;height:280px;display:block;margin-top:4px}
       border-radius:6px;padding:12px 16px;font-size:12.5px;color:#a8b3bf;margin-top:8px}
 .note b{color:#e6edf3}
 </style></head><body>
-<h1>阶梯引擎回放 · 线上版 vs 本地版</h1>
-<div class="sub">真实 ETH_USDT 15m K 线（服务器 kline.db）· 每根 K 线一轮 · 两版跑同一份生产配置</div>
+<h1>阶梯引擎回放 · 等距等比网格 vs 结构位档位</h1>
+<div class="sub">真实 ETH_USDT 15m K 线（服务器 kline.db）· 每根 K 线一轮 · 同一份配置，只切 levels_dynamic / sl_distance</div>
 <div class="legend">
   <span><i style="background:#8b949e"></i>K 线</span>
   <span><i style="background:#e3b341"></i>4H EMA200</span>
@@ -190,18 +194,17 @@ const EMA = P.ema;
 
 function stats(p){
   const s=p.sum;
-  return `<b>${s.auto_flips}</b> 次方向翻转 · <b>${s.fills}</b> 笔成交（<b>${s.fill_qty}</b> 张）
-    · <b>${s.sl_hits}</b> 次 SL · 末仓 <b>${s.final_pos}</b> 张
-    ${s.blocked_rounds? `· <span class="hl"><b>${s.blocked_rounds}</b> 轮被拦截</span>`:""}`;
+  return `档位 <b>${p.lv_txt}</b> 层 · SL 覆盖价距 <b>${p.sl_txt}</b>
+    · <b>${s.fills}</b> 笔成交（<b>${s.fill_qty}</b> 张）· <b>${s.sl_hits}</b> 次 SL`;
 }
 
 const app=document.getElementById("app");
 SEGS.forEach(([seg,a,b,title])=>{
   const wrap=document.createElement("div"); wrap.className="seg";
   wrap.innerHTML=`<h2>${title}</h2><div class="grid">
-    <div class="card"><h3>线上版 a09bfc5 <span class="tag live">15m BB 裸判 · 无反向护栏</span></h3>
+    <div class="card"><h3>改前 · 等距 10 层 <span class="tag live">SL = 最深档 −3×ATR（≈5.5%）</span></h3>
       <canvas id="cv_${seg}_live"></canvas><div class="stats" id="st_${seg}_live"></div></div>
-    <div class="card"><h3>本地版 e5a9934 <span class="tag local">4H EMA200 迟滞 + 反向护栏</span></h3>
+    <div class="card"><h3>改后 · 结构位 10~15 层 <span class="tag local">SL = 最深档 −300~500 点</span></h3>
       <canvas id="cv_${seg}_local"></canvas><div class="stats" id="st_${seg}_local"></div></div>
   </div>`;
   app.appendChild(wrap);
@@ -209,7 +212,7 @@ SEGS.forEach(([seg,a,b,title])=>{
 
 requestAnimationFrame(()=>{
   SEGS.forEach(([seg])=>{
-    ["live","local"].forEach(tag=>{
+    ["legacy","structure"].forEach(tag=>{
       const p=PANELS[`${seg}_${tag}`];
       draw(document.getElementById(`cv_${seg}_${tag}`), p);
       document.getElementById(`st_${seg}_${tag}`).innerHTML = stats(p);
@@ -219,12 +222,14 @@ requestAnimationFrame(()=>{
 
 const tot = ["live","local"].map(t=>SEGS.reduce((n,[s])=>n+PANELS[`${s}_${t}`].sum.auto_flips,0));
 document.getElementById("note").innerHTML = `<b>怎么读这张图</b><br>
-· 每个短横线是一次挂单，颜色随引擎判定的方向变（蓝=铺下方接多 / 橙=铺上方接空）。线上版的方向
-在中轨附近来回跳（两段合计翻转 <b>${tot[0]}</b> 次），本地版始终单方向（<b>${tot[1]}</b> 次）——
-因为线上 <code>direction_mode:auto</code> 读的是 15m BB 中轨，本地读 4H EMA200 带 0.98/1.005 迟滞。<br>
-· 图底部色带同理：线上大面积蓝橙交替，本地一条色。<br>
-· <b>本图不展示收益</b>：回放只有模板的共享 SL，<b>没有止盈</b>（TP 由模型每轮下发），
-且未含资金费，所以成交与 SL 次数只反映“行为差异”，不代表盈亏。要看盈亏需 paper 实跑。`;
+· 短横线 = 挂单（颜色随方向：蓝=铺下方接多 / 橙=铺上方接空）；圆点 = 成交。<br>
+· 左图档位等距（每档约 11 点），右图档位落在 swing 结构位上、间距不等（本次回放用 swing
+极值模拟 AI 的 <code>structure_levels</code>，真实由 smc_map 的 OB/FVG 给出）。<br>
+· <b>两张图都没触发 SL</b>：这段 4 天行情最深回撤约 4%，而改前 SL 距现价 5.5%（128 点）、
+改后 12.9%（300 点）——<b>本样本不足以触到任何一个</b>。要验证「少止损」需看更长的样本：
+此前 20.8 天统计的未来 8h 最大回撤 P99 = 5.09%、max = 6.26%，旧 SL 5.5% 正好压在 P99 上，
+新 SL 12.9% 是这个 max 的两倍以上。<br>
+· <b>本图不展示收益</b>：回放只有共享 SL、没有止盈（TP 由模型每轮下发），撮合用净持仓简化。`;
 </script></body></html>"""
 
 out = ROOT / "reports"

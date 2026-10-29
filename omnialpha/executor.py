@@ -1379,6 +1379,131 @@ class Executor:
             pass
         return None, 0.0
 
+    def _range_points(self, sym: str, dyn: dict, cfg: dict) -> tuple[float, dict]:
+        """近 lookback 根的区间宽度（点数）= max(high) − min(low)。
+
+        用途：① 层数自适应（区间越大层数越多，别被固定 10 层截断）；
+              ② 覆盖价距（止损随区间放大到 300~500 点）。
+        """
+        note: dict = {}
+        try:
+            interval = str(cfg.get("interval") or dyn.get("interval") or "15m")
+            lookback = int(cfg.get("lookback") or 96)
+            db_path = str(dyn.get("db_path") or
+                          (Path(__file__).resolve().parents[1]
+                           / "pa-data-source" / "data" / "kline.db"))
+            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
+            try:
+                row = con.execute(
+                    "SELECT min(l), max(h), count(*) FROM (SELECT l, h FROM kline "
+                    "WHERE symbol=? AND interval=? AND closed=1 ORDER BY t DESC LIMIT ?)",
+                    (sym, interval, lookback)).fetchone()
+            finally:
+                con.close()
+        except Exception as e:  # noqa: BLE001
+            note["error"] = f"db: {str(e)[:60]}"
+            return 0.0, note
+        if not row or not row[0] or not row[1]:
+            note["error"] = "no_range_rows"
+            return 0.0, note
+        lo, hi, n = float(row[0]), float(row[1]), int(row[2])
+        note.update({"lo": round(lo, 2), "hi": round(hi, 2), "bars": n,
+                     "range_pct": round((hi - lo) / lo * 100, 2) if lo else None})
+        return (hi - lo), note
+
+    def _structure_targets(self, sym: str, mark: float, side: str, cfg: dict,
+                           level_note: dict, tpl: dict) -> tuple[list, dict]:
+        """把 AI 给的结构位转成档位（**不等距**）。
+
+        用户口径：10~15 层放在关键结构位（OB / FVG / swing / EQL），不要等距等比。
+        · 多头取现价**下方**、空头取**上方**，按距离由近到远，最多 max_levels 个
+        · 不足 min_levels → 在区间里等分补点（仅补空缺，结构位优先；不退回纯等距）
+        · 张数按位次比例沿用 `martin_slots`（10 层下的 3/7/10 = 30%/70%/100%）
+        """
+        try:
+            min_lv = int(cfg.get("min_levels") or 10)
+            max_lv = int(cfg.get("max_levels") or 15)
+            min_gap = float(cfg.get("min_gap_pct") or 0.3)
+        except (TypeError, ValueError):
+            min_lv, max_lv, min_gap = 10, 15, 0.3
+        raw = (getattr(self, "_round_meta", {}) or {}).get("structure_levels") or []
+        try:
+            lv = sorted({round(float(x), 2) for x in raw if float(x) > 0})
+        except (TypeError, ValueError):
+            lv = []
+        note: dict = {"given": len(lv), "side": side}
+        if not lv:
+            # 一个结构位都没给 → 回退等距（不能凭空"延伸"出 10 档冒充结构位）
+            return [], dict(note, error="no_structure_levels",
+                            hint="plan meta.structure_levels 为空，本轮回退等距")
+        near, far = (mark * (1 - min_gap / 100), 0.0) if side == "long" \
+            else (mark * (1 + min_gap / 100), 0.0)
+        if side == "long":
+            cands = [p for p in lv if p < near]
+            cands.sort(reverse=True)          # 由近到远（价格由高到低）
+        else:
+            cands = [p for p in lv if p > near]
+            cands.sort()                      # 由近到远（价格由低到高）
+        note["in_side"] = len(cands)
+        # 区间窄时必须压缩间距，否则 10 档 × 0.3% 铺不进 53 点的区间（会溢出区间外）
+        try:
+            _rng = (level_note or {}).get("range") or {}
+            _lo0 = float(_rng.get("lo") or 0)
+            _hi0 = float(_rng.get("hi") or 0)
+        except (TypeError, ValueError):
+            _lo0 = _hi0 = 0.0
+        note["min_gap_pct"] = round(min_gap, 3)
+        # 档位之间必须有最小间距：横盘时 swing 极值会密集簇生（实测 14 个结构位
+        # 全挤在 22 点内、间距 0.06%）→ 贪心去重，按「由近到远」保留
+        if min_gap > 0:
+            kept: list[float] = []
+            for p in cands:
+                if all(abs(p - k) / max(k, 1e-9) * 100 >= min_gap for k in kept):
+                    kept.append(p)
+            note["deduped_out"] = len(cands) - len(kept)
+            cands = kept
+        cands = cands[:max_lv]
+
+        filled = 0
+        if len(cands) < min_lv:
+            # 结构位不足 → 沿「远离现价」方向按统一间距延伸。
+            # **不限制在区间内**：结构位本就可以在区间外（更远的 swing 低/高点），
+            # 早期硬塞进区间会把间距压到 2 点（实测 0.09%），比等距还密。
+            if len(cands) >= 2:
+                gaps = [abs(cands[i] - cands[i+1]) for i in range(len(cands) - 1)]
+                ext_gap = max(float(tpl.get("grid_step_pct") or 0.5) / 100 * mark,
+                              min_gap / 100 * mark, sum(gaps) / len(gaps))
+            else:
+                ext_gap = max(min_gap / 100 * mark, mark * 0.004)
+            cur = cands[-1] if cands else mark
+            while len(cands) < min_lv:
+                cur = cur - ext_gap if side == "long" else cur + ext_gap
+                cands.append(round(cur, 2))
+                filled += 1
+        cands.sort(reverse=(side == "long"))
+
+        if len(cands) < 2:
+            return [], dict(note, error="insufficient_levels",
+                            hint="plan meta.structure_levels 需 ≥2 个正确侧的结构位")
+
+        # 张数：位次比例沿用 martin_slots（3/7/10 @ 10 层 → 30%/70%/100%）
+        base_n = int(tpl.get("grid_levels") or 10) or 10
+        pct_map: dict[float, float] = {}
+        for k, v in (tpl.get("martin_slots") or {}).items():
+            try:
+                pct_map[float(k) / base_n] = float(v)
+            except (TypeError, ValueError):
+                continue
+        n = len(cands)
+        slot_pos = {max(1, min(n, int(round(pct * n)))): lots
+                    for pct, lots in pct_map.items()}
+        base_lots = float(tpl.get("grid_lots") or 1)
+        want = [(p, slot_pos.get(i + 1, base_lots)) for i, p in enumerate(cands)]
+        note.update({"filled": filled, "levels": n, "slots": slot_pos,
+                     "spacing_pct": round((cands[0] - cands[-1]) / mark * 100, 2)
+                     if n > 1 else None})
+        return want, note
+
     def _direction_state_path(self, hcfg: dict) -> Path:
         sp = hcfg.get("state_file")
         path = (Path(str(sp)) if sp else
@@ -1736,7 +1861,33 @@ class Executor:
         dyn_note["side"] = side
         sgn = -1.0 if side == "long" else 1.0     # 多头铺锚点下方，空头铺上方
 
+        # ── 区间度量（层数与 SL 都用它）──────────────────────────────────
+        # 用户口径（2026-10-29）：层数动态 10~15，**档位放关键结构位**（OB/FVG/swing），
+        # 不做等距等比网格；SL 覆盖价距 300~500 点，随区间放大。
+        ld = tpl.get("levels_dynamic") or {}
+        level_note: dict = {}
+        if ld.get("enabled") and not (tpl.get("edge") or {}).get("enabled"):
+            r_pts, r_note = self._range_points(sym, dyn, ld)
+            level_note = {"range_points": round(r_pts, 1), "range": r_note,
+                          "min_levels": int(ld.get("min_levels") or 10),
+                          "max_levels": int(ld.get("max_levels") or 15)}
+            dyn_note["range"] = level_note
+
         want: list[tuple[float, float]] = []
+        # ── 结构位档位（2026-10-29 用户要求）：不等距，直接用关键结构位 ────
+        # 为什么：等距等比档位与市场结构无关，价格在区间里横盘时全是被动挨打。
+        # 做法：AI 从 smc_map 给 `meta.structure_levels`（OB/FVG/swing/EQL…），
+        # 多头取现价**下方**、空头取**上方**，按距离取 10~15 个；
+        # 不足 10 个时在最大间隙插中点补足（保留结构位优先，不退回等距）。
+        structured = False
+        if ld.get("structure_only") and not (tpl.get("edge") or {}).get("enabled"):
+            sw, snote = self._structure_targets(sym, mark, side, ld, level_note, tpl)
+            if sw:
+                want = sw
+                grid_n = len(sw)
+                structured = True
+                dyn_note["structure_only"] = snote
+                dyn_note["levels"] = dict(level_note, levels=len(sw), mode="structure")
         # ── 边缘模式（2026-10-29）：只在区间下沿接多 / 上沿接空，中间不挂 ──
         # 动机：等距铺满 10 档时，中间档位在均衡区被来回扫（低买高卖变成双向止损）。
         # 边缘模式把档位集中到「近 lookback 根」的最低/最高附近（band 内），
@@ -1803,7 +1954,7 @@ class Executor:
                 slot_lots[int(k)] = float(v)
             except (TypeError, ValueError):
                 continue
-        if slot_lots and not edge.get("enabled"):
+        if slot_lots and not edge.get("enabled") and not structured:
             use_n = max(max(slot_lots), grid_n)
             for i in range(1, use_n + 1):
                 lots = slot_lots.get(i, grid_lots)
@@ -1811,7 +1962,8 @@ class Executor:
             dyn_note["model"] = "slots"
             dyn_note["slots"] = {str(k): v for k, v in sorted(slot_lots.items())}
             grid_n = use_n
-        for i in range(1, (grid_n + 1) if (not slot_lots and not edge.get("enabled")) else 1):
+        for i in range(1, (grid_n + 1) if (not slot_lots and not edge.get("enabled")
+                                          and not structured) else 1):
             want.append((anchor * (1 + sgn * step_pct * i / 100.0), grid_lots))
         # ── 马丁深度 ATR 化（2026-10-29）───────────────────────────────
         # 档距已按 ATR 自适应，马丁深度却写死 4.2/5.4/6.6% —— 实测 ATR 7.5(0.32%)
@@ -1823,7 +1975,7 @@ class Executor:
         except (TypeError, ValueError):
             atr_pct_now = None
         atr_based = False
-        for m in ([] if slot_lots else martin):
+        for m in ([] if (slot_lots or structured) else martin):
             try:
                 lots = float(m["lots"])
             except (KeyError, TypeError, ValueError):
@@ -1888,11 +2040,43 @@ class Executor:
         # 低点 2296 有 136 点 = 18×ATR —— 要跌 7.4% 才触发，等于没有保护。
         # 护栏：SL 必须落在 [最深档 − 3×ATR, 最深档 − 1×ATR]。
         sl_note: dict = {}
+        sdcfg = tpl.get("sl_distance") or {}
         try:
             atr_price = float(dyn_note.get("atr") or 0) or None
         except (TypeError, ValueError):
             atr_price = None
-        if sl is not None and want and atr_price:
+        if sl is not None and want and sdcfg.get("enabled"):
+            # ── 覆盖价距（点数，2026-10-29 用户要求）────────────────────
+            # SL 距**最深档** 300~500 点（随区间放大），而不是 ATR 的 45~67 点 ——
+            # 后者在 300 点宽的区间里必然被反复打掉（回放实测 SL 20~40 次/4 天）。
+            # 与模型给的 sl 取**更远者**：收紧等于更容易被打，与「不要频繁止损」相反。
+            try:
+                pmin = float(sdcfg.get("min_points") or 300)
+                pmax = float(sdcfg.get("max_points") or 500)
+                mult = float(sdcfg.get("range_mult") or 2.0)
+            except (TypeError, ValueError):
+                pmin, pmax, mult = 300.0, 500.0, 2.0
+            r_pts = float(level_note.get("range_points") or 0)
+            pts = max(pmin, min(pmax, r_pts * mult)) if r_pts > 0 else pmin
+            deepest_px = (min(p for p, _ in want) if side == "long"
+                          else max(p for p, _ in want))
+            target = deepest_px - pts if side == "long" else deepest_px + pts
+            try:
+                cur = float(sl)
+            except (TypeError, ValueError):
+                cur = None
+            if cur is None:
+                sl = target
+            else:
+                sl = min(cur, target) if side == "long" else max(cur, target)
+            sl_note = {"mode": "points", "points": round(pts, 1),
+                       "deepest": round(deepest_px, 2),
+                       "range_points": round(r_pts, 1),
+                       "distance_pct": round(abs(sl - mark) / mark * 100, 2)}
+            if cur is not None and abs(cur - sl) > 1e-9:
+                sl_note["original"] = round(cur, 2)
+            dyn_note["sl_points"] = sl_note
+        elif sl is not None and want and atr_price:
             if side == "long":
                 deepest_px = min(p for p, _ in want)
                 lo_b = deepest_px - 3.0 * atr_price

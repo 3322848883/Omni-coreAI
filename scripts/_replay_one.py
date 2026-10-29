@@ -18,6 +18,7 @@ ROOT = Path(sys.argv[1]).resolve()
 DATA = Path(sys.argv[2])
 START, END = int(sys.argv[3]), int(sys.argv[4])
 OUT = Path(sys.argv[5])
+MODE = sys.argv[6] if len(sys.argv) > 6 else "legacy"   # legacy=线上现有行为 / structure=新规则
 sys.path.insert(0, str(ROOT))
 
 from omnialpha.executor import Executor  # noqa: E402
@@ -147,6 +148,22 @@ def match_bar(c: Client, bar, idx):
         c.book.remove(b)
 
 
+def struct_levels(bars, i, lookback=96):
+    """近 lookback 根的 swing 极值 + 区间上下沿（模拟 AI 的 structure_levels）。"""
+    win = bars[max(0, i - lookback + 1): i + 1]
+    lv = []
+    for k in range(2, len(win) - 2):
+        h, l = win[k]["h"], win[k]["l"]
+        if h >= max(x["h"] for x in win[k-2:k]) and h >= max(x["h"] for x in win[k+1:k+3]):
+            lv.append(h)
+        if l <= min(x["l"] for x in win[k-2:k]) and l <= min(x["l"] for x in win[k+1:k+3]):
+            lv.append(l)
+    if win:
+        lv.append(min(x["l"] for x in win))
+        lv.append(max(x["h"] for x in win))
+    return sorted({round(v, 2) for v in lv})
+
+
 def equity(c: Client):
     if abs(c.pos) < 1e-9:
         return 0.0
@@ -176,8 +193,16 @@ def main():
         "direction_hysteresis": {"enabled": True, "interval": "4h",
                                  "long_keep_ratio": 0.98, "short_keep_ratio": 1.005,
                                  "state_file": str(Path(tempfile.mkdtemp()) / "d.json")},
-        "dynamic": {"enabled": False, "db_path": str(dbf)},
+        "dynamic": {"enabled": True, "interval": "15m", "atr_mult": 1.5, "bb_div": 6.0,
+                    "min_step_pct": 0.45, "max_step_pct": "auto", "max_span_pct": 6.0,
+                    "scale_martin": True, "max_martin_pct": 9.0, "db_path": str(dbf)},
     }
+    if MODE == "structure":
+        tpl["levels_dynamic"] = {"enabled": True, "interval": "15m", "lookback": 96,
+                                 "min_levels": 10, "max_levels": 15,
+                                 "structure_only": True, "min_gap_pct": 0.3}
+        tpl["sl_distance"] = {"enabled": True, "min_points": 300, "max_points": 500,
+                              "range_mult": 4.0}
     c = Client()
     ex = Executor(c, symbols_whitelist=["ETH_USDT"], ladder_template=dict(tpl))
     ex.ladder_template = dict(tpl)
@@ -223,6 +248,9 @@ def main():
             auto_side, auto_note = ex._auto_direction(
                 "ETH_USDT", c.mark, ex.ladder_template["dynamic"])
 
+        if MODE == "structure":
+            ex._round_meta = {"structure_levels": struct_levels(bars, i, 96)}
+
         rep = type("R", (), {"results": []})()
         ex._complete_ladder([Intent(action="hold", symbol="ETH_USDT")], rep)
         dets = [r.detail for r in rep.results
@@ -247,6 +275,9 @@ def main():
             "equity": round(eq, 4), "pnl_delta": round(eq - prev_equity, 4),
             "prot": prot,
             "ema200_4h": round(e4, 1), "close4h": round(c4, 1),
+            "levels": (dyn.get("levels") or {}).get("levels") or len(c.book),
+            "sl_pts": (dyn.get("sl_points") or {}).get("points"),
+            "sl_dist_pct": (dyn.get("sl_points") or {}).get("distance_pct"),
             "auto_side": auto_side, "auto_rule": (auto_note or {}).get("rule"),
             "auto_reason": ((auto_note or {}).get("reason") or "")[:44],
         })
