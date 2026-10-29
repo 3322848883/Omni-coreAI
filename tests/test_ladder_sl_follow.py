@@ -345,6 +345,70 @@ class TestStaleLadderReplaced(Base):
         self.assertEqual(px1, px2, "档位已对齐不该动")
 
 
+class TestCacheInvalidatedByConfig(Base):
+    """改配置后档位缓存必须作废（2026-10-30 部署实测抓到）。
+
+    症状：把 max_span 6→12、grid_lots 1→0.5、martin_slots 6/7/9→1/1/1 部署上去，
+    `step_pct` 在 detail 里已经算出 1.2%（对的），但盘面仍是旧的 13.52 点间距、
+    29 张 —— 档位稳定缓存只校验 `side` + `anchor`，锚点没漂移（2% 阈值内）就把
+    旧档位整份沿用，配置改动被缓存静默吞掉。
+    """
+
+    def _set_atr(self, atr):
+        """把测试库的 ATR 改大，让 raw 档距突破旧的 6%/10=0.6% 封顶。"""
+        con = sqlite3.connect(self.db)
+        con.execute("UPDATE kline SET atr14=? WHERE interval='15m'", (atr,))
+        con.commit()
+        con.close()
+
+    def test_step_change_rebuilds_ladder(self):
+        self._set_atr(18.0)          # raw = 18/2332.71×1.5 = 1.157% > 0.6%
+        c = Client()
+        _, det1, _ = self._run(c, self._tpl(), action="open_long")
+        px1 = sorted((float(b["price"]) for b in c.book), reverse=True)
+        self.assertGreaterEqual(len(px1), 9, f"第一轮应铺满：{px1}")
+        step1 = det1.get("step_pct")
+        self.assertAlmostEqual(step1, 0.6, places=2,
+                               msg=f"旧配置应被 max_span 6/10 封顶到 0.6，实际 {step1}")
+
+        # 换配置：跨度上限翻倍 → 档距放开到 raw(1.157%)，间距从 14 点变 27 点
+        tpl2 = self._tpl()
+        tpl2["dynamic"] = dict(tpl2["dynamic"], max_span_pct=12.0)
+        c2 = Client()
+        _, det2, _ = self._run(c2, tpl2, action="open_long")
+        px2 = sorted((float(b["price"]) for b in c2.book), reverse=True)
+        self.assertAlmostEqual(det2.get("step_pct"), 1.157, places=2,
+                               msg=f"step 应跟着配置变：{det2.get('step_pct')}")
+        gap2 = (px2[0] - px2[1]) / px2[1] * 100 if len(px2) > 1 else 0
+        self.assertGreater(gap2, 1.0, f"档距必须真的换掉，实际 {gap2:.3f}%：{px2[:3]}")
+
+    def test_same_config_reuses_cache(self):
+        """配置没变、锚点没漂 → 仍然复用缓存（不能反过来每轮重铺）。"""
+        c = Client()
+        tpl = self._tpl()
+        _, det1, _ = self._run(c, tpl, action="open_long")
+        st1 = (det1.get("dynamic") or {}).get("levels_state")
+        self.assertNotEqual(st1, "reused", f"首轮应写入而非复用：{st1}")
+        n1 = c.placed
+        _, det2, _ = self._run(c, tpl, action="open_long")
+        # already_full 分支的 detail 不带 dynamic，用「没重铺」本身来判定复用
+        self.assertEqual(det2.get("skipped"), "already_full", f"{det2.get('skipped')}")
+        self.assertEqual(c.placed, n1, "配置未变时不得重挂")
+
+    def test_lots_change_rebuilds_ladder(self):
+        """只改张数（不碰档距）也要重铺 —— 否则新仓位永远上不去。"""
+        c1 = Client()
+        _, det1, _ = self._run(c1, self._tpl(), action="open_long")
+        self.assertEqual(det1.get("step_pct"), det1.get("step_pct"))
+        c2 = Client()
+        tpl2 = self._tpl(grid_lots=0.5, martin_slots={3: 1.0, 7: 1.0, 10: 1.0})
+        _, _det2, _ = self._run(c2, tpl2, action="open_long")
+        tot = sum(abs(float(b["size"])) for b in c2.book)
+        self.assertAlmostEqual(tot, 6.5, places=2, msg=f"张数应跟着配置变，实际 {tot}")
+        st2 = (_det2.get("dynamic") or {}).get("levels_state")
+        self.assertNotEqual(st2, "reused", f"配置变了不得复用缓存：{st2}")
+
+
 class TestAlwaysOnChain(Base):
     """⑤ 0 单信号必须走完铺梯（execute_signal 全链路）。"""
 

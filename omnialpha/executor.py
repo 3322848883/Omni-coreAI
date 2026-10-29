@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -1626,6 +1627,28 @@ class Executor:
             pass
         return Path(__file__).resolve().parents[1] / "data" / "ladder_levels.json"
 
+    def _ladder_cfg_sig(self, tpl: dict) -> str:
+        """档位生成参数的指纹 —— 缓存必须带上它，否则**改配置永远不生效**。
+
+        2026-10-30 实盘：把 max_span 6→12、grid_lots 1→0.5、martin_slots 6/7/9→1/1/1
+        部署上去后，`step_pct` 已经算出 1.2%（detail 里是对的），但盘面仍是旧的
+        13.52 点间距 / 29 张 —— 因为档位稳定缓存只校验 `side` 和 `anchor`，
+        锚点没漂移（2% 阈值内）就一直沿用旧档位，配置改动被缓存整份吞掉。
+        """
+        dyn = tpl.get("dynamic") or {}
+        sd = tpl.get("sl_distance") or {}
+        parts = [
+            tpl.get("grid_levels"), tpl.get("grid_lots"), tpl.get("grid_step_pct"),
+            json.dumps(tpl.get("martin_slots") or {}, sort_keys=True),
+            json.dumps(tpl.get("levels_dynamic") or {}, sort_keys=True),
+            dyn.get("atr_mult"), dyn.get("bb_div"), dyn.get("min_step_pct"),
+            dyn.get("max_step_pct"), dyn.get("max_span_pct"),
+            dyn.get("scale_martin"), dyn.get("max_martin_pct"),
+            sd.get("min_points"), sd.get("max_points"), sd.get("range_mult"),
+        ]
+        raw = "|".join("" if v is None else str(v) for v in parts)
+        return hashlib.md5(raw.encode("utf-8")).hexdigest()[:12]
+
     def _read_levels_state(self, sym: str, tpl: dict,
                            side: Optional[str] = None) -> dict:
         """读上一轮的档位快照。
@@ -1648,7 +1671,8 @@ class Executor:
         return {}
 
     def _write_levels_state(self, sym: str, tpl: dict, side: str,
-                            anchor: float, want: list) -> None:
+                            anchor: float, want: list,
+                            step_pct: Optional[float] = None) -> None:
         try:
             p = self._levels_state_path(tpl)
             if not p:
@@ -1666,6 +1690,11 @@ class Executor:
                    else sym)
             data[key] = {"side": side, "anchor": round(float(anchor), 6),
                          "ts": int(time.time()),
+                         # 生成这批档位时用的配置指纹 + 档距：配置一改就作废，
+                         # 否则「调参部署」会被这份缓存静默挡住（见 _ladder_cfg_sig）。
+                         "cfg_sig": self._ladder_cfg_sig(tpl),
+                         "step_pct": (None if step_pct is None
+                                      else round(float(step_pct), 6)),
                          "levels": [[round(float(px), 6), float(l)] for px, l in want]}
             p.parent.mkdir(parents=True, exist_ok=True)
             tmp = p.with_suffix(p.suffix + ".tmp")
@@ -2650,7 +2679,16 @@ class Executor:
                 c_anchor = float(cached.get("anchor") or 0)
             except (TypeError, ValueError):
                 c_anchor = 0.0
+            _sig = self._ladder_cfg_sig(tpl)
+            try:
+                _c_step = float(cached.get("step_pct") or 0)
+            except (TypeError, ValueError):
+                _c_step = 0.0
+            _sig_ok = (cached.get("cfg_sig") == _sig
+                       and _c_step > 0
+                       and abs(_c_step - float(step_pct)) < 1e-6)
             if (cached and cached.get("side") == side and c_anchor > 0
+                    and _sig_ok
                     and abs(c_anchor - anchor) / max(anchor, 1e-9) < 1e-4):
                 c_want = []
                 for it in cached.get("levels") or []:
@@ -2671,7 +2709,7 @@ class Executor:
                     want = c_want
                     dyn_note["levels_state"] = "reused"
         if not dyn_note.get("levels_state") and anchor_note.get("mode") == "fixed":
-            self._write_levels_state(sym, tpl, side, anchor, want)
+            self._write_levels_state(sym, tpl, side, anchor, want, step_pct)
             dyn_note["levels_state"] = "written"
         # ── SL 距离护栏（2026-10-29）────────────────────────────────────
         # 实测线上 SL=2160：距 mark 7.4%、距最深档 19.6 点看似合理，但距近 200 根
