@@ -376,6 +376,40 @@ _ENTRY_ACTIONS = frozenset({
     "stop_entry_long", "stop_entry_short",
 })
 
+
+def _hysteresis_side(close: float, ema200: float, prev: Optional[str],
+                     long_keep: float = 0.98,
+                     short_keep: float = 1.005) -> tuple[Optional[str], str]:
+    """价格行为人格 v5 的**方向迟滞带**（纯函数，便于单测）。
+
+    v5 原文（`ladder_v5_dyn` §2.2，V5.1 保留）：
+      · 已判多：4H 收盘不跌破 `EMA200 × 0.98` 就保持多
+      · 已判空：4H 收盘不涨破 `EMA200 × 1.005` 就保持空
+      · 落在两条带之间 → **维持原方向**（迟滞带内的回踩是网格吃折返的地方，不是转空信号）
+
+    为什么必须有：裸判（`close >= ema200`）在价格贴着均线抖动时每轮翻向，
+    于是同时持多梯 + 空梯、保证金翻倍、两个方向 SL 互砍（实测中轨附近 0.1%
+    的来回就足够触发）。迟滞带把「翻向」推迟到真突破。
+
+    返回 `(side, reason)`；`ema200 <= 0` → `(None, "bad_ema")` 交回调用方回退。
+    """
+    if not (ema200 and ema200 > 0):
+        return None, "bad_ema"
+    long_band = ema200 * long_keep        # 跌破则不再维持多头
+    short_band = ema200 * short_keep      # 涨破则不再维持空头
+    if prev == "long":
+        if close >= long_band:
+            return "long", f"hold_long(close {close:.2f} >= {long_band:.2f})"
+        return "short", f"flip_short(close {close:.2f} < {long_band:.2f})"
+    if prev == "short":
+        if close <= short_band:
+            return "short", f"hold_short(close {close:.2f} <= {short_band:.2f})"
+        return "long", f"flip_long(close {close:.2f} > {short_band:.2f})"
+    # 无上一轮方向（首次 / 状态丢失）：只能按位置裸判，之后靠 state 维持
+    if close >= ema200:
+        return "long", "init_long(close>=ema200)"
+    return "short", "init_short(close<ema200)"
+
 #: 每轮 `ensure_grid_tp` 最多做多少次「台账 ↔ 交易所对齐」的 `get_order` 查询。
 #: 为什么要限：档位表历史上只增不清（实测 5 小时涨到 110 条），若一次全查会把
 #: 一轮扫描拖死。老档优先、每轮 20 条 → 病态表约半小时收敛，之后每轮只有新增几条。
@@ -1246,18 +1280,62 @@ class Executor:
                      "range_pct": round((hi - lo) / lo * 100, 2) if lo else None})
         return lo, hi, note
 
-    def _auto_direction(self, sym: str, mark: float, dyn: dict) -> tuple[str, dict]:
-        """`direction_mode: auto` 的方向判定：BB 中轨 + EMA20/50 同向确认。
+    def _auto_direction(self, sym: str, mark: float, dyn: dict,
+                        tpl: Optional[dict] = None) -> tuple[str, dict]:
+        """`direction_mode: auto` 的方向判定。
 
-        多头条件：mark ≥ BB 中轨 且 EMA20 ≥ EMA50（上升结构 → 铺下方接回撤）
-        其余 → 空头（铺上方接反弹）。任一数据缺失 → 回退 long（保守，兼容旧行为）。
+        **优先走 v5 迟滞带**（`direction_hysteresis.enabled`）：读 4H 收盘 + EMA200，
+        按 §2.2 的 0.98 / 1.005 两条带判，带内维持原方向（状态落盘，跨轮/跨重启保持）。
+        迟滞不可用（未启用 / 读不到 4H ema200 / 状态文件坏）→ 回退旧的
+        「BB 中轨 + EMA20/50 同向」裸判，并在 note 里留 `hysteresis_fallback`。
         """
         note: dict = {}
+        hcfg = dict((tpl or {}).get("direction_hysteresis") or {})
+        db_path = str(dyn.get("db_path") or
+                      (Path(__file__).resolve().parents[1]
+                       / "pa-data-source" / "data" / "kline.db"))
+
+        if hcfg.get("enabled"):
+            h_iv = str(hcfg.get("interval") or "4h")
+            try:
+                lon_k = float(hcfg.get("long_keep_ratio") or 0.98)
+                sho_k = float(hcfg.get("short_keep_ratio") or 1.005)
+            except (TypeError, ValueError):
+                lon_k, sho_k = 0.98, 1.005
+            try:
+                con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
+                try:
+                    row = con.execute(
+                        "SELECT c, ema200 FROM kline WHERE symbol=? AND interval=? "
+                        "AND closed=1 ORDER BY t DESC LIMIT 1",
+                        (sym, h_iv)).fetchone()
+                finally:
+                    con.close()
+            except Exception as e:  # noqa: BLE001
+                note["hysteresis_fallback"] = f"db: {str(e)[:60]}"
+                row = None
+            if row and row[0] is not None:
+                close = float(row[0])
+                ema200 = float(row[1]) if row[1] is not None else 0.0
+                prev, st_path = self._read_direction_state(sym, hcfg)
+                side, reason = _hysteresis_side(close, ema200, prev, lon_k, sho_k)
+                if side:
+                    note.update({"rule": "ema200_hysteresis", "interval": h_iv,
+                                 "close": round(close, 2),
+                                 "ema200": round(ema200, 2),
+                                 "long_keep": round(ema200 * lon_k, 2),
+                                 "short_keep": round(ema200 * sho_k, 2),
+                                 "prev_side": prev, "reason": reason})
+                    if side != prev:
+                        self._write_direction_state(st_path, sym, side, close, ema200)
+                    return side, note
+                note["hysteresis_fallback"] = reason
+            elif "hysteresis_fallback" not in note:
+                note["hysteresis_fallback"] = f"no_4h_row({h_iv})"
+
+        # ── 回退：BB 中轨 + EMA20/50 同向（原实现，无迟滞）──────────────
         try:
             interval = str(dyn.get("interval") or "15m")
-            db_path = str(dyn.get("db_path") or
-                          (Path(__file__).resolve().parents[1]
-                           / "pa-data-source" / "data" / "kline.db"))
             con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
             try:
                 row = con.execute(
@@ -1280,6 +1358,52 @@ class Executor:
         note.update({"mark": round(mark, 2), "bb_mid": round(mid, 2),
                      "ema20": e20, "ema50": e50, "rule": "bb_mid+ema"})
         return ("long" if up else "short"), note
+
+    def _direction_state_path(self, hcfg: dict) -> Path:
+        sp = hcfg.get("state_file")
+        path = (Path(str(sp)) if sp else
+                Path(__file__).resolve().parents[1] / "data" / "direction_state.json")
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parents[1] / path
+        return path
+
+    def _read_direction_state(self, sym: str, hcfg: dict) -> tuple[Optional[str], Path]:
+        """读上一轮方向（迟滞必须跨轮记忆，否则等于没有）。坏文件 → 当作无状态。"""
+        try:
+            path = self._direction_state_path(hcfg)
+        except Exception:  # noqa: BLE001
+            return None, Path("/dev/null")
+        prev = None
+        try:
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8")) or {}
+                rec = data.get(sym) or {}
+                side = str(rec.get("side") or "").lower()
+                if side in ("long", "short"):
+                    prev = side
+        except Exception:  # noqa: BLE001 — 状态坏了不阻断，退化成「首次」
+            prev = None
+        return prev, path
+
+    def _write_direction_state(self, path: Path, sym: str, side: str,
+                              close: float, ema200: float) -> None:
+        """原子写；失败只警告（方向状态丢一轮不至于停摆，只是退化成裸判）。"""
+        try:
+            data: dict = {}
+            if path.exists():
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8")) or {}
+                except Exception:  # noqa: BLE001
+                    data = {}
+            data[sym] = {"side": side, "close": round(close, 4),
+                         "ema200": round(ema200, 4), "ts": int(time.time())}
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1),
+                           encoding="utf-8")
+            tmp.replace(path)
+        except Exception as e:  # noqa: BLE001
+            log.warning("direction state write failed %s: %s", sym, e)
 
     def _resolve_anchor(self, sym: str, mark: float, tpl: dict) -> tuple[float, dict]:
         """阶梯锚点（`anchor_mode`）。
@@ -1586,7 +1710,7 @@ class Executor:
                 dyn_note["max_martin_pct"] = max_martin
         # `direction_mode: auto` → 用 BB 中轨 + EMA 斜率定方向（读同一个 v2 库）
         if str(tpl.get("direction_mode") or "signal").lower() == "auto":
-            auto_side, dir_note = self._auto_direction(sym, mark, dyn)
+            auto_side, dir_note = self._auto_direction(sym, mark, dyn, tpl)
             dyn_note["auto_direction"] = dir_note
             side = auto_side
         dyn_note["side"] = side
@@ -1604,7 +1728,13 @@ class Executor:
                 dyn_note["edge"] = edge_note
                 if str(tpl.get("direction_mode") or "signal").lower() == "auto":
                     mid_px = (lo_px + hi_px) / 2.0
-                    side = "long" if mark <= mid_px else "short"
+                    half_side = "long" if mark <= mid_px else "short"
+                    # edge 按「价格在区间哪一半」定方向，会**盖掉** `_auto_direction`
+                    # 判出的趋势方向。两者哲学不同（均值回归 vs 趋势跟随），同时开时
+                    # 留痕冲突，避免将来复盘时以为迟滞失效。
+                    if side != half_side:
+                        edge_note["half_conflict"] = f"trend={side} half={half_side}"
+                    side = half_side
                     dyn_note["side"] = side
                     edge_note["half"] = "lower" if side == "long" else "upper"
                 atr_p = 0.0

@@ -58,6 +58,18 @@ ladder_template:
   always_on: true
   symbol: ETH_USDT
   sl_pct: 5.0
+  # ── 方向迟滞带（人格 v5 §2.2，2026-10-29 移植）──────────────────────────
+  # 只有 `direction_mode: auto` 时才生效；signal（现在的默认）跟随模型动作，不受影响。
+  # 为什么必要：裸判 `close vs EMA200` 在价格贴着均线抖动时每轮翻向 → 多梯 + 空梯
+  # 同时在场、保证金翻倍、两个 SL 互砍。迟滞带把翻向推迟到真突破。
+  # ⚠️ 开 auto 前先看这条：4H 收盘 2309 vs EMA200 2454（10-29）→ 一开就翻空头阶梯。
+  direction_mode: signal
+  direction_hysteresis:
+    enabled: true
+    interval: 4h
+    long_keep_ratio: 0.98      # 已判多：4H 收盘不跌破 EMA200×0.98 就保持多
+    short_keep_ratio: 1.005    # 已判空：4H 收盘不涨破 EMA200×1.005 就保持空
+    state_file: data/direction_state.json
   anchor_mode: fixed
   reanchor_threshold_pct: 2.0     # mark 偏离锚点 >2% 才重锚
   anchor_state_file: data/ladder_anchor.json
