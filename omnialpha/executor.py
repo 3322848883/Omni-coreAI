@@ -1215,6 +1215,41 @@ class Executor:
                     "replace_cancel", sym, True, detail=detail,
                 ))
 
+    def _auto_direction(self, sym: str, mark: float, dyn: dict) -> tuple[str, dict]:
+        """`direction_mode: auto` 的方向判定：BB 中轨 + EMA20/50 同向确认。
+
+        多头条件：mark ≥ BB 中轨 且 EMA20 ≥ EMA50（上升结构 → 铺下方接回撤）
+        其余 → 空头（铺上方接反弹）。任一数据缺失 → 回退 long（保守，兼容旧行为）。
+        """
+        note: dict = {}
+        try:
+            interval = str(dyn.get("interval") or "15m")
+            db_path = str(dyn.get("db_path") or
+                          (Path(__file__).resolve().parents[1]
+                           / "pa-data-source" / "data" / "kline.db"))
+            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
+            try:
+                row = con.execute(
+                    "SELECT boll20, ema20, ema50 FROM kline WHERE symbol=? AND interval=? "
+                    "AND closed=1 ORDER BY t DESC LIMIT 1", (sym, interval)).fetchone()
+            finally:
+                con.close()
+        except Exception as e:  # noqa: BLE001
+            note["error"] = f"db: {str(e)[:60]}"
+            return "long", note
+        if not row or row[0] is None:
+            note["error"] = "no_indicator_row"
+            return "long", note
+        mid = float(row[0])
+        e20 = float(row[1]) if row[1] is not None else None
+        e50 = float(row[2]) if row[2] is not None else None
+        up = mark >= mid
+        if e20 is not None and e50 is not None:
+            up = up and e20 >= e50
+        note.update({"mark": round(mark, 2), "bb_mid": round(mid, 2),
+                     "ema20": e20, "ema50": e50, "rule": "bb_mid+ema"})
+        return ("long" if up else "short"), note
+
     def _resolve_anchor(self, sym: str, mark: float, tpl: dict) -> tuple[float, dict]:
         """阶梯锚点（`anchor_mode`）。
 
@@ -1367,6 +1402,11 @@ class Executor:
         sym = str(getattr(entry_legs[0], "symbol", "") or "")
         if not sym:
             return
+        # ── 方向（2026-10-29）：默认跟随模型入场腿；`direction_mode: auto` 时
+        # 由波动/趋势规则自己判（价格与 BB 中轨 + EMA 关系），从而同一套模板
+        # 可以「涨了做多回踩、跌了做空反弹」。
+        actions = {str(getattr(i, "action", "") or "").lower() for i in entry_legs}
+        side = "short" if actions & {"open_short", "add_short", "stop_entry_short"} else "long"
         sl = getattr(entry_legs[0], "sl", None)
         if sl is None:
             return                      # 没有 sl 的轮次不补（补齐必须带止损）
@@ -1479,6 +1519,14 @@ class Executor:
                 martin = scaled
                 dyn_note["martin_scaled_by"] = round(ratio, 3)
                 dyn_note["max_martin_pct"] = max_martin
+        # `direction_mode: auto` → 用 BB 中轨 + EMA 斜率定方向（读同一个 v2 库）
+        if str(tpl.get("direction_mode") or "signal").lower() == "auto":
+            auto_side, dir_note = self._auto_direction(sym, mark, dyn)
+            dyn_note["auto_direction"] = dir_note
+            side = auto_side
+        dyn_note["side"] = side
+        sgn = -1.0 if side == "long" else 1.0     # 多头铺锚点下方，空头铺上方
+
         want: list[tuple[float, float]] = []
         # ── 模型 A：等距 N 档 + 马丁占位（2026-10-29，推荐）────────────────
         # 人格本义是「10 层 = 7 网格 + 3 马丁**穿插**」：马丁不是额外再加 3 档，
@@ -1497,12 +1545,12 @@ class Executor:
             use_n = max(max(slot_lots), grid_n)
             for i in range(1, use_n + 1):
                 lots = slot_lots.get(i, grid_lots)
-                want.append((anchor * (1 - step_pct * i / 100.0), lots))
+                want.append((anchor * (1 + sgn * step_pct * i / 100.0), lots))
             dyn_note["model"] = "slots"
             dyn_note["slots"] = {str(k): v for k, v in sorted(slot_lots.items())}
             grid_n = use_n
         for i in range(1, grid_n + 1 if not slot_lots else 1):
-            want.append((anchor * (1 - step_pct * i / 100.0), grid_lots))
+            want.append((anchor * (1 + sgn * step_pct * i / 100.0), grid_lots))
         # ── 马丁深度 ATR 化（2026-10-29）───────────────────────────────
         # 档距已按 ATR 自适应，马丁深度却写死 4.2/5.4/6.6% —— 实测 ATR 7.5(0.32%)
         # 时最深档 = 21×ATR，那一档永不成交，还逼着 SL 放到 -7.4%（形同没有）。
@@ -1583,9 +1631,14 @@ class Executor:
         except (TypeError, ValueError):
             atr_price = None
         if sl is not None and want and atr_price:
-            deepest_px = min(p for p, _ in want)
-            lo_b = deepest_px - 3.0 * atr_price
-            hi_b = deepest_px - 1.0 * atr_price
+            if side == "long":
+                deepest_px = min(p for p, _ in want)
+                lo_b = deepest_px - 3.0 * atr_price
+                hi_b = deepest_px - 1.0 * atr_price
+            else:
+                deepest_px = max(p for p, _ in want)      # 空头：最高档
+                lo_b = deepest_px + 1.0 * atr_price
+                hi_b = deepest_px + 3.0 * atr_price
             try:
                 cur = float(sl)
             except (TypeError, ValueError):
@@ -1668,17 +1721,21 @@ class Executor:
             if any(p > 0 and abs(price - p) / p <= dedupe_tol for p in existing):
                 skipped.append(price)
                 continue
-            if price >= mark:           # 只补现价下方
+            if side == "long" and price >= mark:      # 多头只补现价下方
+                skipped.append(price)
+                continue
+            if side == "short" and price <= mark:     # 空头只补现价上方
                 skipped.append(price)
                 continue
             if len(existing) >= len(want):
                 skipped.append(price)
                 continue
-            body = {"contract": sym, "size": lots, "price": str(price),
+            signed = lots if side == "long" else -lots
+            body = {"contract": sym, "size": signed, "price": str(price),
                     "tif": "gtc", "text": f"t-{self._bot_tag('')}"}
             try:
                 order = self.client.place_order(body)
-                placed.append({"price": price, "size": lots,
+                placed.append({"price": price, "size": signed,
                                "id": str((order or {}).get("id") or "")})
                 existing.append(price)
             except Exception as e:  # noqa: BLE001
@@ -1749,8 +1806,14 @@ class Executor:
                     size = _num(o.get("size"))
                     left = o.get("left")
                     left = size if left in (None, "") else _num(left)
-                    if size > 0 and left > 0:
-                        pend += left
+                    # 多头算买单、空头算卖单。注意空单的 left 是**负数**
+                    # （left 与 size 同号），直接判 left>0 会把空头挂单全漏掉
+                    # —— 实测空头 SL 只覆盖持仓 3 张而非 32 张。
+                    left_abs = abs(left)
+                    if side == "long" and size > 0 and left_abs > 0:
+                        pend += left_abs
+                    elif side == "short" and size < 0 and left_abs > 0:
+                        pend += left_abs
                 need = int(round(pos_sz + pend))
             except Exception:  # noqa: BLE001
                 need = 0
@@ -1762,7 +1825,8 @@ class Executor:
                     ini = o.get("initial") or {}
                     if str(o.get("status") or "").lower() not in ("open", ""):
                         continue
-                    if int(trg.get("rule") or 0) != 2:
+                    want_rule = 2 if side == "long" else 1
+                    if int(trg.get("rule") or 0) != want_rule:
                         continue
                     olds.append(o)
                     try:
@@ -1771,11 +1835,13 @@ class Executor:
                         pass
                 if covered < need:
                     body = {
-                        "initial": {"contract": sym, "size": -need, "price": "0",
-                                    "tif": "ioc", "reduce_only": True,
+                        "initial": {"contract": sym,
+                                    "size": (-need if side == "long" else need),
+                                    "price": "0", "tif": "ioc", "reduce_only": True,
                                     "text": f"t-{self._bot_tag('')}-sl"},
                         "trigger": {"price": str(round_price(float(sl), meta)),
-                                    "rule": 2, "price_type": 1, "expiration": 86400},
+                                    "rule": 2 if side == "long" else 1,
+                                    "price_type": 1, "expiration": 86400},
                     }
                     o = self.client.place_price_order(body)
                     prot_added = {"trigger": float(sl), "size": -need,
