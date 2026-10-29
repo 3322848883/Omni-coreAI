@@ -1504,6 +1504,95 @@ class Executor:
                      if n > 1 else None})
         return want, note
 
+    def _maybe_rewrite_sl(self, sym: str, meta: Any, sl: Any, side: str,
+                          want: list, dyn_note: dict, report) -> Optional[dict]:
+        """阶梯不动时的 SL 维护（张数不足 / 价格偏离当前规则 → 重挂）。
+
+        为什么要单独一份：`_complete_ladder` 的 SL 覆盖段在 `already_full`
+        的 return 之后，而绝大多数轮次都是 already_full → 改了 `sl_distance`
+        或结构位后旧 SL 永远换不掉（实测部署后 6 轮 SL 仍停在 2197）。
+        """
+        if sl is None or not want:
+            return None
+        try:
+            need = 0
+            try:
+                pos_sz = 0.0
+                for pos in self.client.get_positions() or []:
+                    if str(pos.get("contract")) == sym:
+                        pos_sz += qty(pos.get("size"))
+                pend = 0.0
+                for o in self.client.list_orders(sym) or []:
+                    if o.get("is_reduce_only") or o.get("reduce_only"):
+                        continue
+                    if str(o.get("status") or "").lower() not in ("open", ""):
+                        continue
+                    size = _num(o.get("size"))
+                    left = o.get("left")
+                    left = size if left in (None, "") else _num(left)
+                    if side == "long" and size > 0:
+                        pend += abs(left)
+                    elif side == "short" and size < 0:
+                        pend += abs(left)
+                need = int(round(pos_sz + pend))
+            except Exception:  # noqa: BLE001
+                need = 0
+
+            olds, covered = [], 0
+            want_rule = 2 if side == "long" else 1
+            for o in self.client.list_price_orders(sym) or []:
+                trg = o.get("trigger") or {}
+                ini = o.get("initial") or {}
+                if str(o.get("status") or "").lower() not in ("open", ""):
+                    continue
+                if int(trg.get("rule") or 0) != want_rule:
+                    continue
+                olds.append(o)
+                try:
+                    covered += abs(int(float(ini.get("size") or 0)))
+                except (TypeError, ValueError):
+                    pass
+
+            try:
+                target_px = round_price(float(sl), meta)
+            except (TypeError, ValueError):
+                return {"error": "bad_sl"}
+
+            drift = None
+            if covered >= need and olds and target_px:
+                try:
+                    cur_px = float((olds[-1].get("trigger") or {}).get("price") or 0)
+                except (TypeError, ValueError):
+                    cur_px = 0.0
+                if cur_px > 0 and abs(cur_px - target_px) / cur_px > 0.05:
+                    drift = {"from": cur_px, "to": target_px}
+
+            if covered < need or drift:
+                size = (-need if side == "long" else need)
+                body = {
+                    "initial": {"contract": sym, "size": size, "price": "0",
+                                "tif": "ioc", "reduce_only": True,
+                                "text": f"t-{self._bot_tag('')}-sl"},
+                    "trigger": {"price": str(target_px), "rule": want_rule,
+                                "price_type": 1, "expiration": 86400},
+                }
+                o = self.client.place_price_order(body)
+                for old_o in olds:          # 新单已挂 → 撤旧的
+                    try:
+                        self.client.cancel_price_order(old_o["id"])
+                    except Exception:  # noqa: BLE001
+                        pass
+                return {"trigger": float(target_px), "size": size,
+                        "reason": (f"cover_gap({covered}<{need})" if drift is None
+                                   else f"rule_drift({drift['from']}→{drift['to']})"),
+                        "drift": drift,
+                        "id": str((o or {}).get("id") or "")}
+            return {"skipped": f"covered({covered}>={need})"}
+        except Exception as e:  # noqa: BLE001 — 维护失败不能阻断轮次
+            report.results.append(StepResult(
+                "ladder_template", sym, False, error=f"SL 维护失败: {str(e)[:100]}"))
+            return {"error": str(e)[:80]}
+
     def _direction_state_path(self, hcfg: dict) -> Path:
         sp = hcfg.get("state_file")
         path = (Path(str(sp)) if sp else
@@ -2227,11 +2316,17 @@ class Executor:
         # 重锚的轮次不能走 already_full：旧梯是按旧锚点铺的，必须换掉
         # （实测：drift 越阈值 → anchor 更新，但 old 10 条仍在 → 误判已满 → 阶梯卡在旧价位）
         if not anchor_note.get("reanchored") and len(existing) >= len(want):
+            # 阶梯不动 ≠ 保护单不用维护：部署新 `sl_distance` 后旧 SL 仍挂在旧规则的价上，
+            # 而 SL 覆盖段在这个 return 之后 → 规则永远不生效（实测 15:00 轮 already_full，
+            # SL 还是 2197 的老价）。所以这里先跑一次 SL 维护再返回。
+            sl_rewrite = self._maybe_rewrite_sl(sym, meta, sl, side, want,
+                                                dyn_note, report)
             report.results.append(StepResult(
                 "ladder_template", sym, True,
                 detail={"skipped": "already_full", "existing": len(existing),
                         "template_total": len(want), "anchor": anchor,
-                        "anchor_info": anchor_note, "mark": mark}))
+                        "anchor_info": anchor_note, "mark": mark,
+                        "sl_rewrite": sl_rewrite}))
             return
         placed, skipped = [], []
         for px, lots in want:
@@ -2354,7 +2449,24 @@ class Executor:
                         covered += abs(int(float(ini.get("size") or 0)))
                     except (TypeError, ValueError):
                         pass
-                if covered < need:
+                # ── 规则漂移（2026-10-29 实测）：张数够了但滑价不符合当前规则 ──
+                # 部署新 sl_distance 后，旧 SL 仍挂在 2197（−3×ATR 时代的价），
+                # 因为 `covered(29>=29)` 只比张数 → 新规则永远不生效。
+                # 现价与目标价偏离 >5% 视为规则已变，按新规则重挂（先挂后撤）。
+                drift = None
+                try:
+                    target_px = round_price(float(sl), meta) if sl is not None else None
+                except (TypeError, ValueError):
+                    target_px = None
+                if covered >= need and olds and target_px:
+                    try:
+                        cur_px = float((olds[-1].get("trigger") or {}).get("price") or 0)
+                    except (TypeError, ValueError):
+                        cur_px = 0.0
+                    if cur_px > 0 and abs(cur_px - target_px) / cur_px > 0.05:
+                        drift = {"from": cur_px, "to": target_px,
+                                 "points": (dyn_note.get("sl_points") or {}).get("points")}
+                if covered < need or drift:
                     body = {
                         "initial": {"contract": sym,
                                     "size": (-need if side == "long" else need),
@@ -2366,7 +2478,9 @@ class Executor:
                     }
                     o = self.client.place_price_order(body)
                     prot_added = {"trigger": float(sl), "size": -need,
-                                  "reason": f"cover_gap({covered}<{need})",
+                                  "reason": (f"cover_gap({covered}<{need})" if drift is None
+                                             else f"rule_drift({drift['from']}→{drift['to']})"),
+                                  "drift": drift,
                                   "id": str((o or {}).get("id") or "")}
                     for old_o in olds:      # 新单已挂 → 撤旧的不足尺寸 SL
                         try:
