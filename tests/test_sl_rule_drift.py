@@ -147,7 +147,10 @@ class TestSlRuleDrift(unittest.TestCase):
         c, det1 = _run(state=st)                       # 第一轮建锚
         self.assertNotEqual(det1.get("skipped"), "already_full")
         # 把 SL 篡改成旧规则价（模拟"部署前留下的老单"）
-        n = len(c.book)
+        # ⚠️ 张数必须用**档位张数总和**，不是 `len(book)` —— 马丁档是 6/7/9 张，
+        # 10 条挂单共 29 张；用条数会让 need 算错、走成 cover_gap 而非 rule_drift。
+        n = int(sum(abs(float(b.get("size") or 0)) for b in c.book))
+        self.assertGreater(n, len(c.book), "本节依赖马丁档张数 > 1")
         c.prot = [{"id": "stale", "status": "open", "initial": {"size": -n},
                    "trigger": {"price": "2197.38", "rule": 2}}]
         _c2, det2 = _run(state=st, client=c)           # 第二轮：锚点未漂移

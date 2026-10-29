@@ -281,6 +281,48 @@ class TestLevelsStable(Base):
         self.assertGreaterEqual(len(px), 9, f"坏缓存应回退重算：{len(px)} 层")
 
 
+class TestStaleLadderReplaced(Base):
+    """⑧ 盘上旧梯档距变了必须重铺（`existing >= len(want)` 只比条数不够）。
+
+    2026-10-30 实盘：部署后盘上仍是 step 0.445% 的 10 条旧档（2311.21~2217.19），
+    新 want 是 step 0.6% 的 10 条（2330.06~2203.47）→ `10 >= 10` 判 already_full，
+    且每档都能在 0.3% dedupe 容差内找到「近邻」→ prune 一条不撤 →
+    **整梯换了档距也不更新，永远卡在旧价位**。
+    """
+
+    def test_off_step_ladder_is_replaced(self):
+        c = Client(MARK, 0.0, "long")
+        old_step = 0.0030
+        old = [round(MARK * (1 - old_step * i), 2) for i in range(1, 11)]
+        for i, px in enumerate(old):
+            c.book.append({"id": f"x{i}", "price": px, "size": 1.0})
+        _, det, rep = self._run(c, self._tpl(), action="open_long")
+        px = sorted((float(b["price"]) for b in c.book), reverse=True)
+        step_cfg = float(det.get("step_pct") or 0.4823)
+        # 两套等比序列会交错，个别旧档恰好落在新档位上（等价于已铺好）——
+        # 所以不能要求「旧价一个不剩」，而要看**整梯是否真的换成了新档距**：
+        # 若旧梯没被换掉，间距会停在 old_step，与 step_cfg 差 0.18% 以上。
+        gaps = [(px[i] - px[i + 1]) / px[i] * 100 for i in range(len(px) - 1)]
+        avg = sum(gaps) / len(gaps) if gaps else 0.0
+        self.assertLess(abs(avg - step_cfg), 0.05,
+                        f"整梯档距应≈配置 {step_cfg:.4f}%，实际 {avg:.4f}%"
+                        f"（旧梯 step={old_step*100:.2f}% 没被换掉）")
+        self.assertLess(max(gaps) - min(gaps), 0.15,
+                        f"重铺后间距应均匀，实际 {[round(g,3) for g in gaps]}")
+        self.assertLessEqual(len(px), 11, f"旧档不该堆积：{len(px)} 条")
+
+    def test_aligned_ladder_not_touched(self):
+        c = Client(MARK, 0.0, "long")
+        tpl = self._tpl()
+        self._run(c, tpl, action="open_long")
+        px1 = sorted((float(b["price"]) for b in c.book), reverse=True)
+        n1 = c.placed
+        _, det, _ = self._run(c, tpl, action="open_long")
+        px2 = sorted((float(b["price"]) for b in c.book), reverse=True)
+        self.assertEqual(c.placed, n1, f"档位已对齐不该补挂：{n1} → {c.placed}")
+        self.assertEqual(px1, px2, "档位已对齐不该动")
+
+
 class TestAlwaysOnChain(Base):
     """⑤ 0 单信号必须走完铺梯（execute_signal 全链路）。"""
 

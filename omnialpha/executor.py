@@ -2365,6 +2365,21 @@ class Executor:
                     dyn_note["dedupe_tol_pct"] = round(dedupe_tol * 100, 4)
             except (TypeError, ValueError):
                 pass
+        # ── 档位归属容差（2026-10-30 实盘 BUG）──────────────────────────
+        # `dedupe_tol`（0.3%）的语义是「两条价格算不算同一档」，用于**同价去重**
+        # （防模型与本补档抢挂同一价）。但用它判「盘上这条档是不是模板档」太宽：
+        # 实测部署后盘上 2311.21~2217.19（step 0.445%），want 是 2330.06~2203.47
+        # （step 0.6%），每条旧档都能在 want 里找到 0.3% 内的近邻 →
+        # prune 一条不撤、`existing(10) >= len(want)(10)` → already_full →
+        # **整梯换了档距也不更新，永远卡在旧价位**。
+        # 归属判定用 0.1%（2330 价位 ≈ 2.3 点，远小于半档），只有真正重合才算同档。
+        # 归属判定必须**远小于半个档距**：0.1%（2330 价位 ≈ 2.3 点）仍会把旧档
+        # 2311.72 当成 want 里的 2310.21 认领（差 1.5 点），重铺后间距变成
+        # 0.42/0.61/0.44 忽宽忽窄。收紧到 0.02%（≈0.47 点 @2330，约 10 个 tick）
+        # —— 只容得下 round_price 的取整误差，两套不同步长的档位一定能区分开。
+        align_tol = 0.0002
+        if edge.get("enabled"):
+            align_tol = min(0.0002, dedupe_tol)
 
         # ── 反向持仓护栏（2026-10-29 实测 BUG）────────────────────────────
         # 实测：持空 3 张时 4H 涨破 → side 翻 long → 引擎铺 10 条多头入场单，
@@ -2449,6 +2464,12 @@ class Executor:
                      and not (o.get("is_reduce_only") or o.get("reduce_only"))]
         except Exception:  # noqa: BLE001
             owned = []
+        # ── 逐档认领（2026-10-30 实盘）：每个模板价只认领**最近的一条**挂单，其余全撤。
+        # 原来「每条挂单自己判断是否落在某个模板价附近」会让两套交错档位各留一条
+        # （实测 2311.72 与 2310.21 相差 1.5 点并存 → 重铺后间距 0.42/0.61/0.44
+        # 忽宽忽窄，档位语义破坏、SL 口径也算不准）。用全局贪心：先按距离排序，
+        # 逐个认领（一条挂单只服务一个档位、一个档位只留一条挂单）。
+        pairs: list = []
         for o in owned:
             try:
                 px = float(o.get("price") or 0)
@@ -2456,7 +2477,26 @@ class Executor:
                 continue
             if px <= 0:
                 continue
-            if any(abs(px - t) / t <= dedupe_tol for t in tmpl_prices if t > 0):
+            for t in tmpl_prices:
+                if t <= 0:
+                    continue
+                d = abs(px - t) / t
+                if d <= align_tol:
+                    pairs.append((d, str(o.get("id")), px, t))
+        pairs.sort()
+        keep_ids: set = set()
+        used_t: set = set()
+        for d, oid, px, t in pairs:
+            if oid in keep_ids or t in used_t:
+                continue
+            keep_ids.add(oid)
+            used_t.add(t)
+        for o in owned:
+            try:
+                px = float(o.get("price") or 0)
+            except (TypeError, ValueError):
+                continue
+            if px <= 0 or str(o.get("id")) in keep_ids:
                 continue
             try:
                 self.client.cancel_order(o["id"])
@@ -2483,7 +2523,21 @@ class Executor:
         # 现有入场单已经 ≥ 模板总档数时，本轮不补。
         # 重锚的轮次不能走 already_full：旧梯是按旧锚点铺的，必须换掉
         # （实测：drift 越阈值 → anchor 更新，但 old 10 条仍在 → 误判已满 → 阶梯卡在旧价位）
-        if not anchor_note.get("reanchored") and len(existing) >= len(want):
+        # 档距/档位变了同理（2026-10-30 实盘）：条数够 ≠ 档位对，必须逐档核对。
+        aligned = True
+        off_max = 0.0
+        if existing and want:
+            hit = 0
+            for q, _ in want:
+                if q <= 0:
+                    continue
+                best = min((abs(p - q) / q for p in existing if p > 0), default=1.0)
+                off_max = max(off_max, best)
+                if best <= align_tol:
+                    hit += 1
+            aligned = hit == len([1 for q, _ in want if q > 0])
+        if (not anchor_note.get("reanchored") and aligned
+                and len(existing) >= len(want)):
             # 阶梯不动 ≠ 保护单不用维护：部署新 `sl_distance` 后旧 SL 仍挂在旧规则的价上，
             # 而 SL 覆盖段在这个 return 之后 → 规则永远不生效（实测 15:00 轮 already_full，
             # SL 还是 2197 的老价）。所以这里先跑一次 SL 维护再返回。
@@ -2494,6 +2548,7 @@ class Executor:
                 detail={"skipped": "already_full", "existing": len(existing),
                         "template_total": len(want), "anchor": anchor,
                         "anchor_info": anchor_note, "mark": mark,
+                        "off_max_pct": round(off_max * 100, 4),
                         "sl_rewrite": sl_rewrite}))
             return
         placed, skipped = [], []
@@ -2502,7 +2557,7 @@ class Executor:
                 price = round_price(px, meta)
             except Exception:  # noqa: BLE001
                 continue
-            if any(p > 0 and abs(price - p) / p <= dedupe_tol for p in existing):
+            if any(p > 0 and abs(price - p) / p <= align_tol for p in existing):
                 skipped.append(price)
                 continue
             if side == "long" and price >= mark:      # 多头只补现价下方

@@ -104,15 +104,25 @@ class TestLadderTemplate(unittest.TestCase):
         self.assertEqual(prices, [1920.0, 1940.0, 1960.0])
 
     def test_no_extra_layers_when_already_full(self):
-        """已存在入场单 ≥ 模板总档数 → 不再补（防模型档 + 模板档叠加成 14 层）。"""
-        olds = [{"price": str(px), "size": 1} for px in (1990, 1985, 1975, 1960)]
+        """已存在入场单 ≥ 模板总档数 → 不得叠加（防模型档 + 模板档变成 14 层）。
+
+        2026-10-30 语义收紧：原来靠「条数够就跳过」实现，那会让**档距变了的旧梯
+        永远换不掉**（实测部署后卡在 step 0.445% 的旧档位）。现在模板是唯一权威：
+        与模板价不重合的旧档先撤、再补成模板档，最终条数仍等于模板档数 ——
+        防叠加的目标不变，断言改看「最终条数」而不是「走哪个分支」。
+        """
+        olds = [{"id": f"o{i}", "price": str(px), "size": 1}
+                for i, px in enumerate((1990, 1985, 1975, 1960))]
         c = C(existing=olds, mark=2000.0)
         ex = self._ex(c)
         rep = Report()
         ex._complete_ladder([_intent()], rep)
-        self.assertEqual(c.placed, [], "已满 4 档（模板 3+1）时不得再补")
-        dets = [r.detail for r in rep.results if r.detail.get("skipped")]
-        self.assertEqual(dets[0]["skipped"], "already_full")
+        # 1960 与模板档完全重合 → 保留；其余 3 条不合规被撤 → 补 3 条 = 总共 4 档
+        final = sorted(float(b["price"]) for b in c.placed) + \
+            sorted(float(o["price"]) for o in c.existing)
+        self.assertEqual(len(final), 4,
+                         f"最终档数必须等于模板档数（不叠加），实际 {len(final)}")
+        self.assertEqual(sorted(final), [1920.0, 1940.0, 1960.0, 1980.0])
 
     def test_prunes_off_template_levels(self):
         """模板启用时是唯一权威：价格不在模板档位上的入场单被撤掉。
@@ -132,16 +142,22 @@ class TestLadderTemplate(unittest.TestCase):
         self.assertEqual(pruned[0]["pruned_off_template"][0]["price"], 1930.0)
 
     def test_dedupes_same_price_orders(self):
-        """同价重复档（模型与补档同轮抢挂）只保留一条。"""
+        """同价重复档（模型与补档同轮抢挂）只保留一条。
+
+        2026-10-30：档位归属容差从 0.3% 收紧到 0.02% 后，1980.5 已经落在
+        模板价 1980 的容差外 → 由 prune 直接撤掉（不再等 dedupe 段）。
+        结论不变（只留一条），但要走当前路径，所以断言改成「保留的是与模板价
+        完全一致的那条」。
+        """
         olds = [{"id": "dupA", "price": "1980", "size": 1},
                 {"id": "dupB", "price": "1980.5", "size": 1}]
         c = C(existing=olds, mark=2000.0)
         ex = self._ex(c)
         rep = Report()
         ex._complete_ladder([_intent()], rep)
-        self.assertEqual(len(c.cancelled), 1, "同价两条必须撤掉一条")
-        dets = [r.detail for r in rep.results if r.detail.get("dup_removed")]
-        self.assertTrue(dets and len(dets[0]["dup_removed"]) == 1)
+        self.assertEqual(len(c.cancelled), 1, f"同价两条必须撤掉一条：{c.cancelled}")
+        self.assertEqual(c.cancelled, ["dupB"],
+                         "应保留与模板价 1980 完全重合的那条")
 
     def test_no_sl_no_completion(self):
         c = C(mark=2000.0)
