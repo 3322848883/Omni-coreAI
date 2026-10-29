@@ -222,9 +222,13 @@ snap = (det8.get("dynamic") or {}).get("structure_snap") or {}
 print(f"  吸附={snap}  层数={len(px8)}")
 check("吸附生效", snap.get("snapped", 0) >= 2, str(snap))
 check("吸附后仍 10 层", len(px8) == 10, f"{len(px8)}")
-adj = (det8.get("dynamic") or {}).get("sl_adjusted") or {}
-print(f"  SL 调整={adj}")
-check("SL 被拉回区间", bool(adj) and adj.get("adjusted", 0) > 2160, str(adj))
+# 断言改口径：SL 现在走 sl_distance 点数模式（300~500 点），不再用 ATR 的 bounds
+dyn8 = det8.get("dynamic") or {}
+sp8 = dyn8.get("sl_points") or {}
+print(f"  SL 点数={sp8}")
+check("SL 走点数模式", sp8.get("mode") == "points", str(sp8))
+check("覆盖价距 300~500 点",
+      bool(sp8) and 300 <= (sp8.get("points") or 0) <= 500, str(sp8.get("points")))
 
 print("\n" + "=" * 70)
 print(f"总计：{sum(RESULTS)}/{len(RESULTS)} 项通过")
