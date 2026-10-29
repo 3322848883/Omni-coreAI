@@ -1680,7 +1680,11 @@ class Executor:
                 if cur_px > 0 and abs(cur_px - target_px) / cur_px > self._sl_drift_tol():
                     drift = {"from": cur_px, "to": target_px}
 
-            if covered < need or drift:
+            # 过度覆盖也要收紧：旧 SL 按旧敞口挂了 -37，换成 29 张后它成了
+            # 「平不完的单」，语义不干净（Gate 只按实际持仓平，多余部分无效）。
+            # 2026-10-30 实盘：档位张数从 37 纠正到 29，SL 仍挂 -37。
+            over = covered > need + 0.5
+            if covered < need or over or drift:
                 size = (-need if side == "long" else need)
                 body = {
                     "initial": {"contract": sym, "size": size, "price": "0",
@@ -1696,8 +1700,9 @@ class Executor:
                     except Exception:  # noqa: BLE001
                         pass
                 return {"trigger": float(target_px), "size": size,
-                        "reason": (f"cover_gap({covered}<{need})" if drift is None
-                                   else f"rule_drift({drift['from']}→{drift['to']})"),
+                        "reason": (f"cover_gap({covered}<{need})" if covered < need
+                                   else (f"cover_over({covered}>{need})" if over
+                                         else f"rule_drift({drift['from']}→{drift['to']})")),
                         "drift": drift,
                         "id": str((o or {}).get("id") or "")}
             return {"skipped": f"covered({covered}>={need})"}
@@ -2705,7 +2710,9 @@ class Executor:
                     if cur_px > 0 and abs(cur_px - target_px) / cur_px > self._sl_drift_tol():
                         drift = {"from": cur_px, "to": target_px,
                                  "points": (dyn_note.get("sl_points") or {}).get("points")}
-                if covered < need or drift:
+                # 过度覆盖同样要收紧（见 `_maybe_rewrite_sl` 同名注释）
+                over = covered > need + 0.5
+                if covered < need or over or drift:
                     body = {
                         "initial": {"contract": sym,
                                     "size": (-need if side == "long" else need),
@@ -2717,8 +2724,9 @@ class Executor:
                     }
                     o = self.client.place_price_order(body)
                     prot_added = {"trigger": float(sl), "size": -need,
-                                  "reason": (f"cover_gap({covered}<{need})" if drift is None
-                                             else f"rule_drift({drift['from']}→{drift['to']})"),
+                                  "reason": (f"cover_gap({covered}<{need})" if covered < need
+                                             else (f"cover_over({covered}>{need})" if over
+                                                   else f"rule_drift({drift['from']}→{drift['to']})")),
                                   "drift": drift,
                                   "id": str((o or {}).get("id") or "")}
                     for old_o in olds:      # 新单已挂 → 撤旧的不足尺寸 SL

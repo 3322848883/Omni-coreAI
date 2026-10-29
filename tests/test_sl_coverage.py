@@ -133,13 +133,35 @@ class TestSlCoverage(unittest.TestCase):
         self.assertEqual(c.cancelled_prot, ["old"], "旧的小尺寸 SL 必须撤掉")
 
     def test_enough_cover_untouched(self):
+        """覆盖**精确等于**敞口时不动（防止每轮重挂 SL 抖动）。"""
+        c0, _ = self._run(3.0, [])          # 先量出 need
+        need = c0.placed_prot[0]["initial"]["size"]
         preset = [{"id": "old", "status": "open",
                    "trigger": {"price": "2160", "rule": 2},
-                   "initial": {"size": -99}}]
+                   "initial": {"size": need}}]
         c, det = self._run(3.0, preset)
         self.assertEqual(c.placed_prot, [], "覆盖已足够时不得重复挂")
         self.assertEqual(c.cancelled_prot, [], "也不得撤")
         self.assertTrue((det.get("protection") or {}).get("skipped"))
+
+    def test_over_cover_is_tightened(self):
+        """覆盖**超过**敞口也要收紧（2026-10-30 实盘：换档后 37 张压 29 张敞口）。
+
+        挂一张平不完的 reduce_only 单语义不干净（交易所只按实际持仓平），
+        还会让「这是不是最新规则」的判断失真。
+        """
+        preset = [{"id": "old", "status": "open",
+                   "trigger": {"price": "2160", "rule": 2},
+                   "initial": {"size": -99}}]
+        c, det = self._run(3.0, preset)
+        entry = sum(float(b["size"]) for b in c.placed)
+        need = int(3 + entry)
+        self.assertEqual(len(c.placed_prot), 1, "过度覆盖必须重挂")
+        self.assertEqual(c.placed_prot[0]["initial"]["size"], -need,
+                         "必须收紧到实际敞口")
+        self.assertEqual(c.cancelled_prot, ["old"])
+        self.assertIn("cover_over", (det.get("protection") or {}).get("reason", ""),
+                      f"应留 cover_over 痕迹：{det.get('protection')}")
 
 
 if __name__ == "__main__":
