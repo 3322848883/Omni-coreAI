@@ -124,7 +124,8 @@ def run(tag, atr=7.5, bw=2.6, null=False, sl=2160.0, meta=None, client=None,
             if getattr(s, "action", "") == "ladder_template" and s.detail]
     det = next((d for d in dets if "step_pct" in d), dets[0] if dets else {})
     Path(ex.ladder_template["dynamic"]["db_path"]).unlink(missing_ok=True)
-    prices = sorted((float(b["price"]), int(float(b["size"]))) for b in c.book)
+    # 张数可能是 0.5（grid_lots 0.5）→ 绝不能 int()，否则 0.5 变 0
+    prices = sorted((float(b["price"]), round(float(b["size"]), 2)) for b in c.book)
     return c, det, prices
 
 
@@ -132,6 +133,17 @@ def check(name, cond, extra=""):
     RESULTS.append(bool(cond))
     print(f"  {'PASS' if cond else 'FAIL'}  {name}{('  ' + extra) if extra else ''}")
 
+
+
+# ── 2026-10-30：上限/张数一律从生产配置推导，别硬编码（调参会全挂）──────────
+_CAP = (float((TPL_PROD.get("dynamic") or {}).get("max_span_pct") or 6.0)
+        / float(TPL_PROD.get("grid_levels") or 10))
+_MIN = float((TPL_PROD.get("dynamic") or {}).get("min_step_pct") or 0.3)
+_LOTS = float(TPL_PROD.get("grid_lots") or 1)
+_SLOTS = {int(k): float(v) for k, v in (TPL_PROD.get("martin_slots") or {}).items()}
+_NLV = int(TPL_PROD.get("grid_levels") or 10)
+_WANT_LOTS = [_SLOTS.get(i + 1, _LOTS) for i in range(_NLV)]
+_TOTAL_LOTS = sum(_WANT_LOTS)
 
 print("=" * 70)
 print("生产配置检查")
@@ -151,15 +163,18 @@ print(f"  张数={[s for _, s in px]}")
 print(f"  档位={[round(p, 1) for p, _ in px]}")
 check("10 层", len(px) == 10, f"实际 {len(px)}")
 sizes_desc = [s for _, s in reversed(px)]     # 从锚点往下
-slots_cfg = {int(k): int(v) for k, v in (TPL_PROD.get("martin_slots") or {}).items()}
-want_sizes = [slots_cfg.get(i + 1, int(TPL_PROD.get("grid_lots") or 1))
+slots_cfg = {int(k): float(v) for k, v in (TPL_PROD.get("martin_slots") or {}).items()}
+want_sizes = [slots_cfg.get(i + 1, float(TPL_PROD.get("grid_lots") or 1))
               for i in range(len(sizes_desc))]
 check("马丁占位与配置一致", sizes_desc == want_sizes,
       f"实际{sizes_desc} 期望{want_sizes}（slots={slots_cfg}）")
 gaps = [round(px[i][0] - px[i + 1][0], 2) for i in range(len(px) - 1)]
 check("间距基本等距", max(gaps) - min(gaps) < 1.0, f"{gaps}")
 prot = c.prot[-1]["initial"]["size"] if c.prot else None
-check("SL 覆盖 = 持仓+入场", prot == -(POS + sum(s for _, s in px)), f"SL={prot}")
+import math as _m
+# 触发单 size 是 int64 → 引擎用 ceil(持仓+挂单)；小数张配置下 -(3+6.5) 要写成 -10
+_need = -_m.ceil(POS + sum(s for _, s in px) - 1e-9)
+check("SL 覆盖 = ceil(持仓+入场)", prot == _need, f"SL={prot} 期望{_need}")
 
 print("\n" + "=" * 70)
 print("② 低波动 / ③ 高波动 / ④ 指标缺失")
@@ -171,7 +186,9 @@ for tag, atr, bw, null in (("低波动 ATR2", 2.0, 0.8, False),
     print(f"  {tag}: step={det2.get('step_pct')}% 层数={len(px2)} "
           f"deepest={(MARK - px2[0][0]) / MARK * 100:.2f}%")
     check(f"{tag} 10 层", len(px2) == 10, f"实际 {len(px2)}")
-    check(f"{tag} step 合法", (det2.get("step_pct") or 0) <= 0.86 + 1e-6)
+    check(f"{tag} step 合法",
+          _MIN - 1e-6 <= (det2.get("step_pct") or 0) <= _CAP + 1e-6,
+          f"区间[{_MIN}, {_CAP:.2f}]")
 
 print("\n" + "=" * 70)
 print("⑤ 幂等（同盘面连跑两次）")
@@ -188,15 +205,16 @@ print("\n" + "=" * 70)
 print("⑥ AI 档距建议（clamp）")
 print("=" * 70)
 _, det4, px4 = run("ai", meta={"ladder_step_pct": 0.55})
-check("采用 AI 0.55（区间内）", abs((det4.get("step_pct") or 0) - 0.55) < 1e-6,
-      str(det4.get("step_pct")))
-_, det4b, _ = run("ai0", meta={"ladder_step_pct": 0.7})
-check("0.7 被跨度上限 0.6 截断",
-      abs((det4b.get("step_pct") or 0) - 0.6) < 1e-6
+# 0.55 < min_step(0.66) → 被抬到下限。AI 只能在这个窗口里调，不能穿透物理下沿。
+check("AI 0.55 被下限抬起", abs((det4.get("step_pct") or 0) - _MIN) < 1e-6,
+      f"{det4.get('step_pct')} vs min={_MIN}")
+_, det4b, _ = run("ai0", meta={"ladder_step_pct": 1.5})
+check(f"1.5 被跨度上限 {_CAP:.2f}% 截断",
+      abs((det4b.get("step_pct") or 0) - _CAP) < 1e-6
       and (det4b.get("dynamic") or {}).get("ai_step_clamped") is True,
       str(det4b.get("step_pct")))
 _, det5, _ = run("ai2", meta={"ladder_step_pct": 5.0})
-check("越界被 clamp", (det5.get("step_pct") or 0) <= 0.86 + 1e-6
+check("越界被 clamp", (det5.get("step_pct") or 0) <= _CAP + 1e-6
       and (det5.get("dynamic") or {}).get("ai_step_clamped") is True,
       str((det5.get("dynamic") or {}).get("ai_step_clamped")))
 

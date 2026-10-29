@@ -117,7 +117,9 @@ def _run(levels, lo=None, hi=None, extra=None):
             if getattr(r, "action", "") == "ladder_template" and r.detail]
     det = next((d for d in dets if "step_pct" in d or d.get("blocked")), {})
     prices = sorted(float(b["price"]) for b in c.book)
-    sizes = [int(float(b["size"])) for b in sorted(c.book, key=lambda x: -float(x["price"]))]
+    # 张数可能是 0.5（grid_lots 0.5）→ 不能 int()，否则 0.5 变 0、看不出档位差异
+    sizes = [round(float(b["size"]), 2)
+             for b in sorted(c.book, key=lambda x: -float(x["price"]))]
     prot = [p for p in c.prot]
     return prices, sizes, det, prot
 
@@ -161,7 +163,11 @@ class TestStructureLevels(unittest.TestCase):
         prices, sizes, det, _ = _run(lv, lo=MARK - 200, hi=MARK + 40)
         n = len(prices)
         self.assertEqual(n, 12, f"12 个结构位应全用，实际 {n}")
-        want = {max(1, round(0.3 * n)): 6, max(1, round(0.7 * n)): 7, n: 9}
+        # 期望从**生产配置**推导：martin_slots 的 key 是「基准层数下的第几档」，
+        # 这里要验证的是位次比例映射，不该把 6/7/9 写死（一调仓位就挂）。
+        slots = {int(k): float(v) for k, v in (TPL.get("martin_slots") or {}).items()}
+        n0 = int(TPL.get("grid_levels") or 10)
+        want = {max(1, round(k / n0 * n)): v for k, v in slots.items()}
         for idx, lots in want.items():
             self.assertEqual(sizes[idx-1], lots, f"第 {idx} 档应 {lots} 张，实际 {sizes}")
 
@@ -184,8 +190,9 @@ class TestStructureLevels(unittest.TestCase):
         lv = [MARK - 10 * k for k in range(1, 15)]
         _p, _s, det, _prot = _run(lv, lo=MARK - 75, hi=MARK + 75)
         sl = (det.get("dynamic") or {}).get("sl_points") or {}
-        self.assertAlmostEqual(sl.get("points"), 500.0, places=1,
-                               msg=f"区间 150 点应到上限 500，实际 {sl.get('points')}")
+        cap = float((TPL.get("sl_distance") or {}).get("max_points") or 500)
+        self.assertAlmostEqual(sl.get("points"), cap, places=1,
+                               msg=f"区间 150 点应到上限 {cap}，实际 {sl.get('points')}")
 
     def test_levels_capped_at_15(self):
         """给 25 个结构位 → 最多取 15 个。"""

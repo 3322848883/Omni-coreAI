@@ -19,6 +19,21 @@ from omnialpha.schema import Intent  # noqa: E402
 
 TPL = dict(load_bot_config(ROOT / "config/bots/martin-grid.yaml").ladder_template)
 MARK = 2327.0
+
+# 盘面铺满时 SL 该覆盖多少张 —— 从配置推导（trigger size 是 int64 → ceil）。
+# 写死 -29 的话，一旦把 grid_lots 调到 0.5，它会变成「过度覆盖」，
+# 让 cover_over 抢在 rule_drift 前面命中，把本节要验证的东西盖掉。
+import math as _math
+
+
+def _cfg_need() -> int:
+    slots = {int(k): float(v) for k, v in (TPL.get("martin_slots") or {}).items()}
+    n = int(TPL.get("grid_levels") or 10)
+    base = float(TPL.get("grid_lots") or 1)
+    return int(_math.ceil(sum(slots.get(i + 1, base) for i in range(n)) - 1e-9))
+
+
+NEED = _cfg_need()
 OLD = [2311.21, 2300.77, 2290.32, 2279.87, 2269.42,
        2258.98, 2248.53, 2238.08, 2227.63, 2217.19]
 
@@ -31,10 +46,14 @@ class Meta:
 
 
 class Client:
-    def __init__(self, sl_price="2197.38", sl_size=-29, old=None):
+    def __init__(self, sl_price="2197.38", sl_size=None, old=None):
         self.mark = MARK
         self.book = [{"id": f"old{i}", "price": str(p), "size": 1}
                      for i, p in enumerate(old if old is not None else OLD)]
+        # sl_size 默认 = 盘面张数总和：写死 -29 在「0.5 张/档」的新配置下会变成
+        # 过度覆盖（covered 29 > need 10），先命中 cover_over、把 rule_drift 盖掉。
+        if sl_size is None:
+            sl_size = -NEED
         self.prot = ([{"id": "p0", "status": "open",
                        "initial": {"size": sl_size},
                        "trigger": {"price": sl_price, "rule": 2}}]
@@ -76,7 +95,7 @@ class Client:
         return {}
 
 
-def _run(sl_price="2197.38", sl_size=-29, lo=None, hi=None,
+def _run(sl_price="2197.38", sl_size=None, lo=None, hi=None,
          state=None, client=None):
     f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     con = sqlite3.connect(f.name)
@@ -149,8 +168,11 @@ class TestSlRuleDrift(unittest.TestCase):
         # 把 SL 篡改成旧规则价（模拟"部署前留下的老单"）
         # ⚠️ 张数必须用**档位张数总和**，不是 `len(book)` —— 马丁档是 6/7/9 张，
         # 10 条挂单共 29 张；用条数会让 need 算错、走成 cover_gap 而非 rule_drift。
-        n = int(sum(abs(float(b.get("size") or 0)) for b in c.book))
-        self.assertGreater(n, len(c.book), "本节依赖马丁档张数 > 1")
+        # 本节的要点是「必须用张数总和而不是条数」：0.5 张/档时总和 6.5 < 10 条，
+        # 用条数会把 need 算成 10（过度覆盖），走成 cover_over 而非 rule_drift。
+        n = int(_math.ceil(sum(abs(float(b.get("size") or 0)) for b in c.book) - 1e-9))
+        self.assertNotEqual(float(n), float(len(c.book)),
+                            "本节依赖张数总和 ≠ 条数（否则两种算法无法区分）")
         c.prot = [{"id": "stale", "status": "open", "initial": {"size": -n},
                    "trigger": {"price": "2197.38", "rule": 2}}]
         _c2, det2 = _run(state=st, client=c)           # 第二轮：锚点未漂移

@@ -114,6 +114,18 @@ def db2(close4h=None, ema200=EMA200, atr=7.5, bw=2.6, null15=False, with4h=True)
     return f.name
 
 
+
+# ── 2026-10-30：上限/张数一律从生产配置推导，别硬编码（调参会全挂）──────────
+_CAP = (float((TPL.get("dynamic") or {}).get("max_span_pct") or 6.0)
+        / float(TPL.get("grid_levels") or 10))
+_MIN = float((TPL.get("dynamic") or {}).get("min_step_pct") or 0.3)
+_LOTS = float(TPL.get("grid_lots") or 1)
+_SLOTS = {int(k): float(v) for k, v in (TPL.get("martin_slots") or {}).items()}
+_NLV = int(TPL.get("grid_levels") or 10)
+_WANT_LOTS = [_SLOTS.get(i + 1, _LOTS) for i in range(_NLV)]
+_TOTAL_LOTS = sum(_WANT_LOTS)
+
+
 def build(client, db_path, state_dir, tpl_extra=None, entry=None, meta=None):
     ex = Executor(client, symbols_whitelist=["ETH_USDT"], ladder_template=dict(TPL))
     t = dict(TPL)
@@ -264,9 +276,12 @@ c = Client()
 _, det, errs = build(c, str(Path(tempfile.mkdtemp()) / "nope.db"), sd3,
                      {"direction_mode": "auto"})
 check("③ db 缺失 → 不崩", not errs, str(errs[:1]))
-check("③ db 缺失 → 档距回退 base_step",
-      abs((det.get("step_pct") or 0) - float(TPL.get("grid_step_pct"))) < 1e-6,
-      f"step={det.get('step_pct')}")
+# 回退也要守下限：base_step(grid_step_pct=0.5) < min_step(0.66) 时用 min_step，
+# 否则「指标读不到」这种最该保守的场景反而铺出最密的梯（实测 11 点 < 15 点下限）。
+_fb = max(float(TPL.get("grid_step_pct")), _MIN)
+check("③ db 缺失 → 档距回退且守下限",
+      abs((det.get("step_pct") or 0) - _fb) < 1e-6,
+      f"step={det.get('step_pct')} 期望{_fb}")
 check("③ db 缺失 → 仍铺满 10 层", len(c.book) == 10, f"{len(c.book)}")
 
 # ④ 连续两轮同盘面 → 第二轮 0 新增（幂等，锚点未漂移）
@@ -285,14 +300,16 @@ sd5 = tempfile.mkdtemp()
 d = db2(close4h=EMA200 * 1.01, atr=40, bw=12.0)         # 极高波动
 c = Client()
 _, det5, _ = build(c, d, sd5, {"direction_mode": "auto"})
-desc = [int(float(b["size"])) for b in sorted(c.book, key=lambda x: -float(x["price"]))]
-check("⑤ 马丁占第 3/7/10 档", desc == [1, 1, 6, 1, 1, 1, 7, 1, 1, 9], f"{desc}")
+desc = [round(float(b["size"]), 2) for b in sorted(c.book, key=lambda x: -float(x["price"]))]
+check("⑤ 马丁占第 3/7/10 档", desc == _WANT_LOTS,
+      f"{desc} 期望{_WANT_LOTS}")
 hi_px = max(float(b["price"]) for b in c.book)
 lo_px = min(float(b["price"]) for b in c.book)
 span_pct = (hi_px - lo_px) / c.mark * 100
-check("⑤ 极高波动 step 被 span 封顶 0.6%",
-      abs((det5.get("step_pct") or 0) - 0.6) < 0.02, f"step={det5.get('step_pct')}")
-check("⑤ 档位跨度≈5.4%（0.6%→6.0%）", abs(span_pct - 5.4) < 0.2, f"{span_pct:.2f}%")
+check(f"⑤ 极高波动 step 被 span 封顶 {_CAP:.2f}%",
+      abs((det5.get("step_pct") or 0) - _CAP) < 0.02, f"step={det5.get('step_pct')}")
+check(f"⑤ 档位跨度≈{_CAP * 9:.1f}%",
+      abs(span_pct - _CAP * 9) < 0.3, f"{span_pct:.2f}%")
 Path(d).unlink(missing_ok=True)
 
 # ⑥ SL 覆盖：多头 持仓3 + 挂单29 → −32
@@ -301,8 +318,10 @@ d = db2(close4h=EMA200 * 1.01)
 c = Client(pos=3.0, side="long")
 build(c, d, sd6, {"direction_mode": "auto"})
 sl6 = [p for p in c.prot if (p.get("trigger") or {}).get("rule") == 2]
-check("⑥ 多头 SL 覆盖 3+29=32",
-      bool(sl6) and abs(float(sl6[-1]["initial"]["size"])) == 32.0,
+import math as _m
+_need6 = _m.ceil(3.0 + _TOTAL_LOTS - 1e-9)
+check(f"⑥ 多头 SL 覆盖 3+{_TOTAL_LOTS:g}={_need6}",
+      bool(sl6) and abs(float(sl6[-1]["initial"]["size"])) == float(_need6),
       str(sl6[-1]["initial"]["size"]) if sl6 else "无")
 Path(d).unlink(missing_ok=True)
 
@@ -312,8 +331,8 @@ d = db2(close4h=EMA200 * 0.978)
 c = Client(pos=3.0, side="short")
 build(c, d, sd7, {"direction_mode": "auto"})
 sl7 = [p for p in c.prot if (p.get("trigger") or {}).get("rule") == 1]
-check("⑦ 空头 SL 覆盖 3+29=32",
-      bool(sl7) and abs(float(sl7[-1]["initial"]["size"])) == 32.0,
+check(f"⑦ 空头 SL 覆盖 3+{_TOTAL_LOTS:g}={_m.ceil(3.0 + _TOTAL_LOTS - 1e-9)}",
+      bool(sl7) and abs(float(sl7[-1]["initial"]["size"])) == float(_need6),
       str(sl7[-1]["initial"]["size"]) if sl7 else "无")
 Path(d).unlink(missing_ok=True)
 
@@ -324,7 +343,7 @@ c = Client(pos=3.0, side="short", sl_size=-3)
 build(c, d, sd8, {"direction_mode": "auto"})
 sl8 = [p for p in c.prot if (p.get("trigger") or {}).get("rule") == 1]
 check("⑧ 空头补覆盖后只剩一条 SL", len(sl8) == 1, f"{len(sl8)} 条")
-check("⑧ 空头补覆盖 size=32", bool(sl8) and abs(float(sl8[-1]["initial"]["size"])) == 32.0,
+check(f"⑧ 空头补覆盖 size={_need6}", bool(sl8) and abs(float(sl8[-1]["initial"]["size"])) == float(_need6),
       str(sl8[-1]["initial"]["size"]) if sl8 else "无")
 Path(d).unlink(missing_ok=True)
 

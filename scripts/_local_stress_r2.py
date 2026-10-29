@@ -109,6 +109,18 @@ def mkdb(atr=7.5, bw=2.6, null=False, nan=False, path=None):
     return f
 
 
+
+# ── 2026-10-30：上限/张数一律从生产配置推导，别硬编码（调参会全挂）──────────
+_CAP = (float((TPL_PROD.get("dynamic") or {}).get("max_span_pct") or 6.0)
+        / float(TPL_PROD.get("grid_levels") or 10))
+_MIN = float((TPL_PROD.get("dynamic") or {}).get("min_step_pct") or 0.3)
+_LOTS = float(TPL_PROD.get("grid_lots") or 1)
+_SLOTS = {int(k): float(v) for k, v in (TPL_PROD.get("martin_slots") or {}).items()}
+_NLV = int(TPL_PROD.get("grid_levels") or 10)
+_WANT_LOTS = [_SLOTS.get(i + 1, _LOTS) for i in range(_NLV)]
+_TOTAL_LOTS = sum(_WANT_LOTS)
+
+
 def run(tag, *, mark=MARK, atr=7.5, bw=2.6, null=False, nan=False, meta=None,
         pos=0.0, pos_side="long", sl_px=None, client=None, state_dir=None,
         action="hold", sl=None, extra_tpl=None):
@@ -205,7 +217,8 @@ cases = [("'abc'", "abc"), ("0", 0), ("-1", -1), ("NaN", float("nan")),
 for tag, val in cases:
     c, det, err, errs = run(f"step{tag}", meta={"ladder_step_pct": val})
     sp = det.get("step_pct")
-    ok = err is None and sp is not None and 0.2 <= float(sp) <= 0.9
+    ok = (err is None and sp is not None
+          and _MIN - 1e-6 <= float(sp) <= _CAP + 1e-6)
     ck(f"⑤ ladder_step_pct={tag} → 合法档距", ok, f"step={sp} err={err}")
 
 print("\n" + "=" * 72)
@@ -217,7 +230,8 @@ for tag, kw in (("atr14=NULL", dict(null=True)),
                 ("atr 极大 9999", dict(atr=9999.0))):
     c, det, err, errs = run(f"ind{tag}", **kw)
     sp = det.get("step_pct")
-    ok = err is None and sp is not None and 0.2 <= float(sp) <= 0.9
+    ok = (err is None and sp is not None
+          and _MIN - 1e-6 <= float(sp) <= _CAP + 1e-6)
     ck(f"⑥ {tag} → 档距合法", ok, f"step={sp} err={err}")
     ck(f"⑥ {tag} → 仍满层", len(c.book) >= 9, len(c.book))
 

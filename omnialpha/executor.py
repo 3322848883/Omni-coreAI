@@ -1873,7 +1873,11 @@ class Executor:
                         pend += abs(left)
                     elif side == "short" and size < 0:
                         pend += abs(left)
-                need = int(round(pos_sz + pend))
+                # 张数**向上取整**：触发单 size 是 int64（Gate price_orders 不收小数），
+                # 而 0.5 张/档的配置下 need 常是 6.5 —— round 会取到 6，剩 0.5 张裸奔。
+                # 2026-10-30 实测：grid_lots 0.5 + 马丁 1.0 → 总 6.5 张，
+                # need=round(9.5)=10 侥幸对，但 6.4 → 6 就漏 0.4 张。ceil 永远偏安全侧。
+                need = int(math.ceil(pos_sz + pend - 1e-9))
             except Exception:  # noqa: BLE001
                 need = 0
 
@@ -2097,10 +2101,16 @@ class Executor:
         读不到指标 → 回退固定 `base_step`，在 detail 留痕（fail-safe，不阻断铺梯）。
         """
         note: dict = {"base_step_pct": base_step}
+        # 下限先单独读出来：下面两条**回退路径**（配置非法 / 指标缺失）原来直接
+        # 返回 base_step，绕过了 min_step —— 实测指标缺失时档距 0.5%(11 点) < 15 点下限，
+        # 「动态档距」在最该保守的时候反而变得最密。
+        try:
+            min_step = float(dyn.get("min_step_pct", 0.3))
+        except (TypeError, ValueError):
+            min_step = 0.3
         try:
             atr_mult = float(dyn.get("atr_mult", 1.0))
             bb_div = float(dyn.get("bb_div", 6.0))
-            min_step = float(dyn.get("min_step_pct", 0.3))
             # `auto` = 不设固定上限，只由 max_span_pct/grid_n 推导（否则 float("auto")
             # 抛 ValueError 被外层 except 吞掉 → **静默回退固定档距**，实测踩过）
             _max_raw = dyn.get("max_step_pct", 1.2)
@@ -2112,7 +2122,9 @@ class Executor:
                           (Path(__file__).resolve().parents[1]
                            / "pa-data-source" / "data" / "kline.db"))
         except (TypeError, ValueError):
-            return base_step, note
+            note["fallback"] = "bad_config"
+            note["step_pct"] = round(max(base_step, min_step), 4)
+            return max(base_step, min_step), note
 
         try:
             con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
@@ -2125,10 +2137,12 @@ class Executor:
                 con.close()
         except Exception as e:  # noqa: BLE001 — 读库失败回退固定档距
             note["error"] = f"db: {str(e)[:80]}"
-            return base_step, note
+            note["step_pct"] = round(max(base_step, min_step), 4)
+            return max(base_step, min_step), note
         if not row or any(v is None for v in row):
             note["error"] = "no_indicator_row"
-            return base_step, note
+            note["step_pct"] = round(max(base_step, min_step), 4)
+            return max(base_step, min_step), note
 
         atr, mid, up, lo = (float(v) for v in row)
         if mid <= 0 or mark <= 0:
@@ -2870,7 +2884,10 @@ class Executor:
         for d, oid, px, t, sz_o, lots in pairs:
             if oid in keep_ids or t in used_t:
                 continue
-            if abs(sz_o - lots) > max(0.5, lots * 0.1):
+            # 张数容差：原来 max(0.5, lots*10%) 在「0.5 张/档」的配置下等于 100%
+            # 容差 —— 旧档 1 张会被认领成 0.5 张的档位，白留 0.5 张敞口（实测盘面
+            # 9 档却挂着 6.5 张里的 6.0，靠的是认领错位）。下限降到 0.1（= size_step）。
+            if abs(sz_o - lots) > max(0.1, lots * 0.1):
                 continue                      # 张数不符 → 交给撤单+重挂
             keep_ids.add(oid)
             used_t.add(t)
@@ -2925,7 +2942,7 @@ class Executor:
                 # 价格对齐 **且** 张数对得上才算这一档就绪：马丁档张数错位
                 # （旧梯 2217.19=9 张 vs want 2217.54=1 张）比价格错位更难看出来。
                 if (best_d <= align_tol and best_sz is not None
-                        and abs(best_sz - float(lots)) <= max(0.5, float(lots) * 0.1)):
+                        and abs(best_sz - float(lots)) <= max(0.1, float(lots) * 0.1)):
                     hit += 1
             aligned = hit == len([1 for q, _ in want if q > 0])
         if (not anchor_note.get("reanchored") and aligned
@@ -3048,7 +3065,7 @@ class Executor:
                         pend += left_abs
                     elif side == "short" and size < 0 and left_abs > 0:
                         pend += left_abs
-                need = int(round(pos_sz + pend))
+                need = int(math.ceil(pos_sz + pend - 1e-9))
             except Exception:  # noqa: BLE001
                 need = 0
             if need > 0 and sl is not None:
