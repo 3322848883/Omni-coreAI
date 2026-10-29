@@ -377,6 +377,94 @@ _ENTRY_ACTIONS = frozenset({
 })
 
 
+class _SideClient:
+    """把交易所 client 投影成「单一方向」的只读视图（双向网格 2.0，2026-10-30）。
+
+    双向 = 下方多头网格 + 上方空头网格互不影响。实现上**不改 `_complete_ladder`
+    那 900 行单侧逻辑**，而是给它换一个只看得见自己那侧的 client 视图，两侧各跑
+    一遍完整流程 —— prune / already_full / SL 覆盖 / 同价去重全部天然按侧隔离，
+    不会一边铺梯一边把另一边撤掉。
+
+    过滤规则（读操作）：
+      · `list_orders`       long 只看 `size > 0`，short 只看 `size < 0`
+      · `list_price_orders` long 只看 `rule == 2`（跌破卖出 = 多单止损）
+                            short 只看 `rule == 1`（涨破买入 = 空单止损）
+      · `get_positions`     按 `position_qty` 的符号分侧（dual 模式下多空是两条
+                            独立记录，`size` 是 int64 会丢小数，必须用反算值）
+    写操作（place/cancel）与其它属性一律直通真实 client。
+    """
+
+    __slots__ = ("_real", "_side")
+
+    def __init__(self, real: Any, side: str) -> None:
+        self._real = real
+        self._side = "short" if str(side).lower() == "short" else "long"
+
+    def list_orders(self, sym: str) -> list:
+        out = []
+        try:
+            raw = self._real.list_orders(sym) or []
+        except Exception:  # noqa: BLE001
+            return []
+        for o in raw:
+            sz = _num(o.get("size"))
+            if self._side == "long" and sz > 0:
+                out.append(o)
+            elif self._side == "short" and sz < 0:
+                out.append(o)
+        return out
+
+    def list_price_orders(self, sym: str) -> list:
+        want_rule = 2 if self._side == "long" else 1
+        out = []
+        try:
+            raw = self._real.list_price_orders(sym) or []
+        except Exception:  # noqa: BLE001
+            return []
+        for o in raw:
+            trg = o.get("trigger") or {}
+            try:
+                rule = int(trg.get("rule") or 0)
+            except (TypeError, ValueError):
+                rule = 0
+            if rule == want_rule:
+                out.append(o)
+        return out
+
+    def get_positions(self) -> list:
+        out = []
+        try:
+            raw = self._real.get_positions() or []
+        except Exception:  # noqa: BLE001
+            return []
+        try:
+            meta = None
+        except Exception:  # noqa: BLE001
+            meta = None
+        for p in raw:
+            sd = str(p.get("side") or "").lower()
+            if sd in ("long", "short"):
+                if sd == self._side:
+                    out.append(p)
+                continue
+            # dual 模式的 mode 字段形如 dual_long / dual_short
+            mode = str(p.get("mode") or "").lower()
+            if mode.endswith("long") or mode.endswith("short"):
+                if mode.endswith(self._side):
+                    out.append(p)
+                continue
+            try:
+                q = position_qty(p, meta)
+            except Exception:  # noqa: BLE001
+                q = _num(p.get("size"))
+            if (self._side == "long" and q > 0) or (self._side == "short" and q < 0):
+                out.append(p)
+        return out
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
 def _hysteresis_side(close: float, ema200: float, prev: Optional[str],
                      long_keep: float = 0.98,
                      short_keep: float = 1.005) -> tuple[Optional[str], str]:
@@ -1538,11 +1626,22 @@ class Executor:
             pass
         return Path(__file__).resolve().parents[1] / "data" / "ladder_levels.json"
 
-    def _read_levels_state(self, sym: str, tpl: dict) -> dict:
+    def _read_levels_state(self, sym: str, tpl: dict,
+                           side: Optional[str] = None) -> dict:
+        """读上一轮的档位快照。
+
+        双向 2.0 起按 `sym:side` 分开存：两侧共用一个文件，若还按 `sym` 单键写，
+        空侧会把多侧的记录覆盖掉 → 下一轮多侧读到 side=short 判不匹配、放弃缓存、
+        重算档位 → 每轮抖动。旧格式（只有 `sym` 键）仍作回退兼容。
+        """
         try:
             p = self._levels_state_path(tpl)
             if p and p.exists():
                 data = json.loads(p.read_text(encoding="utf-8")) or {}
+                if side:
+                    rec = data.get(f"{sym}:{side}")
+                    if rec:
+                        return rec
                 return data.get(sym) or {}
         except Exception:  # noqa: BLE001
             pass
@@ -1560,7 +1659,12 @@ class Executor:
                     data = json.loads(p.read_text(encoding="utf-8")) or {}
                 except Exception:  # noqa: BLE001
                     data = {}
-            data[sym] = {"side": side, "anchor": round(float(anchor), 6),
+            # 只有**双向**才按侧分 key；单侧仍写 `sym`（与旧 state 文件向后兼容，
+            # 否则部署后第一轮会读到不同 key、丢掉缓存重算一次档位）。
+            key = (f"{sym}:{side}"
+                   if getattr(self, "_forced_side", None) in ("long", "short")
+                   else sym)
+            data[key] = {"side": side, "anchor": round(float(anchor), 6),
                          "ts": int(time.time()),
                          "levels": [[round(float(px), 6), float(l)] for px, l in want]}
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -1889,6 +1993,38 @@ class Executor:
         return step, note
 
     def _complete_ladder(self, intents: list, report) -> None:
+        """阶梯补齐入口（双向 2.0 分流，2026-10-30）。
+
+        `ladder_template.two_way: true` → 下方多头网格 + 上方空头网格**各跑一遍**
+        `_complete_ladder_one_side`，每次拿一个只看得见自己那一侧的 client 视图
+        （`_SideClient`），所以两侧互不 prune、SL 各管各的敞口。
+
+        单向（默认）→ 直接走 `_complete_ladder_one_side`，行为与之前完全一致。
+        """
+        tpl = getattr(self, "ladder_template", None) or {}
+        if not (tpl.get("enabled") and tpl.get("two_way")):
+            self._complete_ladder_one_side(intents, report)
+            return
+        sides = tpl.get("two_way_sides") or ["long", "short"]
+        real = self.client
+        prev_forced = getattr(self, "_forced_side", None)
+        for side in sides:
+            if side not in ("long", "short"):
+                continue
+            self.client = _SideClient(real, side)
+            self._forced_side = side
+            try:
+                self._complete_ladder_one_side(intents, report)
+            except Exception as e:  # noqa: BLE001 — 一侧失败不该拖垮另一侧
+                report.results.append(StepResult(
+                    "ladder_template", str(tpl.get("symbol") or ""), False,
+                    detail={"two_way_side": side},
+                    error=f"双向 {side} 侧铺梯失败: {str(e)[:120]}"))
+            finally:
+                self.client = real
+                self._forced_side = prev_forced
+
+    def _complete_ladder_one_side(self, intents: list, report) -> None:
         """BOT 级阶梯补齐（`ladder_template.enabled`，全局默认关闭）。
 
         为什么要有：模型每轮给的入场腿数不稳定（实测 3/4/10 条都出现过），
@@ -1937,7 +2073,13 @@ class Executor:
         # 由波动/趋势规则自己判（价格与 BB 中轨 + EMA 关系），从而同一套模板
         # 可以「涨了做多回踩、跌了做空反弹」。
         actions = {str(getattr(i, "action", "") or "").lower() for i in entry_legs}
-        side = "short" if actions & {"open_short", "add_short", "stop_entry_short"} else "long"
+        # 双向 2.0：两侧各跑一遍，方向由 `_forced_side` 指定，不看模型给的 action
+        forced = getattr(self, "_forced_side", None)
+        if forced in ("long", "short"):
+            side = forced
+        else:
+            side = "short" if actions & {"open_short", "add_short",
+                                         "stop_entry_short"} else "long"
         sl = getattr(entry_legs[0], "sl", None) if entry_legs else None
         # `sl` 来源决定它能不能被「跟档位重算」（见下方 SL 护栏段）：
         #   模型本轮明示的 sl = 交易意图 → 与 target 取更远者（收紧等于更容易被打）
@@ -2069,10 +2211,13 @@ class Executor:
                 dyn_note["martin_scaled_by"] = round(ratio, 3)
                 dyn_note["max_martin_pct"] = max_martin
         # `direction_mode: auto` → 用 BB 中轨 + EMA 斜率定方向（读同一个 v2 库）
-        if str(tpl.get("direction_mode") or "signal").lower() == "auto":
+        if (str(tpl.get("direction_mode") or "signal").lower() == "auto"
+                and forced not in ("long", "short")):
             auto_side, dir_note = self._auto_direction(sym, mark, dyn, tpl)
             dyn_note["auto_direction"] = dir_note
             side = auto_side
+        elif forced in ("long", "short"):
+            dyn_note["two_way_side"] = forced
         dyn_note["side"] = side
         sgn = -1.0 if side == "long" else 1.0     # 多头铺锚点下方，空头铺上方
 
@@ -2120,8 +2265,12 @@ class Executor:
                     # 留痕冲突，避免将来复盘时以为迟滞失效。
                     if side != half_side:
                         edge_note["half_conflict"] = f"trend={side} half={half_side}"
-                    side = half_side
-                    dyn_note["side"] = side
+                    if forced in ("long", "short"):
+                        # 双向 2.0：两侧都要铺，edge 的「价在区间哪一半」不能再改方向
+                        edge_note["two_way_override"] = f"keep={side} half={half_side}"
+                    else:
+                        side = half_side
+                        dyn_note["side"] = side
                     edge_note["half"] = "lower" if side == "long" else "upper"
                 atr_p = 0.0
                 try:
@@ -2259,7 +2408,7 @@ class Executor:
         # 不命中，白写一次磁盘（实测还会让所有走 `_complete_ladder` 的单元测试
         # 往仓库 `data/ladder_levels.json` 里写测试数据）。
         if anchor_note.get("mode") == "fixed" and not anchor_note.get("reanchored"):
-            cached = self._read_levels_state(sym, tpl)
+            cached = self._read_levels_state(sym, tpl, side)
             try:
                 c_anchor = float(cached.get("anchor") or 0)
             except (TypeError, ValueError):
@@ -2723,7 +2872,10 @@ class Executor:
                                     "price_type": 1, "expiration": 86400},
                     }
                     o = self.client.place_price_order(body)
-                    prot_added = {"trigger": float(sl), "size": -need,
+                    # 留痕用**带符号**的真实下单张数：空头的 SL 是 +need（buy），
+                    # 原来硬编码 -need 会让双向时两侧 detail 都显示负数、看不出方向。
+                    prot_added = {"trigger": float(sl),
+                                  "size": (-need if side == "long" else need),
                                   "reason": (f"cover_gap({covered}<{need})" if covered < need
                                              else (f"cover_over({covered}>{need})" if over
                                                    else f"rule_drift({drift['from']}→{drift['to']})")),

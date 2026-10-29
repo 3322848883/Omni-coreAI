@@ -47,7 +47,17 @@ ladder_shrink_guard: true
 # 只补缺、不撤不改；只在「本轮有入场腿且带 sl」时补。
 ladder_template:
   enabled: true
-  grid_levels: 10       # 总层数 10（7 网格 + 3 马丁，马丁占 2/6/10 档）
+  # ── 双向 2.0（2026-10-30 用户要求）────────────────────────────────────
+  # true = 下方多头网格 + 上方空头网格**同时**维护，各 10 层、各用自己的结构位、
+  #        各挂自己的 SL（多 rule=2 在下 / 空 rule=1 在上），互不 prune。
+  #        prompt 1.0（ladder_t_pa.md「永远双向」）是让模型自己挂两边，
+  #        引擎模板一开就会把另一边当"非模板档"撤掉 —— 2.0 把它移到引擎层。
+  # false = 单向（按 direction_mode 选一侧），与之前行为完全一致。
+  # ⚠️ 双向时保证金翻倍（单侧 29 张 ≈14U，双侧 58 张 ≈28U），账户只有 ~54U 可用，
+  #    开之前先确认 total_risk_pct / max_total_notional_usd 容得下两侧。
+  two_way: false
+  two_way_sides: [long, short]   # 只挂一侧时可写成 [long] / [short]
+  grid_levels: 10       # **每侧**层数（7 网格 + 3 马丁，马丁占 2/6/10 档）
   grid_lots: 1          # 网格每档 1 张
   grid_step_pct: 0.5    # 动态关闭时的固定档距；动态开启时只作马丁缩放基准
   # ── 层数动态 10~15 + 档位放关键结构位（2026-10-29 用户要求）──────────────
