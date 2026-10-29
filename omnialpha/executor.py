@@ -1359,6 +1359,26 @@ class Executor:
                      "ema20": e20, "ema50": e50, "rule": "bb_mid+ema"})
         return ("long" if up else "short"), note
 
+    def _position_side(self, sym: str, meta: Any = None) -> tuple[Optional[str], float]:
+        """当前持仓方向与张数（无持仓返回 `(None, 0.0)`）。
+
+        **必须用 `position_qty`**：`qty()` 返回的是绝对值（判不出方向），而
+        `/positions.size` 是 int64（真实 16.1 张读成 −16、0.1 张读成 0）。
+        `position_qty` 用 `value/(mark×quanto)` 反算真实张数，符号即方向。
+        """
+        try:
+            if meta is None:
+                meta = self.client.get_contract(sym)
+            for pos in self.client.get_positions() or []:
+                if str(pos.get("contract")) != sym:
+                    continue
+                sz = position_qty(pos, meta)
+                if abs(sz) > 0:
+                    return ("long" if sz > 0 else "short"), abs(sz)
+        except Exception:  # noqa: BLE001 — 查持仓失败不该让本轮停摆
+            pass
+        return None, 0.0
+
     def _direction_state_path(self, hcfg: dict) -> Path:
         sp = hcfg.get("state_file")
         path = (Path(str(sp)) if sp else
@@ -1909,6 +1929,71 @@ class Executor:
                     dyn_note["dedupe_tol_pct"] = round(dedupe_tol * 100, 4)
             except (TypeError, ValueError):
                 pass
+
+        # ── 反向持仓护栏（2026-10-29 实测 BUG）────────────────────────────
+        # 实测：持空 3 张时 4H 涨破 → side 翻 long → 引擎铺 10 条多头入场单，
+        # 并把 SL 按 long 语义挂成 rule=2（跌破卖出、位于**下方** 2212.7）。
+        # 结果：空头仓位的真止损（上方）根本不存在，跌到 2212 反而被「提前止盈」
+        # 平掉；镜像（持多判空）同样。翻向时绝不能按新方向铺梯 + 挂 SL。
+        # 处置：不铺新梯、不撤旧单（旧梯是该方向的保护），只保证持仓有兜底 SL；
+        # 是否平旧仓由模型/人工决定（`blocked: reverse_position` 每轮都会提示）。
+        pos_side, pos_sz = self._position_side(sym, meta)
+        if pos_side and pos_side != side:
+            prot_added = None
+            try:
+                if not (self.client.list_price_orders(sym) or []):
+                    pct = 0.0
+                    try:
+                        pct = float(tpl.get("sl_pct") or 0)
+                    except (TypeError, ValueError):
+                        pct = 0.0
+                    if pct <= 0:
+                        pct = 5.0
+                    sl_px = (mark * (1 - pct / 100.0) if pos_side == "long"
+                             else mark * (1 + pct / 100.0))
+                    # 兜底 SL 要覆盖「持仓 + **同向**未成交入场单」：只覆盖持仓时，
+                    # 旧同向梯一旦成交就重新裸仓（与 `cover_gap` 同口径）。
+                    cover = pos_sz
+                    try:
+                        for o in self.client.list_orders(sym) or []:
+                            if o.get("is_reduce_only") or o.get("reduce_only"):
+                                continue
+                            if str(o.get("status") or "").lower() not in ("open", ""):
+                                continue
+                            size = _num(o.get("size"))
+                            left = o.get("left")
+                            left = size if left in (None, "") else _num(left)
+                            if pos_side == "long" and size > 0:
+                                cover += abs(left)
+                            elif pos_side == "short" and size < 0:
+                                cover += abs(left)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    body = {
+                        "initial": {"contract": sym,
+                                    "size": (-cover if pos_side == "long" else cover),
+                                    "price": "0", "tif": "ioc", "reduce_only": True,
+                                    "text": f"t-{self._bot_tag('')}-sl"},
+                        "trigger": {"price": str(round_price(sl_px, meta)),
+                                    "rule": 2 if pos_side == "long" else 1,
+                                    "price_type": 1, "expiration": 86400},
+                    }
+                    o = self.client.place_price_order(body)
+                    prot_added = {"trigger": round(sl_px, 2), "size": cover,
+                                  "position": pos_sz, "for": pos_side,
+                                  "reason": "reverse_position_rescue",
+                                  "id": str((o or {}).get("id") or "")}
+            except Exception as e:  # noqa: BLE001 — 兜底失败也要把 blocked 报出去
+                report.results.append(StepResult(
+                    "ladder_template", sym, False,
+                    error=f"反向持仓兜底 SL 失败: {str(e)[:100]}"))
+            report.results.append(StepResult(
+                "ladder_template", sym, True,
+                detail={"blocked": "reverse_position",
+                        "position": {"side": pos_side, "size": pos_sz},
+                        "template_side": side, "protection": prot_added,
+                        "anchor": anchor, "anchor_info": anchor_note, "mark": mark}))
+            return
 
         # ── 模板权威：撤掉不在模板档位上的入场单（2026-10-28）────────────
         # 模型每轮都会把它自己的 12 条档位铺回来（replace 整梯替换），只靠「补缺 +

@@ -39,7 +39,10 @@ class Client:
         side, size = self.pos
         if not size:
             return []
-        return [{"contract": "ETH_USDT", "side": side, "size": str(size),
+        # size 必须带符号（真实 Gate `/positions.size` 空头为负；恒正会让
+        # `position_qty` 把空头读成多头 → 反向持仓护栏失效）
+        signed = abs(size) if side == "long" else -abs(size)
+        return [{"contract": "ETH_USDT", "side": side, "size": str(signed),
                  "entry_price": str(self.mark)}]
 
     def list_orders(self, sym):
@@ -157,7 +160,9 @@ class TestTwoWay(unittest.TestCase):
         self.assertEqual((dyn.get("auto_direction") or {}).get("rule"), "bb_mid+ema")
 
     def test_auto_picks_short_when_below_mid(self):
-        c, det = self._run("open_long", extra={"direction_mode": "auto"},
+        # pos=None：本用例只测「BB 中轨下方 → 判空」，若持多头仓会被
+        # 反向持仓护栏拦截（那是另一个用例 test_reverse_guard 的职责）
+        c, det = self._run("open_long", pos=None, extra={"direction_mode": "auto"},
                            dbkw={"bb": MARK * 1.02, "ema20": MARK * 0.98,
                                  "ema50": MARK})
         dyn = det.get("dynamic") or {}

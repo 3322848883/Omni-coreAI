@@ -39,7 +39,10 @@ class Client:
         side, size = self.pos
         if not size:
             return []
-        return [{"contract": "ETH_USDT", "side": side, "size": str(size),
+        # size 必须带符号（真实 Gate `/positions.size` 空头为负；恒正会让
+        # `position_qty` 把空头读成多头 → 反向持仓护栏失效）
+        signed = abs(size) if side == "long" else -abs(size)
+        return [{"contract": "ETH_USDT", "side": side, "size": str(signed),
                  "entry_price": str(self.mark)}]
 
     def list_orders(self, sym):
