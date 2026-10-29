@@ -93,6 +93,7 @@ def _build_plan_runner(bot, paths: ProjectPaths):
         ),
         env=bot.env,
         bot_root=paths.root,
+        ladder_template=dict(getattr(bot, "ladder_template", None) or {}),
         bot_id=bot.bot_id,
         account_risk=dict(getattr(bot, "account_risk", None) or {}),
         skills=(s.get("skills") if s.get("skills") is not None else getattr(bot, "skills", None)),

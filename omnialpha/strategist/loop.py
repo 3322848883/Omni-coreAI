@@ -120,6 +120,10 @@ class StrategistConfig:
     # 发送哪些周期图（多选）；省略 = 只发主周期 timeframe
     # 例: ["5m","15m","1h","4h"]
     vision_timeframes: Optional[list] = None
+    # 阶梯模板配置（与 Executor 共用同一份 bot.ladder_template）。
+    # 用途：`always_on` 时即使本轮 0 单也要把信号下发给执行器，
+    # 否则模板永远没机会「常驻铺梯」（实测 12h：模型 hold 54 轮 → 盘面空梯）。
+    ladder_template: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.event_timeframe:
@@ -848,6 +852,28 @@ class PlanRunner:
         if not orders:
             if self.cfg.write_hold:
                 write_hold_audit(self.history_dir, plan, cycle_id=plan.cycle_id)
+            # 模板常驻：0 单也要下发，让执行器维护阶梯（否则 always_on 形同虚设）
+            _tpl = self.cfg.ladder_template or {}
+            if _tpl.get("enabled") and _tpl.get("always_on"):
+                hold_path = write_signal_file(self.inbox, payload,
+                                              cycle_id=plan.cycle_id)
+                self._sync_order_memory(root, bid, plan, [], snapshot)
+                self._record_plan(cycle_id=plan.cycle_id, trigger=trigger, orders=0,
+                                  notes=run_notes + ["template_always_on"],
+                                  reasoning=plan.reasoning)
+                self._record_decay(plan, executed=False,
+                                   equity=self._decay_equity(snapshot))
+                return {
+                    "ok": True,
+                    "cycle_id": plan.cycle_id,
+                    "orders": 0,
+                    "file": str(hold_path),
+                    "notes": run_notes,
+                    "rejected": len(risk_result.rejected),
+                    "trigger": trigger,
+                    "template_always_on": True,
+                    **tail_extra,
+                }
             self._record_plan(cycle_id=plan.cycle_id, trigger=trigger, orders=0,
                               notes=run_notes,
                               reasoning=plan.reasoning)
