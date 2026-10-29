@@ -1215,6 +1215,37 @@ class Executor:
                     "replace_cancel", sym, True, detail=detail,
                 ))
 
+    def _range_edges(self, sym: str, mark: float, dyn: dict, edge: dict) -> tuple[float, float, dict]:
+        """区间边缘：近 `lookback` 根收盘 bar 的最低 low / 最高 high。
+
+        「只在边缘做」的坐标来源 —— 中间（均衡区）不挂单，只在下沿接多、上沿接空。
+        """
+        note: dict = {}
+        try:
+            interval = str(dyn.get("interval") or "15m")
+            lookback = int(edge.get("lookback") or 96)
+            db_path = str(dyn.get("db_path") or
+                          (Path(__file__).resolve().parents[1]
+                           / "pa-data-source" / "data" / "kline.db"))
+            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
+            try:
+                row = con.execute(
+                    "SELECT min(l), max(h), count(*) FROM (SELECT l, h FROM kline "
+                    "WHERE symbol=? AND interval=? AND closed=1 ORDER BY t DESC LIMIT ?)",
+                    (sym, interval, lookback)).fetchone()
+            finally:
+                con.close()
+        except Exception as e:  # noqa: BLE001
+            note["error"] = f"db: {str(e)[:60]}"
+            return 0.0, 0.0, note
+        if not row or not row[0] or not row[1]:
+            note["error"] = "no_range_rows"
+            return 0.0, 0.0, note
+        lo, hi, n = float(row[0]), float(row[1]), int(row[2])
+        note.update({"lo": round(lo, 2), "hi": round(hi, 2), "bars": n,
+                     "range_pct": round((hi - lo) / lo * 100, 2) if lo else None})
+        return lo, hi, note
+
     def _auto_direction(self, sym: str, mark: float, dyn: dict) -> tuple[str, dict]:
         """`direction_mode: auto` 的方向判定：BB 中轨 + EMA20/50 同向确认。
 
@@ -1528,6 +1559,53 @@ class Executor:
         sgn = -1.0 if side == "long" else 1.0     # 多头铺锚点下方，空头铺上方
 
         want: list[tuple[float, float]] = []
+        # ── 边缘模式（2026-10-29）：只在区间下沿接多 / 上沿接空，中间不挂 ──
+        # 动机：等距铺满 10 档时，中间档位在均衡区被来回扫（低买高卖变成双向止损）。
+        # 边缘模式把档位集中到「近 lookback 根」的最低/最高附近（band 内），
+        # 方向由价格在区间的位置决定；SL 放在边缘之外。
+        edge = tpl.get("edge") or {}
+        if edge.get("enabled"):
+            lo_px, hi_px, edge_note = self._range_edges(sym, mark, dyn, edge)
+            if lo_px > 0 and hi_px > lo_px:
+                dyn_note["edge"] = edge_note
+                if str(tpl.get("direction_mode") or "signal").lower() == "auto":
+                    mid_px = (lo_px + hi_px) / 2.0
+                    side = "long" if mark <= mid_px else "short"
+                    dyn_note["side"] = side
+                    edge_note["half"] = "lower" if side == "long" else "upper"
+                atr_p = 0.0
+                try:
+                    atr_p = float(dyn_note.get("atr") or 0)
+                except (TypeError, ValueError):
+                    atr_p = 0.0
+                if atr_p <= 0:
+                    atr_p = mark * 0.003
+                try:
+                    lv = int(edge.get("levels") or 5)
+                    step_atr = float(edge.get("step_atr") or 0.5)
+                except (TypeError, ValueError):
+                    lv, step_atr = 5, 0.5
+                e_slots = {}
+                for k, v in (edge.get("martin_slots") or {}).items():
+                    try:
+                        e_slots[int(k)] = float(v)
+                    except (TypeError, ValueError):
+                        continue
+                base_lots = float(tpl.get("grid_lots") or 1)
+                for i in range(lv):
+                    lots = e_slots.get(i + 1, base_lots)
+                    # 多头：从下沿往上排（越靠下沿张数越大）；空头镜像
+                    px = (lo_px + i * step_atr * atr_p) if side == "long"                         else (hi_px - i * step_atr * atr_p)
+                    want.append((px, lots))
+                try:
+                    sl_atr = float(edge.get("sl_atr") or 2.0)
+                except (TypeError, ValueError):
+                    sl_atr = 2.0
+                sl = (lo_px - sl_atr * atr_p) if side == "long" else (hi_px + sl_atr * atr_p)
+                anchor = lo_px if side == "long" else hi_px
+                dyn_note["model"] = "edge"
+                dyn_note["edge"]["sl"] = round(sl, 2)
+                dyn_note["edge"]["levels"] = lv
         # ── 模型 A：等距 N 档 + 马丁占位（2026-10-29，推荐）────────────────
         # 人格本义是「10 层 = 7 网格 + 3 马丁**穿插**」：马丁不是额外再加 3 档，
         # 而是占用其中 3 个层位、张数放大。旧实现按「网格 + 马丁深度」相加，
@@ -1541,7 +1619,7 @@ class Executor:
                 slot_lots[int(k)] = float(v)
             except (TypeError, ValueError):
                 continue
-        if slot_lots:
+        if slot_lots and not edge.get("enabled"):
             use_n = max(max(slot_lots), grid_n)
             for i in range(1, use_n + 1):
                 lots = slot_lots.get(i, grid_lots)
@@ -1549,7 +1627,7 @@ class Executor:
             dyn_note["model"] = "slots"
             dyn_note["slots"] = {str(k): v for k, v in sorted(slot_lots.items())}
             grid_n = use_n
-        for i in range(1, grid_n + 1 if not slot_lots else 1):
+        for i in range(1, (grid_n + 1) if (not slot_lots and not edge.get("enabled")) else 1):
             want.append((anchor * (1 + sgn * step_pct * i / 100.0), grid_lots))
         # ── 马丁深度 ATR 化（2026-10-29）───────────────────────────────
         # 档距已按 ATR 自适应，马丁深度却写死 4.2/5.4/6.6% —— 实测 ATR 7.5(0.32%)
@@ -1654,9 +1732,19 @@ class Executor:
         if sl_note:
             dyn_note["sl_adjusted"] = sl_note
 
-        # 同价判定容差：占位模型下滑块都落在 step 整数倍上（间距 > 0.3%），
-        # 固定 0.3% 足够；旧的「相加模型」缝隙问题改用 martin_slots 根治。
+        # 同价判定容差：占位模型下滑块都落在 step 整数倍上（间距 > 0.3%），固定 0.3% 够用。
+        # 但**边缘模式**档距按 ATR 走（0.5×ATR ≈ 3.75 点 ≈ 0.16%），小于 0.3% →
+        # 相邻档被判成重复吞掉（实测 5 档只剩 3 档）。此时容差按边缘档距缩放。
         dedupe_tol = 0.003
+        if edge.get("enabled"):
+            try:
+                _e_step = float(edge.get("step_atr") or 0.5) * float(
+                    dyn_note.get("atr") or 0)
+                if _e_step > 0 and mark > 0:
+                    dedupe_tol = min(0.003, 0.4 * _e_step / mark)
+                    dyn_note["dedupe_tol_pct"] = round(dedupe_tol * 100, 4)
+            except (TypeError, ValueError):
+                pass
 
         # ── 模板权威：撤掉不在模板档位上的入场单（2026-10-28）────────────
         # 模型每轮都会把它自己的 12 条档位铺回来（replace 整梯替换），只靠「补缺 +
