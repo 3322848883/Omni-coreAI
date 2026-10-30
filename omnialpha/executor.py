@@ -1513,6 +1513,115 @@ class Executor:
                      "range_pct": round((hi - lo) / lo * 100, 2) if lo else None})
         return (hi - lo), note
 
+    def _engine_smc_levels(self, sym: str, tpl: dict) -> tuple[list, dict]:
+        """引擎自己从**多周期** K 线算结构位（4.0，2026-10-30）。
+
+        为什么要有这一层：线上实测 AI 从不输出 `meta.structure_levels`
+        （日志里出现 0 次），而它的 reasoning 里明明引用了 OB/FVG/BOS ——
+        知识有、不落结构化字段。于是 `structure_only` 永远走 `no_structure_levels`
+        回退等距，「用结构位铺梯」实际从未生效。
+
+        做法：对 `mtf_intervals`（默认 15m/1h/4h/1d）各跑一次 `compute_smc_map`，
+        把 OB 上下沿 / FVG 边界 / EQL·EQH / swing pivot / 区间极值收集起来，
+        同一价位被多个周期命中时记 `confluence`（SMC 汇合位更强）。
+
+        返回 `(levels, note)`；`levels` 是**两侧都含**的原始价位，方向过滤交给
+        `_structure_targets`（它已经有 long 取下方 / short 取上方 的逻辑）。
+        """
+        ld = tpl.get("levels_dynamic") or {}
+        tfs = ld.get("mtf_intervals") or ["15m", "1h", "4h", "1d"]
+        try:
+            lo_ratio = float(ld.get("mtf_min_ratio") or 0.6)
+            hi_ratio = float(ld.get("mtf_max_ratio") or 1.6)
+        except (TypeError, ValueError):
+            lo_ratio, hi_ratio = 0.6, 1.6
+        try:
+            bars_cfg = ld.get("mtf_bars") or {}
+        except (TypeError, ValueError):
+            bars_cfg = {}
+        note: dict = {"tfs": [], "sources": {}}
+
+        injected = getattr(self, "_smc_rows", None)     # 回放注入（避免读未来数据）
+        dyn = tpl.get("dynamic") or {}
+        root = Path(__file__).resolve().parents[1]
+        db_path = str(dyn.get("db_path") or root / "pa-data-source" / "data" / "kline.db")
+
+        try:
+            from .strategist.smc_map import compute_smc_map, smc_map_summary
+        except Exception as e:  # noqa: BLE001
+            return [], dict(note, error=f"import smc_map: {str(e)[:60]}")
+
+        mark = 0.0
+        buckets: dict[float, set] = {}
+
+        def _add(px, tag):
+            try:
+                px = float(px)
+            except (TypeError, ValueError):
+                return
+            if px <= 0 or not mark:
+                return
+            if not (lo_ratio < px / mark < hi_ratio):
+                return
+            key = round(px, 2)
+            buckets.setdefault(key, set()).add(tag)
+
+        for tf in tfs:
+            rows = None
+            if injected:
+                rows = injected.get(tf)
+            else:
+                try:
+                    lim = int(bars_cfg.get(tf) or 300)
+                    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
+                    try:
+                        raw = con.execute(
+                            "SELECT t,o,h,l,c,v FROM kline WHERE symbol=? AND interval=? "
+                            "AND closed=1 ORDER BY t DESC LIMIT ?",
+                            (sym, tf, lim)).fetchall()
+                    finally:
+                        con.close()
+                    rows = [{"t": r[0], "o": r[1], "h": r[2], "l": r[3],
+                             "c": r[4], "v": r[5]} for r in reversed(raw)]
+                except Exception:  # noqa: BLE001
+                    rows = None
+            if not rows or len(rows) < 30:
+                continue
+            if not mark:
+                mark = float(rows[-1]["c"])
+            try:
+                summ = smc_map_summary(compute_smc_map(rows))
+            except Exception:  # noqa: BLE001
+                continue
+            n_before = len(buckets)
+            for grp in ("swing", "internal"):
+                for ob in (summ.get("order_blocks") or {}).get(grp) or []:
+                    _add(ob.get("low"), tf)
+                    _add(ob.get("high"), tf)
+            for f in summ.get("fvgs") or []:
+                _add(f.get("top"), tf)
+                _add(f.get("bottom"), tf)
+            for key in ("equal_lows", "equal_highs"):
+                for e in summ.get(key) or []:
+                    _add(e.get("price") if isinstance(e, dict) else e, tf)
+            for pv in summ.get("swing_pivots") or []:
+                _add(pv.get("price") if isinstance(pv, dict) else pv, tf)
+            # 区间极值：结构位天然稀疏，周期级高低点是最后一道兜底
+            _add(min(x["l"] for x in rows), tf)
+            _add(max(x["h"] for x in rows), tf)
+            note["tfs"].append(tf)
+            note["sources"][tf] = len(buckets) - n_before
+
+        levels = sorted(buckets.keys(), reverse=True)
+        conf = {k: len(v) for k, v in buckets.items()}
+        note["levels"] = len(levels)
+        note["multi_tf"] = sum(1 for v in conf.values() if v >= 2)
+        note["mark"] = round(mark, 2) if mark else None
+        # 把汇合度最高的几个价位留痕，方便复盘「结构位到底强不强」
+        top = sorted(conf.items(), key=lambda kv: (-kv[1], abs(kv[0] - mark) if mark else 0))[:6]
+        note["strongest"] = [[round(k, 2), n] for k, n in top]
+        return levels, note
+
     def _structure_targets(self, sym: str, mark: float, side: str, cfg: dict,
                            level_note: dict, tpl: dict) -> tuple[list, dict]:
         """把 AI 给的结构位转成档位（**不等距**）。
@@ -1525,19 +1634,43 @@ class Executor:
         try:
             min_lv = int(cfg.get("min_levels") or 10)
             max_lv = int(cfg.get("max_levels") or 15)
-            min_gap = float(cfg.get("min_gap_pct") or 0.3)
         except (TypeError, ValueError):
-            min_lv, max_lv, min_gap = 10, 15, 0.3
+            min_lv, max_lv = 10, 15
+        # `min_gap_pct: auto` → 用当轮 ATR 动态档距（4.0，2026-10-30）
+        # 用户口径：「最小间距要求保留（充分利用 ATR 动态调整）」。
+        # 写死 0.3% 会让结构位密集时档距掉到 0.3%（实测 0.602%，比 min_step 还密）；
+        # 写死 0.66% 又会在低波动时浪费 15 点宽的空档。auto 跟着 ATR 走最贴。
+        _mg_raw = cfg.get("min_gap_pct")
+        min_gap = 0.0
+        min_gap_src = "config"
+        if str(_mg_raw).lower() in ("auto", "none", ""):
+            try:
+                min_gap = float(cfg.get("_dyn_step_pct") or 0)
+            except (TypeError, ValueError):
+                min_gap = 0.0
+            min_gap_src = "atr"
+        else:
+            try:
+                min_gap = float(_mg_raw or 0.3)
+            except (TypeError, ValueError):
+                min_gap = 0.3
         raw = (getattr(self, "_round_meta", {}) or {}).get("structure_levels") or []
         try:
             lv = sorted({round(float(x), 2) for x in raw if float(x) > 0})
         except (TypeError, ValueError):
             lv = []
-        note: dict = {"given": len(lv), "side": side}
+        note: dict = {"given": len(lv), "side": side, "src": "ai"}
+        # 4.0：AI 没给就用**引擎自己从多周期算的**结构位（否则永远回退等距）
+        if not lv and cfg.get("auto_extract", True):
+            eng, enote = self._engine_smc_levels(sym, tpl)
+            note["engine"] = enote
+            if eng:
+                lv = eng
+                note.update(src="engine", given=len(lv))
         if not lv:
-            # 一个结构位都没给 → 回退等距（不能凭空"延伸"出 10 档冒充结构位）
+            # 两侧都拿不到 → 回退等距（不能凭空"延伸"出 10 档冒充结构位）
             return [], dict(note, error="no_structure_levels",
-                            hint="plan meta.structure_levels 为空，本轮回退等距")
+                            hint="AI 与引擎都没给出结构位，本轮回退等距")
         near, far = (mark * (1 - min_gap / 100), 0.0) if side == "long" \
             else (mark * (1 + min_gap / 100), 0.0)
         if side == "long":
@@ -1555,6 +1688,7 @@ class Executor:
         except (TypeError, ValueError):
             _lo0 = _hi0 = 0.0
         note["min_gap_pct"] = round(min_gap, 3)
+        note["min_gap_src"] = min_gap_src
         # 档位之间必须有最小间距：横盘时 swing 极值会密集簇生（实测 14 个结构位
         # 全挤在 22 点内、间距 0.06%）→ 贪心去重，按「由近到远」保留
         if min_gap > 0:
@@ -1564,6 +1698,36 @@ class Executor:
                     kept.append(p)
             note["deduped_out"] = len(cands) - len(kept)
             cands = kept
+        # 相邻**太远**也要补点（2026-10-30 多周期实测）：
+        # 15m+4h 混合时 4h 结构位可能离 15m 的上百点（实测单档 4.55% = 100 点空洞），
+        # 整梯跨度从 5.8% 暴涨到 13.6%。任何相邻间距都不得超过 `max_step_pct`。
+        try:
+            _mx_step = float((tpl.get("dynamic") or {}).get("max_step_pct") or 2.2)
+        except (TypeError, ValueError):
+            _mx_step = 2.2
+        # 判断必须用**百分比**而不是"现价 × 2.2%"的绝对点数：深档价格低，
+        # 同样 53 点在 2000 处是 2.65%，会突破 2.2% 上限（实测出现 2.99% 空洞）。
+        if len(cands) >= 2:
+            dense: list[float] = [cands[0]]
+            inserted = 0
+            for p in cands[1:]:
+                gap = abs(dense[-1] - p)
+                gap_pct = gap / max(dense[-1], 1e-9) * 100
+                if gap_pct > _mx_step:
+                    n_ins = int(gap_pct // _mx_step)
+                    step = gap / (n_ins + 1)
+                    # 锚点必须在进内循环**前**固定：原来写 `dense[-1]`，而每次
+                    # append 后 dense[-1] 已经变成新插的点 → k=2 时从新点再减 2×step
+                    # → 位置错乱，实测出现重复价格（gap=0）与 4.32% 的空洞并存。
+                    _base = dense[-1]
+                    for k in range(1, n_ins + 1):
+                        nxt = _base + (-step * k if side == "long" else step * k)
+                        dense.append(round(nxt, 2))
+                        inserted += 1
+                dense.append(p)
+            if inserted:
+                note["gap_filled"] = inserted
+            cands = dense
         cands = cands[:max_lv]
 
         filled = 0
@@ -1571,12 +1735,26 @@ class Executor:
             # 结构位不足 → 沿「远离现价」方向按统一间距延伸。
             # **不限制在区间内**：结构位本就可以在区间外（更远的 swing 低/高点），
             # 早期硬塞进区间会把间距压到 2 点（实测 0.09%），比等距还密。
-            if len(cands) >= 2:
-                gaps = [abs(cands[i] - cands[i+1]) for i in range(len(cands) - 1)]
-                ext_gap = max(float(tpl.get("grid_step_pct") or 0.5) / 100 * mark,
-                              min_gap / 100 * mark, sum(gaps) / len(gaps))
-            else:
-                ext_gap = max(min_gap / 100 * mark, mark * 0.004)
+            # 延伸间距的下限必须对齐 `min_step_pct`（2026-10-30 回放实测）：
+            # 原来取 `grid_step_pct`(0.5%) 作下限，比 min_step(0.66%) 还小 →
+            # 结构位只贡献 4 个、其余 6 个补点全按 0.5% 铺 → 整梯跨度只有 4.49%
+            # （等距模式 6.97%），跌 4% 就没档了、剩下全靠 SL 扛。
+            _dyn = tpl.get("dynamic") or {}
+            try:
+                _min_step_px = float(_dyn.get("min_step_pct") or 0) / 100 * mark
+            except (TypeError, ValueError):
+                _min_step_px = 0.0
+            # 补点间距 = clamp(ATR 动态间距, min_step, max_step)。
+            # 🔴 不能用 `avg(现有间距)`：只要结构位里有一个 5% 的空洞，均值就被拉大，
+            # 补出来的点全按 5% 铺 → 实测出现过 3.92%（94 点）的单档空洞，
+            # 整梯跨度暴涨到 13%。补点是「把不够的层补齐」，不是「复制现有稀疏度」。
+            _atr_gap_px = (min_gap / 100 * mark) if min_gap > 0 else 0.0
+            _mx_gap_px = _mx_step / 100 * mark
+            ext_gap = max(_min_step_px, _atr_gap_px)
+            if _mx_gap_px > 0:
+                ext_gap = min(ext_gap, _mx_gap_px)
+            if ext_gap <= 0:
+                ext_gap = mark * 0.006
             cur = cands[-1] if cands else mark
             while len(cands) < min_lv:
                 cur = cur - ext_gap if side == "long" else cur + ext_gap
@@ -1588,21 +1766,27 @@ class Executor:
             return [], dict(note, error="insufficient_levels",
                             hint="plan meta.structure_levels 需 ≥2 个正确侧的结构位")
 
-        # 张数：位次比例沿用 martin_slots（3/7/10 @ 10 层 → 30%/70%/100%）
+        # 张数：`martin_slots_by_index: true` → key 是**绝对位次**（4.0 口径：
+        # 第 1/5/10 层 = 3/4/6）；否则按「基准层数下的比例位次」映射（旧行为）。
         base_n = int(tpl.get("grid_levels") or 10) or 10
-        pct_map: dict[float, float] = {}
+        by_idx = bool(tpl.get("martin_slots_by_index"))
+        n = len(cands)
+        slot_pos: dict[int, float] = {}
         for k, v in (tpl.get("martin_slots") or {}).items():
             try:
-                pct_map[float(k) / base_n] = float(v)
+                idx = int(k)
+                lots = float(v)
             except (TypeError, ValueError):
                 continue
-        n = len(cands)
-        slot_pos = {max(1, min(n, int(round(pct * n)))): lots
-                    for pct, lots in pct_map.items()}
+            if by_idx:
+                if 1 <= idx <= n:
+                    slot_pos[idx] = lots
+            else:
+                slot_pos[max(1, min(n, int(round(idx / base_n * n))))] = lots
         base_lots = float(tpl.get("grid_lots") or 1)
         want = [(p, slot_pos.get(i + 1, base_lots)) for i, p in enumerate(cands)]
         note.update({"filled": filled, "levels": n, "slots": slot_pos,
-                     "spacing_pct": round((cands[0] - cands[-1]) / mark * 100, 2)
+                     "spacing_pct": round(abs(cands[0] - cands[-1]) / mark * 100, 2)
                      if n > 1 else None})
         return want, note
 
@@ -2481,7 +2665,13 @@ class Executor:
         # 不足 10 个时在最大间隙插中点补足（保留结构位优先，不退回等距）。
         structured = False
         if ld.get("structure_only") and not (tpl.get("edge") or {}).get("enabled"):
-            sw, snote = self._structure_targets(sym, mark, side, ld, level_note, tpl)
+            # `min_gap_pct: auto` 要用当轮 ATR 动态档距 → 注入一份带 _dyn_step_pct 的副本
+            _ld_eff = dict(ld)
+            try:
+                _ld_eff["_dyn_step_pct"] = float(step_pct)
+            except (TypeError, ValueError):
+                pass
+            sw, snote = self._structure_targets(sym, mark, side, _ld_eff, level_note, tpl)
             if sw:
                 want = sw
                 grid_n = len(sw)

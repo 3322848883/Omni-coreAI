@@ -149,6 +149,97 @@ def match_bar(c: Client, bar, idx):
         c.book.remove(b)
 
 
+def _smc_extract(win, mark, cand):
+    """对一段 K 线跑 smc_map，把 OB/FVG/EQL·EQH/pivot 价位塞进 cand。"""
+    from omnialpha.strategist.smc_map import compute_smc_map, smc_map_summary
+    if len(win) < 30:
+        return
+    rows = [{"t": b["t"], "o": b["o"], "h": b["h"], "l": b["l"],
+             "c": b["c"], "v": b.get("v") or 0} for b in win]
+    summary = smc_map_summary(compute_smc_map(rows))
+
+    def _add(v):
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return
+        if v > 0 and 0.6 < v / mark < 1.6:
+            cand.add(round(v, 2))
+
+    for grp in ("swing", "internal"):
+        for ob in (summary.get("order_blocks") or {}).get(grp) or []:
+            _add(ob.get("low"))
+            _add(ob.get("high"))
+    for f in summary.get("fvgs") or []:
+        _add(f.get("top"))
+        _add(f.get("bottom"))
+    for key in ("equal_lows", "equal_highs"):
+        for e in summary.get(key) or []:
+            _add(e.get("price") if isinstance(e, dict) else e)
+    for pv in summary.get("swing_pivots") or []:
+        _add(pv.get("price") if isinstance(pv, dict) else pv)
+    _add(min(x["l"] for x in win))
+    _add(max(x["h"] for x in win))
+
+
+def synth_tf(bars, span):
+    """15m → N×15m（span 根合一根）。只聚合已发生的 bar，回放里不引入未来数据。"""
+    out: list = []
+    cur = None
+    width = span * 900
+    for b in bars:
+        slot = b["t"] - (b["t"] % width)
+        if cur is not None and cur["t"] == slot:
+            cur["h"] = max(cur["h"], b["h"])
+            cur["l"] = min(cur["l"], b["l"])
+            cur["c"] = b["c"]
+        else:
+            if cur is not None:
+                out.append(cur)
+            cur = {"t": slot, "o": b["o"], "h": b["h"], "l": b["l"],
+                   "c": b["c"], "v": b.get("v") or 0}
+    if cur is not None:
+        out.append(cur)
+    return out
+
+
+def synth_h4(bars, span=16):
+    """15m → 4h（16 根合一根）。只从已发生的 bar 聚合，回放里不会引入未来数据。"""
+    out: list = []
+    cur = None
+    for b in bars:
+        slot = b["t"] - (b["t"] % (span * 900))
+        if cur is not None and cur["t"] == slot:
+            cur["h"] = max(cur["h"], b["h"])
+            cur["l"] = min(cur["l"], b["l"])
+            cur["c"] = b["c"]
+        else:
+            if cur is not None:
+                out.append(cur)
+            cur = {"t": slot, "o": b["o"], "h": b["h"], "l": b["l"],
+                   "c": b["c"], "v": b.get("v") or 0}
+    if cur is not None:
+        out.append(cur)
+    return out
+
+
+def smc_levels(bars, i, lookback=200, h4=None):
+    """**真实 smc_map** 提取结构位（OB 上下沿 / FVG 边界 / EQL·EQH / swing pivot）。
+
+    与 `struct_levels` 的区别：那个只用 swing 极值 + 区间上下沿（≈等距的变体），
+    这个走引擎线上真正在用的 `compute_smc_map`，代表「全部使用结构位」的样子。
+    """
+    mark = bars[i]["c"]
+    cand: set = set()
+    _smc_extract(bars[max(0, i - lookback + 1): i + 1], mark, cand)
+    # 多周期：线上模型查 15m/1h/4h/1d。回放数据里的 h4 只有 c/ema200（没有 OHLC），
+    # 所以这里**从 15m 合成 4h**（只用 <= i 的 bar，不给未来函数）。
+    h4o = synth_h4(bars[: i + 1])
+    if len(h4o) >= 30:
+        _smc_extract(h4o[-120:], mark, cand)
+    return sorted(cand, reverse=True)
+
+
 def struct_levels(bars, i, lookback=96):
     """近 lookback 根的 swing 极值 + 区间上下沿（模拟 AI 的 structure_levels）。"""
     win = bars[max(0, i - lookback + 1): i + 1]
@@ -184,26 +275,41 @@ def main():
     con.execute("INSERT INTO kline VALUES ('ETH_USDT','4h',0,1,0,0,0,0,NULL,NULL,NULL,NULL,0,NULL,NULL)")
     con.commit()
 
-    tpl = {
-        "enabled": True, "grid_levels": 10, "grid_lots": 1, "grid_step_pct": 0.5,
-        "martin_slots": {3: 6, 7: 7, 10: 9}, "martin": [], "snap_tol_pct": 0.15,
-        "always_on": True, "symbol": "ETH_USDT", "sl_pct": 5.0,
+    # tpl 直接取**生产配置**（2026-10-30 起），否则 A/B 比的是几个月前的参数
+    from omnialpha.config import load_bot_config
+    tpl = dict(load_bot_config(ROOT / "config/bots/martin-grid.yaml").ladder_template)
+    tpl.update({
+        "martin": [], "snap_tol_pct": 0.15, "always_on": True, "symbol": "ETH_USDT",
         "anchor_mode": "fixed", "reanchor_threshold_pct": 2.0,
         "anchor_state_file": str(Path(tempfile.mkdtemp()) / "a.json"),
+        "levels_state_file": str(Path(tempfile.mkdtemp()) / "l.json"),
+        # 回放没有模型信号 → 统一用 auto（A/B 同口径，不引入方向差异）
         "direction_mode": "auto",
         "direction_hysteresis": {"enabled": True, "interval": "4h",
                                  "long_keep_ratio": 0.98, "short_keep_ratio": 1.005,
                                  "state_file": str(Path(tempfile.mkdtemp()) / "d.json")},
-        "dynamic": {"enabled": True, "interval": "15m", "atr_mult": 1.5, "bb_div": 6.0,
-                    "min_step_pct": 0.45, "max_step_pct": "auto", "max_span_pct": 6.0,
-                    "scale_martin": True, "max_martin_pct": 9.0, "db_path": str(dbf)},
-    }
-    if MODE == "structure":
-        tpl["levels_dynamic"] = {"enabled": True, "interval": "15m", "lookback": 96,
-                                 "min_levels": 10, "max_levels": 15,
-                                 "structure_only": True, "min_gap_pct": 0.3}
-        tpl["sl_distance"] = {"enabled": True, "min_points": 300, "max_points": 500,
-                              "range_mult": 4.0}
+        "dynamic": dict(tpl.get("dynamic") or {}, db_path=str(dbf)),
+    })
+    # OVR_LOTS=v3 → 复现旧版仓位（10 层全 1 张、马丁 3/7/10 各 1 张）
+    if (os.environ.get("OVR_LOTS") or "").lower() == "v3":
+        tpl["grid_lots"] = 1
+        tpl["martin_slots"] = {3: 1, 7: 1, 10: 1}
+        tpl["martin_slots_by_index"] = False
+
+    if MODE in ("structure", "smc", "smc4", "mtf"):
+        # 结构位模式：档位来自 structure_levels，不再等距
+        # min_gap 取 `MIN_GAP` 环境变量（默认 0.66 = min_step，防止结构位密集时档距失控）
+        # MIN_GAP=auto → 用当轮 ATR 动态档距（4.0 正式口径）；给数字则写死
+        _mg = os.environ.get("MIN_GAP") or 0.66
+        try:
+            _mg = float(_mg)
+        except (TypeError, ValueError):
+            pass
+        tpl["levels_dynamic"] = dict(tpl.get("levels_dynamic") or {},
+                                     enabled=True, structure_only=True,
+                                     min_gap_pct=_mg)
+    else:
+        tpl["levels_dynamic"] = dict(tpl.get("levels_dynamic") or {}, enabled=False)
     c = Client()
     ex = Executor(c, symbols_whitelist=["ETH_USDT"], ladder_template=dict(tpl))
     ex.ladder_template = dict(tpl)
@@ -251,6 +357,22 @@ def main():
 
         if MODE == "structure":
             ex._round_meta = {"structure_levels": struct_levels(bars, i, 96)}
+        elif MODE == "smc":
+            ex._round_meta = {"structure_levels": smc_levels(bars, i, 200)}
+        elif MODE == "smc4":
+            ex._round_meta = {"structure_levels": smc_levels(bars, i, 200, h4)}
+        elif MODE == "mtf":
+            # 4.0：**不喂 AI 结构位**，让引擎自己从 15m/1h/4h/1d 提取
+            ex._round_meta = {}
+            past = bars[: i + 1]
+            ex._smc_rows = {
+                "15m": past[-300:],
+                "1h": synth_tf(past, 4)[-240:],
+                "4h": synth_tf(past, 16)[-180:],
+                "1d": synth_tf(past, 96)[-120:],
+            }
+        else:
+            ex._round_meta = {}
 
         rep = type("R", (), {"results": []})()
         ex._complete_ladder([Intent(action="hold", symbol="ETH_USDT")], rep)
@@ -279,6 +401,8 @@ def main():
             "levels": (dyn.get("levels") or {}).get("levels") or len(c.book),
             "sl_pts": (dyn.get("sl_points") or {}).get("points"),
             "sl_dist_pct": (dyn.get("sl_points") or {}).get("distance_pct"),
+            "struct_note": dyn.get("structure_only"),
+            "levels_dyn": dyn.get("levels"),
             "auto_side": auto_side, "auto_rule": (auto_note or {}).get("rule"),
             "auto_reason": ((auto_note or {}).get("reason") or "")[:44],
         })

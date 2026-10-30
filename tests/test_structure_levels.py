@@ -126,8 +126,13 @@ def _run(levels, lo=None, hi=None, extra=None):
 
 class TestStructureLevels(unittest.TestCase):
     def test_uses_structure_levels_not_even_grid(self):
-        """给 12 个不均匀结构位 → 档位就用它们（间距不等），不是等距。"""
-        lv = [MARK - d for d in (12, 26, 44, 58, 73, 90, 108, 125, 141, 160, 178, 195)]
+        """给 12 个不均匀结构位 → 档位就用它们（间距不等），不是等距。
+
+        2026-10-30（4.0）：`min_gap_pct: auto` = 当轮 ATR 档距（此测试 ATR 7.5 →
+        0.805% ≈ 18.8 点），所以结构位的间距必须 ≥ 这个值，否则会被「最小间距」
+        合并掉（那是设计行为，不是丢了结构位）。
+        """
+        lv = [MARK - d for d in (20, 46, 70, 96, 120, 148, 172, 200, 224, 252, 276, 304)]
         prices, sizes, det, _ = _run(lv, lo=MARK - 200, hi=MARK + 40)
         so = (det.get("dynamic") or {}).get("structure_only") or {}
         self.assertTrue(so, f"应走结构位分支，det={det.get('skipped')}")
@@ -158,18 +163,38 @@ class TestStructureLevels(unittest.TestCase):
         self.assertLess(max(gaps) - min(gaps), 0.5, f"回退后应是等距：{gaps}")
 
     def test_martin_lots_follow_rank(self):
-        """张数按**位次比例**（3/7/10 @ 10 层 = 30%/70%/100%），层数变了位置跟着走。"""
-        lv = [MARK - 10 * k for k in range(1, 13)]
+        """张数按**绝对位次**（4.0：第 1/5/10 层 = 3/4/6），其余档 grid_lots。"""
+        lv = [MARK - d for d in (20, 46, 70, 96, 120, 148, 172, 200, 224, 252, 276, 304)]
         prices, sizes, det, _ = _run(lv, lo=MARK - 200, hi=MARK + 40)
         n = len(prices)
         self.assertEqual(n, 12, f"12 个结构位应全用，实际 {n}")
-        # 期望从**生产配置**推导：martin_slots 的 key 是「基准层数下的第几档」，
-        # 这里要验证的是位次比例映射，不该把 6/7/9 写死（一调仓位就挂）。
         slots = {int(k): float(v) for k, v in (TPL.get("martin_slots") or {}).items()}
-        n0 = int(TPL.get("grid_levels") or 10)
-        want = {max(1, round(k / n0 * n)): v for k, v in slots.items()}
-        for idx, lots in want.items():
-            self.assertEqual(sizes[idx-1], lots, f"第 {idx} 档应 {lots} 张，实际 {sizes}")
+        base = float(TPL.get("grid_lots") or 1)
+        by_idx = bool(TPL.get("martin_slots_by_index"))
+        for i in range(1, n + 1):
+            exp = (slots.get(i, base) if by_idx
+                   else slots.get(max(1, round(i / n * int(TPL.get("grid_levels") or 10))), base))
+            self.assertEqual(sizes[i-1], exp, f"第 {i} 档应 {exp} 张，实际 {sizes}")
+        self.assertEqual(sum(sizes), sum(slots.get(i, base) if by_idx
+                                        else base for i in range(1, n + 1))
+                         if not by_idx else
+                         sum(slots.get(i, base) for i in range(1, n + 1)),
+                         f"总张数应为 20 量级，实际 {sizes}")
+
+    def test_min_gap_auto_follows_atr(self):
+        """`min_gap_pct: auto` → 最小间距必须等于当轮 ATR 动态档距。
+
+        用户口径（4.0）：「最小间距要求保留（充分利用 ATR 动态调整）」——
+        写死 0.3% 会让结构位密集时档距掉到 0.3%；写死 0.66% 又浪费低波动宽空档。
+        """
+        lv = [MARK - d for d in (20, 46, 70, 96, 120, 148, 172, 200, 224, 252, 276, 304)]
+        _p, _s, det, _ = _run(lv, lo=MARK - 200, hi=MARK + 40)
+        so = (det.get("dynamic") or {}).get("structure_only") or {}
+        self.assertEqual(so.get("min_gap_src"), "atr", f"应来自 ATR：{so.get('min_gap_src')}")
+        step = det.get("step_pct") or 0
+        # ATR 7.5 / 2330 × 100 × 2.5 = 0.805%
+        self.assertAlmostEqual(so.get("min_gap_pct"), round(step, 3), places=3,
+                               msg=f"min_gap {so.get('min_gap_pct')} 应等于 step {step}")
 
     def test_sl_points_300_when_range_small(self):
         """24h 区间 60 点 → ×4 = 240 → 取下限 300 点。"""
