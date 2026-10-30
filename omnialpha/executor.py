@@ -2684,9 +2684,14 @@ class Executor:
                 _c_step = float(cached.get("step_pct") or 0)
             except (TypeError, ValueError):
                 _c_step = 0.0
+            # 档距比对必须留容差：`_dynamic_step` 用**现价**当分母算 ATR%，
+            # 价格从 2332 走到 2374（+1.8%）就能让 step 从 0.804% 微变到 0.790%
+            # → 严格相等会让缓存每轮失效、每轮重铺 9 条（实测 placed 10→19）。
+            # 只在波动率「明显换档」（±25%）时才认为需要重铺。
+            _step_ratio = (_c_step / float(step_pct)) if step_pct else 1.0
             _sig_ok = (cached.get("cfg_sig") == _sig
                        and _c_step > 0
-                       and abs(_c_step - float(step_pct)) < 1e-6)
+                       and 0.75 <= _step_ratio <= 1.34)
             if (cached and cached.get("side") == side and c_anchor > 0
                     and _sig_ok
                     and abs(c_anchor - anchor) / max(anchor, 1e-9) < 1e-4):

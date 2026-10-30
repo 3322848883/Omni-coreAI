@@ -138,6 +138,14 @@ def check(name, cond, extra=""):
 # ── 2026-10-30：上限/张数一律从生产配置推导，别硬编码（调参会全挂）──────────
 _CAP = (float((TPL_PROD.get("dynamic") or {}).get("max_span_pct") or 6.0)
         / float(TPL_PROD.get("grid_levels") or 10))
+# 2026-10-30 起档距上限由 max_step_pct 直接给（≈50 点），max_span 只管总跨度护栏。
+# 断言必须用「两者取小」的有效上限，否则调参就把测试挂掉。
+_ms_raw = (TPL_PROD.get("dynamic") or {}).get("max_step_pct")
+try:
+    _MAXSTEP = float("inf") if str(_ms_raw).lower() in ("auto", "none", "") else float(_ms_raw)
+except (TypeError, ValueError):
+    _MAXSTEP = float("inf")
+_EFF_CAP = min(_MAXSTEP, _CAP)
 _MIN = float((TPL_PROD.get("dynamic") or {}).get("min_step_pct") or 0.3)
 _LOTS = float(TPL_PROD.get("grid_lots") or 1)
 _SLOTS = {int(k): float(v) for k, v in (TPL_PROD.get("martin_slots") or {}).items()}
@@ -187,8 +195,8 @@ for tag, atr, bw, null in (("低波动 ATR2", 2.0, 0.8, False),
           f"deepest={(MARK - px2[0][0]) / MARK * 100:.2f}%")
     check(f"{tag} 10 层", len(px2) == 10, f"实际 {len(px2)}")
     check(f"{tag} step 合法",
-          _MIN - 1e-6 <= (det2.get("step_pct") or 0) <= _CAP + 1e-6,
-          f"区间[{_MIN}, {_CAP:.2f}]")
+          _MIN - 1e-6 <= (det2.get("step_pct") or 0) <= _EFF_CAP + 1e-6,
+          f"区间[{_MIN}, {_EFF_CAP:.2f}]")
 
 print("\n" + "=" * 70)
 print("⑤ 幂等（同盘面连跑两次）")
@@ -208,13 +216,13 @@ _, det4, px4 = run("ai", meta={"ladder_step_pct": 0.55})
 # 0.55 < min_step(0.66) → 被抬到下限。AI 只能在这个窗口里调，不能穿透物理下沿。
 check("AI 0.55 被下限抬起", abs((det4.get("step_pct") or 0) - _MIN) < 1e-6,
       f"{det4.get('step_pct')} vs min={_MIN}")
-_, det4b, _ = run("ai0", meta={"ladder_step_pct": 1.5})
-check(f"1.5 被跨度上限 {_CAP:.2f}% 截断",
-      abs((det4b.get("step_pct") or 0) - _CAP) < 1e-6
+_, det4b, _ = run("ai0", meta={"ladder_step_pct": 5.0})
+check(f"5.0 被上限 {_EFF_CAP:.2f}% 截断",
+      abs((det4b.get("step_pct") or 0) - _EFF_CAP) < 1e-6
       and (det4b.get("dynamic") or {}).get("ai_step_clamped") is True,
       str(det4b.get("step_pct")))
 _, det5, _ = run("ai2", meta={"ladder_step_pct": 5.0})
-check("越界被 clamp", (det5.get("step_pct") or 0) <= _CAP + 1e-6
+check("越界被 clamp", (det5.get("step_pct") or 0) <= _EFF_CAP + 1e-6
       and (det5.get("dynamic") or {}).get("ai_step_clamped") is True,
       str((det5.get("dynamic") or {}).get("ai_step_clamped")))
 

@@ -118,6 +118,12 @@ def db2(close4h=None, ema200=EMA200, atr=7.5, bw=2.6, null15=False, with4h=True)
 # ── 2026-10-30：上限/张数一律从生产配置推导，别硬编码（调参会全挂）──────────
 _CAP = (float((TPL.get("dynamic") or {}).get("max_span_pct") or 6.0)
         / float(TPL.get("grid_levels") or 10))
+_ms_raw = (TPL.get("dynamic") or {}).get("max_step_pct")
+try:
+    _MAXSTEP = float("inf") if str(_ms_raw).lower() in ("auto", "none", "") else float(_ms_raw)
+except (TypeError, ValueError):
+    _MAXSTEP = float("inf")
+_EFF_CAP = min(_MAXSTEP, _CAP)
 _MIN = float((TPL.get("dynamic") or {}).get("min_step_pct") or 0.3)
 _LOTS = float(TPL.get("grid_lots") or 1)
 _SLOTS = {int(k): float(v) for k, v in (TPL.get("martin_slots") or {}).items()}
@@ -306,10 +312,10 @@ check("⑤ 马丁占第 3/7/10 档", desc == _WANT_LOTS,
 hi_px = max(float(b["price"]) for b in c.book)
 lo_px = min(float(b["price"]) for b in c.book)
 span_pct = (hi_px - lo_px) / c.mark * 100
-check(f"⑤ 极高波动 step 被 span 封顶 {_CAP:.2f}%",
-      abs((det5.get("step_pct") or 0) - _CAP) < 0.02, f"step={det5.get('step_pct')}")
-check(f"⑤ 档位跨度≈{_CAP * 9:.1f}%",
-      abs(span_pct - _CAP * 9) < 0.3, f"{span_pct:.2f}%")
+check(f"⑤ 极高波动 step 被上限封顶 {_EFF_CAP:.2f}%",
+      abs((det5.get("step_pct") or 0) - _EFF_CAP) < 0.02, f"step={det5.get('step_pct')}")
+check(f"⑤ 档位跨度≈{_EFF_CAP * 9:.1f}%",
+      abs(span_pct - _EFF_CAP * 9) < 0.3, f"{span_pct:.2f}%")
 Path(d).unlink(missing_ok=True)
 
 # ⑥ SL 覆盖：多头 持仓3 + 挂单29 → −32
