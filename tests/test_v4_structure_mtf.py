@@ -129,14 +129,14 @@ class TestLotsByIndex(unittest.TestCase):
         self.assertEqual(sum(sizes), 20, f"总张数应 20，实际 {sum(sizes)}")
         self.assertEqual(note.get("slots"), {1: 3.0, 5: 4.0, 10: 6.0})
 
-    def test_extra_levels_use_grid_lots(self):
-        """13 层时第 11-13 档用 grid_lots（1 张），不继承第 10 档的 6 张。"""
+    def test_more_levels_than_10_takes_nearest(self):
+        """给 13 个结构位也只铺 10 层（层数锁 10，保马丁位次语义）。"""
         lv = [MARK - 22 * k for k in range(1, 14)]
-        want, _ = self._want(lv)
-        self.assertGreaterEqual(len(want), 11, f"{len(want)}")
-        sizes = [lots for _p, lots in want]
-        self.assertEqual(sizes[9], 6, f"第 10 档应 6 张：{sizes}")
-        self.assertEqual(sizes[10], 1, f"第 11 档应回落 1 张：{sizes}")
+        want, note = self._want(lv)
+        self.assertEqual(len(want), 10, f"应锁 10 层：{len(want)}")
+        self.assertEqual(sum(lots for _p, lots in want), 20, "总张数应 20")
+        ps = [p for p, _ in want]
+        self.assertEqual(ps, sorted(ps, reverse=True), "应由近到远取最近的 10 个")
 
 
 class TestMinGapAuto(unittest.TestCase):

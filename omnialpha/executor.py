@@ -1730,6 +1730,25 @@ class Executor:
             cands = dense
         cands = cands[:max_lv]
 
+        # ── 整梯跨度上限（2026-10-31 真实行情）：结构位天然稀疏，四周期一起用
+        # 中位 70 个价位，10 层取最近的也铺出 12.4% 跨度（等距模式只有 7.3%）
+        # → SL 距现价被推到 14%。`max_span_pct` 这个键等距模式一直在用，
+        # 结构位分支却漏了（bug 级遗漏），这里补上：由近到远取到跨度上限为止。
+        _span_cap = 0.0
+        try:
+            _span_cap = float((tpl.get("dynamic") or {}).get("max_span_pct") or 0)
+        except (TypeError, ValueError):
+            _span_cap = 0.0
+        if _span_cap > 0 and len(cands) >= 2:
+            _kept = [cands[0]]
+            for p in cands[1:]:
+                if abs(p - _kept[0]) / max(_kept[0], 1e-9) * 100 > _span_cap:
+                    break
+                _kept.append(p)
+            if len(_kept) < len(cands):
+                note["span_capped_out"] = len(cands) - len(_kept)
+            cands = _kept
+
         filled = 0
         if len(cands) < min_lv:
             # 结构位不足 → 沿「远离现价」方向按统一间距延伸。

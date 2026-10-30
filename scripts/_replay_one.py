@@ -264,7 +264,9 @@ def equity(c: Client):
 
 def main():
     data = json.loads(DATA.read_text(encoding="utf-8"))
-    bars, h4 = data["bars"], data["h4"]
+    bars = data["bars"]
+    h4 = data.get("h4") or (data.get("mtf") or {}).get("4h") or []
+    MTF = data.get("mtf") or {}       # 真实 1h/4h/1d（没有则空，走合成）
 
     dbf = Path(tempfile.mkdtemp()) / "k.db"
     con = sqlite3.connect(dbf)
@@ -290,6 +292,11 @@ def main():
                                  "state_file": str(Path(tempfile.mkdtemp()) / "d.json")},
         "dynamic": dict(tpl.get("dynamic") or {}, db_path=str(dbf)),
     })
+    # OVR_SPAN=8 → 覆盖整梯跨度上限（%），用来测「结构位被跨度约束」的效果
+    _sp = os.environ.get("OVR_SPAN")
+    if _sp:
+        tpl["dynamic"] = dict(tpl.get("dynamic") or {}, max_span_pct=float(_sp))
+
     # OVR_LOTS=v3 → 复现旧版仓位（10 层全 1 张、马丁 3/7/10 各 1 张）
     if (os.environ.get("OVR_LOTS") or "").lower() == "v3":
         tpl["grid_lots"] = 1
@@ -338,10 +345,18 @@ def main():
         c4 = cur4["c"] if cur4 else bar["c"]
         e4 = cur4["ema200"] if cur4 else bar["c"]
 
-        con.execute("UPDATE kline SET t=?, o=?, h=?, l=?, c=?, boll20=?, boll20_upper=?, "
-                    "boll20_lower=?, ema20=?, ema50=? WHERE interval='15m'",
-                    (bar["t"], bar["o"], bar["h"], bar["l"], bar["c"], boll,
-                     boll * 1.013, boll * 0.987, ema20, ema50))
+        # 指标：`_real_mtf.json`（服务器真实库导出）带 atr14/boll20/上下来，
+        # 直接用真实值；旧数据（`_kline_data.json`）没有这些列才回退自算，
+        # 否则「ATR 档距」比的是回放器的估算而不是线上真实的 ATR。
+        use_atr = bar.get("atr")
+        use_boll = bar.get("bb_mid")
+        b_up = bar.get("bb_up") if bar.get("bb_up") else boll * 1.013
+        b_lo = bar.get("bb_lo") if bar.get("bb_lo") else boll * 0.987
+        con.execute("UPDATE kline SET t=?, o=?, h=?, l=?, c=?, atr14=?, boll20=?, "
+                    "boll20_upper=?, boll20_lower=?, ema20=?, ema50=? WHERE interval='15m'",
+                    (bar["t"], bar["o"], bar["h"], bar["l"], bar["c"],
+                     use_atr if use_atr else 8.0,
+                     use_boll if use_boll else boll, b_up, b_lo, ema20, ema50))
         con.execute("UPDATE kline SET t=?, c=?, ema200=? WHERE interval='4h'",
                     (cur4["t"] if cur4 else bar["t"], c4, e4))
         con.commit()
@@ -365,12 +380,22 @@ def main():
             # 4.0：**不喂 AI 结构位**，让引擎自己从 15m/1h/4h/1d 提取
             ex._round_meta = {}
             past = bars[: i + 1]
-            ex._smc_rows = {
-                "15m": past[-300:],
-                "1h": synth_tf(past, 4)[-240:],
-                "4h": synth_tf(past, 16)[-180:],
-                "1d": synth_tf(past, 96)[-120:],
-            }
+            if MTF:      # 真实 1h/4h/1d（服务器库导出）→ 只用 <= 当前 bar 的部分
+                rows_mtf = {}
+                for tf, arr in MTF.items():
+                    j = len(arr) - 1
+                    while j >= 0 and arr[j]["t"] > bar["t"]:
+                        j -= 1
+                    if j >= 0:
+                        rows_mtf[tf] = arr[max(0, j - 259): j + 1]
+                ex._smc_rows = dict(rows_mtf, **{"15m": past[-300:]})
+            else:        # 老数据只有 15m → 合成（4h/1d 根数不足，多数轮次不参与）
+                ex._smc_rows = {
+                    "15m": past[-300:],
+                    "1h": synth_tf(past, 4)[-240:],
+                    "4h": synth_tf(past, 16)[-180:],
+                    "1d": synth_tf(past, 96)[-120:],
+                }
         else:
             ex._round_meta = {}
 

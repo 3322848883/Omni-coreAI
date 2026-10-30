@@ -136,8 +136,8 @@ class TestStructureLevels(unittest.TestCase):
         prices, sizes, det, _ = _run(lv, lo=MARK - 200, hi=MARK + 40)
         so = (det.get("dynamic") or {}).get("structure_only") or {}
         self.assertTrue(so, f"应走结构位分支，det={det.get('skipped')}")
-        self.assertGreaterEqual(len(prices), 10)
-        self.assertLessEqual(len(prices), 15)
+        # 4.0：层数锁 10（马丁第 1/5/10 层的位次语义要求），给 12 个只取最近的 10 个
+        self.assertEqual(len(prices), 10, f"层数应锁 10，实际 {len(prices)}")
         gaps = [round(prices[i+1] - prices[i], 1) for i in range(len(prices)-1)]
         self.assertGreater(max(gaps) - min(gaps), 1.0, f"间距应当不等：{gaps}")
         for p in prices:
@@ -167,7 +167,7 @@ class TestStructureLevels(unittest.TestCase):
         lv = [MARK - d for d in (20, 46, 70, 96, 120, 148, 172, 200, 224, 252, 276, 304)]
         prices, sizes, det, _ = _run(lv, lo=MARK - 200, hi=MARK + 40)
         n = len(prices)
-        self.assertEqual(n, 12, f"12 个结构位应全用，实际 {n}")
+        self.assertEqual(n, 10, f"层数锁 10，实际 {n}")
         slots = {int(k): float(v) for k, v in (TPL.get("martin_slots") or {}).items()}
         base = float(TPL.get("grid_lots") or 1)
         by_idx = bool(TPL.get("martin_slots_by_index"))
