@@ -69,11 +69,11 @@ html = """<!DOCTYPE html>
 <body>
 <div class="wrap">
   <h1>ETH_USDT 永续 · 15m · ADX(14) 两套算法</h1>
-  <div class="sub">ADX = RMA(DX)（TV 内置 ta.dmi） vs ADX = SMA(DX)（BeikabuOyaji「ADX and DI for v4」）。DI 两版相同。北京时间。</div>
+  <div class="sub">ADX = SMA(DX)（BeikabuOyaji「ADX and DI for v4」＝本项目默认 <code>adx14</code>） vs ADX = RMA(DX)（TV 内置 ta.dmi＝<code>adx14_wilder</code>）。DI 两版相同。北京时间。</div>
 
   <div class="cards">
-    <div class="card"><div class="k">ADX · Wilder / RMA</div><div class="v" id="c-w">—</div><div class="n">本项目 adx14</div></div>
-    <div class="card"><div class="k">ADX · SMA</div><div class="v" id="c-p" style="color:#e0803a">—</div><div class="n">本项目 adx14_sma</div></div>
+    <div class="card"><div class="k">ADX · Wilder / RMA</div><div class="v" id="c-w">—</div><div class="n">adx14_wilder（备选）</div></div>
+    <div class="card"><div class="k">ADX · SMA</div><div class="v" id="c-p" style="color:#e0803a">—</div><div class="n">adx14（默认）</div></div>
     <div class="card"><div class="k">当前差值</div><div class="v" id="c-d">—</div><div class="n" id="c-dn">—</div></div>
     <div class="card"><div class="k">DI+ / DI-</div><div class="v" id="c-di">—</div><div class="n" id="c-din">—</div></div>
   </div>
@@ -83,7 +83,7 @@ html = """<!DOCTYPE html>
     <div id="tip"></div>
     <div class="tips">
       <span><i class="sw" style="background:#2f4b7c"></i>ADX Wilder（RMA）</span>
-      <span><i class="sw" style="background:#e0803a"></i>ADX SMA（你的脚本）</span>
+      <span><i class="sw" style="background:#e0803a"></i>ADX SMA（默认，你的脚本）</span>
       <span><i class="sw" style="background:#26a69a"></i>DI+</span>
       <span><i class="sw" style="background:#ef5350"></i>DI-</span>
       <span>虚线 = 阈值 20</span>

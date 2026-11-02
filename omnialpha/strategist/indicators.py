@@ -526,7 +526,12 @@ def adx(
     highs: list[float], lows: list[float], closes: list[float],
     period: int = 14,
 ) -> dict[str, list[Optional[float]]]:
-    """Wilder ADX: +DI/-DI from smoothed TR/DM; ADX = RMA of DX."""
+    """Wilder ADX: +DI/-DI from smoothed TR/DM; ADX = RMA of DX.
+
+    ⚠️ 2026-11-02 起**不再是默认**。`adxN` 现在走 `adx_pine()`（ADX = SMA(DX)，
+    与 TV 上「ADX and DI for v4」脚本逐位一致）。本函数保留为 `adxN_wilder`，
+    对应 TV 内置 `ta.dmi` 的语义。两者 DI 相同、ADX 差均 3.5 / 最大 12.6。
+    """
     n = len(closes)
     plus_di: list[Optional[float]] = [None] * n
     minus_di: list[Optional[float]] = [None] * n
@@ -569,7 +574,11 @@ def adx_pine(
     highs: list[float], lows: list[float], closes: list[float],
     period: int = 14,
 ) -> dict[str, list[Optional[float]]]:
-    """ADX/DI 按 Pine v6 「ADX and DI for v4」(BeikabuOyaji) 逐 bar 实现。
+    """ADX/DI 按 Pine v6「ADX and DI for v4」(BeikabuOyaji) 逐 bar 实现 —— **默认实现**。
+
+    2026-11-02 用 TV 截图三点核对后切成默认（ETH 15m 11-02 12:15：
+    本函数 DI+ 35.44 / DI- 7.95 / ADX 54.70，与图上图例逐位相同）。
+    `adx()`（Wilder）仍保留，名字是 `adxN_wilder`。
 
     与 `adx()`（TV 内置 ta.dmi 语义）的**唯一实质差异**：ADX 用 `ta.sma(DX, len)`
     而不是 RMA(DX, len)。DI 的 Wilder 平滑是一样的（本函数从 0 起递归，
@@ -1099,29 +1108,34 @@ def parse_indicator_name(name: str) -> dict[str, Any]:
     m = re.match(r"^mfi(\d+)$", n)
     if m:
         return {"kind": "mfi", "period": int(m.group(1)), "name": n}
-    # ADX 两套算法（2026-11-02）：
-    #   adxN                → Wilder，ADX = RMA(DX)      = TV 内置 ta.dmi
-    #   adxN_sma            → BeikabuOyaji 脚本，ADX = **SMA**(DX)
-    #   两者 ADX 实测差均 3.5 / 最大 12.6，阈值判断可能跨界，别混用。
-    #   DI：di_plusN / di_minusN（推荐）与老写法 plus_diN / minus_diN 等价。
-    m = re.match(r"^adx(\d+)_sma$", n)
+    # ADX 默认 = 「ADX and DI for v4」(BeikabuOyaji)：**ADX = SMA(DX)**。
+    # 2026-11-02 用 TV 截图三点核对过（ETH 15m 11-02 12:15：DI+ 35.44 / DI- 7.95 /
+    # ADX 54.70，本实现逐位相同；Wilder 版会给 44.82，差 9.88）→ 改成默认。
+    #   adxN            → SMA 版（默认，与 TV 上这个脚本一致）
+    #   adxN_wilder     → Wilder 版（ADX = RMA(DX) = TV 内置 ta.dmi），保留
+    #   adxN_sma        → 与 adxN 等价（别名）
+    # DI 两版数值相同（差 <0.01），统一走 SMA 版以免同一次调用里两个家族混用。
+    m = re.match(r"^adx(\d+)_(sma|wilder)$", n)
     if m:
-        return {"kind": "adx_pine", "period": int(m.group(1)), "field": "adx", "name": n}
-    if n == "adx_sma":
-        return {"kind": "adx_pine", "period": 14, "field": "adx", "name": n}
+        kind = "adx" if m.group(2) == "wilder" else "adx_pine"
+        return {"kind": kind, "period": int(m.group(1)), "field": "adx", "name": n}
+    if n in ("adx_sma", "adx_wilder", "adx"):
+        return {"kind": "adx" if n.endswith("wilder") else "adx_pine",
+                "period": 14, "field": "adx", "name": n}
     m = re.match(r"^adx(\d+)_(di_plus|di_minus|plus|minus)$", n)
     if m:
         fld = "plus_di" if m.group(2) in ("di_plus", "plus") else "minus_di"
-        return {"kind": "adx", "period": int(m.group(1)), "field": fld, "name": n}
+        return {"kind": "adx_pine", "period": int(m.group(1)), "field": fld, "name": n}
     m = re.match(r"^adx(\d+)$", n)
     if m:
-        return {"kind": "adx", "period": int(m.group(1)), "field": "adx", "name": n}
+        return {"kind": "adx_pine", "period": int(m.group(1)), "field": "adx", "name": n}
     m = re.match(r"^di_(plus|minus)(\d+)?$", n)
     if m:
-        return {"kind": "adx", "period": int(m.group(2) or 14),
+        return {"kind": "adx_pine", "period": int(m.group(2) or 14),
                 "field": "plus_di" if m.group(1) == "plus" else "minus_di", "name": n}
     if n in ("plus_di", "minus_di", "plus_di14", "minus_di14"):
-        return {"kind": "adx", "period": 14, "field": "plus_di" if "plus" in n else "minus_di", "name": n}
+        return {"kind": "adx_pine", "period": 14,
+                "field": "plus_di" if "plus" in n else "minus_di", "name": n}
     m = re.match(r"^linreg_channel(\d+)$", n)
     if m:
         return {"kind": "linreg_channel", "period": int(m.group(1)), "name": n}
@@ -1263,7 +1277,7 @@ def parse_indicator_name(name: str) -> dict[str, Any]:
         "macd|macd_dea|macd_hist|macdF_S_SIG, "
         "boll[N][_sma|ema|rma|wma|vwma][_K]|boll_upper|middle|lower, "
         "stochN|stoch_kN|stoch_dN|cciN|wrN|mfiN|vwap[N]|obv|sqzmom[N], "
-        "adxN|adxN_sma|adxN_plus|adxN_minus|di_plusN|di_minusN, "
+        "adxN|adxN_sma|adxN_wilder|adxN_plus|adxN_minus|di_plusN|di_minusN, "
         "supertrend[N][_倍率]|supertrend[N]_dir|_direction|_upper|_up|_lower|_lo"
     )
 

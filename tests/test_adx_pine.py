@@ -153,16 +153,17 @@ class TestTwoAlgorithmsDiffer(unittest.TestCase):
 
 
 class TestNames(unittest.TestCase):
-    def test_wilder_is_default(self):
-        for name in ("adx14", "adx20"):
-            spec = parse_indicator_name(name)
-            self.assertEqual(spec["kind"], "adx", name)
-            self.assertEqual(spec["field"], "adx", name)
-
-    def test_sma_variant(self):
-        for name in ("adx14_sma", "adx_sma"):
+    def test_sma_is_default(self):
+        """2026-11-02 起默认 = BeikabuOyaji 的 SMA 版（TV 截图三点核对过）。"""
+        for name in ("adx14", "adx20", "adx", "adx14_sma", "adx_sma"):
             spec = parse_indicator_name(name)
             self.assertEqual(spec["kind"], "adx_pine", name)
+            self.assertEqual(spec["field"], "adx", name)
+
+    def test_wilder_is_opt_in(self):
+        for name in ("adx14_wilder", "adx_wilder"):
+            spec = parse_indicator_name(name)
+            self.assertEqual(spec["kind"], "adx", name)
             self.assertEqual(spec["field"], "adx", name)
 
     def test_di_names(self):
@@ -187,12 +188,14 @@ class TestAttach(unittest.TestCase):
         h, l, c = _walk(200, seed=47, drift=0.3)
         rows = [{"t": i, "o": c[i], "h": h[i], "l": l[i], "c": c[i], "v": 1.0}
                 for i in range(len(c))]
-        wanted = ["adx14", "adx14_sma", "di_plus14", "di_minus14"]
+        wanted = ["adx14", "adx14_wilder", "adx14_sma", "di_plus14", "di_minus14"]
         attach_indicators(rows, wanted)
         last = latest_indicators(rows, wanted)
         for k in wanted:
             self.assertIsNotNone(last[k], k)
-        self.assertNotAlmostEqual(last["adx14"], last["adx14_sma"], places=6)
+        # 默认与 _sma 必须同值（同一实现），与 _wilder 必须不同
+        self.assertAlmostEqual(last["adx14"], last["adx14_sma"], places=9)
+        self.assertNotAlmostEqual(last["adx14"], last["adx14_wilder"], places=6)
 
 
 if __name__ == "__main__":
