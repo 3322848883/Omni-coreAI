@@ -24,7 +24,7 @@ max_files_per_run: 20
 poll_interval_sec: 2
 # ⚠️ 新前缀 mtg：接管账户后**不会**接管原 ladder-eth 的 lad 挂单。
 #    停止旧网格时必须手动撤掉遗留的 lad 挂单，否则它们会一直挂在交易所。
-label_prefix: mtgbi
+label_prefix: mtgbil
 # free：做T需要多档建仓（strict/manage_only 会拦「持仓后再 open_long」，见
 # executor._entry_gate）。反向开仓由下面的 account_risk.no_flip 拦 ——
 # 2026-10-16 账户为 **dual（双向）**：反向单 = 独立腿，闸门由模式推导为 false。
