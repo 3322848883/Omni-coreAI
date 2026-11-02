@@ -212,8 +212,8 @@ if not isinstance(plan.get("meta"), dict) or not plan.get("meta"):
             break
 report = []
 import re as _re1
-    _m1 = _re1.search(r"```(?:json)?\s*(\{.*\})\s*```", content, _re1.S)
-    r1 = bool(_m1) or content.strip().startswith("{")
+_m1 = _re1.search(r"```(?:json)?\s*(\{.*\})\s*```", content, _re1.S)
+r1 = bool(_m1) or content.strip().startswith("{")
 report.append(("C1 合法 JSON", r1))
 
 reasoning0 = (chips[0].get("reasoning") if chips else "") or ""
