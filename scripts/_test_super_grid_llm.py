@@ -181,7 +181,11 @@ usage = resp.get("usage", {})
 Path(ROOT / "_probe" / "super_grid_out").mkdir(parents=True, exist_ok=True)
 out_txt = ROOT / "_probe" / "super_grid_out" / "raw_response.json"
 out_txt.write_text(json.dumps(
-    {"content": content, "thinking": thinking, "usage": usage},
+    {"content": content, "thinking": thinking, "usage": usage,
+     "tool_input": smc_out,
+     "inputs": {"mark": mark, "st4": rows4h[-1]["supertrend10"],
+                "dir4_seq": [r["supertrend10_dir"] for r in rows4h][-12:],
+                "atr15m": a15, "bw15m": bw15, "sqz_state": sqz_state, "sqz_run": sqz_run}},
     ensure_ascii=False, indent=1), encoding="utf-8")
 print(f"      完成。prompt_tokens={usage.get('prompt_tokens')} "
       f"completion_tokens={usage.get('completion_tokens')}")
@@ -189,7 +193,15 @@ print("      原文已存", out_txt)
 
 # ── 7. 核对 ──────────────────────────────────────────────────────────
 print("[6/6] 核对人格硬规则 ...")
-plan = json.loads(content)
+try:
+    plan = json.loads(content)
+except json.JSONDecodeError:
+    # 模型偶发把 JSON 包在 ```json ... ``` 里 —— 生产 parse_plan_text 可处理，脚本同样剥离
+    import re as _re
+    _m = _re.search(r"```(?:json)?\s*(\{.*\})\s*```", content, _re.S)
+    if not _m:
+        raise
+    plan = json.loads(_m.group(1))
 chips = plan.get("chips") or []
 # meta 位置与 bridge.py 同逻辑：plan 级优先、chip 级补缺（模型两种写法都出现过）
 if not isinstance(plan.get("meta"), dict) or not plan.get("meta"):
@@ -199,7 +211,9 @@ if not isinstance(plan.get("meta"), dict) or not plan.get("meta"):
             plan["meta"] = _cm
             break
 report = []
-r1 = content.strip().startswith("{")
+import re as _re1
+    _m1 = _re1.search(r"```(?:json)?\s*(\{.*\})\s*```", content, _re1.S)
+    r1 = bool(_m1) or content.strip().startswith("{")
 report.append(("C1 合法 JSON", r1))
 
 reasoning0 = (chips[0].get("reasoning") if chips else "") or ""
@@ -243,6 +257,30 @@ for name, val in report:
     ok += bool(good)
 print(f"  合计 {ok}/{len(report)}")
 print("=" * 62)
+# ── 模拟引擎铺梯：martin_slots 位次制（1/5/10 = 3/4/6，网格各 1）────
+lv = (plan.get("meta") or {}).get("structure_levels") or []
+tw = (plan.get("meta") or {}).get("two_way") or {}
+side = "short" if (tw.get("short") or {}).get("weight", 0) > 0 else "long"
+if lv:
+    if side == "short":
+        lv = sorted([x for x in lv if x > mark], reverse=False)[:10]
+        dist = [round(x - mark, 1) for x in lv]
+    else:
+        lv = sorted([x for x in lv if x < mark], reverse=True)[:10]
+        dist = [round(mark - x, 1) for x in lv]
+    lots_map = {1: 3, 5: 4, 10: 6}
+    print()
+    print("─" * 62)
+    print(f"模拟引擎铺梯（{side} 侧，martin_slots 1/5/10 = 3/4/6）")
+    print(f"{'层':>3} {'类型':>4} {'张数':>4} {'价位':>10} {'距现价':>9}")
+    for i, px in enumerate(lv, 1):
+        typ = "马丁" if i in (1, 5, 10) else "网格"
+        lot = lots_map.get(i, 1)
+        print(f"{i:>3} {typ:>4} {lot:>4} {px:>10.2f} {dist[i-1]:>8.1f}点")
+    tot = sum(lots_map.get(i, 1) for i in range(1, len(lv) + 1))
+    print(f"合计 {tot} 张 | sl={ (plan.get('meta') or {}).get('sl') }")
+    print("─" * 62)
+
 print()
 print("AI 输出原文（chips[0] 与 meta）：")
 print(json.dumps({"meta": plan.get("meta"), "chips": chips[:3]},
