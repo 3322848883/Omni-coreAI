@@ -6,7 +6,7 @@
 
 | 层 | 已实现 | 静默忽略/缺失 | 与 Gate CLI 对齐 |
 |----|--------|---------------|------------------|
-| **指标计算** | EMA/SMA/RMA/WMA/VWMA/RSI/ATR（**任意周期**）+ MACD/BOLL + **Stoch/CCI/WR/MFI/ADX/VWAP/OBV/SuperTrend** | — | 超集 |
+| **指标计算** | EMA/SMA/RMA/WMA/VWMA/RSI/ATR（**任意周期**）+ MACD/BOLL + **Stoch/CCI/WR/MFI/ADX/VWAP/OBV/SuperTrend**（`supertrendN` + `_dir`/`_upper`/`_lower`，Pine v6 逐 bar 对齐） | — | 超集 |
 | **ATR** | Pine `ta.tr(true)` + `rma\|sma\|ema\|wma` 平滑（`atr14`/`atr14_ema`…） | — | CLI 无 ATR |
 | **快照** `market.indicators` | 全部上述名 | 未知名报错（不再静默 null） | — |
 | **触发** `conditions` | 5 种（EMA 单边/交叉、RSI、ATR spike、价格突破） | 无 macd_cross / boll_break / ma_cross / 量能 | Skills 只出报告，无触发引擎 |

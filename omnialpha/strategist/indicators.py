@@ -616,38 +616,62 @@ def supertrend(
     highs: list[float], lows: list[float], closes: list[float],
     period: int = 10, mult: float = 3.0,
 ) -> dict[str, list[Optional[float]]]:
-    """Pine SuperTrend: upper/lower band from HL2 ± mult*ATR, flip on close cross."""
+    """Pine v6 `ta.supertrend` 逐 bar 等价实现（2026-11-02 重写，此前三处偏离 Pine）。
+
+    Pine 源码（TradingView 内置，v6 indicator "Supertrend" 用同一个）：
+        up = hl2 - factor*atr          // 下轨
+        dn = hl2 + factor*atr          // 上轨
+        up := close[1] > up1 ? math.max(up, up1) : up
+        dn := close[1] < dn1 ? math.min(dn, dn1) : dn
+        direction := 上一根线 == prevUpper ? (close > upperBand ? -1 : 1)
+                                         : (close < lowerBand ? 1 : -1)
+        supertrend := direction == -1 ? lowerBand : upperBand
+
+    **direction 语义：-1 = 上涨（线在下轨，作支撑），1 = 下跌（线在上轨，作压力）。**
+    首根有 ATR 的 bar 恒为 direction=1（Pine 的 `if na(atr[1]) direction := 1`）。
+
+    旧实现的三个 bug（都不抛错，只是值不对，所以长期没被发现）：
+      1. `st = lower if d==1 else upper` —— 方向与线**反配**：判定为下跌却把支撑线下轨
+         当趋势线画，首根必然是「下跌趋势 + 线在价格下方」。
+      2. 翻转用 `prev_close` 比本根 band；Pine 用**本根 close**。
+      3. 翻转基准不是「上一根线落在哪条 band」，而是上下轨各自独立比较 —— 震荡里会多翻。
+    回归：tests/test_supertrend_pine.py（对独立翻译的 Pine 参考实现逐 bar 对照 + 自洽不变量）。
+    """
     n = len(closes)
     st: list[Optional[float]] = [None] * n
     direction: list[Optional[float]] = [None] * n
-    upper: list[Optional[float]] = [None] * n
-    lower: list[Optional[float]] = [None] * n
+    upper: list[Optional[float]] = [None] * n   # hl2 + mult*atr
+    lower: list[Optional[float]] = [None] * n   # hl2 - mult*atr
     a = atr(highs, lows, closes, period, smoothing="rma")
-    hl2 = [(h + l) / 2.0 for h, l in zip(highs, lows)]
-    prev_upper: Optional[float] = None
-    prev_lower: Optional[float] = None
-    prev_dir = 1
-    prev_close: Optional[float] = None
     for i in range(n):
         if a[i] is None:
             continue
-        basic_u = hl2[i] + mult * a[i]
-        basic_l = hl2[i] - mult * a[i]
-        u = basic_u if prev_upper is None or prev_close is None or prev_close > prev_upper \
-            else max(basic_u, prev_upper)
-        l = basic_l if prev_lower is None or prev_close is None or prev_close < prev_lower \
-            else min(basic_l, prev_lower)
+        hl2 = (highs[i] + lows[i]) / 2.0
+        basic_u = hl2 + mult * a[i]
+        basic_l = hl2 - mult * a[i]
+        # band 收紧规则（Pine 原式）：
+        #   upperBand := upperBand < prevUpper or close[1] > prevUpper ? upperBand : prevUpper
+        #   lowerBand := lowerBand > prevLower or close[1] < prevLower ? lowerBand : prevLower
+        # 即：band 朝有利方向移动就接受；收盘站到 band 之外就重算；否则钉住不动。
+        # 这条是「趋势中上下轨只单向收缩」的保证，写反会让 band 永久钉死、方向永不翻转。
+        if i > 0 and upper[i - 1] is not None:
+            pu, pl, pc = upper[i - 1], lower[i - 1], closes[i - 1]
+            u = basic_u if (basic_u < pu or pc > pu) else pu
+            l = basic_l if (basic_l > pl or pc < pl) else pl
+        else:
+            u, l = basic_u, basic_l
         upper[i] = u
         lower[i] = l
-        d = prev_dir
-        if prev_close is not None:
-            if prev_close > u:
-                d = -1
-            elif prev_close < l:
-                d = 1
+        if i == 0 or st[i - 1] is None:
+            d = 1
+        elif st[i - 1] == upper[i - 1]:
+            # 上一根线在上轨 → 处于下跌态：本根收盘站上轨才翻多
+            d = -1 if closes[i] > u else 1
+        else:
+            # 上一根线在下轨 → 处于上涨态：本根收盘跌破下轨才翻空
+            d = 1 if closes[i] < l else -1
         direction[i] = d
-        st[i] = l if d == 1 else u
-        prev_upper, prev_lower, prev_dir, prev_close = u, l, d, closes[i]
+        st[i] = l if d == -1 else u
     return {"supertrend": st, "direction": direction, "upper": upper, "lower": lower}
 
 
@@ -1037,12 +1061,21 @@ def parse_indicator_name(name: str) -> dict[str, Any]:
         return {"kind": "vwap", "period": 0, "name": n}
     if n == "obv":
         return {"kind": "obv", "name": n}
-    m = re.match(r"^supertrend(\d+)(?:_(\d+(?:\.\d+)?))?$", n)
+    # SuperTrend（Pine v6 ta.supertrend）：
+    #   supertrend | supertrend10 | supertrend7_2        → 趋势线
+    #   supertrend10_dir | _direction                    → 方向（-1 涨 / 1 跌）
+    #   supertrend10_upper | _up  /  _lower | _lo        → 上/下轨
+    _st_field = {"dir": "direction", "direction": "direction",
+                 "up": "upper", "upper": "upper",
+                 "lo": "lower", "lower": "lower"}
+    m = re.match(r"^supertrend(\d+)?_(dir|direction|up|upper|lo|lower)$", n)
     if m:
-        return {"kind": "supertrend", "period": int(m.group(1)),
+        return {"kind": "supertrend", "period": int(m.group(1) or 10), "mult": 3.0,
+                "field": _st_field[m.group(2)], "name": n}
+    m = re.match(r"^supertrend(\d+)?(?:_(\d+(?:\.\d+)?))?$", n)
+    if m:
+        return {"kind": "supertrend", "period": int(m.group(1) or 10),
                 "mult": float(m.group(2) or 3.0), "field": "supertrend", "name": n}
-    if n == "supertrend":
-        return {"kind": "supertrend", "period": 10, "mult": 3.0, "field": "supertrend", "name": n}
 
     # LazyBear Squeeze Momentum: sqzmom | sqzmom20 | sqzmom20_20 | sqzmom_state
     if n in ("sqzmom", "sqz_mom", "squeeze", "squeeze_momentum"):
@@ -1140,7 +1173,8 @@ def parse_indicator_name(name: str) -> dict[str, Any]:
         f"unknown indicator {name!r}; supported: emaN/rsiN/atrN/atrN_rma|sma|ema|wma/maN/smaN/rmaN/wmaN/vwmaN, "
         "macd|macd_dea|macd_hist|macdF_S_SIG, "
         "boll[N][_sma|ema|rma|wma|vwma][_K]|boll_upper|middle|lower, "
-        "stochN|stoch_kN|stoch_dN|cciN|wrN|mfiN|adxN|vwap[N]|obv|supertrend[N]|sqzmom[N]"
+        "stochN|stoch_kN|stoch_dN|cciN|wrN|mfiN|adxN|vwap[N]|obv|sqzmom[N], "
+        "supertrend[N][_倍率]|supertrend[N]_dir|_direction|_upper|_up|_lower|_lo"
     )
 
 
