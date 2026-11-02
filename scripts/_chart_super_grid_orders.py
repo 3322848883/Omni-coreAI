@@ -39,7 +39,23 @@ rows = [{"t": int(x["t"]), "o": float(x["o"]), "h": float(x["h"]),
 attach_indicators(rows, ["boll20", "boll_upper", "boll_lower",
                          "supertrend10", "supertrend10_dir"])
 mark = rows[-1]["c"]
-st_now = rows[-1].get("supertrend10")
+# 4H ST 需要单独算（15m 行上的 ST 不是 4H 的）—— 拉最新 4h 并 attach
+try:
+    os.environ.setdefault("no_proxy", "api.gateio.ws")
+    import urllib.request as _ur
+    _d4 = json.load(_ur.urlopen(
+        "https://api.gateio.ws/api/v4/futures/usdt/candlesticks"
+        "?contract=ETH_USDT&interval=4h&limit=180", timeout=30))
+    _r4 = [{"t": int(x["t"]), "o": float(x["o"]), "h": float(x["h"]),
+            "l": float(x["l"]), "c": float(x["c"]), "v": float(x["v"])} for x in _d4]
+    attach_indicators(_r4, ["supertrend10", "supertrend10_dir"])
+    st_now = next((r["supertrend10"] for r in reversed(_r4)
+                   if r.get("supertrend10") is not None), None)
+    st_dir4 = next((r["supertrend10_dir"] for r in reversed(_r4)
+                    if r.get("supertrend10_dir") is not None), None)
+except Exception as _e:
+    print("4h fetch fail:", _e)
+    st_now, st_dir4 = None, None
 
 # 档位表（按方向排）
 if side == "short":
@@ -52,7 +68,7 @@ bars = [{"t": r["t"], "o": r["o"], "h": r["h"], "l": r["l"], "c": r["c"],
         for r in rows]
 data = json.dumps({
     "bars": bars, "levels": levels, "side": side, "sl": sl, "mark": mark,
-    "st4": st_now, "lots": LOTS,
+    "st4": st_now, "st4_dir": st_dir4, "lots": LOTS,
 }, ensure_ascii=False)
 
 html = """<!DOCTYPE html>
@@ -191,7 +207,8 @@ function draw(){
     g.strokeStyle='#9b59b6'; g.lineWidth=2; g.setLineDash([10,4,3,4]);
     g.beginPath(); g.moveTo(L,y+.5); g.lineTo(R,y+.5); g.stroke(); g.setLineDash([]);
     g.fillStyle='#9b59b6'; g.textAlign='left';
-    g.fillText('4H ST '+fmt(D.st4), L+6, y-10);
+    const dirTxt = D.st4_dir === -1 ? '涨(线=支撑)' : (D.st4_dir === 1 ? '跌(线=压力)' : '');
+    g.fillText('4H ST '+fmt(D.st4)+' '+dirTxt, L+6, y-10);
   }
 
   // K 线
