@@ -218,7 +218,7 @@ report.append(("C4 structure_levels ≥8", (c4, f"{len(levels)} 个")))
 
 reason_all = " ".join((c.get("reasoning") or "") for c in chips) + reasoning0
 import re
-m = re.search(r"结构位\s*(\d+)\s*[个+]?\s*(?:\+\s*)?ATR补档\s*(\d+)", reason_all)
+m = re.search(r"结构位?\s*(\d+)\s*(?:个\s*)?[+＋]\s*(?:ATR)?补档\s*(\d+)", reason_all)
 report.append(("C5 ATR补档声明", (bool(m), m.group(0) if m else "未找到")))
 
 c6 = all("confidence" in c for c in chips) and len(chips) > 0
