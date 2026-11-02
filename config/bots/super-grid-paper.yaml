@@ -100,8 +100,8 @@ ladder_template:
     min_gap_pct: auto
     # AI 从不输出 meta.structure_levels（线上日志 0 次）→ 引擎自己算，否则永远回退等距
     auto_extract: true
-    mtf_intervals: [5m, 15m, 1h, 4h]   # 四周期结构位（2026-11-02 拍板，不用 1d）
-    mtf_bars: {5m: 300, 15m: 300, 1h: 240, 4h: 180}
+    mtf_intervals: [5m, 15m, 1h, 4h, 1d]   # 五周期（2026-11-03：马丁层用 1h/4h/1d）
+    mtf_bars: {5m: 300, 15m: 300, 1h: 240, 4h: 180, 1d: 120}
     mtf_min_ratio: 0.6     # 只取现价 ×0.6 ~ ×1.6 范围内的价位（±40%）
     mtf_max_ratio: 1.6
   # ── 覆盖价距（点数）：SL 距**最深档** 300~500 点，随区间放大 ──────────────
@@ -219,8 +219,8 @@ strategist:
     # 必查取数覆盖（2026-10-26 实测：模型只查 map 15m/1h/4h + events 15m 就出计划，
     # 马 3 声称「落在日线结构位」却从没查过日线）。缺项 → 引擎重试一次并点名。
     required_coverage:
-      smc_map: ["5m", "15m", "1h", "4h"]
-      smc_events: ["5m", "15m", "1h", "4h"]
+      smc_map: ["5m", "15m", "1h", "4h", "1d"]
+      smc_events: ["15m", "1h", "4h", "1d"]
     allow:
       - klines
       - ticker
@@ -232,7 +232,7 @@ strategist:
   market:
     mode: rest_only
     indicators: [atr14, boll20, boll_upper, boll_lower, supertrend10_dir]
-    timeframes: ["5m", "15m", "1h", "4h"]
+    timeframes: ["5m", "15m", "1h", "4h", "1d"]
     extra_candles: 60
   ai_triggers:
     enabled: false
