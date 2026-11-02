@@ -6,6 +6,10 @@
 
 bot_id: martin-grid-bi-live
 account: gate-grid
+# 🔴 2026-11-03 实测抓到：不显式配 key 会回落到 GATE_API_KEY（另一个账户）——
+# 首轮 20 条单全挂错账户。必须显式指定网格账户的 key。
+api_key_env: GATE_GRID_API_KEY
+api_secret_env: GATE_GRID_API_SECRET
 # ↑ 声明所属账户 → 与 config/accounts.yaml 的账户级风控**合并**（上限取更严、
 #   日初权益账户共享）。不声明则不参与合并。见 `config/accounts.yaml` 头注释。
 enabled: false
