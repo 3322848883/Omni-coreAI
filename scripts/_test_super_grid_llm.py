@@ -39,10 +39,12 @@ def fetch(interval: str, limit: int) -> list[dict]:
             for x in d]
 
 print("[1/6] 拉取真实 K 线 ...")
-rows15 = fetch("15m", 300)
-rows4h = fetch("4h", 120)
+TF_BARS = {"5m": 300, "15m": 300, "1h": 240, "4h": 180}
+tf_rows = {tf: fetch(tf, n) for tf, n in TF_BARS.items()}
+rows15, rows4h = tf_rows["15m"], tf_rows["4h"]
 mark = rows15[-1]["c"]
-print(f"      15m {len(rows15)} 根, 4h {len(rows4h)} 根, mark={mark}")
+print(f"      " + ", ".join(f"{tf} {len(r)}根" for tf, r in tf_rows.items())
+      + f", mark={mark}")
 
 # ── 2. 指标 ──────────────────────────────────────────────────────────
 print("[2/6] 计算指标 ...")
@@ -64,9 +66,10 @@ from omnialpha.strategist.smc_events import (  # noqa: E402
     compute_smc_events, smc_events_summary)
 from omnialpha.strategist.indicators import squeeze_momentum  # noqa: E402
 
-map15 = smc_map_summary(compute_smc_map(rows15))
-map4h = smc_map_summary(compute_smc_map(rows4h))
-evt15 = smc_events_summary(compute_smc_events(rows15))
+smc_out = {}
+for tf, rows in tf_rows.items():
+    smc_out[f"smc_map_{tf}"] = smc_map_summary(compute_smc_map(rows))
+    smc_out[f"smc_events_{tf}"] = smc_events_summary(compute_smc_events(rows))
 sqz = squeeze_momentum([r["h"] for r in rows15], [r["l"] for r in rows15],
                        [r["c"] for r in rows15])
 sqz_state = sqz["sqz_state"][-1]
@@ -140,14 +143,8 @@ mark: {mark}
 [挤压状态（G1，sqzmom 口径，已代查）]
 sqz_state: {sqz_state}（1=挤压中 -1=已释放 0=无），连续挤压 {sqz_run} 根 → {sqz_txt}
 
-[smc_map 15m 摘要（工具输出原文）]
-{json.dumps(map15, ensure_ascii=False)[:3500]}
-
-[smc_map 4h 摘要（工具输出原文）]
-{json.dumps(map4h, ensure_ascii=False)[:2500]}
-
-[smc_events 15m 摘要（工具输出原文）]
-{json.dumps(evt15, ensure_ascii=False)[:3500]}
+[SMC 两件套 × 四周期（工具输出原文，全部已代查：5m/15m/1h/4h 的 map 与 events）]
+{json.dumps(smc_out, ensure_ascii=False)[:14000]}
 
 [15m 最近 12 根 OHLC]
 {json.dumps(recent, ensure_ascii=False)}
@@ -179,11 +176,13 @@ req = urllib.request.Request(
 os.environ["no_proxy"] = "token.cgdoem.cn"
 resp = json.load(urllib.request.urlopen(req, timeout=420))
 content = resp["choices"][0]["message"]["content"]
+thinking = resp["choices"][0]["message"].get("reasoning_content") or ""
 usage = resp.get("usage", {})
 Path(ROOT / "_probe" / "super_grid_out").mkdir(parents=True, exist_ok=True)
 out_txt = ROOT / "_probe" / "super_grid_out" / "raw_response.json"
-out_txt.write_text(json.dumps({"content": content, "usage": usage},
-                              ensure_ascii=False, indent=1), encoding="utf-8")
+out_txt.write_text(json.dumps(
+    {"content": content, "thinking": thinking, "usage": usage},
+    ensure_ascii=False, indent=1), encoding="utf-8")
 print(f"      完成。prompt_tokens={usage.get('prompt_tokens')} "
       f"completion_tokens={usage.get('completion_tokens')}")
 print("      原文已存", out_txt)
@@ -192,6 +191,13 @@ print("      原文已存", out_txt)
 print("[6/6] 核对人格硬规则 ...")
 plan = json.loads(content)
 chips = plan.get("chips") or []
+# meta 位置与 bridge.py 同逻辑：plan 级优先、chip 级补缺（模型两种写法都出现过）
+if not isinstance(plan.get("meta"), dict) or not plan.get("meta"):
+    for _c in chips:
+        _cm = _c.get("meta") if isinstance(_c, dict) else None
+        if isinstance(_cm, dict) and _cm:
+            plan["meta"] = _cm
+            break
 report = []
 r1 = content.strip().startswith("{")
 report.append(("C1 合法 JSON", r1))
