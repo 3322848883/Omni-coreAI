@@ -123,7 +123,17 @@ ladder_template:
     # ⚠️ 5m 的结构位天然密集（相邻 OB 常常只差几点），会被 min_gap(0.66%) 大量去重 ——
     #    实际贡献看每轮 `dyn_note.structure_only` 的 in_side/deduped_out。
     mtf_intervals: [5m, 15m, 1h, 4h]
-    mtf_bars: {5m: 500, 15m: 300, 1h: 240, 4h: 180}
+    # ── 周期分池（2026-11-03 用户口径）────────────────────────────────
+    # 「马丁三层放在 1h/4h/1d SMC 结构位，网格穿插在 5m/15m/1h」：
+    #   grid 池  = mtf_grid_intervals  → 铺档候选（近端细结构）
+    #   martin 池 = mtf_martin_intervals → 只用于马丁位吸附（深位加码）
+    # 1d 回来了，但**只进马丁池**，不再参与网格铺档。
+    mtf_grid_intervals: [5m, 15m, 1h]
+    mtf_martin_intervals: [1h, 4h, 1d]
+    mtf_bars: {5m: 500, 15m: 300, 1h: 240, 4h: 180, 1d: 120}
+    # 马丁三位次的深度窗口（%，mark 起）：马1∈[2,4.5]、马2∈[4.5,6.5]、马3∈[6.5,10]。
+    # 吸附时在窗口内找离现位最近的池位；窗口保证「马1≥2%、马2≥4%、马3≥6%」口径。
+    martin_windows: [[2.0, 4.5], [4.5, 6.5], [6.5, 10.0]]
     mtf_min_ratio: 0.6     # 只取现价 ×0.6 ~ ×1.6 范围内的价位（±40%）
     mtf_max_ratio: 1.6
   # ── 覆盖价距（点数）：SL 距**最深档** 300~500 点，随区间放大 ──────────────
@@ -316,7 +326,7 @@ strategist:
     # 必查取数覆盖（2026-10-26 实测：模型只查 map 15m/1h/4h + events 15m 就出计划，
     # 马丁第 3 档声称「落在日线结构位」却从没查过日线）。缺项 → 引擎重试一次并点名。
     required_coverage:
-      smc_map: ["5m", "15m", "1h", "4h"]
+      smc_map: ["5m", "15m", "1h", "4h", "1d"]
       smc_events: ["5m", "15m", "1h"]
     allow:
       - klines        # Brooks 信号 K 线 + 结构高低点，全靠它

@@ -1513,7 +1513,8 @@ class Executor:
                      "range_pct": round((hi - lo) / lo * 100, 2) if lo else None})
         return (hi - lo), note
 
-    def _engine_smc_levels(self, sym: str, tpl: dict) -> tuple[list, dict]:
+    def _engine_smc_levels(self, sym: str, tpl: dict, tfs: Optional[list] = None,
+                           mark_hint: float = 0.0) -> tuple[list, dict]:
         """引擎自己从**多周期** K 线算结构位（4.0，2026-10-30）。
 
         为什么要有这一层：线上实测 AI 从不输出 `meta.structure_levels`
@@ -1525,11 +1526,16 @@ class Executor:
         把 OB 上下沿 / FVG 边界 / EQL·EQH / swing pivot / 区间极值收集起来，
         同一价位被多个周期命中时记 `confluence`（SMC 汇合位更强）。
 
+        2026-11-03 分池：`tfs` 参数允许按用途取**不同周期的池** ——
+        网格层走 `mtf_grid_intervals`（5m/15m/1h，近端细结构），
+        马丁层吸附 `mtf_martin_intervals`（1h/4h/1d，深位加码）。
+
         返回 `(levels, note)`；`levels` 是**两侧都含**的原始价位，方向过滤交给
         `_structure_targets`（它已经有 long 取下方 / short 取上方 的逻辑）。
         """
         ld = tpl.get("levels_dynamic") or {}
-        tfs = ld.get("mtf_intervals") or ["15m", "1h", "4h", "1d"]
+        tfs = list(tfs) if tfs else (ld.get("mtf_intervals")
+                                     or ["15m", "1h", "4h", "1d"])
         try:
             lo_ratio = float(ld.get("mtf_min_ratio") or 0.6)
             hi_ratio = float(ld.get("mtf_max_ratio") or 1.6)
@@ -1551,7 +1557,7 @@ class Executor:
         except Exception as e:  # noqa: BLE001
             return [], dict(note, error=f"import smc_map: {str(e)[:60]}")
 
-        mark = 0.0
+        mark = float(mark_hint or 0.0)
         buckets: dict[float, set] = {}
 
         def _add(px, tag):
@@ -1585,10 +1591,23 @@ class Executor:
                              "c": r[4], "v": r[5]} for r in reversed(raw)]
                 except Exception:  # noqa: BLE001
                     rows = None
+                # ── 回退：交易所现拉（2026-11-03）───────────────────────────
+                # 本地/测试库没有 1h/4h/1d 数据（或停在很久前）→ martin 池恒空，
+                # 马丁吸附永远走窗口兜底。与 `_dynamic_step` 的 exchange 回退同源：
+                # fetch_rest_candles 同时兼容 ExchangeClient 与 legacy GateClient。
+                if not rows or len(rows) < 30:
+                    try:
+                        from .strategist.market import fetch_rest_candles
+                        rows = fetch_rest_candles(
+                            self.client, sym, tf, int(bars_cfg.get(tf) or 300)) or []
+                        if rows:
+                            note["src"] = "exchange"
+                    except Exception:  # noqa: BLE001 — 现拉失败就真没有
+                        rows = None
             if not rows or len(rows) < 30:
                 continue
             if not mark:
-                mark = float(rows[-1]["c"])
+                mark = float(rows[-1]["c"]) or mark_hint
             try:
                 summ = smc_map_summary(compute_smc_map(rows))
             except Exception:  # noqa: BLE001
@@ -1696,7 +1715,12 @@ class Executor:
         note: dict = {"given": len(lv), "side": side, "src": "ai"}
         # 4.0：AI 没给就用**引擎自己从多周期算的**结构位（否则永远回退等距）
         if not lv and cfg.get("auto_extract", True):
-            eng, enote = self._engine_smc_levels(sym, tpl)
+            # 2026-11-03 分池：网格层只用 `mtf_grid_intervals`（5m/15m/1h，近端细结构）；
+            # 4h/1d 的位只进马丁池（吸附用），不参与铺档 —— 用户口径
+            # 「马丁三层放 1h/4h/1d，网格穿插在 5m/15m/1h」。
+            _grid_tfs = cfg.get("mtf_grid_intervals")
+            eng, enote = self._engine_smc_levels(
+                sym, tpl, tfs=list(_grid_tfs) if _grid_tfs else None)
             note["engine"] = enote
             if eng:
                 lv = eng
@@ -1828,10 +1852,25 @@ class Executor:
             _atr_gap_px = (min_gap / 100 * mark) if min_gap > 0 else 0.0
             _mx_gap_px = _mx_step / 100 * mark
             ext_gap = max(_min_step_px, _atr_gap_px)
+            # ── 补点间距动态化（2026-11-03 用户口径「补档也需要动态不要写死15点」）──
+            # min_gap 改物理下限后 ext_gap 曾被钉死在 15 点（结构位空隙大时密铺得
+            # 比 AI 的节奏还细）。现在让补点跟随当轮档距：ext_gap ≥ step×0.8，
+            # 再被点数区间 [min_step_points, max_step_points] 硬夹。
+            try:
+                _step_px = float(cfg.get("_dyn_step_pct") or 0) / 100 * mark
+            except (TypeError, ValueError):
+                _step_px = 0.0
+            if _step_px > 0:
+                ext_gap = max(ext_gap, _step_px * 0.8)
+            if _pmax > 0:
+                ext_gap = min(ext_gap, _pmax)
+            if _pmin > 0:
+                ext_gap = max(ext_gap, _pmin)
             if _mx_gap_px > 0:
                 ext_gap = min(ext_gap, _mx_gap_px)
             if ext_gap <= 0:
                 ext_gap = mark * 0.006
+            note["filler_gap_pts"] = round(ext_gap, 2)
             cur = cands[-1] if cands else mark
             while len(cands) < min_lv:
                 cur = cur - ext_gap if side == "long" else cur + ext_gap
@@ -1861,6 +1900,117 @@ class Executor:
             else:
                 slot_pos[max(1, min(n, int(round(idx / base_n * n))))] = lots
         base_lots = float(tpl.get("grid_lots") or 1)
+
+        # ── 马丁池两段式（2026-11-03 用户口径）────────────────────────────
+        # 「马丁三层放在 1h/4h/1d SMC 结构位，网格穿插在 5m/15m/1h」。
+        # 旧槽位制（第 1/5/10 近发马丁张数）做不到：AI 位是浅密排布时，深池位
+        # 替换任一槽位都会破坏单调序 → 吸附永远失败。改为**马丁先定、网格穿插**：
+        #   1) 马丁 3 档：三个深度窗口（martin_windows）各从 martin 池选
+        #      「深度最小」的位（贴窗口下沿 = 满足马1≥2%/马2≥4%/马3≥6%）；
+        #      池空/无窗口内位 → 窗口下沿兜底（标 spacing 档）
+        #   2) 网格档：从该侧候选（AI 位 + engine 网格池）由近到远取，与马丁位
+        #      和彼此保持 ≥min_gap 点；不足 min_lv → ext_gap（动态）向外延伸
+        # 张数按 unit 直接发（马丁=slot 值 / 网格=grid_lots），下游 unit 推断
+        # 「张数≠grid_lots=martin」依然成立。
+        _m_tfs = (cfg.get("mtf_martin_intervals")
+                  if isinstance(cfg, dict) else None) \
+            or (tpl.get("levels_dynamic") or {}).get("mtf_martin_intervals")
+        if _m_tfs and slot_pos:
+            try:
+                _mw = (tpl.get("martin_windows")
+                       or (tpl.get("levels_dynamic") or {}).get("martin_windows")
+                       or [[2.0, 4.5], [4.5, 6.5], [6.5, 10.0]])
+                _wins = [list(w) for w in _mw]
+            except (TypeError, ValueError):
+                _wins = [[2.0, 4.5], [4.5, 6.5], [6.5, 10.0]]
+            try:
+                mpool, mp_note = self._engine_smc_levels(
+                    sym, tpl, tfs=list(_m_tfs), mark_hint=mark)
+            except Exception as e:  # noqa: BLE001 — 池算不出来就走窗口兜底
+                mpool, mp_note = [], {"error": str(e)[:60]}
+            note["martin_pool"] = {"tfs": (mp_note or {}).get("tfs"),
+                                   "levels": len(mpool or [])}
+
+            def _depth(p: float) -> float:
+                return abs(mark - p) / mark * 100
+
+            sgn_side = 1 if side == "long" else -1
+            picks: list[tuple[float, float]] = []      # 马丁 (px, lots)
+            snaps = []
+            for j, (slot, lots) in enumerate(sorted(slot_pos.items())):
+                lo, hi = (_wins[j] if j < len(_wins) else _wins[-1])
+                # 🔴 方向过滤（2026-11-03 真实行情实测抓到）：池位两侧都含，
+                # 多头吸附时若不滤方向，会把 mark **上方**的池位吸进多头 ——
+                # 限价买单挂在现价上方 = 立即成交且方向完全错误。
+                inside = [p for p in mpool or []
+                          if lo <= _depth(p) <= hi
+                          and ((side == "long" and p < mark)
+                               or (side == "short" and p > mark))]
+                if inside:
+                    px = min(inside, key=_depth)
+                    snaps.append({"slot": slot, "to": round(px, 2),
+                                  "depth": round(_depth(px), 2)})
+                else:
+                    px = round(mark * (1 - sgn_side * lo / 100), 2)
+                    snaps.append({"slot": slot, "fallback": px})
+                picks.append((px, float(lots)))
+            if snaps:
+                note["martin_snap"] = snaps
+
+            _m_px = {p for p, _ in picks}
+            deepest = max(_depth(p) for p, _ in picks)
+            grid_want_n = max(0, min_lv - len(picks))
+            g_cands: list[float] = []
+            for p in cands:                     # 已是该侧由近到远、过 near/去重
+                if _depth(p) >= deepest - 1e-9:
+                    continue
+                if any(abs(p - mp) < _pmin for mp in _m_px):
+                    continue
+                if any(abs(p - gp) < _pmin for gp in g_cands):
+                    continue
+                g_cands.append(p)
+                if len(g_cands) >= grid_want_n:
+                    break
+
+            all_p = sorted({p for p, _ in picks} | set(g_cands),
+                           reverse=(side == "long"))
+            # 不足 min_lv → 从最深档按 ext_gap 向外延伸（ext_gap 已动态化）
+            ext = None
+            cur = all_p[-1] if all_p else mark
+            while len(all_p) < min_lv:
+                if ext is None:
+                    try:
+                        _step_px = float(cfg.get("_dyn_step_pct") or 0) / 100 * mark
+                    except (TypeError, ValueError):
+                        _step_px = 0.0
+                    try:
+                        _ms_px = float((tpl.get("dynamic") or {}).get(
+                            "min_step_pct") or 0) / 100 * mark
+                    except (TypeError, ValueError):
+                        _ms_px = 0.0
+                    ext = max(_ms_px, (min_gap / 100 * mark) if min_gap > 0 else 0.0)
+                    if _step_px > 0:
+                        ext = max(ext, _step_px * 0.8)
+                    if _pmax > 0:
+                        ext = min(ext, _pmax)
+                    if _pmin > 0:
+                        ext = max(ext, _pmin)
+                    if _mx_step > 0:
+                        ext = min(ext, _mx_step / 100 * mark)
+                    if ext <= 0:
+                        ext = mark * 0.006
+                    note["filler_gap_pts"] = round(ext, 2)
+                cur = cur - ext if side == "long" else cur + ext
+                all_p.append(round(cur, 2))
+                filled += 1
+            lots_of = {p: l for p, l in picks}
+            want = [(p, lots_of.get(p, base_lots)) for p in all_p]
+            note.update({"filled": filled, "levels": len(all_p),
+                         "slots": slot_pos,
+                         "spacing_pct": round(abs(all_p[0] - all_p[-1]) / mark * 100, 2)
+                         if len(all_p) > 1 else None})
+            return want, note
+
         want = [(p, slot_pos.get(i + 1, base_lots)) for i, p in enumerate(cands)]
         note.update({"filled": filled, "levels": n, "slots": slot_pos,
                      "spacing_pct": round(abs(cands[0] - cands[-1]) / mark * 100, 2)
