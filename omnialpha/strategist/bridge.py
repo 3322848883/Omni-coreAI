@@ -111,6 +111,38 @@ def chips_to_signal(plan: Plan, risk_result: RiskResult, bot_id: str = "") -> di
             "照发会变成只撤不挂的网格空窗）: "
             + ", ".join(f"{d['symbol']}/{d['action']}" for d in dropped_cancels)
         )
+    # 引擎消费的 plan 级 meta 必须**透传**（2026-11-01 实测）：模型在
+    # `meta` 里给了 `structure_levels` / `two_way` / `ladder_step_pct`，
+    # 但这里的 meta 是**固定白名单**拼的 → 全被丢掉，落盘文件里 0 个。
+    # 表现就是「prompt 要求了、AI 也写了、引擎永远收不到」。
+    _pass_meta: dict[str, Any] = {}
+    _meta_keys = ("two_way", "structure_levels", "ladder_step_pct",
+                  "tp_target", "regime")
+    try:
+        _raw_meta = (plan.raw or {}).get("meta") if isinstance(plan.raw, dict) else None
+        if isinstance(_raw_meta, dict):
+            for _k in _meta_keys:
+                _v = _raw_meta.get(_k)
+                if _v not in (None, "", [], {}):
+                    _pass_meta[_k] = _v
+        # 2026-11-02 实测（新网关第 1 轮）：模型把**同样的键全写在 `chips[i].meta`** 里，
+        # plan 根根本没有 `meta` 节点 —— 那时 `_pass_meta` 为空，引擎当"模型没给"，
+        # 直接退化成等距铺 10 层（structure_levels=0、two_way 空），一整轮的结构判断
+        # 白丢。`Chip` dataclass 不承载 meta（只抽了 tp_target/reasoning），所以这里
+        # 从 `plan.raw` 的原始 chip 上补，**plan 级优先、chip 级补缺**。
+        if isinstance(plan.raw, dict):
+            for _c in (plan.raw.get("chips") or []):
+                _cm = _c.get("meta") if isinstance(_c, dict) else None
+                if not isinstance(_cm, dict):
+                    continue
+                for _k in _meta_keys:
+                    if _k in _pass_meta:
+                        continue
+                    _v = _cm.get(_k)
+                    if _v not in (None, "", [], {}):
+                        _pass_meta[_k] = _v
+    except Exception:  # noqa: BLE001 — 透传失败不能阻断出单
+        _pass_meta = {}
     payload: dict[str, Any] = {
         "replace": "symbol" if has_entry else "none",
         "orders": orders,
@@ -125,6 +157,7 @@ def chips_to_signal(plan: Plan, risk_result: RiskResult, bot_id: str = "") -> di
                 {"symbol": c.symbol, "action": c.action, "confidence": c.confidence}
                 for c in risk_result.rejected
             ],
+            **_pass_meta,
         },
     }
     return payload

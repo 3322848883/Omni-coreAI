@@ -1644,16 +1644,50 @@ class Executor:
         min_gap = 0.0
         min_gap_src = "config"
         if str(_mg_raw).lower() in ("auto", "none", ""):
+            # 2026-11-02 修正（用户口径「结构位优先，档距只用来补档」）：
+            # `auto` 原来取**当轮 step_pct** 当去重阈值（整格 0.9% ≈ 20.5 点）→
+            # 间距 0.7~0.8% 的密集结构位被整批丢掉（实测多侧 8 个位只剩 3 个，
+            # 另外 7 档全是补点）。这跟「结构位优先」正好相反：**AI 的档距是补点
+            # 间距，不该成为结构位的准入门槛**。
+            # 去重阈值改为物理下限 `min_step_pct`（0.66% ≈ 15 点）——只拦
+            # 「两档贴得比一格下限还近」的情况，其余结构位一律保留。
             try:
-                min_gap = float(cfg.get("_dyn_step_pct") or 0)
+                min_gap = float((tpl.get("dynamic") or {}).get("min_step_pct") or 0.66)
             except (TypeError, ValueError):
-                min_gap = 0.0
-            min_gap_src = "atr"
+                min_gap = 0.66
+            min_gap_src = "min_step"
         else:
             try:
                 min_gap = float(_mg_raw or 0.3)
             except (TypeError, ValueError):
                 min_gap = 0.3
+        # **AI 给了档距就以 AI 为准**（2026-11-01）：`min_gap_pct: 0.66` 会把 AI 认为
+        # 合法、但间距只有 0.32%~0.62% 的结构位整批去重（实测多头 9 个位里丢掉 4 个，
+        # 只能用补点凑层数）。改成 min_gap = AI 档距 × ratio（默认 0.5，下限 0.15%），
+        # 去重只用来拦「几乎重叠」的位，不再替 AI 决定哪些位可用。
+        _ai_step = None
+        try:
+            _ai_step = float((getattr(self, "_round_meta", {}) or {}).get("ladder_step_pct") or 0) or None
+        except (TypeError, ValueError):
+            _ai_step = None
+        if _ai_step and min_gap_src == "config":
+            try:
+                _ratio = float(cfg.get("min_gap_ai_ratio") or 0.5)
+            except (TypeError, ValueError):
+                _ratio = 0.5
+            min_gap = max(0.15, _ai_step * _ratio)
+            min_gap_src = "ai_step"
+        # 点数下限（2026-11-02）：去重阈值最终按**点**兜一次底 —— 结构位之间
+        # 也必须 ≥15 点，不随价格漂（0.66% 在 2285 是 15 点、在 3000 是 19.8 点）。
+        try:
+            _mg_pmin = float((tpl.get("dynamic") or {}).get("min_step_points") or 0)
+        except (TypeError, ValueError):
+            _mg_pmin = 0.0
+        if mark > 0 and _mg_pmin > 0:
+            _mg_pts = max(min_gap, _mg_pmin / mark * 100.0)
+            if abs(_mg_pts - min_gap) > 1e-9:
+                min_gap = _mg_pts
+                min_gap_src = f"{min_gap_src}+points"
         raw = (getattr(self, "_round_meta", {}) or {}).get("structure_levels") or []
         try:
             lv = sorted({round(float(x), 2) for x in raw if float(x) > 0})
@@ -1691,10 +1725,21 @@ class Executor:
         note["min_gap_src"] = min_gap_src
         # 档位之间必须有最小间距：横盘时 swing 极值会密集簇生（实测 14 个结构位
         # 全挤在 22 点内、间距 0.06%）→ 贪心去重，按「由近到远」保留
-        if min_gap > 0:
+        # 2026-11-02：配置了 `min_step_points` 时改按**绝对点数**比较 —— 百分比在深档会缩水
+        # （0.66% 在 2292 是 15.1 点、在 2100 只有 13.9 点，实测出现 14.9 点间距 < 15 的违规）。
+        if min_gap > 0 or _mg_pmin > 0:
             kept: list[float] = []
             for p in cands:
-                if all(abs(p - k) / max(k, 1e-9) * 100 >= min_gap for k in kept):
+                ok = True
+                for k in kept:
+                    if _mg_pmin > 0:
+                        if abs(p - k) < _mg_pmin - 1e-9:
+                            ok = False
+                            break
+                    elif abs(p - k) / max(k, 1e-9) * 100 < min_gap:
+                        ok = False
+                        break
+                if ok:
                     kept.append(p)
             note["deduped_out"] = len(cands) - len(kept)
             cands = kept
@@ -1705,6 +1750,15 @@ class Executor:
             _mx_step = float((tpl.get("dynamic") or {}).get("max_step_pct") or 2.2)
         except (TypeError, ValueError):
             _mx_step = 2.2
+        # 点数口径（2026-11-02）：结构位之间也必须落在 15~50 点，不随价格漂。
+        _dyn_cfg = tpl.get("dynamic") or {}
+        try:
+            _pmin = float(_dyn_cfg.get("min_step_points") or 0)
+            _pmax = float(_dyn_cfg.get("max_step_points") or 0)
+        except (TypeError, ValueError):
+            _pmin, _pmax = 0.0, 0.0
+        if mark > 0 and _pmax > 0:
+            _mx_step = min(_mx_step, _pmax / mark * 100.0)
         # 判断必须用**百分比**而不是"现价 × 2.2%"的绝对点数：深档价格低，
         # 同样 53 点在 2000 处是 2.65%，会突破 2.2% 上限（实测出现 2.99% 空洞）。
         if len(cands) >= 2:
@@ -1713,8 +1767,12 @@ class Executor:
             for p in cands[1:]:
                 gap = abs(dense[-1] - p)
                 gap_pct = gap / max(dense[-1], 1e-9) * 100
-                if gap_pct > _mx_step:
-                    n_ins = int(gap_pct // _mx_step)
+                # 点数口径优先：相邻超过 `max_step_points`（50 点）就插点，
+                # 不管它在深档是不是刚好卡在 2.2% 以内。
+                _too_far = (gap > _pmax) if _pmax > 0 else (gap_pct > _mx_step)
+                if _too_far:
+                    n_ins = (int(gap // _pmax) if _pmax > 0
+                             else int(gap_pct // _mx_step))
                     step = gap / (n_ins + 1)
                     # 锚点必须在进内循环**前**固定：原来写 `dense[-1]`，而每次
                     # append 后 dense[-1] 已经变成新插的点 → k=2 时从新点再减 2×step
@@ -1829,6 +1887,41 @@ class Executor:
         except Exception:  # noqa: BLE001
             pass
         return Path(__file__).resolve().parents[1] / "data" / "ladder_levels.json"
+
+    def _base_pos_state_path(self, tpl: dict, sym: str,
+                             side: str) -> Optional[Path]:
+        """底仓触发价的独立 state 文件（`ladder_basepos_<sym>_<side>.json`）。
+
+        必须**独立于 `ladder_levels.json`**：档位缓存每轮整体覆写，底仓触发价
+        一旦写进去就会被下一轮的重算结果冲掉 —— 那样又变回「每轮新价位」的
+        移动靶（2026-11-01 实测：3 段 10 层 0 成交）。
+        """
+        lp = self._levels_state_path(tpl)
+        if not lp:
+            return None
+        return lp.parent / f"ladder_basepos_{sym}_{side}.json"
+
+    @staticmethod
+    def _read_state_json(p: Optional[Path]) -> dict:
+        try:
+            if p and p.exists():
+                return json.loads(p.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001 — 读不出来就当没状态
+            pass
+        return {}
+
+    @staticmethod
+    def _write_state_json(p: Optional[Path], data: dict) -> None:
+        try:
+            if not p:
+                return
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(p.suffix + ".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1),
+                           encoding="utf-8")
+            tmp.replace(p)
+        except Exception:  # noqa: BLE001 — 写不进去不阻断铺梯
+            pass
 
     def _ladder_cfg_sig(self, tpl: dict) -> str:
         """档位生成参数的指纹 —— 缓存必须带上它，否则**改配置永远不生效**。
@@ -1987,12 +2080,23 @@ class Executor:
 
         base_n = float(tpl.get("grid_levels") or 10)
         base_lots = float(tpl.get("grid_lots") or 1)
+
+        def _cv(key: str, default: float) -> float:
+            """配置数值必须区分「没配」和「配了 0」——`or` 会吃掉 0。
+
+            实测 2026-10-31：`min_weight: 0`（用户要两侧都挂）被
+            `cfg.get("min_weight") or 0.15` 变成 0.15 → 弱侧整侧不挂，
+            双向退化成单侧，且日志里只留一句 `weight 0.11 < min 0.15`。
+            """
+            v = cfg.get(key)
+            return default if v is None or v == "" else float(v)
+
         try:
-            min_w = float(cfg.get("min_weight") or 0.15)
-            lv_min = float(cfg.get("levels_at_min") or 0.35)
-            st_min = float(cfg.get("step_at_min") or 1.4)
-            lt_min = float(cfg.get("lots_at_min") or 0.3)
-            n_max = float(cfg.get("levels_max") or 15)
+            min_w = _cv("min_weight", 0.15)
+            lv_min = _cv("levels_at_min", 0.35)
+            st_min = _cv("step_at_min", 1.4)
+            lt_min = _cv("lots_at_min", 0.3)
+            n_max = _cv("levels_max", 15.0)
         except (TypeError, ValueError):
             min_w, lv_min, st_min, lt_min, n_max = 0.15, 0.35, 1.4, 0.3, 15.0
 
@@ -2074,6 +2178,85 @@ class Executor:
         except (TypeError, ValueError):
             v = 0.015
         return v if v > 0 else 0.015
+
+    def _ensure_leg_sls(self, sym: str, side: str, want: list, units: list,
+                        tpl: dict, meta) -> Optional[dict]:
+        """**每腿独立止损**（2026-11-01）：网格 / 马丁 / 底仓 各管各的。
+
+        问题：整梯一条 SL 是「一损俱损」—— 底仓浮亏会把网格、马丁一起平掉，
+        三条腿在风控上没有独立性。
+        做法：每条腿自己一条 reduce-only 触发单，谁破位谁走，其余继续等。
+        标签 `-ls` 与整梯 `-sl` 隔离：`_maybe_rewrite_sl` 只维护 `-sl`；
+        `_should_keep_protection` 按 reduce_only 判定，两套互不干扰。
+        """
+        cfg = tpl.get("leg_sl") or {}
+        if not cfg.get("enabled"):
+            return None
+        try:
+            pts = float(cfg.get("points") or 0)
+            pct = float(cfg.get("pct") or 0)
+            tol = float(cfg.get("tol_pct") or 0.15)
+            max_n = int(cfg.get("max_legs") or 40)
+        except (TypeError, ValueError):
+            return None
+        if (pts <= 0 and pct <= 0) or not want:
+            return None
+        want, units = want[:max_n], units[:max_n]
+        rule = 2 if side == "long" else 1
+        tag = f"t-{self._bot_tag('')}-ls"
+        try:
+            olds = [o for o in (self.client.list_price_orders(sym) or [])
+                    if str((o.get("initial") or {}).get("text") or "").startswith(tag)]
+        except Exception:  # noqa: BLE001
+            olds = []
+
+        def _px_of(o: dict) -> float:
+            try:
+                return float((o.get("trigger") or {}).get("price") or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        targets = []
+        for (px, lots), u in zip(want, units):
+            off = pts if pts > 0 else float(px) * pct / 100.0
+            trg = float(px) - off if side == "long" else float(px) + off
+            try:
+                trg = round_price(trg, meta)
+            except Exception:  # noqa: BLE001
+                continue
+            targets.append((float(trg), abs(float(lots)), u))
+
+        kept, to_place = [], []
+        for trg, lots, u in targets:
+            hit = next((o for o in olds if _px_of(o) > 0 and o not in kept
+                        and abs(_px_of(o) - trg) / trg * 100 <= tol), None)
+            if hit is not None:
+                kept.append(hit)
+            else:
+                to_place.append((trg, lots, u))
+        cancel = [o for o in olds if o not in kept]
+
+        placed = []
+        for trg, lots, u in to_place:
+            size = -lots if side == "long" else lots
+            body = {"initial": {"contract": sym, "size": size, "price": "0",
+                                "tif": "ioc", "reduce_only": True,
+                                "text": f"{tag}-{u}"},
+                    "trigger": {"price": str(trg), "rule": rule,
+                                "price_type": 1, "expiration": 86400}}
+            try:
+                self.client.place_price_order(body)
+                placed.append({"trigger": trg, "lots": lots, "unit": u})
+            except Exception:  # noqa: BLE001 — 单腿失败不影响其它腿
+                continue
+        for o in cancel:
+            try:
+                self.client.cancel_price_order(o["id"])
+            except Exception:  # noqa: BLE001
+                pass
+        return {"targets": len(targets), "kept": len(kept),
+                "placed": len(placed), "canceled": len(cancel),
+                "units": sorted({u for _, _, u in targets})}
 
     def _maybe_rewrite_sl(self, sym: str, meta: Any, sl: Any, side: str,
                           want: list, dyn_note: dict, report) -> Optional[dict]:
@@ -2358,6 +2541,9 @@ class Executor:
             note["step_pct"] = round(max(base_step, min_step), 4)
             return max(base_step, min_step), note
 
+        row = None
+        atr = mid = up = lo = None
+        ind_src = "db"
         try:
             con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
             try:
@@ -2367,16 +2553,51 @@ class Executor:
                     "ORDER BY t DESC LIMIT 1", (sym, interval)).fetchone()
             finally:
                 con.close()
-        except Exception as e:  # noqa: BLE001 — 读库失败回退固定档距
-            note["error"] = f"db: {str(e)[:80]}"
+        except Exception as e:  # noqa: BLE001 — 读库失败不再直接回退固定档距
+            note["db_error"] = f"{str(e)[:70]}"
+            row = None
+        if row and not any(v is None for v in row):
+            atr, mid, up, lo = (float(v) for v in row)
+        else:
+            # ── 回退一：从交易所现拉 K 线自己算（2026-11-02）────────────────
+            # 为什么必须补这条：`market.mode: rest_only` 下指标是每轮**现算**的，
+            # 本地/测试库根本不更新（本地库甚至没有 boll20 三列，实测报
+            # `no such column: boll20`）。于是 `_dynamic_step` 100% 回退到
+            # `max(base_step, min_step)` —— 用户以为的「动态档距」实际是死值 0.66%。
+            # 用同一个 `indicators.atr/boll`（Pine 口径）现算，与 strategist 同源。
+            ind_src = "exchange"
+            try:
+                # 用 `fetch_rest_candles`：同时支持两种 client ——
+                # ExchangeClient（有 get_klines，paper 会委托 feed）与 legacy GateClient
+                # （只有 public_get）。直接调 get_klines 在 GateClient 上会 AttributeError。
+                from .strategist.market import fetch_rest_candles
+                kl = fetch_rest_candles(self.client, sym, interval, 120) or []
+            except Exception as e:  # noqa: BLE001
+                kl = []
+                note["kline_error"] = f"{str(e)[:70]}"
+            if len(kl) >= 30:
+                try:
+                    from .strategist.indicators import atr as _atr, boll as _boll
+                    _h = [float(r["h"]) for r in kl]
+                    _l = [float(r["l"]) for r in kl]
+                    _c = [float(r["c"]) for r in kl]
+                    _a = _atr(_h, _l, _c, 14)
+                    _b = _boll(_c, 20)
+                    _mid = _b.get("middle") or _b.get("basis")   # indicators.boll 用 middle
+                    if (_a and _a[-1] is not None
+                            and _mid and _mid[-1] is not None
+                            and _b.get("upper") and _b["upper"][-1] is not None):
+                        atr = float(_a[-1])
+                        mid = float(_mid[-1])
+                        up = float(_b["upper"][-1])
+                        lo = float(_b["lower"][-1])
+                except Exception as e:  # noqa: BLE001
+                    note["calc_error"] = f"{str(e)[:70]}"
+        if atr is None or mid is None or up is None or lo is None:
+            note["error"] = note.get("error") or "no_indicator_row"
             note["step_pct"] = round(max(base_step, min_step), 4)
             return max(base_step, min_step), note
-        if not row or any(v is None for v in row):
-            note["error"] = "no_indicator_row"
-            note["step_pct"] = round(max(base_step, min_step), 4)
-            return max(base_step, min_step), note
-
-        atr, mid, up, lo = (float(v) for v in row)
+        note["indicator_src"] = ind_src
         if mid <= 0 or mark <= 0:
             return base_step, note
         atr_pct = atr / mark * 100.0
@@ -2386,6 +2607,20 @@ class Executor:
         step = max(min_step, min(max_step, raw))
         if max_span > 0 and grid_n > 0:
             step = min(step, max_span / grid_n)
+        # ── 点数口径钳制（2026-11-02 用户口径：「动态间隔 15~50 点」）──────────
+        # 百分比在价格变化后会漂：2.2% 在 2285 是 50 点、在 3000 就是 66 点。
+        # 用户要的是**点数区间恒定**，所以最后再按点数钳一次（点数优先于百分比）。
+        try:
+            _pmin = float(dyn.get("min_step_points") or 0)
+            _pmax = float(dyn.get("max_step_points") or 0)
+        except (TypeError, ValueError):
+            _pmin, _pmax = 0.0, 0.0
+        if mark > 0 and (_pmin > 0 or _pmax > 0):
+            if _pmin > 0:
+                step = max(step, _pmin / mark * 100.0)
+            if _pmax > 0:
+                step = min(step, _pmax / mark * 100.0)
+            note["points_clamp"] = [round(_pmin, 2), round(_pmax, 2)]
         note.update({"atr": round(atr, 4),
                      "atr_pct": round(atr_pct, 4), "bw_pct": round(bw_pct, 4),
                      "raw_step_pct": round(raw, 4), "step_pct": round(step, 4),
@@ -2549,6 +2784,11 @@ class Executor:
         anchor, anchor_note = self._resolve_anchor(sym, mark, tpl)
         if dyn.get("enabled"):
             step_pct, dyn_note = self._dynamic_step(sym, mark, grid_n, base_step, dyn)
+        # ── 动态基准（2026-11-02）：AI 覆盖**之前**的值，即 ATR/BB 算出的档距。
+        # 为什么留一份：AI 几乎每轮都给 `step_pct`（实测 3/3），一旦 AI 优先，
+        # 「结合 ATR/BB 动态调整」就退化成「AI 说多少就多少」—— 用户口径要的是
+        # 档距跟着波动走、AI 只在合理带内微调。`ai_step_mode: band` 用这个基准。
+        _dyn_step_ref = step_pct
         # ── 每侧档距（双向 3.0）：必须在动态公式**之后**施加 ──────────────
         # 逆势侧间距放大（step_mul > 1）、顺势侧维持 1.0；AI 显式给了
         # `step_pct` 则以它为准（仍会被下面的 span 上限收一次）。
@@ -2582,11 +2822,24 @@ class Executor:
                 if m.get("ladder_step_pct") is not None:
                     ai_step = m.get("ladder_step_pct")
                     break
-        if ai_step is not None:
-            try:
-                want_step = float(ai_step)
-            except (TypeError, ValueError):
-                want_step = None
+        if ai_step is not None or (forced in ("long", "short") and sco.get("step_pct_ai")):
+            # 双向：AI 的**分侧** `two_way.<side>.step_pct` 优先于全局 `ladder_step_pct`。
+            # 2026-11-02 实测踩到：多侧 AI 给 0.8（想稀）、空侧给 0.5（想密），
+            # 但这里无条件用全局 0.5 覆盖 → 两侧同一档距，AI 的分侧意图直接丢失。
+            _side_step = None
+            if forced in ("long", "short") and sco.get("step_pct_ai"):
+                try:
+                    _side_step = float(sco["step_pct_ai"]) or None
+                except (TypeError, ValueError):
+                    _side_step = None
+            if _side_step:
+                want_step, step_src = _side_step, "ai_side"
+            else:
+                try:
+                    want_step = float(ai_step)
+                except (TypeError, ValueError):
+                    want_step = None
+                step_src = "ai_global"
             if want_step is not None and want_step > 0:
                 try:
                     lo = float(dyn.get("min_step_pct", 0.3))
@@ -2603,8 +2856,35 @@ class Executor:
                     span = 0.0
                 if span > 0 and grid_n > 0:
                     hi = min(hi, span / grid_n)
+                # ── AI 档距 vs ATR/BB 动态值（2026-11-02）────────────────────
+                # `dynamic.ai_step_mode`：
+                #   override（默认）— AI 说了算，只受 [min_step, max_step] 硬夹
+                #   band            — AI 只能落在**动态值 ±ai_step_band** 内（默认 ±30%）
+                #   ignore          — 完全用动态值，AI 的建议只留痕
+                # 为什么要 band：用户口径是「结合布林带与 ATR 动态调整档距」，
+                # 每轮 AI 都给 step_pct 时（实测 3/3）override 等于动态公式从不生效。
+                _mode = str(dyn.get("ai_step_mode") or "override").strip().lower()
+                _dyn_real = bool(dyn.get("enabled")) and dyn_note.get("raw_step_pct") is not None
+                if _mode in ("band", "ignore") and _dyn_real and _dyn_step_ref > 0:
+                    try:
+                        _band = float(dyn.get("ai_step_band") or 0.3)
+                    except (TypeError, ValueError):
+                        _band = 0.3
+                    _band = max(0.0, min(1.0, _band))
+                    _lo_d = _dyn_step_ref * (1.0 - _band)
+                    _hi_d = _dyn_step_ref * (1.0 + _band)
+                    lo, hi = max(lo, _lo_d), min(hi, _hi_d)
+                    if lo > hi:                      # 带被硬界夹穿 → 以动态值为准
+                        lo = hi = _dyn_step_ref
+                    dyn_note["ai_step_dyn_ref"] = round(_dyn_step_ref, 4)
+                    dyn_note["ai_step_band"] = [round(lo, 4), round(hi, 4)]
+                    dyn_note["ai_step_mode"] = _mode
+                    if _mode == "ignore":
+                        dyn_note["ai_step_requested"] = want_step
+                        want_step = _dyn_step_ref
                 final = max(lo, min(hi, want_step))
                 dyn_note["ai_step_pct"] = want_step
+                dyn_note["ai_step_src"] = step_src
                 dyn_note["ai_step_clamped"] = abs(final - want_step) > 1e-9
                 dyn_note["effective_max_step_pct"] = round(hi, 4) if hi != float("inf") else None
                 step_pct = final
@@ -2664,8 +2944,19 @@ class Executor:
         ld = tpl.get("levels_dynamic") or {}
         # 双向 3.0：结构位模式的 10~15 层区间要跟着**这一侧**的目标层数走，
         # 否则逆势侧明明只该挂 4 档，仍会按 min_levels=10 硬铺满。
+        # 用户口径（2026-11-02）：「多 10 层空 10 层」是硬要求 —— AI 给 5 层就铺 5 层
+        # 等于马丁第 10 档（6 张）永远不出现，总敞口从 20 张掉到 13 张。
+        # `two_way_cfg.levels_floor: N` → 该侧层数**至少** N（AI 给更多则照 AI）。
+        # 只抬层数、不改档距/张数；AI 明确 levels=0（该侧不挂）在上游已 return。
         if forced in ("long", "short") and sco.get("levels") is not None:
             _n = max(1, int(sco["levels"]))
+            try:
+                _floor = int((tpl.get("two_way_cfg") or {}).get("levels_floor") or 0)
+            except (TypeError, ValueError):
+                _floor = 0
+            if _floor > 0 and _n < _floor:
+                dyn_note["levels_floor"] = {"ai": _n, "floor": _floor}
+                _n = _floor
             ld = dict(ld, min_levels=_n, max_levels=max(_n, min(
                 int(ld.get("max_levels") or 15), _n + 3)))
         level_note: dict = {}
@@ -2872,8 +3163,153 @@ class Executor:
             dyn_note["martin_depths_pct"] = [
                 round((1 - px / anchor) * 100, 3) for px, _ in want[grid_n:]
             ]
+        # ── 底仓层（2026-10-31）────────────────────────────────────────
+        # 网格/马丁吃「一格」，底仓吃「一段」：层数、张数、间距三者独立于网格，
+        # 且落在网格最深档**之外**（`start_pct` 必须 ≥ 网格跨度，否则与网格重叠、
+        # 被 dedupe 吞掉）。`mode: grid` 跟随网格止盈（先跑通结构），
+        # `mode: hold` 留给「只挂不进 tp」的长持仓用法。
+        bp = tpl.get("base_position") or {}
+        _bp_added = 0            # 底仓实际追加了几层（供腿级标签分类）
+        if bp.get("enabled"):
+            try:
+                bp_n = int(bp.get("levels") or 0)
+                bp_lots = float(bp.get("lots") or grid_lots)
+                bp_step = float(bp.get("step_pct") or 0)
+                bp_start = float(bp.get("start_pct") or 0)
+                bp_max_n = int(bp.get("max_levels") or 20)
+            except (TypeError, ValueError):
+                bp_n, bp_lots, bp_step, bp_start, bp_max_n = 0, grid_lots, 0.0, 0.0, 20
+            bp_n = max(0, min(bp_max_n, bp_n))
+            # 网格跨度（%）：start_pct 未给时自动接在网格之后，留 1 档空档
+            _grid_span = abs(step_pct) * max(1, grid_n)
+            _bp_start = bp_start if bp_start > 0 else (_grid_span + abs(step_pct or 0))
+            bp_mode = str(bp.get("mode") or "grid").lower()
+            # ── `mode: trigger`（2026-11-01）──────────────────────────────
+            # 病根：`grid` 模式的底仓价 = 现价 ± start_pct，每 2% 重锚就整梯
+            # 重算重挂 → 价格跌它跌得更快，回放 3 段实测 **10 层 0 成交**
+            # （底仓首档价在段内从 2160 漂到 1177，单轮位移 -23%）。
+            # 修法：触发价**一次定死写盘**，之后每轮都用这个绝对价 ——
+            # 价格到了才成交，不到就一直等着（真正「到位置才建仓」）。
+            # 已穿越（mark 越过触发价）= 认为已成交 → 标 consumed，不再补挂，
+            # 否则每轮都会在更低价再买一张，变成变相加仓。
+            if bp_mode in ("trigger", "fixed", "once", "bottom") and bp_n > 0:
+                _bp_path = self._base_pos_state_path(tpl, sym, side)
+                _bp_st = self._read_state_json(_bp_path) or {}
+                _bp_new = False
+                _bp_done = bool(_bp_st.get("consumed"))
+                try:
+                    _bp_px = float(_bp_st.get("price") or 0)
+                except (TypeError, ValueError):
+                    _bp_px = 0.0
+                if _bp_px <= 0 and not _bp_done:
+                    _bp_src = "pct"
+                    if bp_mode == "bottom":
+                        # **底仓在底部**（2026-11-01）：触发价取区间下沿 ——
+                        # 近 `bottom_lookback` 根的**最低价**（空头取最高价），
+                        # 不是「现价 -12%」那种拍脑袋的固定偏移。
+                        try:
+                            _lb = int(bp.get("bottom_lookback") or 240)
+                        except (TypeError, ValueError):
+                            _lb = 240
+                        _lo, _hi, _rnote = self._range_edges(sym, mark, dyn,
+                                                             {"lookback": _lb})
+                        _raw = _lo if sgn < 0 else _hi
+                        try:
+                            _min_d = float(bp.get("min_dist_pct") or 1.0)
+                        except (TypeError, ValueError):
+                            _min_d = 1.0
+                        _dist = abs(_raw - mark) / mark * 100 if mark else 0.0
+                        dyn_note["base_bottom"] = dict(
+                            _rnote, dist_pct=round(_dist, 2),
+                            min_dist_pct=_min_d, price=round(_raw, 2) if _raw else None)
+                        if _raw > 0 and _dist >= _min_d:
+                            _bp_px = float(_raw)
+                            _bp_src = "range_low"
+                        else:
+                            _bp_px = 0.0      # 已在底部区（或取不到区间）→ 本次不建
+                    else:
+                        # 触发价按**当前成交价**算一次（不能用 anchor：anchor 是阶梯锚，
+                        # 可能与现价脱节，一算出来就已经在现价上方 → 立刻判成交）。
+                        _bp_px = float(mark * (1.0 + sgn * _bp_start / 100.0))
+                    if _bp_px > 0:
+                        self._write_state_json(_bp_path, {
+                            "price": round(_bp_px, 6), "side": side,
+                            "src": _bp_src, "ref": round(float(mark), 6),
+                            "start_pct": round(_bp_start, 4),
+                            "ts": int(time.time()), "consumed": False})
+                        _bp_new = True
+                _bp_crossed = (not _bp_new) and _bp_px > 0 and (
+                    (sgn < 0 and mark <= _bp_px) or (sgn > 0 and mark >= _bp_px))
+                if _bp_crossed:
+                    _bp_done = True
+                    self._write_state_json(_bp_path, {
+                        **_bp_st, "price": round(_bp_px, 6), "side": side,
+                        "consumed": True, "consumed_ts": int(time.time()),
+                        "consumed_at": round(float(mark), 4)})
+                elif _bp_px > 0 and not _bp_done:
+                    want.append((_bp_px, bp_lots))
+                    _bp_added += 1
+                dyn_note["base_position"] = {
+                    "levels": bp_n, "lots": bp_lots, "mode": bp_mode,
+                    "price": round(_bp_px, 4) if _bp_px > 0 else None,
+                    "start_pct": round(_bp_start, 4),
+                    "grid_span_pct": round(_grid_span, 4),
+                    # **独立止盈**：底仓不吃网格那一格，自己瞄一个距离（0 = 跟随网格）
+                    "tp_pct": float(bp.get("tp_pct") or 0),
+                    "independent": bool(bp.get("independent", True)),
+                    "consumed": bool(_bp_done),
+                    "qty": bp_n * bp_lots,
+                }
+            elif bp_n > 0 and bp_step > 0:
+                bp_first = anchor * (1.0 + sgn * _bp_start / 100.0)
+                for _i in range(bp_n):
+                    _px = bp_first * (1.0 + sgn * bp_step * _i / 100.0)
+                    want.append((_px, bp_lots))
+                dyn_note["base_position"] = {
+                    "levels": bp_n, "lots": bp_lots, "step_pct": round(bp_step, 4),
+                    "start_pct": round(_bp_start, 4),
+                    "grid_span_pct": round(_grid_span, 4),
+                    "mode": bp.get("mode") or "grid",
+                    "qty": bp_n * bp_lots,
+                    "end_pct": round(_bp_start + bp_step * max(0, bp_n - 1), 4),
+                }
+        # ── 腿级标签（2026-11-01）──────────────────────────────────────
+        # 用户口径：**底仓 / 网格 / 马丁 三条腿各自独立**，不要混成一个整梯。
+        # 分类规则（与生成顺序一致，零侵入）：
+        #   末尾 `_bp_added` 个 = base；张数 ≠ 基础张数的 = martin；其余 = grid。
+        # 标签只用于「记录 + 每腿独立止损」，不改变档位/张数本身。
+        _units: list[str] = []
+        _n_want = len(want)
+        for _idx, (_px, _l) in enumerate(want):
+            if _bp_added and _idx >= _n_want - _bp_added:
+                _units.append("base")
+            elif abs(float(_l) - float(grid_lots)) > 1e-9:
+                _units.append("martin")
+            else:
+                _units.append("grid")
+        dyn_note["legs"] = [
+            {"px": round(float(px), 2), "lots": float(l), "unit": u}
+            for (px, l), u in zip(want, _units)
+        ]
+        # 逐档止盈的**唯一输入**（2026-11-02）：模板铺出的档必须进 bot 级档位表，
+        # 否则 `ensure_grid_tp` 永远 `no_ladder_table`。AI 全 hold 时这是唯一通路。
+        if (tpl.get("tp_by_unit") or {}).get("enabled"):
+            try:
+                _synced = self._sync_template_levels(
+                    sym, side, want, _units, tpl, step_pct)
+                if _synced:
+                    dyn_note["tp_units"] = _synced
+            except Exception as _e:  # noqa: BLE001
+                dyn_note["tp_units"] = {"error": str(_e)[:120]}
         if not want:
             return
+        # 每腿独立止损（默认关闭；`leg_sl.enabled: true` 才挂）
+        try:
+            _leg_sl = self._ensure_leg_sls(sym, side, want, _units, tpl, meta)
+            if _leg_sl:
+                dyn_note["leg_sl"] = _leg_sl
+        except Exception as _e:  # noqa: BLE001 — 独立止损失败不能拖垮铺梯
+            dyn_note["leg_sl"] = {"error": str(_e)[:120]}
         # ── 档位跨轮稳定（2026-10-29 回放实测）──────────────────────────
         # `want` 每轮重新算：结构位随 96 根窗口滑动、档距随 ATR/BB 变 →
         # 档位抖动 → prune 每轮「撤一条补一条」、SL target 跟着抖
@@ -3399,12 +3835,20 @@ class Executor:
                         pend_abs += abs(s)
                 cover = pos_sz + pend_abs
                 if cover > 0:
+                    # 方向必须跟着 side 走（2026-11-02）：原来 rule 硬编码 2、size 硬编码
+                    # 负号 → 空侧的兜底 SL 会挂成「跌破卖出」并落在**现价上方**，
+                    # 永不触发 = 空仓裸奔。多头 = 跌破卖平(rule 2, size<0)，
+                    # 空头 = 涨破买平(rule 1, size>0)。
+                    is_long = side == "long"
                     body = {
-                        "initial": {"contract": sym, "size": -int(round(cover)), "price": "0",
-                                    "tif": "ioc", "reduce_only": True,
+                        "initial": {"contract": sym,
+                                    "size": (-int(round(cover)) if is_long
+                                             else int(round(cover))),
+                                    "price": "0", "tif": "ioc", "reduce_only": True,
                                     "text": f"t-{self._bot_tag('')}-sl"},
                         "trigger": {"price": str(round_price(float(sl), meta)),
-                                    "rule": 2, "price_type": 1, "expiration": 86400},
+                                    "rule": 2 if is_long else 1,
+                                    "price_type": 1, "expiration": 86400},
                     }
                     o = self.client.place_price_order(body)
                     prot_added = {"trigger": float(sl), "size": int(round(cover)),
@@ -4542,6 +4986,98 @@ class Executor:
             raise GateApiError(
                 f"SAFE_MODE: {where}连续失败 {streak} 次 ≥ {n}，暂停开仓（只允许平/减/改/观望）"
             )
+
+    def _template_tp_by_unit(self, tpl: dict, step_pct: float) -> dict:
+        """每个 unit 的止盈距离（%）。缺省值由**当轮档距**派生，不写死价格。
+
+        「程序绝不自己造价格」的边界在这里的解释：这些百分比全部来自 AI 的
+        几何（`two_way.<side>.step_pct` → 当轮 `step_pct`），不是策略判断 ——
+        网格吃一格、马丁吃两格、底仓吃自己的 `base_position.tp_pct`。
+        AI 若显式给了 `meta.tp_target`，`ensure_grid_tp` 侧仍以 AI 的为准。
+        """
+        cfg = tpl.get("tp_by_unit") or {}
+
+        def _f(key: str) -> float:
+            try:
+                return float(cfg.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        try:
+            _st = float(step_pct or 0)
+        except (TypeError, ValueError):
+            _st = 0.0
+        if _st <= 0:
+            _st = 0.5
+        bp = tpl.get("base_position") or {}
+        try:
+            _bp = float(bp.get("tp_pct") or 0)
+        except (TypeError, ValueError):
+            _bp = 0.0
+        g, m, b = _f("grid_pct"), _f("martin_pct"), _f("base_pct")
+        return {
+            "grid": g if g > 0 else _st,
+            "martin": m if m > 0 else _st * 2.0,
+            "base": b if b > 0 else (_bp if _bp > 0 else 3.0),
+        }
+
+    def _sync_template_levels(self, sym: str, side: str, want: list,
+                              units: list, tpl: dict, step_pct: float) -> dict:
+        """模板铺出的档位 → bot 级 `state/ladder_levels.json`（**逐档** tp_target）。
+
+        为什么必须写（2026-11-02 实测）：`ensure_grid_tp` 的唯一输入就是这张表，
+        而以前只有 `_record_ladder_level`（AI 发 `open_*` 腿时）会写。模板独占
+        入场后模型几乎总是 `hold` → 表里 **0 条** → `no_ladder_table` → 一张
+        止盈都不挂。回放里的「逐档 TP」是测试替身，生产端根本没接通。
+
+        按 unit 分派止盈距离（用户口径「网格/马丁/底仓各自管理止盈」）：
+        网格吃一格、马丁吃两格、底仓吃 `base_position.tp_pct`。
+        只替换**本 symbol + 本 side 的 pending 档**；filled/closed 保留作历史。
+        """
+        if not self.bot_id or not want:
+            return {"skipped": "no_input"}
+        try:
+            tps = self._template_tp_by_unit(tpl, step_pct)
+            path = (Path(self.root) / "data" / "bots" / self.bot_id
+                    / "state" / "ladder_levels.json")
+            data: dict[str, Any] = {"levels": []}
+            if path.exists():
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:  # noqa: BLE001 — 损坏则重建
+                    data = {"levels": []}
+            old = [lv for lv in (data.get("levels") or []) if isinstance(lv, dict)]
+            keep = []
+            dropped = 0
+            for lv in old:
+                same = (lv.get("symbol") == sym
+                        and str(lv.get("side") or "long") == side)
+                if same and str(lv.get("status")) == "pending":
+                    dropped += 1
+                    continue
+                keep.append(lv)
+            ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            new = []
+            for (px, lots), unit in zip(want, units):
+                dist = tps.get(unit, tps["grid"])
+                px = float(px)
+                tp = px * (1 + dist / 100.0) if side == "long" \
+                    else px * (1 - dist / 100.0)
+                new.append({
+                    "symbol": sym, "side": side, "unit": unit,
+                    "price": round(px, 4), "size": float(lots),
+                    "tp_target": round(tp, 4), "tp_src": "derived_unit",
+                    "tp_pct": round(dist, 4),
+                    "label": f"t-{self._bot_tag('')}-{unit}",
+                    "order_id": "", "ts": ts, "status": "pending",
+                })
+            data["levels"] = (keep + new)[-400:]
+            self._persist_ladder(path, data)
+            return {"synced": len(new), "replaced": dropped,
+                    "tp_by_unit": {k: round(v, 3) for k, v in tps.items()}}
+        except Exception as e:  # noqa: BLE001 — 档位表是增强，不拦主流程
+            swallow("executor._sync_template_levels", e, level=logging.WARNING)
+            return {"error": str(e)[:120]}
 
     def _record_ladder_level(self, intent: Intent, contracts: int,
                              order_id: Any = None) -> None:
@@ -6373,6 +6909,15 @@ class Executor:
             return out
         levels_all = [lv for lv in (data.get("levels") or [])
                       if isinstance(lv, dict) and lv.get("symbol") == symbol]
+        # 双向（2026-11-02）：本方法目前只实现**多侧**止盈（卖单 reduce_only 覆盖
+        # pos_long）。空侧档位若混进来，会把「高于 mark 的买平 TP」挂成多侧卖单，
+        # 方向直接反了 —— 所以先按 side 过滤，空侧留痕交回（尚未实现）。
+        _long_side = [lv for lv in levels_all if str(lv.get("side") or "long") == "long"]
+        _short_n = len(levels_all) - len(_long_side)
+        if _short_n:
+            out["skipped_side"] = [{"why": "short_side_tp_not_implemented",
+                                    "levels": _short_n}]
+        levels_all = _long_side
 
         # 持仓与在盘 TP —— **覆盖校验的输入**。原先只看「档位表 status==pending」，
         # 于是 TP 被撤（对账/重铺）后那一档永久失去止盈，且没有「在盘 TP 合计 <

@@ -181,20 +181,24 @@ class TestStructureLevels(unittest.TestCase):
                          sum(slots.get(i, base) for i in range(1, n + 1)),
                          f"总张数应为 20 量级，实际 {sizes}")
 
-    def test_min_gap_auto_follows_atr(self):
-        """`min_gap_pct: auto` → 最小间距必须等于当轮 ATR 动态档距。
+    def test_min_gap_auto_is_physical_floor(self):
+        """`min_gap_pct: auto` → 最小间距 = **物理下限 min_step_pct**（2026-11-02 改）。
 
-        用户口径（4.0）：「最小间距要求保留（充分利用 ATR 动态调整）」——
-        写死 0.3% 会让结构位密集时档距掉到 0.3%；写死 0.66% 又浪费低波动宽空档。
+        以前等于当轮 ATR 档距（0.8% ≈ 18.7 点），导致间距 16~18 点的结构位被当
+        "太近"丢掉 → 补点变多、结构覆盖率下降。用户口径是「结构位优先、档距只用来
+        补档」，所以去重阈值只取物理下限，不再拿 AI/ATR 的档距当门槛。
+
+        注意：档距本身仍是动态的（`step_pct` 照旧由 ATR/BB 算），这里只改**去重阈值**。
         """
         lv = [MARK - d for d in (20, 46, 70, 96, 120, 148, 172, 200, 224, 252, 276, 304)]
         _p, _s, det, _ = _run(lv, lo=MARK - 200, hi=MARK + 40)
         so = (det.get("dynamic") or {}).get("structure_only") or {}
-        self.assertEqual(so.get("min_gap_src"), "atr", f"应来自 ATR：{so.get('min_gap_src')}")
-        step = det.get("step_pct") or 0
-        # ATR 7.5 / 2330 × 100 × 2.5 = 0.805%
-        self.assertAlmostEqual(so.get("min_gap_pct"), round(step, 3), places=3,
-                               msg=f"min_gap {so.get('min_gap_pct')} 应等于 step {step}")
+        self.assertEqual(so.get("min_gap_src"), "min_step",
+                         f"应取物理下限：{so.get('min_gap_src')}")
+        self.assertAlmostEqual(so.get("min_gap_pct"), 0.66, places=3,
+                               msg=f"min_gap {so.get('min_gap_pct')} 应为 min_step_pct")
+        # 档距仍然是动态的（ATR 7.5 / 2330 × 100 × 2.5 ≈ 0.8%），不受本次改动影响
+        self.assertGreater(det.get("step_pct") or 0, 0.66)
 
     def test_sl_points_300_when_range_small(self):
         """24h 区间 60 点 → ×4 = 240 → 取下限 300 点。"""

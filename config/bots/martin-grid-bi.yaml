@@ -1,0 +1,369 @@
+# 马丁网格 · ETH 双向（多10+空10）+ 底仓 10 层 — 本地测试版（2026-10-31）
+# 策略：prompts/ladder_nogate.md
+#
+# 上线状态：enabled: false —— 先「配置 + plan 试跑」，确认无误后再开。
+# 启用方式：在 config/bots.local/ 加 overlay `enabled: true`，再部署到服务器。
+#   （config/bots/ 是基线，全部 enabled: false；watchdog 只拉起 enabled: true 的 bot）
+
+bot_id: martin-grid-bi
+account: gate-grid
+# ↑ 声明所属账户 → 与 config/accounts.yaml 的账户级风控**合并**（上限取更严、
+#   日初权益账户共享）。不声明则不参与合并。见 `config/accounts.yaml` 头注释。
+enabled: false
+env: live
+# 接管原 ladder-eth 的独立账户。
+# ⚠️ 上线前必须确认服务器 /opt/omnialpha/.env 里已定义
+#    GATE_GRID_API_KEY / GATE_GRID_API_SECRET —— 缺失时 create_client 会直接抛
+#    GateApiError(missing credentials)（gate_client.py:490）。
+api_key_env: GATE_GRID_API_KEY
+api_secret_env: GATE_GRID_API_SECRET
+
+symbols:
+  - ETH_USDT
+
+max_notional_usd: 1200
+max_orders_per_file: 64   # 双向 10+10 层 = 40 条挂单 + 2 条 SL = 42，32 会截断
+max_files_per_run: 20
+poll_interval_sec: 2
+# ⚠️ 新前缀 mtg：接管账户后**不会**接管原 ladder-eth 的 lad 挂单。
+#    停止旧网格时必须手动撤掉遗留的 lad 挂单，否则它们会一直挂在交易所。
+label_prefix: mtgbi
+# free：做T需要多档建仓（strict/manage_only 会拦「持仓后再 open_long」，见
+# executor._entry_gate）。反向开仓由下面的 account_risk.no_flip 拦 ——
+# 2026-10-16 账户为 **dual（双向）**：反向单 = 独立腿，闸门由模式推导为 false。
+position_policy: free
+# none：做T的挂单要留在市场上等成交，不能每轮被自动替换掉
+default_replace: none
+# P1 空窗修复（2026-10-12）：显式 cancel_all 转换为「快照差集」语义——先挂新单，
+# 新单就位后撤「本轮开始前的旧单」差集。消除「撤完旧的、新的还没挂上」的
+# ~4 分钟交易所空窗。副作用（正是想要的）：stale 清理会连旧批保护单一起撤
+# （本轮新保护挂上后 fresh_protection 生效）→ 新旧 tp 价位并存问题一并解决。
+place_before_cancel: true
+# 缩梯防护（2026-10-28）：replace 时若本轮腿数少于盘上入场单数，
+# 保留价格不重合的旧档 —— 实测 19:29 轮只规划 3 条腿把 10 层梯撤成 3 层。
+ladder_shrink_guard: true
+# BOT 级阶梯模板：模型腿数不稳定（实测 3/4/10 条），引擎按模板补齐缺档。
+# 全局默认关闭（BotConfig.ladder_template 空 = 不启用），只对本 bot 生效。
+# 只补缺、不撤不改；只在「本轮有入场腿且带 sl」时补。
+ladder_template:
+  enabled: true
+  # ── 双向 2.0（2026-10-30 用户要求）────────────────────────────────────
+  # true = 下方多头网格 + 上方空头网格**同时**维护，各 10 层、各用自己的结构位、
+  #        各挂自己的 SL（多 rule=2 在下 / 空 rule=1 在上），互不 prune。
+  #        prompt 1.0（ladder_t_pa.md「永远双向」）是让模型自己挂两边，
+  #        引擎模板一开就会把另一边当"非模板档"撤掉 —— 2.0 把它移到引擎层。
+  # false = 单向（按 direction_mode 选一侧），与之前行为完全一致。
+  # ⚠️ 双向时保证金翻倍（单侧 29 张 ≈14U，双侧 58 张 ≈28U），账户只有 ~54U 可用，
+  #    开之前先确认 total_risk_pct / max_total_notional_usd 容得下两侧。
+  two_way: true
+  two_way_sides: [long, short]   # 只挂一侧时可写成 [long] / [short]
+  # ── 趋势加权（双向 3.0）：两侧**不对称**，逆势侧少挂 / 稀 / 轻，极端可不挂 ──
+  # 权重 = f(4H close 对 EMA200 的偏离, EMA200 斜率)，两侧相加恒为 1。
+  # 映射：levels = base×(0.35+0.65w) / step = 动态档距×(1.4−0.4w) / lots = base×(0.3+0.7w)
+  # AI 可在 meta.two_way.<side> 里覆盖 weight/levels/step_pct/lots（优先级最高）。
+  two_way_cfg:
+    enabled: true
+    trend_interval: 4h
+    trend_lookback: 24        # EMA200 斜率回看根数
+    dev_full_pct: 3.0         # 偏离多少算满权重（3%）
+    slope_full_pct: 3.0       # 斜率多少算满权重
+    min_weight: 0.0           # 两侧都铺，不按趋势否决
+    levels_at_min: 1.0        # 2026-10-31：两侧都铺满 grid_levels（10），不再按权重缩层
+    step_at_min: 1.0          # 档距不放大（结构位本身决定间距）
+    lots_at_min: 1.0          # 张数不缩（马丁 3/4/6 原样保留）
+    levels_max: 15
+    # ── 层数下限（2026-11-02 用户要求「多10空10」）──────────────────────
+    # AI 的 `two_way.<side>.levels` 会把 min_levels/max_levels 整组改写（实测给 7
+    # 就只铺 7 层 → 马丁第 10 档 6 张永不出现，总敞口 13 张而非 20 张）。
+    # floor = 该侧至少铺这么多层；AI 给更多则照 AI。抬的是层数，不动档距/张数。
+    levels_floor: 10
+  grid_levels: 10       # **每侧**层数（7 网格 + 3 马丁，马丁占 2/6/10 档）
+  # ── 仓位（2026-10-30 用户拍板：压到 ~6 张）────────────────────────────
+  # 原配置 1+1+6+1+1+1+7+1+1+9 = 29 张 → 名义 628U = 权益 9.6 倍，
+  # 且 SL 在 500 点外（全成交亏 158U > 权益 66U）→ **SL 永远到不了，先爆仓**。
+  # 现在 0.5/0.5/1.0…… = 7×0.5 + 3×1.0 = **6.5 张**，名义 ~140U = 2.1 倍权益。
+  # ⚠️ 2026-10-30 实测：ETH_USDT 的 order_size_round = **1.0**（步长 1 张），
+  # 0.5 张挂不出去 —— placed 记录 10 条成功，盘面只剩 3 个 1 张的马丁档，
+  # 7 条 0.5 张全被交易所悄悄拒掉。所以张数只能取整数，最小 1 张/档。
+  # 「压到 6 张」在 10 层下做不到（10 层 × 1 张 = 10 张物理下限）；
+  # 真要 6 张就只能把层数降到 6 层。
+  grid_lots: 1
+  # ── 底仓（2026-10-31 用户要求）：吃「一段」而不是「一格」─────────────
+  # 层数/张数/间距三者独立于网格，落在网格最深档**之外**（start_pct 自动接
+  # 在网格跨度之后）。两侧各自铺一遍（双向时每侧都有底仓）。
+  base_position:
+    enabled: false         # 2026-10-31：底仓是「到位置才建」的条件仓，不做常驻挂单
+    levels: 10             # 底仓 10 层
+    lots: 1                # 每层 1 张（ETH size_step=1.0，最小可下量）
+    step_pct: 1.5          # 层间距 1.5%（比网格 0.86% 宽，越深越稀）
+    start_pct: 0           # 0 = 自动接在网格跨度之后
+    max_levels: 20
+    mode: grid             # grid = 跟随网格止盈；hold = 只挂不进 tp
+  grid_step_pct: 0.5    # 动态关闭时的固定档距；动态开启时只作马丁缩放基准
+  # ── 层数动态 10~15 + 档位放关键结构位（2026-10-29 用户要求）──────────────
+  # 不再等距等比：档位来自 AI 的 `meta.structure_levels`（OB / FVG / swing / EQL），
+  # 多头取现价下方、空头取上方，按距离 10~15 个；不足 10 个才在区间里补点。
+  levels_dynamic:
+    enabled: true
+    interval: 15m
+    lookback: 96           # 24h 区间（SL 覆盖价距按它放大）
+    # ── 层数锁 10（2026-10-31 真实行情回放实测）─────────────────────────
+    # 原来是 10~15 动态，但真实四周期结构位一多（中位 70 个）就取到 15 层，
+    # → 总张数漂到 22~25（马丁位次语义破坏：第 10 档成了 6/25 而不是 6/20）、
+    # 整梯跨度中位 17.38%（跌 17% 才到最深档，SL 得放到 30% 外）。
+    # 用户口径是「马丁第 1/5/10 层」= 10 层，所以上下限都锁到 grid_levels。
+    min_levels: 10
+    max_levels: 10
+    structure_only: true   # 结构位优先，不等距
+    # ── 4.0（2026-10-30）：**取消用档距替代结构位** ──────────────────────
+    # 档位必须落在关键结构位上（OB 上下沿 / FVG 边界 / EQL·EQH / swing pivot），
+    # 档距不再是档位的主驱动，只作为「最小间距」约束。
+    # `auto` = 用当轮 ATR 动态档距（clamp(ATR%×2.5, 0.66%, 2.2%)）作为最小间距，
+    # 这样低波动自动收紧、高波动自动放宽，不必写死一个百分比。
+    min_gap_pct: auto
+    # AI 从不输出 meta.structure_levels（线上日志 0 次）→ 引擎自己算，否则永远回退等距
+    auto_extract: true
+    # 2026-11-02 用户指定：结构位只用 **5m / 15m / 1h / 4h**（不再取 1d）。
+    # 5m 给网格近端更细的结构（OB/FVG 边界），15m 主周期，1h/4h 管马丁与止盈。
+    # ⚠️ 5m 的结构位天然密集（相邻 OB 常常只差几点），会被 min_gap(0.66%) 大量去重 ——
+    #    实际贡献看每轮 `dyn_note.structure_only` 的 in_side/deduped_out。
+    mtf_intervals: [5m, 15m, 1h, 4h]
+    mtf_bars: {5m: 500, 15m: 300, 1h: 240, 4h: 180}
+    mtf_min_ratio: 0.6     # 只取现价 ×0.6 ~ ×1.6 范围内的价位（±40%）
+    mtf_max_ratio: 1.6
+  # ── 覆盖价距（点数）：SL 距**最深档** 300~500 点，随区间放大 ──────────────
+  # 旧的 ATR 护栏只有 45~67 点，300 点宽的区间里必然被反复打掉（回放实测 20~40 次/4 天）
+  sl_distance:
+    enabled: true
+    min_points: 300
+    # 2026-10-30：500 点 × 29 张 = 158U > 权益 66U，SL 数学上不可能触发。
+    # 仓位压到 6.5 张后 320 点 × 6.5 张 ≈ 26U（权益 39%），SL 才真正有效。
+    max_points: 320
+    range_mult: 4.0        # 覆盖价距 = clamp(近24h区间 × 4.0, 300, 320)
+                           # 当前 24h 区间 ~100 点 → ×4 = 400 → 钳到 320 上限
+  # 锚点（2026-10-29）：fixed = 锚点跨轮/跨重启保持，价格回撤才吃得到；
+  # trailing = 每轮跟最新价（旧行为，日化 ~864 次撤+挂，且回撤永远在阶梯上方）
+  # 模板常驻（2026-10-29）：模型 hold 时阶梯也不消失。
+  # 实测 12h：模型 cancel_all 后 54/60 轮 hold → 模板因「无入场腿」直接 return，
+  # 阶梯空了 12 小时。开启后 SL 依次回退：已有 SL 触发价 → sl_pct。
+  always_on: true
+  # ── 逐档止盈（2026-11-02 用户要求「网格/马丁/底仓各自管理止盈，共用止损」）
+  # 以前 `ensure_grid_tp` 的唯一输入是 AI 的 `meta.tp_target`（单值、15 轮 0 次给），
+  # 且模板铺出的档**从不写入档位表** → 生产端一张 TP 都没有。
+  # 开启后由模板按 unit 落盘每档 tp_target（距离来自当轮档距，不是写死价）：
+  #   grid = 一格 step_pct / martin = 两格 / base = base_position.tp_pct
+  # 0 = 用上面对应的派生值；要覆盖就写具体百分比。
+  tp_by_unit:
+    enabled: true
+    grid_pct: 0
+    martin_pct: 0
+    base_pct: 3.0
+  symbol: ETH_USDT
+  sl_pct: 5.0
+  # ── 方向迟滞带（人格 v5 §2.2，2026-10-29 移植）──────────────────────────
+  # 只有 `direction_mode: auto` 时才生效；signal（现在的默认）跟随模型动作，不受影响。
+  # 为什么必要：裸判 `close vs EMA200` 在价格贴着均线抖动时每轮翻向 → 多梯 + 空梯
+  # 同时在场、保证金翻倍、两个 SL 互砍。迟滞带把翻向推迟到真突破。
+  # ⚠️ 开 auto 前先看这条：4H 收盘 2309 vs EMA200 2454（10-29）→ 一开就翻空头阶梯。
+  direction_mode: signal
+  direction_hysteresis:
+    enabled: true
+    interval: 4h
+    long_keep_ratio: 0.98      # 已判多：4H 收盘不跌破 EMA200×0.98 就保持多
+    short_keep_ratio: 1.005    # 已判空：4H 收盘不涨破 EMA200×1.005 就保持空
+    state_file: data/direction_state.json
+  anchor_mode: fixed
+  reanchor_threshold_pct: 2.0     # mark 偏离锚点 >2% 才重锚
+  anchor_state_file: data/ladder_anchor.json
+  # 动态区间（A+C，2026-10-28）：档距随波动缩放，避免高波动一根 K 线穿透 5~7 层
+  #   step = clamp(max(ATR% × atr_mult, 带宽% ÷ bb_div), min, max)，再按总跨度封顶
+  #   数据源 = v2 库同序列最新收盘 bar 的 atr14 / boll 三件套
+  dynamic:
+    enabled: true
+    interval: 15m
+    # 2026-10-30：1.5 太小 —— 近 200 根 ATR 中位仅 0.36%，×1.5 = 0.54%(12 点)，
+    # 比 15 点下限还低 → **69% 的时间档距被下限钉在 14.6 点**，动态又失效了
+    # （旧配置是「上限锁死」，改完变成「下限锁死」，殊途同归）。
+    # 模拟 200 根：mult 2.5 → 档距 14.6/20.0/48.6 点（min/中位/max），撞下限降到 8%，
+    # 真正覆盖 15~50 点口径。mult 3.0 会更贴上限、撞下限只剩 2%，但高波动时基本恒 50 点。
+    atr_mult: 2.5         # 档距 = 2.5 × ATR%（中位 0.36% → 0.9% ≈ 20 点）
+    bb_div: 6.0           # 与 ATR 支取 max（带宽 1.66% → 0.28%，通常 ATR 支更大）
+    # 2026-10-30：档距口径统一到「15~50 点」（v5 人格 §几何可达性）。
+    # 原 0.45% 下限 = 10 点，而 max_span 6.0/10 把档距硬压到 0.60%（13.5 点）——
+    # ATR 算出 1.03%（23 点）每轮都被砍半，动态名存实亡。实测 ATR14=0.69%，
+    # raw=1.03% 永远 > 0.6% 封顶 → 盘面永远是 13.5 点等距。
+    min_step_pct: 0.66
+    # ── 点数口径（2026-11-02 用户要求「动态间隔 15~50 点」）────────────────
+    # 百分比会随价格漂：0.66%/2.2% 在 2285 是 15/50 点，到 3000 就变成 19.8/66 点。
+    # 这里把区间按**点数**再钳一次（点数优先于百分比）：
+    #   结构位去重下限、补档间距、max_step 补点阈值全部生效。
+    min_step_points: 15
+    max_step_points: 50    # 下限 ≈ 15 点 @2255（对齐 15~50 口径的下沿）
+    # 上限写死 2.2%（≈50 点），别再让 max_span/grid_n 兼职当档距上限 ——
+    # 这两个值必须分开管：max_step 管「档距物理范围」，max_span 只管极端护栏。
+    max_step_pct: 2.2
+    max_span_pct: 25.0    # 10 档时 25/10 = 2.5% > max_step 2.2% → 不干扰档距；
+                          # 层数加到 15 时 25/15 = 1.67% 才会收窄，那正是想要的行为
+    scale_martin: true    # 马丁深度同比缩放，避免档距放大后挤在网格里
+    max_martin_pct: 9.0   # 马丁最深档上限（高波动时不被同比放大带飞）
+  # ⚠️ 马丁深度必须与网格档错开 ≥0.5%（补档容差 ±0.3%，同价会被去重吞掉一档）：
+  #    网格 7 档到 -3.5%；马丁从 -4.2% 起，实测 0.6×5=-3.0% 会撞 -2.8% 只铺出 9 层。
+  # ── 马丁占位（2026-10-29）：10 档等距，马丁占第 2/6/10 档并放大张数 ──
+  # 人格本义「7 网格 + 3 马丁穿插」。旧写法把马丁当额外档加，但网格缝隙
+  # (step/2≈0.24%) 小于同价容差(0.3%) → 马丁档必被吞（实测只剩 7~8 层）。
+  # 马丁占位后移（2026-10-29）：第 2/6/10 → **3/7/10**
+  # 原第 2 档在 −0.96%，跌 1% 就上 6 张，满仓过快；后移到 −1.45% 更从容。
+  # ── 开仓比例（4.0，2026-10-30 用户指定）──────────────────────────────
+  # 马丁位：第 1 / 5 / 10 层 → 3 / 4 / 6 张
+  # 网格位：第 2,3,4,6,7,8,9 层 → 各 1 张
+  # 总敞口 = 3+1+1+1+4+1+1+1+1+6 = **20 张**
+  # `by_index: true` → key 是**绝对位次**（不是「基准层数下的百分比位次」）。
+  # 层数≠10 时也按 1/5/10 硬定位，深层（11 层以上）沿用网格 1 张。
+  martin_slots: {1: 3, 5: 4, 10: 6}
+  martin_slots_by_index: true
+  snap_tol_pct: 0.15
+order_scope: own
+require_sl: true
+
+account_risk:
+
+  # 2026-10-15 网格做T：成交后由程序按 AI 的 meta.tp_target 挂条件限价止盈
+
+  grid_tp_auto: live        # 2026-10-16 修复后恢复（无多头不挂 + reduce_only）
+  halt: false
+  # 固定 50x：交易所杠杆上限 + prompt 里逐档写死的 leverage=50，两处必须一致
+  # （executor MAX_LEVERAGE 闸门：intent.leverage > max_leverage 整笔拒）。
+  max_leverage: 50
+  # 保证金模式：全仓（cross）。2026-10-16 拍板切换（原为逐仓）。
+  # 逐仓 50x 下爆仓距离仅 ≈ −1.5%（10-15 02:23 事故：13 张在 −3.9% 那根被
+  # 强平 `liq-7479452`，亏 7.36U，占当期总亏 43%）；全仓用**整个账户权益**做
+  # 保证金，且双向持仓可互相对冲（Gate 官方：等量双向持仓「无爆仓风险」）。
+  # ⚠️ Gate 只允许「该合约**无持仓、无挂单**」时切换 —— 实测 2026-10-16 盘上
+  #    10 档挂单时报 `ORDER_PENDING`。所以 executor `_ensure_margin_mode` 是
+  #    **幂等 + 失败静默**：常态有挂单切不动，等重铺空窗自动生效，不阻塞下单。
+  margin_mode: cross
+  # 绝对值兜底；真正 bind 的是下面的「权益倍数」闸门
+  max_total_notional_usd: 1200
+  # 马丁真加码路线（2026-10-12 拍板）：
+  #   - risk_pct: 0.12 —— 放行 prompt 设计的马丁 6/7/9 张。钳制公式
+  #     expected = equity×risk_pct÷dist，超 expected×1.3 就钳。最贴边的是马 1：
+  #     实测 160U（entry≈2495, dist≈6.0%）需要 rp ≥ 160×0.06÷(72×1.3) ≈ 0.103；
+  #     取 0.12 留 20% 余量（SL 收到 2360 时的 dist≈5.2% → 放行上限 216U）。
+  #     本地测试锁定：rp=0.04 时马 1 被钳到 49U（tests/test_risk_align_log.py）。
+  #     即使 SL 极端拉宽（dist 8%）触发钳制，也只钳到 ≈108U≈4 张，不再清零。
+  #     ⚠️ 该值实质是「放行开关」：真实风险由 SL+张数决定，满阶（29 张）止损
+  #     ≈29U ≈ 40% 权益，daily_loss_limit 15U 只能事后熔断挡不住这一下。
+  risk_pct: 0.12
+  # D 组合风险闸门（2026-10-12）：单档 risk_pct 挡不住「每档合规、10 档加起来爆表」。
+  # 满阶 29 张全成交后跌穿 SL 2345 ≈ 41U ≈ 40% 权益 → 设 35% 上限，超出时
+  # 全部 open 档等比缩小（触发打 WARNING(RISK_BUDGET)，不会静默）。
+  # 35% ≈ 25.2U：轻削 ~13% 张数；要更激进降风险改 0.30（砍 ~1/4）。
+  total_risk_pct: 0.35
+  # 单档名义 ≤ 4× 权益（72U 时 ≈288U）：马 3 设计峰值 214U 有余量，LLM 超设计
+  # 放大仓位时先被钳（size_capped）而不是默默成交
+  max_notional_pct: 4.0
+  # 总敞口 ≤ 14× 权益（72U 时 ≈1008U）：满阶设计 754U（10.5×）+ 权益下跌 10% 余量
+  max_total_notional_pct: 14.0
+  # 与风险口径对齐（拍板 15U）：≈1.4 次满阶止损 / 2 次半阶止损的空间
+  daily_loss_limit_usd: 15
+  # 反手闸门：**生效值由交易所持仓模式推导**（`Executor._effective_no_flip`）——
+  #   single → true（拦）：单向簿里反向单**不是开反向仓，而是净平现有仓**，
+  #            AI 一句 open_short 就直接把多头仓平掉；
+  #   dual   → false（不拦）：反向意图开成**独立腿**，不污染本方向。
+  # 2026-10-16 账户已切为 **dual（双向）** → 这里显式 false 只为与推导一致、
+  # 避免「配置与模式不符」告警。**建议直接删掉本键**交给模式推导（切模式后无需改配置）。
+  # ⚠️ 历史（2026-10-16 上半日 single 期间）：闸门为 true，而账户上出现意外空仓时
+  #    **所有 open_long 都被拦死 → 网格停摆 4 小时**（只能人工平仓）。
+  no_flip: false
+  # 反向仓处置：本策略只做多 → 反向 = 空腿。
+  # ⛔ **处置权在 AI / 人，不在程序** —— 程序**没有识别仓位意图的能力**：
+  #    它只知道「方向 ≠ 策略方向」，而这不等于「误开」；`_symbol_owned` 也只证明
+  #    「本 bot 在该合约有挂单」，不证明这条仓的意图。程序自主市价平仓属于
+  #    **「程序层减仓」**，越过既有边界（`ensure_protection` 只补风控、
+  #    `allow_close/reduce` 只作用 `_execute_intent`、程序绝不自己造价格）。
+  #    反例：① 手动留一条对冲空腿 → 被程序静默平掉；
+  #          ② 将来若做双向网格 → 空腿是**正常仓位**，flatten 会与策略打架；
+  #          ③ 平仓是市价 IOC，错了不可撤销。
+  # 所以本键 = `warn`：程序只**告警 + 每轮留痕**，不动手。
+  # ✅ 正确路径：AI 每轮快照里本来就有 `positions`（人格 §3.2），由 AI 发
+  #    `close_short` / `reduce_short` 处置（这两个动作本来就不受 `no_flip` 拦）
+  #    —— 程序只执行 AI 写下的计划。
+  # ⚠️ 改本键**必须重启服务**（配置无热重载，`load_all_bots` 只在进程启动时读一次）。
+  stray_position: warn
+  # 浮盈回撤保护：某腿浮盈后，价格从峰值回撤 peak_trail_atr×ATR(1h) 就把该腿 SL 上移
+  # （只上移不下移）。双向持仓下两条腿各自跟踪，状态按 bot 隔离。
+  #
+  # ⚠️ 2026-10-13 关闭（「没跑满 10 层就止损」事故，修复 P0-a）：
+  #   阶梯的 SL 是「全梯共用的一条最后防线」（锚在最深档之外），对它**只上移**
+  #   等于把最后防线一路推浅。实盘 10-12 23:46 → 10-13 02:23 四次 peak trail
+  #   把 SL 从 2245 推到 2431（浅于马丁 1 档之上），价格一回落就整梯提前止损
+  #   （05:44 / 07:02 / 08:06 三次只成交 4~5 档就平仓）。
+  #   做 T 靠 TP 锁盈，不需要移动止损。已同步关闭 config/bots/ 下全部 ladder 家族
+  #   （l10-* / l500-long-dn / ladder-eth / ladder-sol / lnogate / lorig-long）。
+  #   ⚠️ 更正（2026-10-13）：brooks 类单腿 bot **并未配此键** —— 引擎
+  #   `ar.get("peak_trail", False)` 默认就是关的；要开只应在单腿 bot 上显式开。
+  peak_trail: false
+  peak_trail_atr: 2.0
+  # SL 移动纪律分派（2026-10-13，修复 P0-b）：阶梯用 "ladder" —— 跳过「浮亏禁动
+  # SL」并允许往深挪（widen），把被推浅的 SL 挪回结构位；仍保留「同值 no-op」与
+  # 「挂上即触发」护栏。brooks 类单腿策略保持默认 "strict"（不设即 strict）。
+  sl_move_policy: ladder
+
+strategist:
+  prompt_file: prompts/ladder_nogate_bi.md
+  # 15m 一轮：作业尺度也是 15m。
+  interval_sec: 900
+  timeframe: 15m
+  # 关掉 K 线收盘触发：它和 interval 是两条各自 15 分钟的节拍，相位错开会合并成
+  # 每 7.5 分钟一次（成本 ×2.5）。只留 interval 定时 + AI 价格触发。
+  event_on_kline_close: false
+  event_timeframe: 15m
+  # 做T要看结构，多给些 K 线
+  candles: 200
+  write_hold: true
+  # 关掉 vision：vision.py 默认叠加 EMA20，而人格明令只用 SMC + Al Brooks。
+  # 结构靠 smc_map / smc_events 取，不需要图。
+  vision: false
+  tools:
+    enabled: true
+    native: true
+    # SMC/ICT + Al Brooks 两套体系：SMC 用专用工具，Brooks 直接读 klines 的 OHLC。
+    max_rounds: 14
+    # 必查取数覆盖（2026-10-26 实测：模型只查 map 15m/1h/4h + events 15m 就出计划，
+    # 马丁第 3 档声称「落在日线结构位」却从没查过日线）。缺项 → 引擎重试一次并点名。
+    required_coverage:
+      smc_map: ["5m", "15m", "1h", "4h"]
+      smc_events: ["5m", "15m", "1h"]
+    allow:
+      - klines        # Brooks 信号 K 线 + 结构高低点，全靠它
+      - ticker        # 现价
+      - contract      # 最小下单量 / 张值 / 杠杆上限
+      - smc_map       # 结构地图：swing/internal 趋势、OB、FVG、premium-discount、EQL/EQH
+      - smc_events    # 结构事件流：扫荡 sweep、CHoCH/MSS、OB/FVG 生命周期
+      - indicators    # 2026-10-28 新加：12.1 挤压判据需要模型自查指标
+      - sqzmom        # 12.1 专用：挤压状态 + linreg 动量（原生工具，一次返回全要）
+  market:
+    mode: rest_only
+    # ATR 是做T的门槛校验输入，必须给；boll 三件套 2026-10-27 新加（区间判断，
+    # 追加不替换）—— 快照 200 根每行多 3 列，prompt 约 +2k token
+    indicators: [atr14, boll20, boll_upper, boll_lower]
+    # 大周期定性需要日线与 4H
+    timeframes: ["5m", "15m", "1h", "4h", "1d"]
+    extra_candles: 60
+  ai_triggers:
+    # 2026-10-12 关闭：cond 事件轮是保护单堆积/churn 的主源头（两轮 plan 相隔 1-3 分钟、
+    # tp 占位价随现价漂移导致新旧两批并存）。节拍只留 interval 定时（900s）。
+    enabled: false
+    max_active: 5
+    default_cooldown_sec: 900
+  risk:
+    min_confidence: 0.55
+    # 密集多层阶梯：一次要能出 10+ 层（4 周期 × 每周期至少 3 档 ≈ 12 档，留余量）
+    max_chips: 32
+    max_notional_usd: 1200
+  skills: []
+  llm:
+    provider: gw-flash
+    reasoning_effort: high
+    # 密集多层 + 长推理，默认 8192 容易撞上限导致 JSON 写不出来
+    max_tokens: 32768

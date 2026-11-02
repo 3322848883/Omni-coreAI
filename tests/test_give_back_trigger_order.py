@@ -177,7 +177,11 @@ class TestFiveSymbols(_Base):
         r = rows[0]
         self.assertTrue(r["reduce_only"], "必须是 reduce-only")
         self.assertEqual(r["rule"], 1, "空单锁盈应涨破触发 rule=1")
-        self.assertEqual(r["price_type"], "mark", "触发基准必须是 mark（与算价同源）")
+        # 2026-11-02：paper 视图改成与 Gate `/price_orders` 同构后，
+        # `trigger.price_type` 是 Gate 语义的 int（1=mark），不再是配置里的字符串
+        # `mark`。原断言拿 "mark" 只是因为在视图缺 `trigger` 嵌套时**回退读到
+        # store 的扁平列**（侥幸通过）；真实的 Gate wire 一直是 1。
+        self.assertEqual(r["price_type"], "1", "触发基准必须是 mark(price_type=1，与算价同源)")
         self.assertAlmostEqual(r["trigger"], 82736.0, places=2)
         self.assertEqual(r["size"], 40, "买平空 → 正张数，覆盖全仓")
         self.assertGreater(r["trigger"], self.feed.px[SYM], "触发价必须在现价上方")

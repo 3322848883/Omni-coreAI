@@ -67,8 +67,58 @@ def _order_view(order: dict) -> dict:
 
 
 def _price_order_view(po: dict) -> dict:
+    """paper 条件单 → 与 Gate `/price_orders` **同构**的视图。
+
+    真实 Gate 返回嵌套结构（`trigger.{price,rule,price_type}` + `initial.size`），
+    而 paper 台账是扁平列（`trigger_price` / `rule` / `size`）。只补 id 的旧实现让
+    executor 里所有按嵌套读的统计**恒为零**：
+
+    - `Executor._ensure_ladder_protection` 的 `covered` 统计
+      （`o.get("trigger",{}).get("rule")` + `o.get("initial",{}).get("size")`）
+      → paper 上永远拿到 rule=0/size=0 → `covered=0 < need` → **每轮都重挂一条同价 SL**
+      （2026-11-02 实测：3 轮 plan 后多侧 2 条 -13、空侧 2 条，全是同价重复；
+       本地结论"SL 重复挂"因此不可信，线上走 gate_client 不会出现）。
+    - 同价归并 / `_should_keep_protection` / `_plan_shared_sl` 同理。
+
+    只**新增**嵌套键，保留扁平键 → 现有按扁平读的调用方（paper 自身、审计脚本）不受影响。
+    """
     out = dict(po)
     out["id"] = po.get("order_id")
+
+    def _int(v) -> int:
+        # `trigger_price_type` 存的是字符串（`latest` / `mark`），
+        # 直接 int() 会抛 ValueError → 整块 trigger 退化成 0/空（实测踩过）。
+        try:
+            return int(float(v))
+        except (TypeError, ValueError):
+            return 0
+
+    try:
+        price = po.get("trigger_price")
+        _pt = str(po.get("trigger_price_type") or "").strip().lower()
+        # Gate 语义：0=last、1=mark。paper 配置写的是 `latest` / `mark` 字符串。
+        out["trigger"] = {
+            "price": "" if price in (None, "") else str(price),
+            "rule": _int(po.get("rule")),
+            "price_type": 1 if _pt in ("mark", "mark_price") else _int(_pt),
+        }
+    except (TypeError, ValueError):
+        out["trigger"] = {"price": "", "rule": 0, "price_type": 0}
+    try:
+        size = int(float(po.get("size") or 0))
+    except (TypeError, ValueError):
+        size = 0
+    # 状态词表也要对齐：paper 用 `untriggered`，Gate `/price_orders` 用 `open`。
+    # executor 里凡 `status not in ("open","")` 即视为已终结 → paper 上每条 SL 都被
+    # 当成"已终结"跳过，`covered` 恒 0，于是**第二轮又挂一条同价 SL**（实测 4 条）。
+    _st = str(po.get("status") or "")
+    out["status"] = "open" if _st.lower() == "untriggered" else _st
+    out["initial"] = {
+        "size": size,
+        "price": "0",
+        "reduce_only": bool(po.get("reduce_only")),
+        "text": po.get("text"),
+    }
     return out
 
 

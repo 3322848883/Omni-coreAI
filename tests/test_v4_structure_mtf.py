@@ -140,23 +140,30 @@ class TestLotsByIndex(unittest.TestCase):
 
 
 class TestMinGapAuto(unittest.TestCase):
-    """最小间距 = 当轮 ATR 动态档距。"""
+    """最小间距 = **物理下限** `min_step_pct`（2026-11-02 起）。
 
-    def test_min_gap_equals_dyn_step(self):
+    以前取「当轮 ATR 动态档距」当去重阈值（整格 0.9% ≈ 20.5 点），把间距 16~20 点的
+    密集结构位当"太近"整批丢掉 —— 实测多侧 8 个位只剩 3 个、其余 7 档全靠补点，
+    与用户口径「结构位优先、档距只用来补档」相反。现在只拦「比一格下限还近」的位。
+    """
+
+    def test_min_gap_equals_min_step(self):
         ex, tpl = _ex()
         ex._round_meta = {"structure_levels": [MARK - 25 * k for k in range(1, 11)]}
+        floor = float((tpl.get("dynamic") or {}).get("min_step_pct") or 0.66)
         for step in (0.7, 1.2, 2.0):
             _w, note = ex._structure_targets(
                 "ETH_USDT", MARK, "long",
                 dict(tpl["levels_dynamic"], _dyn_step_pct=step), {}, tpl)
-            self.assertEqual(note.get("min_gap_src"), "atr")
-            self.assertAlmostEqual(note.get("min_gap_pct"), step, places=3,
-                                   msg=f"step={step} → {note.get('min_gap_pct')}")
+            self.assertEqual(note.get("min_gap_src"), "min_step")
+            self.assertAlmostEqual(note.get("min_gap_pct"), floor, places=3,
+                                   msg=f"min_gap 应恒为物理下限 {floor}，与 step={step} 无关")
 
     def test_levels_denser_than_min_gap_are_merged(self):
-        """结构位比最小间距还密 → 合并（不能铺出 0.3% 的密集档）。"""
+        """结构位比物理下限还密 → 合并（不能铺出 0.13% 的密集档）。"""
         ex, tpl = _ex()
-        # 间距 3 点 = 0.13%，远小于 min_gap 1.2%
+        floor = float((tpl.get("dynamic") or {}).get("min_step_pct") or 0.66)
+        # 间距 3 点 = 0.13%，远小于 min_gap（物理下限 0.66%）
         ex._round_meta = {"structure_levels": [MARK - 3 * k for k in range(1, 40)]}
         want, note = ex._structure_targets(
             "EU", MARK, "long",
@@ -166,8 +173,8 @@ class TestMinGapAuto(unittest.TestCase):
         ps = sorted(p for p, _ in want)
         for i in range(len(ps) - 1):
             gap = (ps[i + 1] - ps[i]) / ps[i] * 100
-            self.assertGreaterEqual(gap, 1.2 - 1e-6,
-                                    f"合并后间距 {gap:.2f}% 仍小于 min_gap 1.2%")
+            self.assertGreaterEqual(gap, floor - 1e-6,
+                                    f"合并后间距 {gap:.2f}% 仍小于物理下限 {floor}%")
 
     def test_no_gap_larger_than_max_step(self):
         """相邻档距不得超过 max_step（防跨周期空洞）。"""
