@@ -263,7 +263,7 @@ skill 可声明 `allowed-tools`（激活后**收窄**工具面）、`model-invoc
 - `smc_events`（结构事件 → 发生了什么/何时动手）：枢轴 BOS/CHoCH 事件流、流动性扫荡(x)、OB+Breaker+活动、FVG+突袭
 - `sqzmom`（Squeeze Momentum）：BB/KC 挤压状态 + linreg 动量
 
-**指标 26 族**（`indicators` 工具，周期任意）：EMA/SMA/MA/RMA/WMA/VWMA/HMA/KAMA/ALMA/T3/LSMA、Linreg/Linreg Channel、ATR（Pine 平滑 rma/sma/ema/wma）、RSI（含平滑+BB）、MACD（EMA/SMA）、BOLL（SMA/EMA/RMA/WMA/VWMA 基线）、Stoch、CCI、Williams %R、MFI、ADX、VWAP、OBV、SuperTrend（`supertrendN` 线 / `_dir` 方向 −1涨|1跌 / `_upper` 压力轨 / `_lower` 支撑轨，N 后跟 `_倍率` 可调 factor，如 `supertrend10_2`，与 Pine v6 `ta.supertrend` 逐 bar 对齐）、SQZMOM、pine_ema 套件。
+**指标 26 族**（`indicators` 工具，周期任意）：EMA/SMA/MA/RMA/WMA/VWMA/HMA/KAMA/ALMA/T3/LSMA、Linreg/Linreg Channel、ATR（Pine 平滑 rma/sma/ema/wma）、RSI（含平滑+BB）、MACD（EMA/SMA）、BOLL（SMA/EMA/RMA/WMA/VWMA 基线）、Stoch、CCI、Williams %R、MFI、ADX（`adxN` Wilder=RMA 平滑＝TV 内置；`adxN_sma` SMA 平滑＝BeikabuOyaji 脚本；DI 用 `di_plusN`/`di_minusN`）、VWAP、OBV、SuperTrend（`supertrendN` 线 / `_dir` 方向 −1涨|1跌 / `_upper` 压力轨 / `_lower` 支撑轨，N 后跟 `_倍率` 可调 factor，如 `supertrend10_2`，与 Pine v6 `ta.supertrend` 逐 bar 对齐）、SQZMOM、pine_ema 套件。
 
 **TV 指标 8 套**（独立工具，Pine 原版移植并已对齐验证）：`tv_linreg_trendlines`（Linreg & Trendlines：3 层回归通道 + 枢轴趋势线）、`tv_rsi_yata`（RSI Yata：平滑 RSI + MA + BB + RSI 蜡烛 + OB/OS + 直方图 + RSI-MACD + HH/HL/LH/LL）、`tv_lr_ha_candles`（LR HA Candles：线性回归 Heikin-Ashi + T3 + ATR 波动带）、`tv_delta_flow_profile`（Delta Flow Profile：逐价位资金流/Delta + POC 迁移）、`tv_oi_visible_range`（OI Visible Range：持仓量四象限 + 价位分布）、`tv_vol_oi_footprint`（Volume/OI Footprint：逐价位买卖足迹）、`tv_cdv`（Cumulative Delta Volume：K 线几何估算累积 Delta）、`tv_wyckoff`（Wyckoff [theUltimator5]：A→E 五阶段状态机 + 15 个 Wyckoff 事件 + 结构置信度/验证双评分 + `next`「还差什么条件」+ `checks` 门槛明细）。
 

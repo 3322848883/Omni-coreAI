@@ -392,7 +392,7 @@ NATIVE_TOOLS = [
                     "tf": {"type": "string"},
 
 
-                    "names": {"type": "array", "items": {"type": "string"}, "description": "指标名列表。必须带周期且全小写，例：ema20 / rsi14 / atr14 / boll20。合法：emaN rsiN atrN maN smaN rmaN wmaN vwmaN、macd、bollN|bollN_K|boll、stochN cciN wrN mfiN adxN、vwapN obv、supertrend 族（supertrendN 趋势线 / supertrendN_dir 方向 -1涨|1跌 / supertrendN_upper 压力轨 / supertrendN_lower 支撑轨，N 后可再跟 _倍率 如 supertrend10_2）。会被拒的写法：rsi / atr / bb20 / bbands / bb / EMA20（大写）。"},
+                    "names": {"type": "array", "items": {"type": "string"}, "description": "指标名列表。必须带周期且全小写，例：ema20 / rsi14 / atr14 / boll20。合法：emaN rsiN atrN maN smaN rmaN wmaN vwmaN、macd、bollN|bollN_K|boll、stochN cciN wrN mfiN、adxN（Wilder，RMA 平滑 = TV 内置）/ adxN_sma（SMA 平滑 = BeikabuOyaji 脚本，两者 ADX 差约 3~12，别混用）/ di_plusN / di_minusN（DI 方向）、vwapN obv、supertrend 族（supertrendN 趋势线 / supertrendN_dir 方向 -1涨|1跌 / supertrendN_upper 压力轨 / supertrendN_lower 支撑轨，N 后可再跟 _倍率 如 supertrend10_2）。会被拒的写法：rsi / atr / bb20 / bbands / bb / EMA20（大写）。"},
 
 
                     "limit": {"type": "integer", "minimum": 5, "maximum": 200},

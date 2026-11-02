@@ -37,7 +37,7 @@ __all__ = [
     "cci",
     "williams_r", "williams",
     "mfi",
-    "adx",
+    "adx", "adx_pine",
     "vwap",
     "obv",
     "supertrend",
@@ -565,6 +565,77 @@ def adx(
     return {"adx": adx_line, "plus_di": plus_di, "minus_di": minus_di}
 
 
+def adx_pine(
+    highs: list[float], lows: list[float], closes: list[float],
+    period: int = 14,
+) -> dict[str, list[Optional[float]]]:
+    """ADX/DI 按 Pine v6 「ADX and DI for v4」(BeikabuOyaji) 逐 bar 实现。
+
+    与 `adx()`（TV 内置 ta.dmi 语义）的**唯一实质差异**：ADX 用 `ta.sma(DX, len)`
+    而不是 RMA(DX, len)。DI 的 Wilder 平滑是一样的（本函数从 0 起递归，
+    Pine 的 `nz(SmoothedXXX[1])` 也是 0），平滑差别只在预热期。
+
+    Pine 源码：
+        TR  = max(h-l, |h-close[1]|, |l-close[1]|)
+        DM+ = (h-high[1] > low[1]-l) ? max(h-high[1], 0) : 0
+        DM- = (low[1]-l > h-high[1]) ? max(low[1]-l, 0) : 0
+        S   = S[1] - S[1]/len + X          // Wilder，无 sma 播种
+        DI+ = S_DM+/S_TR*100 ; DI- = S_DM-/S_TR*100
+        DX  = |DI+-DI-| / (DI++DI-) * 100
+        ADX = **ta.sma(DX, len)**
+
+    实测（ETH 15m 600 根，末 200 根）：ADX 末值 44.92 vs Wilder 37.18，
+    均差 3.52 / 最大 12.60；DI 均差 0.35 / 最大 3.05。
+    所以「ADX 阈值判断」在两者间可能跨界（如 20/25 关口），不能混用。
+
+    首根处理：Pine 用 nz(close[1])=0，导致 bar0 的 TR=h、DM+=h、DI+=100%（假值）。
+    这里跳过 bar0（TR=h-l，DM=0）—— Wilder 衰减 (1-1/n)^k，第 60 根后差异 <1.5%，
+    但 60 根预算的指标工具不会吃到那条 100% 的假线。
+    回归：tests/test_adx_pine.py
+    """
+    n = len(closes)
+    adx_line: list[Optional[float]] = [None] * n
+    plus_di: list[Optional[float]] = [None] * n
+    minus_di: list[Optional[float]] = [None] * n
+    if n < 2 or period <= 0:
+        return {"adx": adx_line, "plus_di": plus_di, "minus_di": minus_di}
+
+    s_tr = s_dp = s_dm = 0.0
+    dx: list[Optional[float]] = [None] * n
+    for i in range(n):
+        if i == 0:
+            tr = highs[0] - lows[0]
+            up = down = 0.0
+        else:
+            pc, ph, pl_ = closes[i - 1], highs[i - 1], lows[i - 1]
+            tr = max(highs[i] - lows[i], abs(highs[i] - pc), abs(lows[i] - pc))
+            up = highs[i] - ph
+            down = pl_ - lows[i]
+        dmp = max(up, 0.0) if up > down else 0.0
+        dmm = max(down, 0.0) if down > up else 0.0
+
+        s_tr = s_tr - s_tr / period + tr
+        s_dp = s_dp - s_dp / period + dmp
+        s_dm = s_dm - s_dm / period + dmm
+        if s_tr == 0:
+            continue
+        di_p = 100.0 * s_dp / s_tr
+        di_m = 100.0 * s_dm / s_tr
+        plus_di[i] = di_p
+        minus_di[i] = di_m
+        tot = di_p + di_m
+        dx[i] = 0.0 if tot == 0 else 100.0 * abs(di_p - di_m) / tot
+
+    vals = [(i, v) for i, v in enumerate(dx) if v is not None]
+    if len(vals) >= period:
+        idxs = [i for i, _ in vals]
+        series = [v for _, v in vals]
+        sm = sma(series, period)
+        for j, v in enumerate(sm):
+            adx_line[idxs[j]] = v
+    return {"adx": adx_line, "plus_di": plus_di, "minus_di": minus_di}
+
+
 def vwap(
     highs: list[float], lows: list[float], closes: list[float],
     volumes: list[float], period: int = 0,
@@ -1028,9 +1099,27 @@ def parse_indicator_name(name: str) -> dict[str, Any]:
     m = re.match(r"^mfi(\d+)$", n)
     if m:
         return {"kind": "mfi", "period": int(m.group(1)), "name": n}
+    # ADX 两套算法（2026-11-02）：
+    #   adxN                → Wilder，ADX = RMA(DX)      = TV 内置 ta.dmi
+    #   adxN_sma            → BeikabuOyaji 脚本，ADX = **SMA**(DX)
+    #   两者 ADX 实测差均 3.5 / 最大 12.6，阈值判断可能跨界，别混用。
+    #   DI：di_plusN / di_minusN（推荐）与老写法 plus_diN / minus_diN 等价。
+    m = re.match(r"^adx(\d+)_sma$", n)
+    if m:
+        return {"kind": "adx_pine", "period": int(m.group(1)), "field": "adx", "name": n}
+    if n == "adx_sma":
+        return {"kind": "adx_pine", "period": 14, "field": "adx", "name": n}
+    m = re.match(r"^adx(\d+)_(di_plus|di_minus|plus|minus)$", n)
+    if m:
+        fld = "plus_di" if m.group(2) in ("di_plus", "plus") else "minus_di"
+        return {"kind": "adx", "period": int(m.group(1)), "field": fld, "name": n}
     m = re.match(r"^adx(\d+)$", n)
     if m:
         return {"kind": "adx", "period": int(m.group(1)), "field": "adx", "name": n}
+    m = re.match(r"^di_(plus|minus)(\d+)?$", n)
+    if m:
+        return {"kind": "adx", "period": int(m.group(2) or 14),
+                "field": "plus_di" if m.group(1) == "plus" else "minus_di", "name": n}
     if n in ("plus_di", "minus_di", "plus_di14", "minus_di14"):
         return {"kind": "adx", "period": 14, "field": "plus_di" if "plus" in n else "minus_di", "name": n}
     m = re.match(r"^linreg_channel(\d+)$", n)
@@ -1173,7 +1262,8 @@ def parse_indicator_name(name: str) -> dict[str, Any]:
         f"unknown indicator {name!r}; supported: emaN/rsiN/atrN/atrN_rma|sma|ema|wma/maN/smaN/rmaN/wmaN/vwmaN, "
         "macd|macd_dea|macd_hist|macdF_S_SIG, "
         "boll[N][_sma|ema|rma|wma|vwma][_K]|boll_upper|middle|lower, "
-        "stochN|stoch_kN|stoch_dN|cciN|wrN|mfiN|adxN|vwap[N]|obv|sqzmom[N], "
+        "stochN|stoch_kN|stoch_dN|cciN|wrN|mfiN|vwap[N]|obv|sqzmom[N], "
+        "adxN|adxN_sma|adxN_plus|adxN_minus|di_plusN|di_minusN, "
         "supertrend[N][_倍率]|supertrend[N]_dir|_direction|_upper|_up|_lower|_lo"
     )
 
@@ -1405,11 +1495,12 @@ def attach_indicators(rows: list[dict[str, Any]], wanted: list[str] | None = Non
             series = mfi(highs, lows, closes, vols, spec["period"])
             for i, r in enumerate(rows):
                 r[spec["name"]] = series[i]
-        elif kind == "adx":
+        elif kind in ("adx", "adx_pine"):
             highs = [_f(r.get("h")) or 0.0 for r in rows]
             lows = [_f(r.get("l")) or 0.0 for r in rows]
             closes = [_f(r.get("c")) or 0.0 for r in rows]
-            res = adx(highs, lows, closes, spec.get("period") or 14)
+            fn = adx_pine if kind == "adx_pine" else adx
+            res = fn(highs, lows, closes, spec.get("period") or 14)
             src = spec.get("field") or "adx"
             for i, r in enumerate(rows):
                 r[spec["name"]] = res[src][i]
