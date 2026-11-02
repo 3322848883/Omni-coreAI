@@ -39,7 +39,7 @@ def fetch(interval: str, limit: int) -> list[dict]:
             for x in d]
 
 print("[1/6] 拉取真实 K 线 ...")
-TF_BARS = {"5m": 300, "15m": 300, "1h": 240, "4h": 180}
+TF_BARS = {"5m": 300, "15m": 300, "1h": 240, "4h": 180, "1d": 120}
 tf_rows = {tf: fetch(tf, n) for tf, n in TF_BARS.items()}
 rows15, rows4h = tf_rows["15m"], tf_rows["4h"]
 mark = rows15[-1]["c"]
