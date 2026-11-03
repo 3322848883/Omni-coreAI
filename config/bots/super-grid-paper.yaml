@@ -106,10 +106,29 @@ ladder_template:
     mtf_bars: {5m: 500, 15m: 300, 1h: 240, 4h: 180, 1d: 120}
     # 马丁层深度窗口（bi-g 同款，软校验）：第 1/5/10 层的马丁档应落在对应 % 区间内
     martin_windows: [[2.0, 4.5], [4.5, 6.5], [6.5, 10.0]]
+
     mtf_min_ratio: 0.6     # 只取现价 ×0.6 ~ ×1.6 范围内的价位（±40%）
     mtf_max_ratio: 1.6
   # ── 覆盖价距（点数）：SL 距**最深档** 300~500 点，随区间放大 ──────────────
   # 旧的 ATR 护栏只有 45~67 点，300 点宽的区间里必然被反复打掉（回放实测 20~40 次/4 天）
+  # ── 底仓（2026-11-03 用户拍板：引擎层管理，触发条件见下）────────────
+  # 触发价 = 近 bottom_lookback 根 15m 的极值（多头取最低/空头取最高），一次定死写盘，
+  # 价格到了才成交（「到位置才建仓」）；穿越即 consumed 不再补挂。
+  # st_filter（触发过滤，两个条件缺一不可）：
+  #   ① 与 4H SuperTrend 方向一致（多头底仓 dir=-1 / 空头 dir=1）
+  #   ② 多头底仓要求现价 ≤ 4H EMA55（空头 ≥）—— 确保底仓在低位/高位建仓
+  base_position:
+    enabled: true
+    mode: bottom
+    levels: 1
+    lots: 3
+    bottom_lookback: 240
+    min_dist_pct: 1.0
+    tp_pct: 3.0
+    independent: true
+    st_filter:
+      ema_len: 55
+
   sl_distance:
     enabled: true
     min_points: 300

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .gate_client import GateApiError, GateClient, position_qty, resolve_symbol
+from .strategist.indicators import attach_indicators
 from .observability import swallow
 from .schema import (
     Intent,
@@ -1351,6 +1352,62 @@ class Executor:
                     "replace_cancel", sym, True, detail=detail,
                 ))
 
+    def _base_pos_st_filter(self, sym: str, side: str, sf: dict,
+                            mark: float) -> tuple[bool, dict]:
+        """底仓触发过滤（2026-11-03 用户拍板）。
+
+        ① 方向与 4H SuperTrend 一致（多头底仓要求 dir=-1，空头要求 dir=1）；
+        ② 多头底仓要求现价 ≤ 4H EMA{ema_len}（空头 ≥）—— 确保底仓在低位/高位建仓。
+
+        数据源：kline.db 的 4h OHLC（与 `_range_edges` 同源），本地 attach
+        `ema{len}` + `supertrend10_dir` 现算（不依赖落库指标列）。
+        任一条件不满足返回 False；note 全量落 `dyn_note.base_st_filter` 供对账。
+        """
+        from .strategist.indicators import attach_indicators
+        try:
+            ema_len = int(sf.get("ema_len") or 55)
+        except (TypeError, ValueError):
+            ema_len = 55
+        want_long = (side == "long")
+        note: dict = {"interval": "4h", "ema_len": ema_len,
+                      "side": side, "mark": round(float(mark), 2)}
+        try:
+            db_path = str((self.ladder_template or {}).get("levels_dynamic", {}).get(
+                "db_path") or (Path(__file__).resolve().parents[1]
+                               / "pa-data-source" / "data" / "kline.db"))
+            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
+            try:
+                rows = con.execute(
+                    "SELECT t,o,h,l,c,v FROM kline WHERE symbol=? AND interval='4h' "
+                    "AND closed=1 ORDER BY t DESC LIMIT ?",
+                    (sym, ema_len + 60)).fetchall()
+            finally:
+                con.close()
+        except Exception as e:  # noqa: BLE001
+            note["error"] = f"db: {str(e)[:60]}"
+            return False, note
+        if len(rows) < ema_len + 12:
+            note["error"] = f"not_enough_bars({len(rows)})"
+            return False, note
+        rows = [{"t": int(r[0]), "o": float(r[1]), "h": float(r[2]),
+                 "l": float(r[3]), "c": float(r[4]), "v": float(r[5])}
+                for r in reversed(rows)]                      # 时间升序
+        attach_indicators(rows, [f"ema{ema_len}",
+                                 "supertrend10", "supertrend10_dir"])
+        last = rows[-1]
+        ema = last.get(f"ema{ema_len}")
+        dir4 = last.get("supertrend10_dir")
+        if ema is None or dir4 is None:
+            note["error"] = "indicator_warmup"
+            return False, note
+        note["ema"] = round(ema, 2)
+        note["st_dir"] = dir4
+        dir_ok = (dir4 == -1) if want_long else (dir4 == 1)
+        ema_ok = (mark <= ema) if want_long else (mark >= ema)
+        note["dir_ok"] = dir_ok
+        note["ema_ok"] = ema_ok
+        return (dir_ok and ema_ok), note
+
     def _range_edges(self, sym: str, mark: float, dyn: dict, edge: dict) -> tuple[float, float, dict]:
         """区间边缘：近 `lookback` 根收盘 bar 的最低 low / 最高 high。
 
@@ -2091,6 +2148,11 @@ class Executor:
             dyn.get("max_step_pct"), dyn.get("max_span_pct"),
             dyn.get("scale_martin"), dyn.get("max_martin_pct"),
             sd.get("min_points"), sd.get("max_points"), sd.get("range_mult"),
+            # 🔴 2026-11-03 核实抓到：顶层键漏了两处 —— 改 base_position
+            # （开/关底仓、层数、mode）或 two_way_cfg（levels_floor 等）时
+            # 缓存不失效，盘面永远沿用旧档位（与 2026-10-30 那次同类病）。
+            json.dumps(tpl.get("base_position") or {}, sort_keys=True),
+            json.dumps(tpl.get("two_way_cfg") or {}, sort_keys=True),
         ]
         raw = "|".join("" if v is None else str(v) for v in parts)
         return hashlib.md5(raw.encode("utf-8")).hexdigest()[:12]
@@ -3382,6 +3444,17 @@ class Executor:
                         # 可能与现价脱节，一算出来就已经在现价上方 → 立刻判成交）。
                         _bp_px = float(mark * (1.0 + sgn * _bp_start / 100.0))
                     if _bp_px > 0:
+                        # ── 底仓触发过滤（2026-11-03 用户拍板）────────────────
+                        # st_filter: ① 与 4H SuperTrend 方向一致
+                        #            ② 多头底仓要求现价 ≤ 4H EMA{len}（空头 ≥）——低位/高位建仓
+                        # 不满足 → 本次不建且**不写 state**（条件是动态的，锁死触发价没意义）。
+                        _sf = bp.get("st_filter") or {}
+                        if _sf:
+                            _ok, _fn = self._base_pos_st_filter(sym, side, _sf, mark)
+                            dyn_note["base_st_filter"] = _fn
+                            if not _ok:
+                                _bp_px = 0.0
+                    if _bp_px > 0:
                         self._write_state_json(_bp_path, {
                             "price": round(_bp_px, 6), "side": side,
                             "src": _bp_src, "ref": round(float(mark), 6),
@@ -3415,6 +3488,10 @@ class Executor:
                 for _i in range(bp_n):
                     _px = bp_first * (1.0 + sgn * bp_step * _i / 100.0)
                     want.append((_px, bp_lots))
+                # 🔴 2026-11-03 核实抓到：这里没记 `_bp_added` → 底仓层
+                # 张数=grid_lots 时被 unit 分类吞成 grid（实测底仓 10 层全标
+                # grid、TP 按 grid 一格算而非独立 tp_pct）。补上计数。
+                _bp_added += bp_n
                 dyn_note["base_position"] = {
                     "levels": bp_n, "lots": bp_lots, "step_pct": round(bp_step, 4),
                     "start_pct": round(_bp_start, 4),
