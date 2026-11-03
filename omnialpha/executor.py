@@ -5447,6 +5447,30 @@ class Executor:
                 total += -n
         return total
 
+    def _side_position_info(self, sym: str, side: str) -> tuple:
+        """该侧 (张数, 入场均价)。取不到返回 (None, 0.0) —— 调用方 fail-closed。"""
+        try:
+            rows = self._positions_cached()
+        except Exception:  # noqa: BLE001
+            return None, 0.0
+        if not rows:
+            return 0.0, 0.0
+        try:
+            pos = _parse_symbol_positions(rows, sym, meta=self._safe_meta(sym))
+        except Exception:  # noqa: BLE001
+            return None, 0.0
+        total, cost = 0.0, 0.0
+        for p in pos or []:
+            n = _num(p.get("size"))
+            if side == "long" and n > 0:
+                total += n
+                cost += n * _num(p.get("entry_price"))
+            elif side == "short" and n < 0:
+                total += -n
+                cost += (-n) * _num(p.get("entry_price"))
+        entry = (cost / total) if total > 0 else 0.0
+        return total, entry
+
     def _ladder_bind_placed(self, sym: str, side: str, placed: list,
                             kept: Optional[list] = None) -> dict:
         """铺单成功后**回写 order_id** —— 台账与交易所对账的唯一入口。
@@ -5565,6 +5589,11 @@ class Executor:
                                self._probe_entry_order, tol)
         if rec.get("n_filled") or rec.get("n_pruned"):
             note["reconcile"] = {"filled": rec["filled"], "pruned": rec["pruned"]}
+        # ②' 同价去重（2026-11-04 部署实测：同价出现过 filled/closed/pending 三行，
+        # 来源是 `_record_ladder_level` 的盲目 append 与模板 sync 并存）
+        _dup = ledger.dedupe(data, sym, side, tol)
+        if _dup.get("removed"):
+            note["deduped"] = _dup["removed"]
         # ③ 删幽灵档（从没挂出去、也不在本轮模板里）
         d = ledger.drop_phantoms(data, sym, side, [p for p, _ in want], tol)
         if d.get("dropped"):
@@ -5574,10 +5603,11 @@ class Executor:
         # **已成交的档当空闲额度重新挂一遍**，敞口超过层数上限。用当前持仓按
         # 由近到远累加反推「已成交几档」，一次性（之后全靠单号对账）。
         if not ledger.is_seeded(data, sym, side):
-            _pos = self._side_position_qty(sym, side)
+            _pos, _entry = self._side_position_info(sym, side)
             if _pos is not None:
                 _sd = ledger.seed_from_position(
-                    data, sym, side, list(zip(want, units)), tps, _pos, tol)
+                    data, sym, side, list(zip(want, units)), tps, _pos, tol,
+                    entry=_entry or 0.0)
                 if _sd.get("seeded"):
                     note["seeded"] = _sd
 
@@ -5657,17 +5687,24 @@ class Executor:
                 except Exception:  # noqa: BLE001 — 损坏则重建，不拦主流程
                     data = {"levels": []}
             levels = [lv for lv in (data.get("levels") or []) if isinstance(lv, dict)]
+            # 方向必须写进去：缺 `side` 的行会被 `entries()` 当成 long —— AI 开的
+            # 空腿被记成多头行，去重/预算/止盈全错。
+            side = "short" if "short" in str(intent.action or "") else "long"
             levels.append({
                 "symbol": intent.symbol,
+                "side": side,
                 "price": float(intent.price or 0),
                 "size": int(contracts),
                 "tp_target": float(tp_target) if tp_target else None,
                 "label": str(intent.label or ""),
                 "order_id": str(order_id or ""),
+                "entry_state": "open",
                 "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "status": "pending",
             })
-            data["levels"] = levels[-200:]  # 有界存储，防无限增长
+            data["levels"] = levels[-400:]  # 有界存储，防无限增长
+            # 同一价只留一行（历史遗留：AI 逐腿 append 与模板 sync 并存 → 同价三行）
+            ledger.dedupe(data, intent.symbol, side, 0.0002)
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")

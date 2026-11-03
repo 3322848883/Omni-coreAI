@@ -456,6 +456,45 @@ def mark_filled(data: dict, symbol: str, side: str, price: Any,
     return False
 
 
+#: 同一价位多行时保留优先级：持仓中的 > 已挂 TP 的 > 待成交的 > 已闭合/归档
+_STATUS_PRI = {ST_FILLED: 4, ST_PROTECTED: 3, ST_PENDING: 2, ST_CLOSED: 1,
+               ST_ARCHIVED: 0}
+
+
+def dedupe(data: dict, symbol: str, side: str, tol: float = DEFAULT_TOL) -> dict:
+    """同一价位只留一行（2026-11-04 部署实测：super-grid 出现了同一价 3 行）。
+
+    来源：`_record_ladder_level`（AI 逐腿）曾**盲目 append**，与模板 sync 写下的
+    那一行并存 → 同价 filled/closed/pending 三行，预算与止盈都会算错。
+    合并规则：保留优先级最高的一行，把其余行的 `order_id`/`tp_target` 补进来。
+    """
+    rows = entries(data, symbol, side)
+    groups: list[list[dict]] = []
+    for lv in rows:
+        for g in groups:
+            if same_price(g[0].get("price"), lv.get("price"), tol):
+                g.append(lv)
+                break
+        else:
+            groups.append([lv])
+    removed = []
+    bag = levels_of(data)
+    for g in groups:
+        if len(g) < 2:
+            continue
+        g.sort(key=lambda x: (_STATUS_PRI.get(str(x.get("status")), -1),
+                              bool(x.get("order_id"))), reverse=True)
+        keep = g[0]
+        for drop in g[1:]:
+            for k in ("order_id", "tp_order_id", "tp_target", "tp_pct", "size"):
+                if not keep.get(k) and drop.get(k):
+                    keep[k] = drop.get(k)
+            if drop in bag:
+                bag.remove(drop)
+            removed.append(drop.get("price"))
+    return {"removed": len(removed), "prices": removed}
+
+
 # ── 一次性播种：从持仓反推已成交档（2026-11-04 部署迁移用）──────────────
 def seed_key(symbol: str, side: str) -> str:
     return f"{symbol}|{side}"
@@ -475,7 +514,8 @@ def mark_seeded(data: dict, symbol: str, side: str, info: dict = None) -> None:
 
 
 def seed_from_position(data: dict, symbol: str, side: str, want: list,
-                       tps: dict, pos: float, tol: float = DEFAULT_TOL) -> dict:
+                       tps: dict, pos: float, tol: float = DEFAULT_TOL,
+                       entry: float = 0.0) -> dict:
     """用**当前持仓**反推「这一侧已经成交了几档」，把对应的档标成 filled。
 
     为什么需要（2026-11-04 首次部署本台账时）：服务器上的旧表 `order_id` 全空，
@@ -496,6 +536,36 @@ def seed_from_position(data: dict, symbol: str, side: str, want: list,
     if need <= 0:
         mark_seeded(data, symbol, side, {"ts": now_ts(), "filled": 0})
         return {"skipped": "no_position"}
+    dist_g = float((tps or {}).get("grid", 0) or 0)
+    if entry > 0:
+        # 🔴 有**真实入场价**就用它建一行（持仓 = 一档聚合），不要猜「最近模板档」：
+        # 实测 super-grid 持仓入场 2279.31，却把最近模板档 2320.49 标成已成交 →
+        # 由它派生的 tp(≈2298) 对空单是**亏损价**（空单止盈必须在入场下方），
+        # `ensure_short_tp` 一旦补覆盖就会挂出亏损止盈。
+        tp = entry * (1 + dist_g / 100.0) if side == "long"             else entry * (1 - dist_g / 100.0)
+        row = None
+        for lv in entries(data, symbol, side):
+            if same_price(lv.get("price"), entry, tol):
+                row = lv
+                break
+        if row is None:
+            row = {
+                "symbol": symbol, "side": side, "unit": "grid",
+                "price": round(float(entry), 4), "size": need,
+                "tp_target": round(tp, 4), "tp_pct": round(dist_g, 4),
+                "label": "", "order_id": "", "tp_order_id": "",
+                "ts": now_ts(),
+            }
+            levels_of(data).append(row)
+        row["entry_state"] = "filled"
+        row["status"] = ST_FILLED
+        row["seeded"] = True
+        row.setdefault("filled_ts", now_ts())
+        mark_seeded(data, symbol, side,
+                    {"ts": now_ts(), "filled": 1, "position": need,
+                     "entry": float(entry), "src": "entry_price"})
+        return {"seeded": 1, "lots": need, "position": need, "entry": float(entry),
+                "levels": [float(entry)]}
     filled, acc = [], 0.0
     for (px, lots), unit in want:
         try:

@@ -425,3 +425,44 @@ class TestBindSameRound(Base):
         rows = [lv for lv in self.levels() if lv.get("side") == "long"]
         self.assertEqual(sum(1 for x in rows if x.get("order_id")), len(rows),
                          f"新建档必须本轮绑上单号：{[(x['price'], x.get('order_id')) for x in rows]}")
+
+
+class TestSeedUsesEntryPrice(Base):
+    """播种必须用**真实入场价**，不能猜「最近的模板档」（2026-11-04 实盘）。
+
+    实测 super-grid：持仓入场 2279.31，播种却把最近模板档 2320.49 标成已成交 →
+    由它派生的 tp≈2298 对空单是**亏损价**（空单止盈必须在入场下方），
+    `ensure_short_tp` 一旦补覆盖就会挂出亏损止盈单。
+    """
+
+    def test_entry_price_wins(self):
+        w = self.want(side="short")          # 空侧档全在 mark 上方
+        self.client.positions = [{"contract": "ETH_USDT", "size": "-3",
+                                  "entry_price": "2279.31"}]
+        self.sync(w, side="short")
+        rows = [lv for lv in self.levels() if lv.get("side") == "short"]
+        filled = [x for x in rows if x.get("entry_state") == "filled"]
+        self.assertEqual(len(filled), 1)
+        self.assertAlmostEqual(filled[0]["price"], 2279.31, places=2)
+        # 空单止盈必须在入场价下方
+        self.assertLess(filled[0]["tp_target"], 2279.31,
+                        f"空单 TP 必须在入场下方：{filled[0]}")
+
+
+class TestDedupeSamePrice(Base):
+    """同一价位多行 → 只留优先级最高的一行（部署实测同价 3 行）。"""
+
+    def test_dedupe_collapses(self):
+        w = self.want()
+        self.sync(w)
+        p = self.path()
+        d = json.loads(p.read_text(encoding="utf-8"))
+        base = [x for x in d["levels"] if x.get("side") == "long"][0]
+        for st in ("closed", "filled"):
+            dup = dict(base)
+            dup["status"] = st
+            dup["order_id"] = ""
+            d["levels"].append(dup)
+        p.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+        n = ledger.dedupe(ledger.read(p), "ETH_USDT", "long")
+        self.assertEqual(n["removed"], 2, f"同价三行应合并成一行：{n}")
