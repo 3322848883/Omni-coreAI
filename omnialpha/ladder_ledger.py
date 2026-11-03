@@ -264,6 +264,27 @@ def upsert_pending(data: dict, symbol: str, side: str, price: float, size: float
         return {"skipped": "bad_price"}
     for lv in entries(data, symbol, side):
         if same_price(lv.get("price"), px, tol):
+            # 释放过的档（止盈落袋 closed / 整代归档 archived）→ **重新开一代**：
+            # 套利完成后额度已释放，这个价位应当能重新挂上入场单，否则台账会
+            # 停在 closed、交易所上的新单永远绑不到这一行（等于又回到不可对账）。
+            # 只按 status 判：`closed` = 该档止盈已成交（持仓已平），即便
+            # `entry_state` 还是 filled 也要重开 —— 那正是「套利完成释放一档」。
+            if str(lv.get("status")) in (ST_CLOSED, ST_ARCHIVED):
+                lv["status"] = ST_PENDING
+                lv["entry_state"] = "open"
+                lv["order_id"] = ""
+                lv.pop("tp_order_id", None)
+                lv["reopened"] = int(lv.get("reopened") or 0) + 1
+                lv["ts"] = now_ts()
+                if tp_target:
+                    lv["tp_target"] = round(float(tp_target), 4)
+                if tp_pct:
+                    lv["tp_pct"] = round(float(tp_pct), 4)
+                if unit:
+                    lv["unit"] = unit
+                if size:
+                    lv["size"] = float(size)
+                return {"reopened": True, "price": px}
             if tp_target and not lv.get("tp_target"):
                 lv["tp_target"] = float(tp_target)
             if not lv.get("unit"):
@@ -318,15 +339,20 @@ def bind_order(data: dict, symbol: str, side: str, price: Any, order_id: str,
 
 
 def is_consumed(lv: dict) -> bool:
-    """这一档是否**已经用掉了层数额度**（成交 / 止盈闭合）→ 不再原地补。
+    """这一档是否**正在占用层数额度**（= 该档的持仓还开着）。
 
-    与 `entry_state=="filled"` 不完全等价：止盈成交（status=closed）的那一档，
-    入场单早已 filled 并被 `upsert_pending` 保住；两者都算「这一代梯子已消耗」。
-    `archived` 不算（持仓归零后整代归档，预算要回满）。
+    语义（2026-11-04 用户口径「网格套利一次就释放一档」）：
+    · `pending`（挂单在盘）/ `protected`(未成交) → **不占**（还没建仓）
+    · `filled` / 已成交的 `protected`（持仓还在） → **占**（成交一档少一层）
+    · `closed`（止盈落袋 = 套利完成） → **释放**，额度还回去，该档可重新开档
+    · `archived`（整代归档） → 不占
+
+    曾经把 `closed` 也算「已消耗」，结果是**套利一次层数就永久少一层**，
+    梯子越跑越稀 —— 与网格的定义相反。
     """
-    if str(lv.get("status")) == ST_ARCHIVED:
+    if str(lv.get("status")) in (ST_ARCHIVED, ST_CLOSED):
         return False
-    return entry_state_of(lv) == "filled" or str(lv.get("status")) in (ST_FILLED, ST_CLOSED)
+    return entry_state_of(lv) == "filled" or str(lv.get("status")) == ST_FILLED
 
 
 def consumed_prices(data: dict, symbol: str, side: str) -> list:
@@ -349,10 +375,13 @@ def budget(data: dict, symbol: str, side: str, total_slots: int) -> dict:
             if not is_consumed(lv)
             and str(lv.get("status")) in (ST_PENDING, ST_PROTECTED)]
     remaining = total - len(filled) if total > 0 else 0
+    released = [lv for lv in entries(data, symbol, side)
+                if str(lv.get("status")) == ST_CLOSED]
     return {
         "filled": len(filled),
         "filled_prices": consumed_prices(data, symbol, side),
         "pending": len(live),
+        "released": len(released),
         "total": total,
         "remaining": max(0, remaining),
     }

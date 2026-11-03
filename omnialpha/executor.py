@@ -5573,7 +5573,7 @@ class Executor:
         except (TypeError, ValueError):
             _cfg_total = 0
         _filled_now = len([lv for lv in ledger.entries(data, sym, side)
-                           if ledger.entry_state_of(lv) == "filled"])
+                           if ledger.is_consumed(lv)])
         _tot = ledger.get_total(data, sym, side)
         if _filled_now == 0 or _tot <= 0:
             _n_grid = len([u for u in units if u != "base"])

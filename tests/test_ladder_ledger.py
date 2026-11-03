@@ -307,3 +307,60 @@ class TestExitSizeReconcile(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReleaseOnArbitrage(Base):
+    """用户口径（2026-11-04）：「网格套利一次那么就释放了一档网格」。
+
+    两段语义必须同时成立，否则网格会跑歪：
+    · 成交一档 → **占**额度（10 → 9，不原地补满）
+    · 止盈落袋 → **释放**额度（9 → 10，该档重新开档）
+    """
+
+    def _seed_fill(self):
+        w = self.want()
+        self.sync(w)
+        ids = {}
+        for px, lots in w:
+            ids[px] = self.client.place_order(
+                {"contract": "ETH_USDT", "price": str(px), "size": lots,
+                 "text": "t-led"})["id"]
+        self.sync(w)
+        self.client.fill(ids[w[0][0]])
+        self.client.positions = [{"contract": "ETH_USDT", "size": "3"}]
+        self.sync(w)
+        return w
+
+    def _close(self, price):
+        p = self.path()
+        d = json.loads(p.read_text(encoding="utf-8"))
+        for lv in d["levels"]:
+            if abs(lv["price"] - price) < 0.01:
+                lv["status"] = "closed"
+                lv.pop("tp_order_id", None)
+        p.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+
+    def test_budget_released_after_tp(self):
+        w = self._seed_fill()
+        _, _, note = self.ex._apply_ladder_budget(
+            "ETH_USDT", "long", w, ["martin"] + ["grid"] * 9, _tpl())
+        self.assertEqual(note.get("filled"), 1, f"成交后应先占 1 档：{note}")
+        self._close(w[0][0])                      # 止盈落袋
+        want2, _, note2 = self.ex._apply_ladder_budget(
+            "ETH_USDT", "long", w, ["martin"] + ["grid"] * 9, _tpl())
+        self.assertEqual(note2.get("filled"), 0, f"套利完成后额度应释放：{note2}")
+        self.assertEqual(note2.get("remaining"), 10)
+        self.assertEqual(len(want2), 10, "释放后应回到 10 档")
+        self.assertIn(w[0][0], [p for p, _ in want2],
+                      "释放的档位应重新可挂（不是永久消失）")
+
+    def test_released_level_reopens_as_pending(self):
+        w = self._seed_fill()
+        self._close(w[0][0])
+        self.sync(w)                              # 下一轮：重开档
+        rows = [lv for lv in self.levels() if abs(lv["price"] - w[0][0]) < 0.01]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "pending", f"应重开为 pending：{rows[0]}")
+        self.assertEqual(rows[0].get("order_id"), "", "重开档要重新等交易所单号")
+        self.assertIsNotNone(rows[0].get("tp_target"), "重开档仍要带 tp_target")
+        self.assertGreaterEqual(int(rows[0].get("reopened") or 0), 1)
