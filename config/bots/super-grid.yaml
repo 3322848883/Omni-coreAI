@@ -17,12 +17,11 @@
 # 与 martin-grid-paper 的差异：prompt、快照指标（+boll 三件套 + supertrend10_dir）、
 # 工具白名单（+indicators +sqzmom）。
 bot_id: super-grid
-# ⚠️ 交易账户先不配置（占位）：启用前替换成真实账户名，并在 /opt/omnialpha/.env
-#    定义 GATE_SG_API_KEY / GATE_SG_API_SECRET（独立 key，不与 martin-grid 共用）。
-#    不配置则 create_client 直接抛 missing credentials —— 这正是「不启动」的第二道保险。
-# account: gate-grid
-# api_key_env: GATE_SG_API_KEY
-# api_secret_env: GATE_SG_API_SECRET
+# 交易账户（2026-11-03 用户配置）：gate-sg 独立账户，key 在服务器 .env（GATE_SG_*）。
+# 双向持仓模式（dual）+ cross 全仓 + cross_leverage_limit=50（2026-11-03 已在交易所侧设置并核实）。
+account: gate-sg
+api_key_env: GATE_SG_API_KEY
+api_secret_env: GATE_SG_API_SECRET
 # ↑ 声明所属账户 → 与 config/accounts.yaml 的账户级风控**合并**（上限取更严、
 #   日初权益账户共享）。不声明则不参与合并。见 `config/accounts.yaml` 头注释。
 # 本地 paper bot，与实盘 martin-grid 完全独立（不同 label_prefix / 不同账户）。
@@ -234,7 +233,9 @@ account_risk:
   # ---- 以下与实盘 martin-grid.yaml 逐项一致 ----
   grid_tp_auto: live
   halt: false
-  max_leverage: 25
+  # 固定 50x（2026-11-03 用户拍板）：交易所 cross_leverage_limit=50 + 这里闸门 50，
+  # 两处必须一致（executor MAX_LEVERAGE 闸门：intent.leverage > max_leverage 整笔拒）。
+  max_leverage: 50
   margin_mode: cross
   max_total_notional_usd: 1200
   risk_pct: 0.12
