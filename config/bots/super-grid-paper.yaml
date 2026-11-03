@@ -128,6 +128,13 @@ ladder_template:
     independent: true
     st_filter:
       ema_len: 55
+    # 低周期 SMC 结构吸附（2026-11-03，非阻断）：触发价吸附到极值附近最近结构
+    # （多头向上/空头向下，tol 内）；无结构保留裸极值 —— best-effort，缺结构不阻止建仓
+    structure:
+      enabled: true
+      interval: 15m
+      bars: 300
+      tol_pct: 0.5
 
   sl_distance:
     enabled: true

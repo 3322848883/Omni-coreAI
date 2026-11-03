@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 from .gate_client import GateApiError, GateClient, position_qty, resolve_symbol
 from .strategist.indicators import attach_indicators
+from .strategist.smc_map import BULL, BEAR
 from .observability import swallow
 from .schema import (
     Intent,
@@ -1407,6 +1408,78 @@ class Executor:
         note["dir_ok"] = dir_ok
         note["ema_ok"] = ema_ok
         return (dir_ok and ema_ok), note
+
+    def _base_pos_structure_snap(self, sym: str, side: str, px: float,
+                                 cfg: dict, mark: float) -> tuple[float, dict]:
+        """底仓触发价的低周期 SMC 结构吸附（2026-11-03 用户拍板）。
+
+        裸极值 = 流动性扫荡位（wick），价格常插针后不回头 → 挂在精确 wick 上
+        成交率低。本方法把触发价**吸附到极值附近最近的结构**：
+        多头（px = 区间最低）→ px 上方 tol 内最近的 bull OB low / bull FVG bottom /
+        swing low / equal_low；空头（px = 区间最高）→ 镜像向下吸附。
+
+        **非阻断（与 st_filter 相反）**：tol 内没有结构 → 原样返回 px，
+        结构吸附是 best-effort，缺结构不阻止底仓建立。
+        note 全量落 `dyn_note.base_structure` 供对账。
+        """
+        from .strategist.smc_map import compute_smc_map
+        note: dict = {"side": side, "raw": round(float(px), 2), "mark": round(float(mark), 2)}
+        try:
+            interval = str(cfg.get("interval") or "15m")
+            bars_n = int(cfg.get("bars") or 300)
+            tol_pct = float(cfg.get("tol_pct") or 0.5)
+        except (TypeError, ValueError):
+            interval, bars_n, tol_pct = "15m", 300, 0.5
+        note.update({"interval": interval, "bars": bars_n, "tol_pct": tol_pct})
+        try:
+            db_path = str((self.ladder_template or {}).get("levels_dynamic", {}).get(
+                "db_path") or (Path(__file__).resolve().parents[1]
+                               / "pa-data-source" / "data" / "kline.db"))
+            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
+            try:
+                rows = con.execute(
+                    "SELECT t,o,h,l,c,v FROM kline WHERE symbol=? AND interval=? "
+                    "AND closed=1 ORDER BY t DESC LIMIT ?",
+                    (sym, interval, bars_n)).fetchall()
+            finally:
+                con.close()
+        except Exception as e:  # noqa: BLE001
+            note["error"] = f"db: {str(e)[:60]}"
+            return px, note
+        if len(rows) < 60:
+            note["error"] = f"not_enough_bars({len(rows)})"
+            return px, note
+        rows = [{"t": int(r[0]), "o": float(r[1]), "h": float(r[2]),
+                 "l": float(r[3]), "c": float(r[4]), "v": float(r[5])}
+                for r in reversed(rows)]
+        res = compute_smc_map(rows)
+        want_long = (side == "long")
+        if want_long:
+            cands = [float(o.bar_low) for o in res.swing_order_blocks + res.internal_order_blocks
+                     if o.bias == BULL]
+            cands += [float(f.bottom) for f in res.fvgs if f.bias == BULL]
+            cands += [float(pv["price"]) for pv in res.swing_pivots if pv.get("kind") == "low"]
+            cands += [float(el["price"]) for el in res.equal_lows]
+            lo_lim, hi_lim = px, px * (1.0 + tol_pct / 100.0)
+            inband = [c for c in cands if lo_lim < c <= hi_lim]
+            snap = min(inband) if inband else None   # 离 wick 最近的上方结构
+        else:
+            cands = [float(o.bar_high) for o in res.swing_order_blocks + res.internal_order_blocks
+                     if o.bias == BEAR]
+            cands += [float(f.top) for f in res.fvgs if f.bias == BEAR]
+            cands += [float(pv["price"]) for pv in res.swing_pivots if pv.get("kind") == "high"]
+            cands += [float(eh["price"]) for eh in res.equal_highs]
+            lo_lim, hi_lim = px * (1.0 - tol_pct / 100.0), px
+            inband = [c for c in cands if lo_lim <= c < hi_lim]
+            snap = max(inband) if inband else None
+        note["candidates_in_band"] = len(inband)
+        if snap is None:
+            note["snapped"] = False
+            return px, note
+        note["snapped"] = True
+        note["structure"] = round(snap, 2)
+        note["shift_pct"] = round((snap - px) / px * 100.0, 3)
+        return float(snap), note
 
     def _range_edges(self, sym: str, mark: float, dyn: dict, edge: dict) -> tuple[float, float, dict]:
         """区间边缘：近 `lookback` 根收盘 bar 的最低 low / 最高 high。
@@ -3454,6 +3527,15 @@ class Executor:
                             dyn_note["base_st_filter"] = _fn
                             if not _ok:
                                 _bp_px = 0.0
+                    if _bp_px > 0:
+                        # ── 低周期 SMC 结构吸附（2026-11-03，非阻断）──────────
+                        # 裸极值=扫荡位 wick，成交率低 → 吸附到最近结构（多头向上/
+                        # 空头向下，tol 内）；无结构原样保留。best-effort。
+                        _sc = bp.get("structure") or {}
+                        if _sc.get("enabled"):
+                            _bp_px, _sn = self._base_pos_structure_snap(
+                                sym, side, _bp_px, _sc, mark)
+                            dyn_note["base_structure"] = _sn
                     if _bp_px > 0:
                         self._write_state_json(_bp_path, {
                             "price": round(_bp_px, 6), "side": side,
