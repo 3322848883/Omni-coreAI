@@ -454,3 +454,82 @@ def mark_filled(data: dict, symbol: str, side: str, price: Any,
             lv.setdefault("filled_ts", now_ts())
             return True
     return False
+
+
+# ── 一次性播种：从持仓反推已成交档（2026-11-04 部署迁移用）──────────────
+def seed_key(symbol: str, side: str) -> str:
+    return f"{symbol}|{side}"
+
+
+def is_seeded(data: dict, symbol: str, side: str) -> bool:
+    seeded = data.get("seeded")
+    return isinstance(seeded, dict) and bool(seeded.get(seed_key(symbol, side)))
+
+
+def mark_seeded(data: dict, symbol: str, side: str, info: dict = None) -> None:
+    seeded = data.get("seeded")
+    if not isinstance(seeded, dict):
+        seeded = {}
+        data["seeded"] = seeded
+    seeded[seed_key(symbol, side)] = info or {"ts": now_ts()}
+
+
+def seed_from_position(data: dict, symbol: str, side: str, want: list,
+                       tps: dict, pos: float, tol: float = DEFAULT_TOL) -> dict:
+    """用**当前持仓**反推「这一侧已经成交了几档」，把对应的档标成 filled。
+
+    为什么需要（2026-11-04 首次部署本台账时）：服务器上的旧表 `order_id` 全空，
+    成交档已经不在交易所挂单里 —— 新台账**认不出**哪些档已经成交。若直接按
+    「零消耗」起算，价格回来时会把已成交的档当成空闲额度重新挂一遍 → 敞口
+    超过层数上限（10 层 + 已有持仓）。
+
+    做法：按 `want` 的**由近到远**顺序累加张数，凑够持仓张数即视为这几档已成交
+    （阶梯本来就从近端开始成交）。一次性 —— 播种过就不再猜（之后全靠
+    `reconcile()` 的单号对账，那才是真凭据）。
+
+    只读 `want` 里的档，不动交易所；取不到持仓时调用方不会走到这里（fail-closed）。
+    """
+    try:
+        need = float(pos)
+    except (TypeError, ValueError):
+        return {"skipped": "bad_position"}
+    if need <= 0:
+        mark_seeded(data, symbol, side, {"ts": now_ts(), "filled": 0})
+        return {"skipped": "no_position"}
+    filled, acc = [], 0.0
+    for (px, lots), unit in want:
+        try:
+            sz = float(lots)
+            p = float(px)
+        except (TypeError, ValueError):
+            continue
+        if sz <= 0 or p <= 0:
+            continue
+        dist = (tps or {}).get(unit, (tps or {}).get("grid", 0.0))
+        tp = p * (1 + dist / 100.0) if side == "long" else p * (1 - dist / 100.0)
+        row = None
+        for lv in entries(data, symbol, side):
+            if same_price(lv.get("price"), p, tol):
+                row = lv
+                break
+        if row is None:
+            row = {
+                "symbol": symbol, "side": side, "unit": unit,
+                "price": round(p, 4), "size": sz,
+                "tp_target": round(tp, 4), "tp_pct": round(dist, 4),
+                "label": "", "order_id": "", "tp_order_id": "",
+                "ts": now_ts(),
+            }
+            levels_of(data).append(row)
+        row["entry_state"] = "filled"
+        row["status"] = ST_FILLED          # 已成交、尚未挂 TP → ensure_*_tp 会接手
+        row["seeded"] = True
+        row.setdefault("filled_ts", now_ts())
+        filled.append({"price": p, "size": sz})
+        acc += sz
+        if acc >= need - 1e-9:
+            break
+    mark_seeded(data, symbol, side,
+                {"ts": now_ts(), "filled": len(filled), "position": need})
+    return {"seeded": len(filled), "lots": acc, "position": need,
+            "levels": [f["price"] for f in filled]}

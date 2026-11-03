@@ -5564,6 +5564,18 @@ class Executor:
         d = ledger.drop_phantoms(data, sym, side, [p for p, _ in want], tol)
         if d.get("dropped"):
             note["dropped_phantom"] = d["dropped"]
+        # ④ 一次性播种（2026-11-04 部署迁移）：服务器上的旧表 `order_id` 全空，
+        # 成交档已经不在挂单里 → 新台账认不出来。若不播种，按「零消耗」起算会把
+        # **已成交的档当空闲额度重新挂一遍**，敞口超过层数上限。用当前持仓按
+        # 由近到远累加反推「已成交几档」，一次性（之后全靠单号对账）。
+        if not ledger.is_seeded(data, sym, side):
+            _pos = self._side_position_qty(sym, side)
+            if _pos is not None:
+                _sd = ledger.seed_from_position(
+                    data, sym, side, list(zip(want, units)), tps, _pos, tol)
+                if _sd.get("seeded"):
+                    note["seeded"] = _sd
+
         # ── 这一代梯子的总层数（预算上限）──────────────────────────────
         # 首次铺（尚无成交档）时按实际铺出的层数定死；之后「成交 k 档 → 只剩 N−k
         # 档」都用这个 N 当上限。不用配置里的 `grid_levels` 是因为 AI 允许在 floor

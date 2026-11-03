@@ -130,6 +130,9 @@ class Base(unittest.TestCase):
         return out
 
     def sync(self, want, side="long"):
+        # 持仓快照有 5s 进程内缓存（生产上一轮只读一次是优点），测试里毫秒级
+        # 连续调用会拿到旧值 → 每次显式失效。
+        self.ex._pos_cache = None
         units = []
         for i, _ in enumerate(want):
             units.append("martin" if i in (0, 4, 9) else "grid")
@@ -364,3 +367,42 @@ class TestReleaseOnArbitrage(Base):
         self.assertEqual(rows[0].get("order_id"), "", "重开档要重新等交易所单号")
         self.assertIsNotNone(rows[0].get("tp_target"), "重开档仍要带 tp_target")
         self.assertGreaterEqual(int(rows[0].get("reopened") or 0), 1)
+
+
+class TestSeedFromPosition(Base):
+    """部署迁移：旧表 order_id 全空，用**持仓**反推已成交档（一次性）。
+
+    不播种的后果：按「零消耗」起算 → 已成交档被当空闲额度重挂 → 敞口超过
+    层数上限（10 层 + 已有持仓）。
+    """
+
+    def test_seed_marks_nearest_levels_filled(self):
+        w = self.want()                    # 第 1 档 3 张，其余 1 张
+        self.client.positions = [{"contract": "ETH_USDT", "size": "3"}]
+        note = self.sync(w)
+        rows = [lv for lv in self.levels() if lv.get("side") == "long"]
+        filled = [x for x in rows if x.get("entry_state") == "filled"]
+        self.assertEqual(len(filled), 1,
+                         f"持仓 3 张 = 最近 1 档（3 张）已成交：{note}")
+        self.assertAlmostEqual(filled[0]["price"], w[0][0], places=2)
+        self.assertIn("seeded", note)
+
+    def test_seed_counts_against_budget(self):
+        w = self.want()
+        self.client.positions = [{"contract": "ETH_USDT", "size": "3"}]
+        self.sync(w)
+        want2, _, note = self.ex._apply_ladder_budget(
+            "ETH_USDT", "long", w, ["martin"] + ["grid"] * 9, _tpl())
+        self.assertEqual(note.get("filled"), 1, f"播种后应占 1 档：{note}")
+        self.assertEqual(len(want2), 9, "剩 9 档可挂（不能把已成交档重挂）")
+
+    def test_seed_runs_once(self):
+        w = self.want()
+        self.client.positions = [{"contract": "ETH_USDT", "size": "3"}]
+        self.sync(w)
+        n1 = len(self.levels())
+        self.client.positions = []
+        self.sync(w)                       # 第二次不再播种（不重复加行）
+        self.assertLessEqual(len(self.levels()), n1 + 10)
+        data = ledger.read(self.path())
+        self.assertTrue(ledger.is_seeded(data, "ETH_USDT", "long"))
