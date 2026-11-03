@@ -118,6 +118,16 @@ ladder_template:
 
     mtf_min_ratio: 0.6     # 只取现价 ×0.6 ~ ×1.6 范围内的价位（±40%）
     mtf_max_ratio: 1.6
+
+  # ── 逐档止盈（4.1 配置层，2026-11-03）──────────────────────────────────
+  # enabled: true 才会把「模板铺出的档位」写进 data/bots/<bot>/state/ladder_levels.json
+  # —— 那是 ensure_grid_tp 唯一输入，不写 → 每轮 no_ladder_table 静默跳过 → 网格腿零止盈。
+  # 距离按 unit 派生（不写死价格）：网格吃一格（step_pct）、马丁吃两格、底仓吃 tp_pct。
+  # ⚠️ 引擎现状（executor.ensure_grid_tp 7225）：**只实现多侧**（卖单 reduce_only 覆盖
+  #    pos_long）；空侧会被 `short_side_tp_not_implemented` 整体跳过。超级网格当前是
+  #    空头梯 → 开了这个开关，档位表会写、但空侧仍然不挂逐档 TP。空侧实现是下一步。
+  tp_by_unit:
+    enabled: true
   # ── 覆盖价距（点数）：SL 距**最深档** 300~500 点，随区间放大 ──────────────
   # 旧的 ATR 护栏只有 45~67 点，300 点宽的区间里必然被反复打掉（回放实测 20~40 次/4 天）
   # ── 底仓（2026-11-03 用户拍板：引擎层管理，触发条件见下）────────────
