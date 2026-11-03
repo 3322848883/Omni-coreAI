@@ -7515,6 +7515,215 @@ class Executor:
         out["errors"] = errors
         return out
 
+    def ensure_short_tp(self, symbol: str) -> dict:
+        """空侧持仓的逐档止盈兜底（2026-11-03 事故修复）—— `ensure_grid_tp` 的镜像。
+
+        **事故**：空侧持仓的 TP 只有 AI 发 `modify_tp_sl` 这一条路（ensure_grid_tp
+        只实现多侧，空侧档位被 `short_side_tp_not_implemented` 过滤）。AI 发
+        `hold` 的轮次整轮没有 modify_tp_sl → 空仓 TP 被撤后无人补挂 → 实盘
+        -3 张空单（entry 2293.6）裸奔无止盈。
+
+        镜像规则（方向全部翻转）：
+        · 硬闸：**无空头持仓 → 一张止盈买单都不挂**（买单无仓成交 = 开多，
+          与多侧「无多头卖单=开空」同类事故），并撤掉在盘孤儿 -gstp 买单。
+        · 形态：普通限价**买单** + `reduce_only=True`（只减空、永不反手开多），
+          text 后缀 `-gstp`（与多侧 -gtp 分开命名，覆盖统计互不污染）。
+        · 候选：空侧 pending 档 `tp_target < mark`（target ≥ mark 的买单会
+          立即市价成交）。
+        · 覆盖统计 **同时计入 AI 的 -tp 单**：AI 发 modify_tp_sl 时它的 TP
+          占住覆盖额度 → gstp 自动退位（不双份）；AI hold 轮 -tp 被撤 →
+          额度空出 → gstp 补位。「AI 主力、程序兜底」自洽。
+        · 张数上限 = 空头持仓 − 在盘覆盖，绝不超配。
+        """
+        out: dict[str, Any] = {"symbol": symbol, "short_tp": "off",
+                               "candidates": [], "placed": [], "errors": [],
+                               "skipped": []}
+        if not self.manage_positions:
+            out["skipped"] = "manage_positions_off"
+            return out
+        ar = self.account_risk or {}
+        mode = ar.get("grid_tp_auto", "off")
+        if not mode or str(mode).lower() in ("off", "false", "none"):
+            return out
+        dry = str(mode).lower() == "dry"
+        out["short_tp"] = "dry" if dry else "live"
+        if not self.bot_id:
+            out["skipped"] = "no_bot_id"
+            return out
+        path = (Path(self.root) / "data" / "bots" / self.bot_id
+                / "state" / "ladder_levels.json")
+        if not path.exists():
+            out["skipped"] = "no_ladder_table"
+            return out
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            out["skipped"] = "ladder_table_corrupt"
+            return out
+        levels_all = [lv for lv in (data.get("levels") or [])
+                      if isinstance(lv, dict) and lv.get("symbol") == symbol
+                      and str(lv.get("side") or "") == "short"]
+        if not levels_all:
+            out["skipped"] = "no_short_levels"
+            return out
+        raw_pos, perr = self._positions_or_error()
+        if raw_pos is None:
+            out["skipped"] = "positions_unavailable"
+            out["error"] = f"持仓查询失败: {perr}"
+            return out
+        positions = _parse_symbol_positions(raw_pos, symbol, meta=self._safe_meta(symbol))
+        pos_short = 0
+        for p in positions or []:
+            n = _num(p.get("size"))
+            if n < 0:
+                pos_short += -n
+        out["position_short"] = pos_short
+        out["position_long"] = sum(_num(p.get("size")) for p in positions or []
+                                   if _num(p.get("size")) > 0)
+
+        # 在盘止盈买单集合（-gstp 程序兜底 + -tp AI 的 TP）—— 都占覆盖额度
+        open_gstp_ids: set = set()
+        existing: set = set()
+        covered_size = 0
+        try:
+            for o in (self._owned_open_orders(symbol, self._own_prefix("")) or []):
+                txt = str(o.get("text") or "")
+                if not (txt.endswith("-gstp") or txt.endswith("-tp")):
+                    continue
+                oid = str(self._order_id(o) or "")
+                if oid:
+                    open_gstp_ids.add(oid)
+                existing.add(self._price_key(o.get("price")))
+                covered_size += abs(_num(o.get("size")))
+        except Exception as e:  # noqa: BLE001
+            swallow("executor.ensure_short_tp.gstp_orders", e, level=logging.DEBUG)
+            out["skipped"] = "orders_unavailable"
+            return out
+
+        # ⛔ 硬闸：无空头持仓 → 撤孤儿 gstp（无仓买单成交 = 开多）
+        if pos_short <= 0:
+            cancelled = []
+            if not dry:
+                for oid in list(open_gstp_ids):
+                    try:
+                        self.client.cancel_order(oid)
+                        cancelled.append(oid)
+                    except Exception as e:  # noqa: BLE001
+                        swallow("executor.ensure_short_tp.cancel_orphan", e,
+                                level=logging.DEBUG)
+            out["skipped"] = [{"why": "no_short_position(买单=开多，禁止无仓预挂)",
+                               "cancelled_gstp": len(cancelled)}]
+            return out
+
+        mark = _to_float((self.client.get_ticker(symbol) or {}).get("mark_price"))
+        if mark <= 0:
+            out["skipped"] = "mark_unavailable"
+            return out
+        out["mark"] = mark
+        out["covered"] = covered_size
+
+        # 台账维护：protected 档的 gstp 单死活（gone → pending 重挂）
+        state_fixes: list = []
+        for lv in levels_all:
+            if str(lv.get("status")) != "protected":
+                continue
+            tid = str(lv.get("tp_order_id") or "")
+            if tid and tid in open_gstp_ids:
+                continue
+            if not tid:
+                lv["status"] = "pending"
+                lv.pop("tp_order_id", None)
+                state_fixes.append({"price": lv.get("price"), "to": "pending",
+                                    "why": "no_tp_order_id"})
+                continue
+            try:
+                o = self.client.get_order(tid) or {}
+            except Exception as e:  # noqa: BLE001
+                if _is_order_gone(e):
+                    lv["status"] = "pending"
+                    lv.pop("tp_order_id", None)
+                    state_fixes.append({"price": lv.get("price"), "to": "pending",
+                                        "why": "gstp_order_gone"})
+                continue                      # 真·抖动 → 不动（fail-closed）
+            if str(o.get("finish_as") or "") == "filled":
+                lv["status"] = "closed"
+                state_fixes.append({"price": lv.get("price"), "to": "closed"})
+            elif str(o.get("status") or "") == "open":
+                continue
+            else:
+                lv["status"] = "pending"
+                lv.pop("tp_order_id", None)
+                state_fixes.append({"price": lv.get("price"), "to": "pending",
+                                    "why": f"gstp_{str(o.get('finish_as') or o.get('status') or 'gone')}"})
+        out["state_fixes"] = state_fixes
+
+        # 候选：pending 空侧档中「tp_target < mark」的全部档
+        candidates, skipped = [], []
+        _gstp_step = safe_step(self.client.get_contract(symbol))
+        for lv in levels_all:
+            if str(lv.get("status")) not in ("pending", "filled"):
+                continue
+            tgt = lv.get("tp_target")
+            if not tgt:
+                skipped.append({"price": lv.get("price"), "why": "no_tp_target(交回AI)"})
+                continue
+            tf = _to_float(tgt)
+            if tf <= 0:
+                skipped.append({"price": lv.get("price"), "why": "bad_target"})
+                continue
+            if tf >= mark:
+                skipped.append({"price": lv.get("price"),
+                                "why": f"above_mark({mark})——买单会立即成交"})
+                continue
+            if self._price_key(tgt) in existing:
+                skipped.append({"price": lv.get("price"), "why": "tp_already_present"})
+                continue
+            remaining = pos_short - covered_size
+            size = min(qty(lv.get("size")) or _gstp_step, max(remaining, 0))
+            if size <= 0:
+                skipped.append({"price": lv.get("price"),
+                                "why": f"short_fully_covered({pos_short})"})
+                continue
+            covered_size += size
+            candidates.append({"level": lv, "target": tf, "size": size})
+
+        out["candidates"] = [{"price": c["level"].get("price"), "tp": c["target"],
+                              "size": c["size"]} for c in candidates]
+        out["skipped"] = skipped
+        if not candidates:
+            if state_fixes and not dry:
+                self._persist_ladder(path, data)
+            return out
+        if dry:
+            return out
+
+        meta = self.client.get_contract(symbol)
+        placed, errors = [], []
+        for c in candidates:
+            lv, tgt, size = c["level"], c["target"], c["size"]
+            try:
+                order = self.client.place_order({
+                    "contract": symbol, "size": size,       # 正数 = 买平
+                    "price": str(round_price(tgt, meta)),
+                    "tif": "gtc",
+                    "reduce_only": True,
+                    "text": f"t-{self._bot_tag(self.label_prefix or 'auto')}-gstp",
+                })
+            except Exception as e:  # noqa: BLE001 — boundary
+                errors.append({"price": lv.get("price"), "tp": tgt,
+                               "error": str(e)[:200]})
+                continue
+            placed.append({"price": lv.get("price"), "tp": tgt, "size": size,
+                           "order_type": "limit", "reduce_only": True,
+                           "id": str((order or {}).get("id") or "")})
+            lv["tp_order_id"] = str((order or {}).get("id") or "")
+            lv["status"] = "protected"
+        if placed or state_fixes:
+            self._persist_ladder(path, data)
+        out["placed"] = placed
+        out["errors"] = errors
+        return out
+
     @staticmethod
     def _price_key(v: Any) -> str:
         """触发价归一化键（去空白/去尾零）—— 刻意不做 float()，避免为解析新增裸吞异常。"""

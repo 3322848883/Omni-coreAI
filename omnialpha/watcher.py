@@ -973,6 +973,18 @@ def _grid_tp_sweep(bot: BotConfig, paths: ProjectPaths, *,
         except Exception as e:  # noqa: BLE001 — 单个 symbol 失败不拖垮整轮扫描
             log.warning("grid tp %s %s raised: %s", bot.bot_id, sym, e)
             continue
+        # 空侧兜底（2026-11-03 事故修复）：ensure_grid_tp 只管多侧，空侧持仓的
+        # TP 原来只有 AI modify_tp_sl 一条路——AI 发 hold 的轮次空仓裸奔无止盈。
+        # `ensure_short_tp` 是它的镜像（买单 reduce_only、-gstp 后缀、covered
+        # 计入 AI 的 -tp 单避免双份覆盖）。
+        try:
+            sout = executor.ensure_short_tp(sym)
+        except Exception as e:  # noqa: BLE001
+            log.warning("short tp %s %s raised: %s", bot.bot_id, sym, e)
+            sout = {}
+        s_placed = sout.get("placed") or []
+        if sout.get("errors"):
+            log.warning("short tp %s %s errors: %s", bot.bot_id, sym, sout["errors"])
         placed = out.get("placed") or []
         if out.get("grid_tp") == "dry":
             if out.get("candidates"):

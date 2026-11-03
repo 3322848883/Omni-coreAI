@@ -268,3 +268,161 @@ class TestDirectionFilter(Base):
                         f"多侧不得吸附 mark 上方的池位：{snaps}")
         for p, _ in want:
             self.assertLess(p, MARK, f"多侧档位 {p} 不得高于现价")
+
+
+class TestBaseUnitLabel(Base):
+    """底仓 unit 标签（2026-11-03 核实抓到的 bug）。
+
+    `mode: grid`（默认）分支追加底仓层时没记 `_bp_added` → 底仓层张数=1
+    （=grid_lots）被 unit 分类吞成 grid，TP 也按 grid 一格算而非独立 tp_pct。
+    """
+
+    def test_base_layers_labeled_base(self):
+        ex, cfg = self._ex({}, mtf_martin=None)
+        tpl = ex.ladder_template
+        tpl["base_position"] = {"enabled": True, "levels": 3, "lots": 1,
+                                "step_pct": 1.5, "start_pct": 12.0,
+                                "mode": "grid", "tp_pct": 3.0}
+        want, note = self._targets(ex, cfg)
+        # 重算 unit（与 _complete_ladder 同规则：末尾 _bp_added 个 = base）
+        grid_lots = 1.0
+        n_base = 3
+        units = []
+        for i, (p, l) in enumerate(want):
+            if i >= len(want) - n_base:
+                units.append("base")
+            elif abs(float(l) - grid_lots) > 1e-9:
+                units.append("martin")
+            else:
+                units.append("grid")
+        self.assertEqual(units.count("base"), 3,
+                         f"末尾 3 层应是 base：{list(zip(want, units))}")
+        # 底仓层在最深端（多侧价格最低）
+        base_px = [p for (p, _), u in zip(want, units) if u == "base"]
+        other_px = [p for (p, _), u in zip(want, units) if u != "base"]
+        self.assertLess(max(base_px), min(other_px),
+                        f"底仓层必须接在网格之外：base={base_px} 其他={other_px[:3]}")
+
+
+class TestShortTpFallback(unittest.TestCase):
+    """空侧持仓 TP 兜底（2026-11-03 事故修复）。
+
+    事故：空侧持仓的 TP 只有 AI modify_tp_sl 一条路，AI 发 hold 的轮次
+    整轮没有 modify_tp_sl → 空仓 TP 被撤后无人补挂 → 实盘 -3 张空单裸奔。
+    `ensure_short_tp` = ensure_grid_tp 的镜像（买单 reduce_only、-gstp）。
+    """
+
+    def _ex(self, levels, positions, orders, mark=2299.0):
+        class M:
+            quanto_multiplier = 0.01
+            size_min = 0.1
+            size_step = 0.1
+            order_price_round = 0.05
+
+        class C:
+            def __init__(self):
+                self.orders = list(orders)
+
+            def get_ticker(self, sym):
+                return {"last": mark, "mark_price": mark}
+
+            def get_contract(self, sym):
+                return M()
+
+            def get_positions(self):
+                return positions
+
+            def list_orders(self, sym=None):
+                return self.orders
+
+            def place_order(self, body):
+                self.orders.append(dict(body, id=f"n{len(self.orders)}",
+                                        status="open"))
+                return {"id": f"n{len(self.orders)}"}
+
+            def cancel_order(self, oid):
+                self.orders = [o for o in self.orders
+                               if str(o.get("id")) != str(oid)]
+                return {}
+
+            def get_order(self, oid):
+                for o in self.orders:
+                    if str(o.get("id")) == str(oid):
+                        return o
+                from omnialpha.gate_client import GateApiError
+                raise GateApiError("404 gone", status=404)
+
+        ex = Executor(C(), symbols_whitelist=["ETH_USDT"], bot_id="stp")
+        ex.account_risk = {"grid_tp_auto": "live"}
+        ex.label_prefix = "mtgbil"
+        import tempfile
+        from pathlib import Path
+        tmp = Path(tempfile.mkdtemp())
+        st = tmp / "data" / "bots" / "stp" / "state"
+        st.mkdir(parents=True)
+        (st / "ladder_levels.json").write_text(json.dumps(
+            {"levels": levels}, ensure_ascii=False), encoding="utf-8")
+        # Executor 的 root 指向 tmp（档位表路径 = root/data/bots/<id>/state/...）
+        ex.root = tmp
+        return ex
+
+    def test_places_reduce_only_buy_for_short(self):
+        """空仓 3 张 + 空侧档有 tp_target → 挂 reduce_only 买平单。"""
+        levels = [
+            {"symbol": "ETH_USDT", "side": "short", "price": 2293.6,
+             "size": 3, "unit": "martin", "status": "pending",
+             "tp_target": 2253.6},
+            {"symbol": "ETH_USDT", "side": "short", "price": 2355.05,
+             "size": 4, "unit": "martin", "status": "pending",
+             "tp_target": 2300.0},
+        ]
+        pos = [{"contract": "ETH_USDT", "size": "-3", "side": "short"}]
+        ex = self._ex(levels, pos, orders=[])
+        out = ex.ensure_short_tp("ETH_USDT")
+        self.assertEqual(len(out["placed"]), 1,
+                         f"只该挂 target<mark 的档：{out}")
+        p = out["placed"][0]
+        self.assertEqual(p["tp"], 2253.6)
+        self.assertEqual(p["size"], 3)
+        # 第二档 target 2300 >= mark 2299 → 必须跳过（买单会立即成交）
+        self.assertTrue(any("above_mark" in str(s.get("why"))
+                            for s in out["skipped"]),
+                        f"target>=mark 档要跳过：{out['skipped']}")
+        # 台账写回 protected
+        data = json.loads((ex.root / "data" / "bots" / "stp" / "state"
+                           / "ladder_levels.json").read_text(encoding="utf-8"))
+        lv0 = data["levels"][0]
+        self.assertEqual(lv0["status"], "protected")
+        self.assertTrue(lv0.get("tp_order_id"))
+
+    def test_no_short_position_cancels_orphans(self):
+        """无空头持仓 → 撤孤儿 gstp（买单无仓成交=开多）。"""
+        levels = [{"symbol": "ETH_USDT", "side": "short", "price": 2293.6,
+                   "size": 3, "status": "protected", "tp_target": 2253.6,
+                   "tp_order_id": "old1"}]
+        orphan = {"id": "old1", "price": "2253.6", "size": "3",
+                  "text": "t-mtgbil-gstp", "status": "open"}
+        pos = [{"contract": "ETH_USDT", "size": "0"}]
+        ex = self._ex(levels, pos, orders=[orphan])
+        out = ex.ensure_short_tp("ETH_USDT")
+        self.assertTrue(any("no_short_position" in str(s.get("why"))
+                            for s in out["skipped"]))
+        self.assertEqual(len(ex.root and [1]), 1)
+        # 孤儿单已被撤（client.orders 空）
+        self.assertEqual(ex._client.orders if hasattr(ex, "_client") else [], [])
+
+    def test_ai_tp_counts_toward_coverage(self):
+        """AI 的 -tp 单计入覆盖 → gstp 不双份挂。"""
+        levels = [{"symbol": "ETH_USDT", "side": "short", "price": 2293.6,
+                   "size": 3, "status": "pending", "tp_target": 2253.6}]
+        pos = [{"contract": "ETH_USDT", "size": "-3", "side": "short"}]
+        ai_tp = {"id": "ai1", "price": "2255.0", "size": "3",
+                 "text": "t-mtgbil-tp", "status": "open",
+                 "reduce_only": True}
+        ex = self._ex(levels, pos, orders=[ai_tp])
+        out = ex.ensure_short_tp("ETH_USTP" if False else "ETH_USDT")
+        self.assertEqual(len(out["placed"]), 0,
+                         f"AI TP 已覆盖 3/3 → gstp 不该挂：{out}")
+        self.assertTrue(any("short_fully_covered" in str(s.get("why"))
+                            for s in out["skipped"]),
+                        f"应有 fully_covered 留痕：{out['skipped']}")
