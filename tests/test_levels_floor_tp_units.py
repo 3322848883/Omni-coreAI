@@ -135,16 +135,18 @@ class Base(unittest.TestCase):
                                "martin_pct": 0, "base_pct": 3.0}
         return t
 
-    def run_round(self, ai_levels, floor=None, tp=True, side="long"):
-        c = Client()
+    def run_round(self, ai_levels, floor=None, tp=True, side="long",
+                  client=None, levels=None):
+        c = client or Client()
         ex = Executor(c, symbols_whitelist=["ETH_USDT"],
                       root=self.tmp, bot_id="tpg")
         ex.ladder_template = self.tpl(floor=floor, tp=tp, include_short=(side == "short"))
         ex._round_meta = {
             "two_way": {side: {"weight": 0.6, "levels": ai_levels,
                                "step_pct": 0.5, "lots": 1}},
-            "structure_levels": _levels_below() if side == "long"
-            else [round(MARK * (1 + 0.3 / 100 + i * 0.004), 2) for i in range(20)],
+            "structure_levels": levels if levels is not None else (
+                _levels_below() if side == "long"
+                else [round(MARK * (1 + 0.3 / 100 + i * 0.004), 2) for i in range(20)]),
             "ladder_step_pct": 0.5,
         }
         rep = Report()
@@ -323,3 +325,28 @@ class TestChipMetaPromoted(unittest.TestCase):
         plan = self._plan(root_meta={"structure_levels": []},
                           chip_meta={"structure_levels": [2100.0]})
         self.assertEqual(self._payload(plan).get("structure_levels"), [2100.0])
+
+
+class TestLedgerMatchesExchange(Base):
+    """台账价格必须与**交易所挂单**一致（2026-11-04 部署实测抓到的错位）。
+
+    病根：`_sync_template_levels` 原来在**档位缓存决议之前**调用，写进台账的是
+    本轮**重算**的 want；而锚点固定时实际下单沿用的是**缓存**档位 → 台账价格
+    与交易所挂单对不上 → `bind_by_price` 一条单号都绑不上（实测 bi-live 多头
+    12 档 oid 全空：台账 2266/2249/2225 vs 交易所 2236/2205/2188）。
+    """
+
+    def test_ledger_prices_equal_placed_after_cache_reuse(self):
+        c = Client()
+        self.run_round(ai_levels=10, floor=10, client=c)
+        # 第二轮：结构位整体换一批（重算 want 一定会变），锚点没动 → 走缓存
+        lv2 = [round(MARK * (1 - (0.8 + i * 0.5) / 100.0), 2) for i in range(20)]
+        rows, _, _ = self.run_round(ai_levels=10, floor=10, client=c, levels=lv2)
+        led = sorted(float(x["price"]) for x in self.table()
+                     if x.get("status") in ("pending", "protected", "filled"))
+        book = sorted(float(p) for p, _ in rows)
+        self.assertEqual(len(led), len(book), f"档数应一致：{led} vs {book}")
+        # 台账存的是模板原价、交易所存的是按 tick 取整后的价（差 ≤ 半个 tick）
+        for a, b in zip(led, book):
+            self.assertLessEqual(abs(a - b), 0.1,
+                                 f"台账与挂单错位：{a} vs {b}（缓存复用后）")

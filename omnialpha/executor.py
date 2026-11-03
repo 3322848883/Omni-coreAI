@@ -3601,16 +3601,6 @@ class Executor:
             {"px": round(float(px), 2), "lots": float(l), "unit": u}
             for (px, l), u in zip(want, _units)
         ]
-        # 逐档止盈的**唯一输入**（2026-11-02）：模板铺出的档必须进 bot 级档位表，
-        # 否则 `ensure_grid_tp` 永远 `no_ladder_table`。AI 全 hold 时这是唯一通路。
-        if (tpl.get("tp_by_unit") or {}).get("enabled"):
-            try:
-                _synced = self._sync_template_levels(
-                    sym, side, want, _units, tpl, step_pct)
-                if _synced:
-                    dyn_note["tp_units"] = _synced
-            except Exception as _e:  # noqa: BLE001
-                dyn_note["tp_units"] = {"error": str(_e)[:120]}
         if not want:
             return
         # 每腿独立止损（默认关闭；`leg_sl.enabled: true` 才挂）
@@ -3918,6 +3908,21 @@ class Executor:
                     dyn_note["ledger_bind_kept"] = _kb
             except Exception as _e:  # noqa: BLE001 — 台账回写失败不拦铺梯
                 dyn_note["ledger_bind_kept"] = {"error": str(_e)[:80]}
+
+        # 逐档止盈的**唯一输入**（2026-11-02）：模板铺出的档必须进 bot 级档位表，
+        # 否则 `ensure_grid_tp` 永远 `no_ladder_table`；AI 全 hold 时这是唯一通路。
+        # 🔴 必须放在**档位缓存决议之后**（2026-11-04 部署实测）：锚点固定时
+        # 下面会把 `want` 换成本轮**实际沿用的缓存档位**，若在这里提前用重算的
+        # `want` 写台账，台账价格就与交易所挂单对不上 —— 实测 bi-live 多头 12 档
+        # 一条单号都绑不上（台账 2266/2249/2225 vs 交易所 2236/2205/2188）。
+        if self._ladder_ledger_on(tpl):
+            try:
+                _synced = self._sync_template_levels(
+                    sym, side, want, _units, tpl, step_pct)
+                if _synced:
+                    dyn_note["tp_units"] = _synced
+            except Exception as _e:  # noqa: BLE001
+                dyn_note["tp_units"] = {"error": str(_e)[:120]}
 
         # ── 层数预算（2026-11-04 用户口径）：**已成交档占额度** ──────────────
         # 成交 k 档 → 本轮只剩 10−k 档可挂，且新档从**下一层**开始（按最新价格铺），
