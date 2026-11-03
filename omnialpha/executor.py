@@ -5619,6 +5619,12 @@ class Executor:
                 label="t-" + self._bot_tag("") + "-" + str(unit), tol=tol)
             if r.get("added"):
                 added += 1
+        # ②' 再回填一次：上面新建的档也要**本轮立刻**绑上（否则要等下一轮才能
+        # 判成交 —— 实测部署后第一轮多头 10 档 oid 全空，就是因为回填发生在
+        # upsert 之前，行还不存在）。
+        b2 = ledger.bind_by_price(data, sym, side, rows, tol)
+        if b2.get("bound"):
+            note["bound_after_upsert"] = b2["bound"]
         ledger.write(path, data)
         bud = ledger.budget(data, sym, side, _tot)
         return {"synced": added, "total": len(ledger.entries(data, sym, side)),

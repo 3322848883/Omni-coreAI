@@ -406,3 +406,22 @@ class TestSeedFromPosition(Base):
         self.assertLessEqual(len(self.levels()), n1 + 10)
         data = ledger.read(self.path())
         self.assertTrue(ledger.is_seeded(data, "ETH_USDT", "long"))
+
+
+class TestBindSameRound(Base):
+    """新建的档必须**本轮**绑上单号（不必等下一轮）。
+
+    部署实测：同步顺序是 回填 → 对账 → 删幽灵 → 新增，回填发生在新增之前，
+    于是首轮新建的 10 档 oid 全空、要等下一个 15 分钟周期才绑上 —— 期间成交
+    判不出来、TP 无来源。修法：新增之后再回填一次。
+    """
+
+    def test_new_rows_bound_in_same_sync(self):
+        w = self.want()
+        for px, lots in w:                     # 交易所已有一整套同价挂单
+            self.client.place_order({"contract": "ETH_USDT", "price": str(px),
+                                     "size": lots, "text": "t-led"})
+        self.sync(w)                           # 台账为空 + 挂单已在盘 → 新建即绑
+        rows = [lv for lv in self.levels() if lv.get("side") == "long"]
+        self.assertEqual(sum(1 for x in rows if x.get("order_id")), len(rows),
+                         f"新建档必须本轮绑上单号：{[(x['price'], x.get('order_id')) for x in rows]}")
