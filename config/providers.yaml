@@ -53,7 +53,43 @@ providers:
     # 第二道是**真·跨供应商**（DeepSeek 官方 API）：网关整体故障时还能活。
     # 它用自己的 DEEPSEEK_API_KEY，与网关的 OPENAI_API_KEY 分开 —— 共用会在
     # 官方 API 上认证失败，还会掩盖「网关挂了备用也没接住」。
-    fallback: [gw-cn-flash, deepseek-official]
+    # 备用链现状（2026-11-03）：
+    # - deepseek-official：402 余额耗尽（11-02），充值后需手动回链
+    # - loveccvv：11-02 扛了 79 次后 403 insufficient balance（余额也耗尽），
+    #   充值后回链
+    # - cgdoem：11-03 接入，deepseek-v4.1-flash（1M ctx + vision + tool_calls +
+    #   reasoning），omnialpha 解析链实测 200
+    # ⚠️ MAX_FALLBACKS=3 会截断递归链：bot 级 fallback: [gw-flash, deepseek-official]
+    # 展开到第 3 条腿就把后面的挤掉 —— 11-03 cgdoem 因此进不了 martin-grid 的链。
+    # 所有 bot 级 fallback 已统一改为 [gw-flash, cgdoem]。
+    fallback: [gw-cn-flash, cgdoem, loveccvv]
+
+  loveccvv:
+    label: loveccvv 中转（deepseek-v4.1-flash / v4-pro，备用 #3）
+    base_url: https://api.loveccvv.shop/v1
+    # 独立变量铁律（同 deepseek-official）：不设独立 env 会被 OPENAI_API_KEY /
+    # OPENAI_BASE_URL 劫持到自建网关 → 拿 loveccvv 的 key 敲网关 → 401。
+    api_key_env: LOVECCVV_API_KEY
+    base_url_env: LOVECCVV_BASE_URL
+    model: deepseek-v4.1-flash
+    thinking: true
+    reasoning_effort: high
+    timeout_sec: 240
+    max_tokens: 8192
+    json_mode: true
+
+  cgdoem:
+    label: cgdoem 中转（deepseek-v4.1-flash，1M ctx + vision + tool_calls，备用 #4）
+    base_url: https://token.cgdoem.cn/v1
+    # 独立变量铁律同上：防被 OPENAI_* 劫持回自建网关 → 401。
+    api_key_env: CGDOEM_API_KEY
+    base_url_env: CGDOEM_BASE_URL
+    model: deepseek-v4.1-flash
+    thinking: true
+    reasoning_effort: high
+    timeout_sec: 240
+    max_tokens: 8192
+    json_mode: true
 
   gw-cn-flash:
     label: 自建网关 deepseek-v4-flash（cn 池）
