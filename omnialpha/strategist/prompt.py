@@ -28,6 +28,37 @@ _SYSTEM_HEAD = (
     # research/trading-system-design-upgrade/VERGEX-COMPARISON.md 的 P1）。
     # **实测动因**：规则 14 让 AI 去撤孤儿保护单，而 AI 因「position_open
     # 说明 protections 属于持仓」而不敢撤 —— 卡了 6 小时。归属说清了就不会重演。
+    # ── 执行契约（系统层，2026-11-04）──────────────────────────────────
+    # 用户口径：「执行契约在系统（通用下单指令怎么下，确保正确执行每一份方案，
+    # 交易所一共就那么多个指令）；策略模板在人格（下什么单、下多少、什么方式）。
+    # 这部分要区分在系统提示词与策略人格提示词。」
+    # 为什么要这一段：人格换一版就可能引入一个新意图（突破/冰山/分批/双向），
+    # 而**交易所可下的指令是固定的**。把原语和硬约束写死在系统层，任何人格的
+    # 计划都能落到某个合法原语上；写不出原语的意图必须在**计划阶段**自我否决，
+    # 而不是等引擎拒单、白烧一轮。
+    "\n【执行契约 · 交易所订单原语】（系统层，所有人格共用；人格只决定"
+    "「下什么 / 多少 / 什么价 / 什么条件」）\n"
+    "交易所只有下面 6 类可下指令，任何策略意图都必须落到其中之一：\n"
+    "① 市价单 market —— type=market（price 必须 null）。立即成交，滑点由交易所决定。\n"
+    "② 限价单 limit —— type=limit + price。挂单等待；post_only=只做 maker（会立即成交则被拒）。\n"
+    "③ 突破进场 stop_entry_long|stop_entry_short —— 条件单，必须带 trigger_price"
+    "（价格穿越才进）；缺 trigger_price 整条被拒。\n"
+    "④ 保护单（条件触发）—— action=modify_tp_sl，或开仓 chip 直接带 tp/sl；"
+    "默认 tp_mode/sl_mode=trigger。方向约束：多头 tp>mark 且 sl<mark、空头反之"
+    "（写反了交易所直接拒：AUTO_TRIGGER_PRICE_*）。\n"
+    "⑤ 盘口 reduce_only 平仓 —— tp_mode/sl_mode=limit_order。只能减仓、永不反手。\n"
+    "⑥ 撤单 / 平仓 / 减仓 —— cancel_all / cancel_price_all / close / close_all / "
+    "flatten / reduce_long / reduce_short。\n"
+    "**字段硬约束（缺一个整条被拒，不会被自动修正）**：\n"
+    "· 量：四种口径选一且不可冲突（size_usd | size_coins | margin_usd+leverage | size 张数）；"
+    "张数必须是 size_step 的整数倍（不足会被 floor，可能 floor 成 0 张 → 整条被拒）。\n"
+    "· 价：必须落在 tick（order_price_round）上；多头挂单 price<mark、空头挂单 price>mark，"
+    "否则会立即成交（等于市价单）或被拒。\n"
+    "· 条件单必带 trigger_price + 方向；市价单不许带 price；limit 必带 price。\n"
+    "· 单笔名义受 `max_notional_usd` 硬闸门约束（引擎按实时权益算，超了整条拒）。\n"
+    "**分工**：你只输出「动作 + 方向 + 量 + 价 + 条件」；**不要描述引擎怎么下单、"
+    "也不要自己拼触发单参数**（那是系统层的事）。写不出合法原语的意图 → 改写成"
+    "能落地的动作，或 hold。\n"
     "规则（每条标注归属）：[代码强制]=引擎会拒绝或改写，不可绕过；"
     "[代码兜底]=引擎会自动处理，你只需知道、不必动手；[AI 判断]=你的职责。\n"
     "1) [代码强制] action 英文枚举; 突破进场用 stop_entry_*+trigger_price，止损止盈用 tp/sl。\n"

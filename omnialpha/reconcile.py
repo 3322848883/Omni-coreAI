@@ -323,3 +323,256 @@ def reconcile_protectors(executor: Any, symbol: str) -> dict:
         "dedup": dedup, "capped": capped, "tp_legs": tp_legs,
     }
 
+
+# ── 保护单张数对齐（2026-11-04）──────────────────────────────────────────
+
+
+def _num_or(v: Any, d: float = 0.0) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return d
+
+
+def _positions_by_side(positions: Any) -> tuple[float, float]:
+    """(多头张数, 空头张数)。单位与挂单 `size` 一致（合约张数）。"""
+    long_, short_ = 0.0, 0.0
+    for p in positions or []:
+        n = _num_or(p.get("size"))
+        if n > 0:
+            long_ += n
+        elif n < 0:
+            short_ += -n
+    return long_, short_
+
+
+def _pending_by_side(executor: Any, symbol: str) -> tuple[float, float]:
+    """未成交入场单张数（多侧/空侧各一）。保护单要覆盖「未来会成交的档」。
+
+    与 `_pending_entry_size` 同源，但按方向拆开 —— 双向网格两侧各自对账，
+    合并口径会让一侧的保护单按另一侧的挂单算，张数直接错。
+    """
+    long_, short_ = 0.0, 0.0
+    try:
+        rows = executor._owned_open_orders(symbol, executor._own_prefix("")) or []
+    except Exception:  # noqa: BLE001
+        rows = []
+    for o in rows:
+        if o.get("is_reduce_only") or o.get("reduce_only"):
+            continue
+        left = o.get("left")
+        if left is not None and _num_or(left) == 0:
+            continue
+        n = _num_or(o.get("size"))
+        if n > 0:
+            long_ += n
+        elif n < 0:
+            short_ += -n
+    return long_, short_
+
+
+def _created(p: dict) -> float:
+    return _num_or(p.get("create_time"), 0.0)
+
+
+def _exit_orders(executor: Any, symbol: str) -> tuple[list, list]:
+    """本 bot 名下的 (TP 单列表, SL 单列表)；每项 = (类型, 原始行, 张数绝对值)。
+
+    覆盖两种 TP 形态（都是本项目的既有设计）：
+    · 条件单 reduce_only（`-tp`/`-gtp`）：AI `modify_tp_sl` 与 `ensure_*_tp` 的兜底
+    · 普通限价 reduce_only（`-gtp`）：`ensure_grid_tp` 的定稿形态（单向净仓簿）
+    SL 只有条件单一种形态。
+    """
+    tp: list = []
+    sl: list = []
+    prefix = getattr(executor, "label_prefix", "") or ""
+    try:
+        rows = executor.client.list_price_orders(symbol) or []
+    except Exception:  # noqa: BLE001
+        rows = []
+    for p in rows:
+        try:
+            if not executor._order_is_reduce_only(p):
+                continue
+        except Exception:  # noqa: BLE001
+            continue
+        txt = _text(p)
+        if prefix and not executor._text_owned(txt, prefix):
+            continue
+        tail = _tail(p)
+        if tail in ("tp", "lp", "stp", "gtp"):
+            tp.append(("price", p, _protector_size(p)))
+        elif tail in ("sl", "ls"):
+            sl.append(("price", p, _protector_size(p)))
+    try:
+        limits = executor.client.list_orders(symbol) or []
+    except Exception:  # noqa: BLE001
+        limits = []
+    for o in limits:
+        if not (o.get("is_reduce_only") or o.get("reduce_only")):
+            continue
+        if not str(o.get("text") or "").endswith("-gtp"):
+            continue
+        tp.append(("limit", o, abs(_num_or(o.get("size")))))
+    return tp, sl
+
+
+def _replace_price_order(executor: Any, row: dict, new_size: float,
+                         side: str) -> str:
+    """按原触发价重挂一张「缩量后」的条件单。返回 "" = 成功，否则错误串。
+
+    **先挂后撤**（调用方负责撤旧单）：撤了挂不上 = 那一档彻底没保护/没止盈。
+    """
+    init = row.get("initial") or {}
+    trg = row.get("trigger") or {}
+    signed = -abs(new_size) if side == "long" else abs(new_size)
+    body = {
+        "initial": {"contract": init.get("contract"),
+                    "size": signed,
+                    "price": str(init.get("price") or "0"),
+                    "tif": init.get("tif") or "ioc",
+                    "reduce_only": True,
+                    "text": _text(row)},
+        "trigger": {"price": str(trg.get("price")),
+                    "rule": int(_num_or(trg.get("rule"), 0)),
+                    "price_type": int(_num_or(trg.get("price_type"), 1)),
+                    "expiration": int(_num_or(trg.get("expiration"), 86400))},
+    }
+    try:
+        executor.client.place_price_order(body)
+        return ""
+    except Exception as e:  # noqa: BLE001
+        return str(e)[:160]
+
+
+def _replace_limit_order(executor: Any, row: dict, new_size: float,
+                         side: str) -> str:
+    signed = -abs(new_size) if side == "long" else abs(new_size)
+    body = {"contract": row.get("contract"), "size": signed,
+            "price": str(row.get("price")),
+            "tif": row.get("tif") or "gtc",
+            "reduce_only": True,
+            "text": _text(row)}
+    try:
+        executor.client.place_order(body)
+        return ""
+    except Exception as e:  # noqa: BLE001
+        return str(e)[:160]
+
+
+def _trim_group(executor: Any, items: list, target: float, side: str,
+                step: float) -> dict:
+    """把一组同向保护单**总张数**裁到 `target`（只裁超额，绝不裁到目标以下）。
+
+    裁剪顺序：**最旧的在先**（陈旧腿更可能是已经落袋/已平仓的那一批），
+    单条就能覆盖超额时**缩量重挂**而不是整条撤掉 —— 撤掉等于那一档失去保护。
+    """
+    total = sum(s for _, _, s in items)
+    excess = total - target
+    out = {"cancelled": [], "resized": [], "errors": []}
+    if excess <= 1e-9:
+        return out
+    for kind, row, sz in sorted(items, key=lambda x: _created(x[1])):
+        if excess <= 1e-9:
+            break
+        pid = executor._order_id(row)
+        if not pid:
+            continue
+        if sz <= excess + 1e-9:
+            try:
+                executor.client.cancel_price_order(pid)
+                out["cancelled"].append({"id": pid, "size": sz})
+                excess -= sz
+            except Exception as e:  # noqa: BLE001
+                out["errors"].append({"id": pid, "error": str(e)[:120]})
+            continue
+        new_sz = round(sz - excess, 8)
+        if new_sz <= step * 0.5:
+            try:
+                executor.client.cancel_price_order(pid)
+                out["cancelled"].append({"id": pid, "size": sz})
+                excess -= sz
+            except Exception as e:  # noqa: BLE001
+                out["errors"].append({"id": pid, "error": str(e)[:120]})
+            continue
+        err = (_replace_limit_order(executor, row, new_sz, side) if kind == "limit"
+               else _replace_price_order(executor, row, new_sz, side))
+        if err:
+            out["errors"].append({"id": pid, "resize_to": new_sz, "error": err})
+            continue                      # 新单没挂上 → 旧单**保留**（fail-closed）
+        try:
+            executor.client.cancel_price_order(pid)
+        except Exception as e:  # noqa: BLE001 — 新单已在盘，旧单撤失败下轮再收
+            out["errors"].append({"id": pid, "error": f"cancel_old: {str(e)[:80]}"})
+        out["resized"].append({"id": pid, "from": sz, "to": new_sz})
+        excess = 0.0
+    return out
+
+
+def reconcile_exit_sizes(executor: Any, symbol: str) -> dict:
+    """TP/SL 张数对齐**最新持仓**（2026-11-04）。
+
+    ## 病根（2026-11-03 核实）
+
+    TP/SL 的张数取的是**下单位置那一刻**的持仓快照，之后持仓减少（逐档止盈落袋、
+    人工减仓）**不会联动裁剪** → 实测 super-grid：TP 8 张 / SL 8 张 vs 持仓 5 张
+    （超配 3 张）。超配不是「多一层保护」，而是台账与真实敞口脱节 ——
+    reduce_only 的超额部分会被交易所拒/撤，账上「有止盈」实际只覆盖一部分。
+
+    ## 判据
+
+    - **TP 目标 = 该侧持仓**（止盈只平已有仓，多出的一张都没有对应敞口）
+    - **SL 目标 = 该侧持仓 + 该侧待成交入场**（风控要覆盖**未来会成交**的档，
+      所以 SL 允许大于当前持仓，这不算超配）
+    - 只裁**超额**，绝不裁到目标以下（裁错了 = 裸仓）
+    - 逐档 TP（不同触发价）**不合并**：只裁条数/张数余额，不动价格结构
+
+    ## fail-closed
+
+    持仓/挂单取不到 → `ok=False` 且**不动任何单**。
+    """
+    out: dict = {"ok": False, "symbol": symbol, "tp": {}, "sl": {},
+                 "error": "", "skipped": []}
+    truth = account_truth(executor, symbol)
+    if not truth["ok"]:
+        out["error"] = truth["error"]
+        return out
+    pos_long, pos_short = _positions_by_side(truth["positions"])
+    pend_long, pend_short = _pending_by_side(executor, symbol)
+    if pos_long <= 0 and pos_short <= 0:
+        out["ok"] = True
+        out["skipped"].append("no_position")
+        return out
+    try:
+        step = abs(float(getattr(executor.client.get_contract(symbol),
+                                 "size_step", 0) or 0))
+    except Exception:  # noqa: BLE001
+        step = 0.0
+    tp_items, sl_items = _exit_orders(executor, symbol)
+
+    for side, pos, pend in (("long", pos_long, pend_long),
+                            ("short", pos_short, pend_short)):
+        if pos <= 0:
+            continue
+        # 该 side 的保护单：long 持仓 → 卖单（size<0）；short → 买单（size>0）
+        def _mine(rows):
+            return [x for x in rows if _protector_side(x[1]) == side]
+
+        tp_grp = _mine(tp_items)
+        sl_grp = _mine(sl_items)
+        tp_total = sum(s for _, _, s in tp_grp)
+        sl_total = sum(s for _, _, s in sl_grp)
+        tp_target = pos
+        sl_target = pos + pend
+        out["%s_tp" % side] = {"total": tp_total, "target": tp_target,
+                               "legs": len(tp_grp)}
+        out["%s_sl" % side] = {"total": sl_total, "target": sl_target,
+                               "legs": len(sl_grp)}
+        if tp_total > tp_target + max(step, 0.01):
+            out.setdefault("tp", {})[side] = _trim_group(
+                executor, tp_grp, tp_target, side, step)
+        if sl_total > sl_target + max(step, 0.01):
+            out.setdefault("sl", {})[side] = _trim_group(
+                executor, sl_grp, sl_target, side, step)
+    out["ok"] = True
+    return out

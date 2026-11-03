@@ -747,6 +747,31 @@ def _reconcile_sweep(bot: BotConfig, paths: ProjectPaths, *,
                      bot.bot_id, sym, n, res.get("kept"), res.get("tp_legs"),
                      res.get("dedup"), res.get("capped"))
         total += n
+        # ── TP/SL 张数对齐最新持仓（2026-11-04 全局系统层）──────────────
+        # 与去重是两个正交问题：去重管「同价重复腿」，这里管「总张数 > 真实敞口」。
+        # 实测病根：TP/SL 张数取的是下单那一刻的持仓快照，之后持仓减少（逐档止盈
+        # 落袋）不联动 → super-grid 出现 TP 8 / SL 8 vs 持仓 5（超配 3 张）。
+        # 判据：TP 目标 = 该侧持仓；SL 目标 = 该侧持仓 + 待成交入场（风控要覆盖
+        # 未来会成交的档）。只裁超额、绝不裁到目标以下，取数失败一律不动。
+        try:
+            from .reconcile import reconcile_exit_sizes
+            szr = reconcile_exit_sizes(executor, sym)
+            if not szr.get("ok"):
+                log.warning("exit size %s %s: 取数失败，本轮不动（%s）",
+                            bot.bot_id, sym, szr.get("error"))
+            elif szr.get("tp") or szr.get("sl"):
+                log.info("exit size %s %s: 超额保护单已对齐持仓 %s",
+                         bot.bot_id, sym,
+                         {k: v for k, v in szr.items()
+                          if k in ("long_tp", "long_sl", "short_tp", "short_sl",
+                                   "tp", "sl")})
+                _log_program_action(
+                    paths, bot, source="watcher:reconcile", action="resize_exits",
+                    symbol=sym, detail={"tp": szr.get("tp"), "sl": szr.get("sl"),
+                                        "long": szr.get("long_tp"),
+                                        "short": szr.get("short_tp")})
+        except Exception as e:  # noqa: BLE001 — 张数对齐失败不拖垮整轮扫描
+            log.warning("exit size %s %s failed: %s", bot.bot_id, sym, e)
     return total
 
 

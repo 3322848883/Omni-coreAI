@@ -260,7 +260,10 @@ class TestTpByUnit(Base):
         closed = [x for x in lv if x.get("status") == "closed"]
         pending = [x for x in lv if x.get("status") == "pending"]
         self.assertEqual(len(closed), 1, "已闭合档不能被覆盖掉（历史要留）")
-        self.assertEqual(len(pending), 10, "新一轮的 10 条 pending 档")
+        # 2026-11-04 用户口径变更：**已闭合/已成交档占层数额度**。
+        # 旧语义是「每轮重建 10 条 pending」——于是永远有 10 层未成交、价格来回
+        # 就无限重入。新语义：这一代梯子总共 10 层，闭合 1 档 → 只剩 9 档可挂。
+        self.assertEqual(len(pending), 9, "已闭合档占额度：10 层 → 剩 9 档")
 
 
 if __name__ == "__main__":

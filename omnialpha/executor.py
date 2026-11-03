@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .gate_client import GateApiError, GateClient, position_qty, resolve_symbol
+from . import ladder_ledger as ledger
 from .strategist.indicators import attach_indicators
 from .strategist.smc_map import BULL, BEAR
 from .observability import swallow
@@ -3878,6 +3879,7 @@ class Executor:
         pairs.sort()
         keep_ids: set = set()
         used_t: set = set()
+        kept_bind: list = []          # 本轮「认领的旧单」→ 回写台账 order_id
         for d, oid, px, t, sz_o, lots in pairs:
             if oid in keep_ids or t in used_t:
                 continue
@@ -3888,6 +3890,7 @@ class Executor:
                 continue                      # 张数不符 → 交给撤单+重挂
             keep_ids.add(oid)
             used_t.add(t)
+            kept_bind.append({"price": t, "id": oid})
         for o in owned:
             try:
                 px = float(o.get("price") or 0)
@@ -3906,6 +3909,31 @@ class Executor:
             report.results.append(StepResult(
                 "ladder_template", sym, True,
                 detail={"pruned_off_template": removed, "anchor": mark}))
+        # 认领的旧单也要回写 order_id：它们是台账里「已在盘」的档，单号缺失会让
+        # 下一轮无法判成交（历史病根：台账 order_id 恒空）。
+        if kept_bind:
+            try:
+                _kb = self._ladder_bind_placed(sym, side, [], kept=kept_bind)
+                if _kb:
+                    dyn_note["ledger_bind_kept"] = _kb
+            except Exception as _e:  # noqa: BLE001 — 台账回写失败不拦铺梯
+                dyn_note["ledger_bind_kept"] = {"error": str(_e)[:80]}
+
+        # ── 层数预算（2026-11-04 用户口径）：**已成交档占额度** ──────────────
+        # 成交 k 档 → 本轮只剩 10−k 档可挂，且新档从**下一层**开始（按最新价格铺），
+        # 绝不「成交一档就原地补一档」把未成交层数补满 —— 否则永远有 10 层未成交，
+        # 价格来回震荡就变成无限重入。详见 `_apply_ladder_budget`。
+        _want_place, _units_place, _budget_note = self._apply_ladder_budget(
+            sym, side, want, _units, tpl)
+        if _budget_note:
+            dyn_note["ladder_budget"] = _budget_note
+        if want and not _want_place:
+            report.results.append(StepResult(
+                "ladder_template", sym, True,
+                detail={"skipped": "ladder_budget_exhausted", "side": side,
+                        "budget": _budget_note, "anchor": anchor, "mark": mark}))
+            return
+        want, _units = _want_place, _units_place
 
         # 已存在的入场档（价格, 张数绝对值）
         try:
@@ -3990,6 +4018,15 @@ class Executor:
                     "ladder_template", sym, False,
                     detail={"price": price, "size": lots},
                     error=f"补档失败: {str(e)[:120]}"))
+        # **单号回写**（2026-11-04）：没有 order_id 的台账等于「无法对账的账本」——
+        # 成交判不出来、撤单感知不到、TP 单号每轮清零。这里把本轮新挂的单绑上。
+        if placed:
+            try:
+                _lb = self._ladder_bind_placed(sym, side, placed)
+                if _lb:
+                    dyn_note["ledger_bind"] = _lb
+            except Exception as _e:  # noqa: BLE001 — 台账回写失败不拦铺梯
+                dyn_note["ledger_bind"] = {"error": str(_e)[:80]}
         # ── 同价去重（2026-10-28）：模型与本补档在同一轮抢挂同一价（实测 2247×2）
         # 快照取单发生在本轮下单之前，模型随后挂出的档看不到 → 同价重复。
         # 按 ±0.3% 分桶，每桶只留一条（优先张数更接近模板的），其余撤掉。
@@ -5330,63 +5367,248 @@ class Executor:
             "base": b if b > 0 else (_bp if _bp > 0 else 3.0),
         }
 
+    # ── 阶梯台账（全局系统层，2026-11-04）────────────────────────────────
+    def _ladder_ledger_path(self) -> Optional[Path]:
+        if not self.bot_id:
+            return None
+        return (Path(self.root) / "data" / "bots" / self.bot_id
+                / "state" / "ladder_levels.json")
+
+    def _ladder_ledger_on(self, tpl: dict) -> bool:
+        """台账是否需要维护 —— **引擎级判定，不需要每个 bot 单独配**。
+
+        只要策略用了「档位 → 逐档止盈」这条链（`tp_by_unit.enabled`）或程序兜底
+        止盈（`account_risk.grid_tp_auto`）开着，台账就必须维护；两者都关时
+        完全不动（零额外 REST / 零落盘），存量 bot 行为不变。
+        """
+        try:
+            if (tpl.get("tp_by_unit") or {}).get("enabled"):
+                return True
+        except AttributeError:
+            pass
+        mode = str((self.account_risk or {}).get("grid_tp_auto", "off") or "off")
+        return mode.strip().lower() not in ("", "off", "false", "none", "0")
+
+    def _probe_entry_order(self, order_id: str) -> str:
+        """入场单在交易所的终态：filled / gone / unknown（unknown = 不改，fail-closed）。"""
+        try:
+            o = self.client.get_order(order_id) or {}
+        except Exception as e:  # noqa: BLE001
+            return "gone" if _is_order_gone(e) else "unknown"
+        status = str(o.get("status") or "").lower()
+        finish = str(o.get("finish_as") or "").lower()
+        if finish == "filled":
+            return "filled"
+        if finish:
+            return "gone"
+        if status in ("open", "new", "pending"):
+            return "open"
+        if status == "finished":
+            return "filled"
+        return "unknown"
+
+    def _positions_cached(self, ttl: float = 5.0) -> list[dict]:
+        """5s 内复用持仓快照：一轮里两侧各查一次太浪费，且两侧必须口径一致。"""
+        now = time.time()
+        cache = getattr(self, "_pos_cache", None)
+        if cache and now - cache[0] <= ttl:
+            return cache[1]
+        try:
+            rows = self.client.get_positions() or []
+        except Exception as e:  # noqa: BLE001
+            swallow("executor._positions_cached", e, level=logging.WARNING)
+            return []
+        self._pos_cache = (now, rows)
+        return rows
+
+    def _side_position_qty(self, sym: str, side: str) -> Optional[float]:
+        """该 symbol 该方向的持仓张数（取不到 → None，调用方按 fail-closed 处理）。"""
+        try:
+            rows = self._positions_cached()
+        except Exception:  # noqa: BLE001
+            return None
+        if not rows:
+            return 0.0
+        try:
+            pos = _parse_symbol_positions(rows, sym, meta=self._safe_meta(sym))
+        except Exception:  # noqa: BLE001
+            return None
+        total = 0.0
+        for p in pos or []:
+            n = _num(p.get("size"))
+            if side == "long" and n > 0:
+                total += n
+            elif side == "short" and n < 0:
+                total += -n
+        return total
+
+    def _ladder_bind_placed(self, sym: str, side: str, placed: list,
+                            kept: Optional[list] = None) -> dict:
+        """铺单成功后**回写 order_id** —— 台账与交易所对账的唯一入口。
+
+        历史病根：铺单结果只回在 `detail.placed` 里，台账 `order_id` 恒空 →
+        下一轮无法判成交、TP 单 `tp_order_id` 每轮清零。这里把「本轮新挂」与
+        「本轮认领的旧单」都绑上。
+        """
+        path = self._ladder_ledger_path()
+        if not path:
+            return {}
+        data = ledger.read(path)
+        tol = 0.0002
+        bound, missed = 0, []
+        for it in list(placed or []) + list(kept or []):
+            px, oid = it.get("price"), it.get("id")
+            if not oid:
+                continue
+            if ledger.bind_order(data, sym, side, px, str(oid), tol):
+                bound += 1
+            else:
+                missed.append(px)
+        if bound:
+            ledger.write(path, data)
+        return {"bound": bound, "missed": missed}
+
+    def _apply_ladder_budget(self, sym: str, side: str, want: list, units: list,
+                             tpl: dict) -> tuple[list, list, dict]:
+        """层数预算：**已成交档占额度**（用户口径 2026-11-04）。
+
+        「上限 10 层」= 已成交 k 档 + 未成交 10−k 档。成交一档后不再补满 10 条
+        未成交（旧行为：在盘 9 条 < 模板 10 条 → 立刻在同一价补一条 → 永远 10 层
+        未成交、价格来回就无限重入）。新档从**下一层**开始：先剔掉已成交价，
+        再按剩余额度从近到远取 —— 价格回来时也是「往下一层铺」，不是原地补。
+
+        底仓层（`unit == base`）是独立腿，不吃网格/马丁的 10 层额度。
+        """
+        if not want or not units:
+            return want, units, {}
+        if not self._ladder_ledger_on(tpl):
+            return want, units, {}
+        path = self._ladder_ledger_path()
+        data = ledger.read(path)
+        # 上限 =「这一代梯子的总层数」（sync 时定）；没有记录才退回配置值
+        try:
+            total = ledger.get_total(data, sym, side) or int(tpl.get("grid_levels") or 0)
+        except (TypeError, ValueError):
+            total = 0
+        if total <= 0:
+            return want, units, {}
+        tol = 0.0002
+        # 该侧无持仓 → 上一轮梯子的成交档归档，预算回满（新的一轮重新 10 层）
+        pos = self._side_position_qty(sym, side)
+        if pos is not None and pos <= 0:
+            if ledger.archive_flat(data, sym, side):
+                ledger.write(path, data)
+        bud = ledger.budget(data, sym, side, total)
+        # want 是 [(price, lots), ...]，units 是平行标签 → 这里是 [((px,lots), unit)]
+        pairs_in = list(zip(list(want), list(units)))
+        grid_pairs = [x for x in pairs_in if x[1] != "base"]
+        base_pairs = [x for x in pairs_in if x[1] == "base"]
+        fp = bud["filled_prices"]
+        keep = [x for x in grid_pairs
+                if not any(abs(float(x[0][0]) - f) / f <= tol for f in fp)]
+        consumed = len(grid_pairs) - len(keep)
+        trimmed = 0
+        if bud["remaining"] <= 0:
+            trimmed = len(keep)
+            keep = []
+        elif len(keep) > bud["remaining"]:
+            trimmed = len(keep) - bud["remaining"]
+            keep = keep[:bud["remaining"]]
+        note = {"filled": bud["filled"], "budget_total": bud["total"],
+                "remaining": bud["remaining"], "consumed_dropped": consumed,
+                "trimmed": trimmed}
+        pairs = keep + base_pairs
+        return [p for p, _ in pairs], [u for _, u in pairs], note
+
     def _sync_template_levels(self, sym: str, side: str, want: list,
                               units: list, tpl: dict, step_pct: float) -> dict:
-        """模板铺出的档位 → bot 级 `state/ladder_levels.json`（**逐档** tp_target）。
+        """把本轮模板档位**增量**并入阶梯台账（2026-11-04 重写）。
 
-        为什么必须写（2026-11-02 实测）：`ensure_grid_tp` 的唯一输入就是这张表，
-        而以前只有 `_record_ladder_level`（AI 发 `open_*` 腿时）会写。模板独占
-        入场后模型几乎总是 `hold` → 表里 **0 条** → `no_ladder_table` → 一张
-        止盈都不挂。回放里的「逐档 TP」是测试替身，生产端根本没接通。
+        旧实现的三条病根（见 `omnialpha/ladder_ledger.py` 模块头）：
+        ① 每轮把本侧 pending 档**整表删掉重建** → `order_id` 每轮清零，
+           台账与交易所永远对不上，成交档识别不出来；
+        ② 成交档随「旧 pending」一起被删 → 持仓的 `tp_target` 凭空消失，
+           止盈断源（实盘空仓裸奔 8 小时）；
+        ③ 预算只看在盘挂单数 → 永远补满 N 层未成交。
 
-        按 unit 分派止盈距离（用户口径「网格/马丁/底仓各自管理止盈」）：
-        网格吃一格、马丁吃两格、底仓吃 `base_position.tp_pct`。
-        只替换**本 symbol + 本 side 的 pending 档**；filled/closed 保留作历史。
+        新实现是**对账 → 保留 → 增量追加**，绝不整表重建：
+        回填单号 → 交易所对账（成交保留 / 撤销删行）→ 删幽灵档 → 追加本轮新档。
+        追加**按预算封顶**（活档数 ≤ 这一代总层数），否则重锚后的新 want 会堆出
+        「从没挂出去」的幽灵档（实测 20 条单对应 26 行台账）。
         """
         if not self.bot_id or not want:
             return {"skipped": "no_input"}
+        path = self._ladder_ledger_path()
+        if not path:
+            return {"skipped": "no_bot_id"}
+        data = ledger.read(path)
+        tps = self._template_tp_by_unit(tpl, step_pct)
+        tol = 0.0002
+        note: dict = {}
+        # ① 在盘入场单 → 回填缺失的 order_id（历史空表 / 上轮放置失败）
         try:
-            tps = self._template_tp_by_unit(tpl, step_pct)
-            path = (Path(self.root) / "data" / "bots" / self.bot_id
-                    / "state" / "ladder_levels.json")
-            data: dict[str, Any] = {"levels": []}
-            if path.exists():
-                try:
-                    data = json.loads(path.read_text(encoding="utf-8"))
-                except Exception:  # noqa: BLE001 — 损坏则重建
-                    data = {"levels": []}
-            old = [lv for lv in (data.get("levels") or []) if isinstance(lv, dict)]
-            keep = []
-            dropped = 0
-            for lv in old:
-                same = (lv.get("symbol") == sym
-                        and str(lv.get("side") or "long") == side)
-                if same and str(lv.get("status")) == "pending":
-                    dropped += 1
-                    continue
-                keep.append(lv)
-            ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            new = []
-            for (px, lots), unit in zip(want, units):
-                dist = tps.get(unit, tps["grid"])
-                px = float(px)
-                tp = px * (1 + dist / 100.0) if side == "long" \
-                    else px * (1 - dist / 100.0)
-                new.append({
-                    "symbol": sym, "side": side, "unit": unit,
-                    "price": round(px, 4), "size": float(lots),
-                    "tp_target": round(tp, 4), "tp_src": "derived_unit",
-                    "tp_pct": round(dist, 4),
-                    "label": f"t-{self._bot_tag('')}-{unit}",
-                    "order_id": "", "ts": ts, "status": "pending",
-                })
-            data["levels"] = (keep + new)[-400:]
-            self._persist_ladder(path, data)
-            return {"synced": len(new), "replaced": dropped,
-                    "tp_by_unit": {k: round(v, 3) for k, v in tps.items()}}
-        except Exception as e:  # noqa: BLE001 — 档位表是增强，不拦主流程
-            swallow("executor._sync_template_levels", e, level=logging.WARNING)
-            return {"error": str(e)[:120]}
+            rows = self.client.list_orders(sym) or []
+        except Exception as e:  # noqa: BLE001
+            rows = []
+            note["orders_error"] = str(e)[:80]
+        open_ids = {str(o.get("id")) for o in rows if o.get("id")}
+        b = ledger.bind_by_price(data, sym, side, rows, tol)
+        if b.get("bound"):
+            note["bound"] = b["bound"]
+        # ② 对账：成交 → filled（**保留该行**，它是持仓止盈的唯一来源）
+        rec = ledger.reconcile(data, sym, side, open_ids,
+                               self._probe_entry_order, tol)
+        if rec.get("n_filled") or rec.get("n_pruned"):
+            note["reconcile"] = {"filled": rec["filled"], "pruned": rec["pruned"]}
+        # ③ 删幽灵档（从没挂出去、也不在本轮模板里）
+        d = ledger.drop_phantoms(data, sym, side, [p for p, _ in want], tol)
+        if d.get("dropped"):
+            note["dropped_phantom"] = d["dropped"]
+        # ── 这一代梯子的总层数（预算上限）──────────────────────────────
+        # 首次铺（尚无成交档）时按实际铺出的层数定死；之后「成交 k 档 → 只剩 N−k
+        # 档」都用这个 N 当上限。不用配置里的 `grid_levels` 是因为 AI 允许在 floor
+        # 之上要更多层（实测 12 层），写死 10 会把它砍回去。
+        try:
+            _cfg_total = int(tpl.get("grid_levels") or 0)
+        except (TypeError, ValueError):
+            _cfg_total = 0
+        _filled_now = len([lv for lv in ledger.entries(data, sym, side)
+                           if ledger.entry_state_of(lv) == "filled"])
+        _tot = ledger.get_total(data, sym, side)
+        if _filled_now == 0 or _tot <= 0:
+            _n_grid = len([u for u in units if u != "base"])
+            _tot = ledger.set_total(data, sym, side, max(_cfg_total, _n_grid))
+        # ④ 增量追加本轮新档（按预算封顶：活档数不许超过这一代的总层数）
+        added = 0
+        _live_before = len([lv for lv in ledger.entries(data, sym, side)
+                            if not ledger.is_consumed(lv)
+                            and str(lv.get("status")) in (ledger.ST_PENDING,
+                                                          ledger.ST_PROTECTED)])
+        _room = max(0, _tot - _live_before)
+        if len(want) > _room:
+            note["over_budget"] = {"want": len(want), "room": _room,
+                                   "live": _live_before, "total": _tot}
+        for (px, lots), unit in zip(want, units):
+            if added >= _room:
+                break
+            dist = tps.get(unit, tps["grid"])
+            if side == "long":
+                tp = float(px) * (1 + dist / 100.0)
+            else:
+                tp = float(px) * (1 - dist / 100.0)
+            r = ledger.upsert_pending(
+                data, sym, side, float(px), float(lots), unit,
+                round(tp, 4), dist,
+                label="t-" + self._bot_tag("") + "-" + str(unit), tol=tol)
+            if r.get("added"):
+                added += 1
+        ledger.write(path, data)
+        bud = ledger.budget(data, sym, side, _tot)
+        return {"synced": added, "total": len(ledger.entries(data, sym, side)),
+                "ladder_total": _tot,
+                "filled": bud["filled"], "remaining": bud["remaining"],
+                "tp_by_unit": {k: round(v, 3) for k, v in tps.items()},
+                **note}
 
     def _record_ladder_level(self, intent: Intent, contracts: int,
                              order_id: Any = None) -> None:
