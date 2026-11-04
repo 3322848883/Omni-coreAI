@@ -466,3 +466,28 @@ class TestDedupeSamePrice(Base):
         p.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
         n = ledger.dedupe(ledger.read(p), "ETH_USDT", "long")
         self.assertEqual(n["removed"], 2, f"同价三行应合并成一行：{n}")
+
+
+class TestBudgetTrimsNearEnd(Base):
+    """开仓后额度从**近端**让位（2026-11-04 用户实测抓到）。
+
+    用户口径：「已经开过第一层 3 张，下一次铺 9 层就应该进入下一层」。
+    播种行的入场均价往往不精确等于模板档价 → 「按价剔除」匹配不上；若从深端裁，
+    近端那层（同样的 3 张）永远挂着 → 「开仓了还是 10 层、第一层还是 3 张」。
+    """
+
+    def test_unmatched_consumed_drops_nearest_layer(self):
+        w = self.want(side="short")
+        # 持仓 3 张，入场价 2280.32 不在模板档位里（旧一代遗留 / 均价）
+        self.client.positions = [{"contract": "ETH_USDT", "size": "-3",
+                                  "entry_price": "2280.32"}]
+        self.sync(w, side="short")
+        self.ex._pos_cache = None
+        want2, _, note = self.ex._apply_ladder_budget(
+            "ETH_USDT", "short", w, ["grid"] * 10, _tpl())
+        self.assertEqual(note.get("remaining"), 9, f"占 1 档 → 剩 9：{note}")
+        self.assertEqual(len(want2), 9)
+        # 必须是 w[1:]（近端第一层让位），不是 w[:9]（深端被砍）
+        self.assertEqual([round(p, 2) for p, _ in want2],
+                         [round(p, 2) for p, _ in w[1:]],
+                         f"应从近端让位：{[round(p,2) for p,_ in want2]}")

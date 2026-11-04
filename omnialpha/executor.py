@@ -3825,6 +3825,37 @@ class Executor:
                         "anchor": anchor, "anchor_info": anchor_note, "mark": mark}))
             return
 
+        # 逐档止盈的**唯一输入**（2026-11-02）：模板铺出的档必须进 bot 级档位表，
+        # 否则 `ensure_grid_tp` 永远 `no_ladder_table`；AI 全 hold 时这是唯一通路。
+        # 🔴 必须放在**档位缓存决议之后**（2026-11-04 部署实测）：锚点固定时
+        # 下面会把 `want` 换成本轮**实际沿用的缓存档位**，若在这里提前用重算的
+        # `want` 写台账，台账价格就与交易所挂单对不上 —— 实测 bi-live 多头 12 档
+        # 一条单号都绑不上（台账 2266/2249/2225 vs 交易所 2236/2205/2188）。
+        if self._ladder_ledger_on(tpl):
+            try:
+                _synced = self._sync_template_levels(
+                    sym, side, want, _units, tpl, step_pct)
+                if _synced:
+                    dyn_note["tp_units"] = _synced
+            except Exception as _e:  # noqa: BLE001
+                dyn_note["tp_units"] = {"error": str(_e)[:120]}
+
+        # ── 层数预算（2026-11-04 用户口径）：**已成交档占额度** ──────────────
+        # 成交 k 档 → 本轮只剩 10−k 档可挂，且新档从**下一层**开始（按最新价格铺），
+        # 绝不「成交一档就原地补一档」把未成交层数补满 —— 否则永远有 10 层未成交，
+        # 价格来回震荡就变成无限重入。详见 `_apply_ladder_budget`。
+        _want_place, _units_place, _budget_note = self._apply_ladder_budget(
+            sym, side, want, _units, tpl)
+        if _budget_note:
+            dyn_note["ladder_budget"] = _budget_note
+        if want and not _want_place:
+            report.results.append(StepResult(
+                "ladder_template", sym, True,
+                detail={"skipped": "ladder_budget_exhausted", "side": side,
+                        "budget": _budget_note, "anchor": anchor, "mark": mark}))
+            return
+        want, _units = _want_place, _units_place
+
         # ── 模板权威：撤掉不在模板档位上的入场单（2026-10-28）────────────
         # 模型每轮都会把它自己的 12 条档位铺回来（replace 整梯替换），只靠「补缺 +
         # 上限」无法收敛：实测清理到 10 层后，下一轮又变 12 条（2211.5×9 / 2223.5×1 复活）。
@@ -3908,37 +3939,6 @@ class Executor:
                     dyn_note["ledger_bind_kept"] = _kb
             except Exception as _e:  # noqa: BLE001 — 台账回写失败不拦铺梯
                 dyn_note["ledger_bind_kept"] = {"error": str(_e)[:80]}
-
-        # 逐档止盈的**唯一输入**（2026-11-02）：模板铺出的档必须进 bot 级档位表，
-        # 否则 `ensure_grid_tp` 永远 `no_ladder_table`；AI 全 hold 时这是唯一通路。
-        # 🔴 必须放在**档位缓存决议之后**（2026-11-04 部署实测）：锚点固定时
-        # 下面会把 `want` 换成本轮**实际沿用的缓存档位**，若在这里提前用重算的
-        # `want` 写台账，台账价格就与交易所挂单对不上 —— 实测 bi-live 多头 12 档
-        # 一条单号都绑不上（台账 2266/2249/2225 vs 交易所 2236/2205/2188）。
-        if self._ladder_ledger_on(tpl):
-            try:
-                _synced = self._sync_template_levels(
-                    sym, side, want, _units, tpl, step_pct)
-                if _synced:
-                    dyn_note["tp_units"] = _synced
-            except Exception as _e:  # noqa: BLE001
-                dyn_note["tp_units"] = {"error": str(_e)[:120]}
-
-        # ── 层数预算（2026-11-04 用户口径）：**已成交档占额度** ──────────────
-        # 成交 k 档 → 本轮只剩 10−k 档可挂，且新档从**下一层**开始（按最新价格铺），
-        # 绝不「成交一档就原地补一档」把未成交层数补满 —— 否则永远有 10 层未成交，
-        # 价格来回震荡就变成无限重入。详见 `_apply_ladder_budget`。
-        _want_place, _units_place, _budget_note = self._apply_ladder_budget(
-            sym, side, want, _units, tpl)
-        if _budget_note:
-            dyn_note["ladder_budget"] = _budget_note
-        if want and not _want_place:
-            report.results.append(StepResult(
-                "ladder_template", sym, True,
-                detail={"skipped": "ladder_budget_exhausted", "side": side,
-                        "budget": _budget_note, "anchor": anchor, "mark": mark}))
-            return
-        want, _units = _want_place, _units_place
 
         # 已存在的入场档（价格, 张数绝对值）
         try:
@@ -5542,7 +5542,12 @@ class Executor:
             keep = []
         elif len(keep) > bud["remaining"]:
             trimmed = len(keep) - bud["remaining"]
-            keep = keep[:bud["remaining"]]
+            # 🔴 从**近端**丢，不是深端（2026-11-04 用户实测抓到）：消耗掉的槽位
+            # 在梯子前段（第一层已开仓）。播种行的入场均价往往不精确等于模板档价，
+            # 「按价剔除」匹配不上时，若从深端裁，近端那层（同样的 3 张）会一直
+            # 挂着 → 用户看到「开仓了还是 10 层、第一层还是 3 张」。
+            # 正确语义：第一层已开仓 → pending 从**下一层**开始（近端让位）。
+            keep = keep[trimmed:]
         note = {"filled": bud["filled"], "budget_total": bud["total"],
                 "remaining": bud["remaining"], "consumed_dropped": consumed,
                 "trimmed": trimmed}
