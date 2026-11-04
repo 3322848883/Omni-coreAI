@@ -69,8 +69,9 @@ class Client:
         return self.prot
 
     def place_order(self, body):
-        self.book.append(dict(body, id=f"o{len(self.book)}"))
-        return {"id": f"o{len(self.book)}"}
+        oid = f"o{len(self.book)}"
+        self.book.append(dict(body, id=oid))
+        return {"id": oid}
 
     def place_price_order(self, body):
         self.prot.append({"id": f"p{len(self.prot)}", "status": "open",

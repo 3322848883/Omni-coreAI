@@ -3456,6 +3456,9 @@ class Executor:
         # `mode: hold` 留给「只挂不进 tp」的长持仓用法。
         bp = tpl.get("base_position") or {}
         _bp_added = 0            # 底仓实际追加了几层（供腿级标签分类）
+        _bp_track = False        # trigger 族模式：底仓单号回写（成交判定依据）
+        _bp_px_track = 0.0
+        _bp_path_track = None
         if bp.get("enabled"):
             try:
                 bp_n = int(bp.get("levels") or 0)
@@ -3482,11 +3485,48 @@ class Executor:
                 _bp_path = self._base_pos_state_path(tpl, sym, side)
                 _bp_st = self._read_state_json(_bp_path) or {}
                 _bp_new = False
+                _bp_track = True
+                _bp_path_track = _bp_path
                 _bp_done = bool(_bp_st.get("consumed"))
                 try:
                     _bp_px = float(_bp_st.get("price") or 0)
                 except (TypeError, ValueError):
                     _bp_px = 0.0
+                # 🔴 底仓成交判定不能只靠 mark 穿越（2026-11-04 实盘三次重复进场）：
+                # 限价单成交在 touch 价，等下一轮检查时 mark 往往已回落 →
+                # 「mark 越过触发价」的穿越判定永不成立 → 每轮重挂、重复成交
+                # （实测 2320.49 在 08:15/09:06/09:31 三次各成交 3 张，-3→-12）。
+                # 以下单返回的 **order_id** 为准：
+                #   · 单还在盘 → 等待中（照常把触发价放进 want，让 prune 保护它）
+                #   · finish_as=filled → consumed，永不再建
+                #   · finish_as=cancelled → 清单号重新武装（触发价重算）
+                #   · 查询失败 → 本轮**不铺底仓也不改 state**（fail-closed：
+                #     既不重复进场，也不因一次 API 抖动永久误杀底仓）
+                _bp_oid = str(_bp_st.get("order_id") or "")
+                _bp_skip_round = False
+                if _bp_oid and not _bp_done:
+                    try:
+                        _o = self.client.get_order(_bp_oid) or {}
+                        _fin = str(_o.get("finish_as") or "").lower()
+                    except Exception as _e:  # noqa: BLE001
+                        _fin = "filled" if _is_order_gone(_e) else "unknown"
+                    if _fin == "filled":
+                        _bp_done = True
+                        self._write_state_json(_bp_path, {
+                            **_bp_st, "consumed": True,
+                            "consumed_ts": int(time.time()),
+                            "consumed_src": "order_filled"})
+                    elif _fin and _fin != "filled":
+                        _bp_st = {}
+                        _bp_px = 0.0
+                        _bp_oid = ""                    # 撤单 → 重新武装
+                        self._write_state_json(_bp_path, {})
+                    elif _ost in ("open", "new", "pending"):
+                        pass                            # 单还在盘 → 照常占位（防 prune 误撤）
+                    else:
+                        _bp_skip_round = True           # 查不清 → 本轮跳过底仓
+                        dyn_note["base_position"] = {
+                            "skipped": "order_state_unknown", "oid": _bp_oid}
                 if _bp_px <= 0 and not _bp_done:
                     _bp_src = "pct"
                     if bp_mode == "bottom":
@@ -3544,7 +3584,7 @@ class Executor:
                             "start_pct": round(_bp_start, 4),
                             "ts": int(time.time()), "consumed": False})
                         _bp_new = True
-                _bp_crossed = (not _bp_new) and _bp_px > 0 and (
+                _bp_crossed = (not _bp_new) and not _bp_skip_round                     and _bp_px > 0 and (
                     (sgn < 0 and mark <= _bp_px) or (sgn > 0 and mark >= _bp_px))
                 if _bp_crossed:
                     _bp_done = True
@@ -3552,9 +3592,11 @@ class Executor:
                         **_bp_st, "price": round(_bp_px, 6), "side": side,
                         "consumed": True, "consumed_ts": int(time.time()),
                         "consumed_at": round(float(mark), 4)})
-                elif _bp_px > 0 and not _bp_done:
+                elif (_bp_px > 0 and not _bp_done
+                      and not _bp_skip_round):
                     want.append((_bp_px, bp_lots))
                     _bp_added += 1
+                    _bp_px_track = float(_bp_px)
                 dyn_note["base_position"] = {
                     "levels": bp_n, "lots": bp_lots, "mode": bp_mode,
                     "price": round(_bp_px, 4) if _bp_px > 0 else None,
@@ -4032,6 +4074,34 @@ class Executor:
                     dyn_note["ledger_bind"] = _lb
             except Exception as _e:  # noqa: BLE001 — 台账回写失败不拦铺梯
                 dyn_note["ledger_bind"] = {"error": str(_e)[:80]}
+        # 底仓单号回写：base 的成交判定只能靠 order_id（mark 穿越判定有 race，
+        # 实测 2320.49 三次重复进场）。**必须在 dedupe 之后绑**——底仓价与马丁层
+        # 落进同一个 0.3% 桶时（实测 2379.3 vs 2377.1），dedupe 会把底仓单撤掉、
+        # 留下模板层；先绑就会把一个**已撤单**写进 state → 下轮 re-arm → 无限
+        # 重挂/重撤。所以这里以「dedupe 后还在盘」为准：在盘 → 绑单号；
+        # 不在盘 → 清 state 重新武装。
+        if _bp_track and _bp_path_track and _bp_px_track > 0:
+            try:
+                _bp_alive = [
+                    o for o in (self.client.list_orders(sym) or [])
+                    if abs(float(o.get("price") or 0) - _bp_px_track)
+                    / _bp_px_track <= 5e-5
+                    and not (o.get("is_reduce_only") or o.get("reduce_only"))]
+                _bp_st2 = self._read_state_json(_bp_path_track) or {}
+                if _bp_alive:
+                    _oid2 = str(_bp_alive[0].get("id") or "")
+                    if _oid2 and _bp_st2.get("order_id") != _oid2:
+                        self._write_state_json(_bp_path_track, {
+                            **_bp_st2, "order_id": _oid2,
+                            "placed_ts": int(time.time())})
+                        dyn_note["base_bind"] = {"price": _bp_px_track,
+                                                 "oid": _oid2}
+                elif _bp_st2.get("order_id"):
+                    self._write_state_json(_bp_path_track, {})
+                    dyn_note["base_bind"] = {"rearmed": True,
+                                             "reason": "deduped"}
+            except Exception as _e:  # noqa: BLE001 — 回写失败不拦铺梯
+                dyn_note["base_bind"] = {"error": str(_e)[:80]}
         # ── 同价去重（2026-10-28）：模型与本补档在同一轮抢挂同一价（实测 2247×2）
         # 快照取单发生在本轮下单之前，模型随后挂出的档看不到 → 同价重复。
         # 按 ±0.3% 分桶，每桶只留一条（优先张数更接近模板的），其余撤掉。

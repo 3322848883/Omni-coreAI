@@ -59,13 +59,27 @@ class Client:
         return self.prot
 
     def place_order(self, body):
-        self.book.append(dict(body, id=f"o{len(self.book)}"))
-        return {"id": f"o{len(self.book)}"}
+        # 🔴 off-by-one（2026-11-04 修）：旧写法 append 后再用 len 生成返回 id ——
+        # book 里存的是 o0..o9，返回给引擎的却是 o1..o10，台账回写的单号全部
+        # 错位一格（绑到隔壁档）。真实 Gate 返回的就是本单 id。
+        oid = f"o{len(self.book)}"
+        self.book.append(dict(body, id=oid))
+        return {"id": oid}
 
     def place_price_order(self, body):
         self.prot.append({"id": f"p{len(self.prot)}", "status": "open",
                           "initial": body["initial"], "trigger": body["trigger"]})
         return {"id": f"p{len(self.prot)}"}
+
+    def get_order(self, oid):
+        for b in self.book:
+            if b["id"] == oid:
+                return {"id": oid, "status": "open", "finish_as": ""}
+        return {"id": oid, "status": "finished", "finish_as": "filled"}
+
+    def fill(self, oid):
+        """模拟成交：从在盘移除（get_order 随即返回 filled）。"""
+        self.book = [b for b in self.book if b["id"] != oid]
 
     def cancel_order(self, oid):
         return {}
@@ -251,13 +265,15 @@ class TestTpByUnit(Base):
             self.assertEqual(x["size"] > 0, True, "空侧档位 size 记正数（方向由 side 表达）")
 
     def test_resync_replaces_pending_keeps_closed(self):
-        self.run_round(ai_levels=10, floor=10)
+        c = Client()          # 持久 client：第二轮同一交易所盘面（否则新 client
+                              # 的空账本会把 9 条在盘单全判成已成交）
+        self.run_round(ai_levels=10, floor=10, client=c)
         # 手工把一档标成 closed，再跑一轮 → pending 全换、closed 保留
         p = self.state / "ladder_levels.json"
         data = json.loads(p.read_text(encoding="utf-8"))
         data["levels"][0]["status"] = "closed"
         p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        self.run_round(ai_levels=10, floor=10)
+        self.run_round(ai_levels=10, floor=10, client=c)
         lv = self.table()
         closed = [x for x in lv if x.get("status") == "closed"]
         pending = [x for x in lv if x.get("status") == "pending"]
@@ -350,3 +366,72 @@ class TestLedgerMatchesExchange(Base):
         for a, b in zip(led, book):
             self.assertLessEqual(abs(a - b), 0.1,
                                  f"台账与挂单错位：{a} vs {b}（缓存复用后）")
+
+
+class TestBaseFillDetect(Base):
+    """底仓成交判定必须用 **order_id**，不能只看 mark 穿越（2026-11-04 实盘）。
+
+    实测 super-grid：底仓限价单在 touch 价成交，等下一轮检查时 mark 已回落 →
+    「mark 越过触发价」永不成立 → consumed 永不置位 → 每轮重挂 → 2320.49
+    三次各成交 3 张（-3→-12），正是用户明令禁止的重复进场。
+    """
+
+    def _round(self, c, side="short"):
+        ex = Executor(c, symbols_whitelist=["ETH_USDT"],
+                      root=self.tmp, bot_id="tpg")
+        ex.ladder_template = self.tpl(floor=10, tp=True, include_short=(side == "short"))
+        ex.ladder_template["base_position"] = {
+            "enabled": True, "levels": 1, "lots": 3, "mode": "trigger",
+            "start_pct": 2.0, "step_pct": 1.0, "tp_pct": 3.0}
+        ex._round_meta = {
+            "two_way": {side: {"weight": 0.6, "levels": 10,
+                               "step_pct": 0.5, "lots": 1}},
+            "structure_levels": _levels_below() if side == "long"
+            else [round(MARK * (1 + 0.3 / 100 + i * 0.004), 2) for i in range(20)],
+            "ladder_step_pct": 0.5,
+        }
+        ex._forced_side = side
+        rep = Report()
+        ex._complete_ladder([], rep)
+        return ex, rep
+
+    def _state(self):
+        p = self.tmp / "ladder_basepos_ETH_USDT_short.json"
+        if not p.exists():
+            return {}
+        return json.loads(p.read_text(encoding="utf-8"))
+
+    def test_base_fill_marks_consumed_no_reentry(self):
+        c = Client()
+        c.positions = [{"contract": "ETH_USDT", "size": "-3",
+                        "entry_price": "2290"}]
+        self._round(c)
+        st = self._state()
+        self.assertTrue(st.get("order_id"), f"底仓单号必须回写 state：{st}")
+        oid = st["order_id"]
+        bp_px = float(st["price"])
+        self.assertTrue(any(b["id"] == oid for b in c.book), "底仓单在盘")
+        c.fill(oid)                                 # 模拟成交
+        self._round(c)
+        st2 = self._state()
+        self.assertTrue(st2.get("consumed"),
+                        f"成交后必须 consumed：{st2}")
+        near = [b for b in c.book
+                if abs(float(b["price"]) - bp_px) / bp_px <= 0.0002]
+        self.assertEqual(near, [],
+                         f"consumed 后不得再铺底仓（重复进场）：{near}")
+
+    def test_base_open_order_not_duplicated(self):
+        c = Client()
+        c.positions = [{"contract": "ETH_USDT", "size": "-3",
+                        "entry_price": "2290"}]
+        self._round(c)
+        st = self._state()
+        oid, bp_px = st["order_id"], float(st["price"])
+        self._round(c)                              # 单还在盘 → 再跑一轮
+        self.assertTrue(any(b["id"] == oid for b in c.book),
+                        "在盘底仓单不得被撤/重挂")
+        near = [b for b in c.book
+                if b["id"] != oid
+                and abs(float(b["price"]) - bp_px) / bp_px <= 0.0002]
+        self.assertEqual(near, [], f"底仓单在盘时不得重复挂：{near}")
